@@ -1,0 +1,54 @@
+// SPDX-License-Identifier: Apache-2.0
+// repro_bool_eq_true.t27 -- MINIMAL REPRO for a t27c gen-rust codegen bug.
+//
+// BUG (found 2026-08-05): when a bool-returning function is compared to `true`
+// inside a condition, `gen-rust` lowers  `is_thing(x) == true`  to
+//   if (is_thing(x) as u32) == true { ... }
+// which is a u32-vs-bool comparison -> Rust E0308 "mismatched types". It should
+// lower to just  `if is_thing(x) { ... }`  (or `== true` without the u32 cast).
+//
+// Repro: `t27c parse` = 0 and `t27c gen-rust` = 0 (the compiler does NOT error),
+// but the GENERATED Rust fails `rustc` with E0308. So parse=0 is not enough --
+// the output must be compiled. Fix target: the codegen for a comparison where an
+// operand is a bool-typed function call (do not insert the `as u32` cast, and do
+// not keep the `== true` against a bool). For the fix branch `fix/gen-verilog-*`
+// / `fix/r7-*` this file is the regression: after the fix, gen-rust output must
+// compile with rustc.
+// phi^2 + 1/phi^2 = 3 | TRINITY
+
+module ReproBoolEqTrue {
+    use base::types;
+
+    fn is_thing(x: u32) -> bool {
+        return x == 1;
+    }
+
+    // The trigger: `is_thing(x) == true` in the condition.
+    fn uses_it(x: u32) -> u32 {
+        let r: u32 = 0;
+        if (is_thing(x) == true) {
+            r = 1;
+        } else {
+            r = 0;
+        }
+        return r;
+    }
+
+    // WORKAROUND that DOES compile (inline the predicate, no bool_fn == true):
+    fn uses_it_ok(x: u32) -> u32 {
+        let r: u32 = 0;
+        if (x == 1) {
+            r = 1;
+        } else {
+            r = 0;
+        }
+        return r;
+    }
+
+    test repro {
+        assert(uses_it(1) == 1, "is_thing(1) -> 1");
+        assert(uses_it(2) == 0, "is_thing(2) -> 0");
+        assert(uses_it_ok(1) == 1, "workaround 1");
+        assert(uses_it_ok(2) == 0, "workaround 0");
+    }
+}

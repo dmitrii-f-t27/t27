@@ -1,0 +1,42 @@
+// SPDX-License-Identifier: Apache-2.0
+// repro_u64_compare.t27 -- MINIMAL REPRO for a t27c gen-rust codegen bug.
+//
+// BUG (found 2026-08-06): when two u64 operands are compared inside an `if`
+// condition, `gen-rust` lowered the comparison with a spurious `as u32` cast
+// on each operand, truncating them to 32 bits:
+//   if (prod as u32) >= (two_sq as u32) { ... }
+// The u64 arithmetic in the `let` bindings lowers correctly; only the
+// COMPARISON operands were truncated. So carries(2^25, 0, 0) computes
+// prod = 2^50 and two_sq = 2^51, but both `as u32` truncate to 0, making
+// `0 >= 0` true -> returns 1 (the u64-correct answer is 0).
+//
+// Repro: `t27c parse` = 0 and `t27c gen-rust` = 0 (the compiler does NOT
+// error), but the GENERATED Rust computes the wrong result. Fix target: the
+// comparison lowering must cast operands to their real width (u64) instead of
+// always u32. After the fix, gen-rust emits `(prod as u64) >= (two_sq as u64)`
+// and carries(2^25, 0, 0) == 0. Blocks GF-T32 (25-bit mantissa) arithmetic in
+// tri-net, which needs u64 comparisons.
+// phi^2 + 1/phi^2 = 3 | TRINITY
+
+module ReproU64Compare {
+    use base::types;
+
+    // The trigger: a u64-vs-u64 comparison in the condition. `prod` reaches
+    // 2^50 and `two_sq` reaches 2^51 for mant_one = 2^25, both > u32::MAX.
+    fn carries(mant_one: u64, ma: u64, mb: u64) -> u32 {
+        let prod: u64 = (mant_one + ma) * (mant_one + mb);
+        let two_sq: u64 = 2 * mant_one * mant_one;
+        if (prod >= two_sq) { return 1; } else { return 0; }
+    }
+
+    test repro {
+        // 2^25 = 33554432. prod = 2^50, two_sq = 2^51 -> 2^50 >= 2^51 is false.
+        // With the u32-truncation bug this wrongly returned 1.
+        assert(carries(33554432, 0, 0) == 0, "u64 compare must not truncate");
+        // A case that is genuinely true, still in the >32-bit range.
+        assert(carries(33554432, 33554432, 33554432) == 1, "true branch");
+        // Small operands (<=32-bit path) keep working.
+        assert(carries(2, 0, 0) == 0, "small false");
+        assert(carries(2, 5, 5) == 1, "small true");
+    }
+}

@@ -1799,6 +1799,14 @@ impl Parser {
         decl.extra_mutable = self.current.kind == TokenKind::KwVar;
         self.advance(); // consume const/var
 
+        // Rust-style `let mut NAME` / `var mut NAME`: the `mut` qualifier
+        // appears between the keyword and the binding name. t27 specs use
+        // both `let mut x` and `let x`, so handle the optional `mut` here.
+        if self.current.kind == TokenKind::Ident && self.current.lexeme == "mut" {
+            decl.extra_mutable = true;
+            self.advance(); // consume `mut`
+        }
+
         // Name
         if self.current.kind == TokenKind::Ident {
             decl.name = self.current.lexeme.clone();
@@ -1846,10 +1854,16 @@ impl Parser {
         let mut if_node = Node::new(NodeKind::StmtIf);
         self.advance(); // consume 'if'
 
-        // Condition in parentheses
-        self.expect(TokenKind::LParen)?;
+        // Condition: parentheses are optional. t27 specs historically use
+        // `if (cond)`, but many newer specs use the Go/Rust-style `if cond`.
+        let has_paren = self.current.kind == TokenKind::LParen;
+        if has_paren {
+            self.advance(); // consume (
+        }
         let cond = self.parse_expr()?;
-        self.expect(TokenKind::RParen)?;
+        if has_paren {
+            self.expect(TokenKind::RParen)?;
+        }
         if_node.children.push(cond);
 
         // Then branch: { ... }
@@ -1908,10 +1922,15 @@ impl Parser {
         let mut while_node = Node::new(NodeKind::StmtWhile);
         self.advance(); // consume 'while'
 
-        // Condition in parentheses
-        self.expect(TokenKind::LParen)?;
+        // Condition: parentheses are optional (same as parse_if_stmt).
+        let has_paren = self.current.kind == TokenKind::LParen;
+        if has_paren {
+            self.advance(); // consume (
+        }
         let cond = self.parse_expr()?;
-        self.expect(TokenKind::RParen)?;
+        if has_paren {
+            self.expect(TokenKind::RParen)?;
+        }
         while_node.children.push(cond);
 
         // Body: { ... }
@@ -6548,6 +6567,42 @@ fn collect_mutable_names_one(stmt: &Node, set: &mut std::collections::HashSet<St
     }
 }
 
+/// Collect int-typed local declarations (`let x: u64 = ...`) anywhere in a
+/// statement list, recursing into if/while/for bodies. Maps name -> Rust
+/// integer type. Used by comparison lowering to pick a common cast type wide
+/// enough for both operands. Non-int locals are ignored.
+fn collect_int_types(
+    stmts: &[Node],
+    map: &mut std::collections::HashMap<String, String>,
+) {
+    for stmt in stmts {
+        collect_int_types_one(stmt, map);
+    }
+}
+fn collect_int_types_one(
+    stmt: &Node,
+    map: &mut std::collections::HashMap<String, String>,
+) {
+    match stmt.kind {
+        NodeKind::StmtLocal => {
+            let rt = RustCodegen::t27_type_to_rust(&stmt.extra_type);
+            if RustCodegen::is_int_type(&rt) {
+                map.insert(stmt.name.clone(), rt);
+            }
+        }
+        NodeKind::StmtIf | NodeKind::StmtWhile | NodeKind::StmtFor | NodeKind::StmtForRange => {
+            for c in &stmt.children {
+                if c.kind == NodeKind::Module {
+                    collect_int_types(&c.children, map);
+                } else {
+                    collect_int_types_one(c, map);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 fn copy_propagate(stmts: &mut Vec<Node>, stats: &mut OptStats) {
     // Recursive reassignment check: a `let X = Y` where X is reassigned later
     // (including inside if/while/for bodies) must NOT be copy-propagated —
@@ -6556,6 +6611,17 @@ fn copy_propagate(stmts: &mut Vec<Node>, stats: &mut OptStats) {
     let mut reassigned_set = std::collections::HashSet::new();
     collect_mutable_names(stmts, &mut reassigned_set);
 
+    // Collect explicit type annotations of every local, so we can detect
+    // type-WIDENING bindings (e.g. `let lo: u16 = seq_lo` where seq_lo is u8).
+    // Copy-propagating such a binding (replacing `lo` with `seq_lo` everywhere)
+    // loses the implicit promotion and produces Rust type-mismatch errors at
+    // the use site. Skip propagation when the binding carries an explicit type.
+    let mut annotated: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for stmt in stmts.iter() {
+        if stmt.kind == NodeKind::StmtLocal && !stmt.extra_type.is_empty() {
+            annotated.insert(stmt.name.clone());
+        }
+    }
     let mut replacements: Vec<(String, String)> = Vec::new();
     for stmt in stmts.iter() {
         if stmt.kind == NodeKind::StmtLocal
@@ -6563,6 +6629,7 @@ fn copy_propagate(stmts: &mut Vec<Node>, stats: &mut OptStats) {
             && stmt.children[0].kind == NodeKind::ExprIdentifier
             && stmt.name != stmt.children[0].name
             && !reassigned_set.contains(&stmt.name)
+            && !annotated.contains(&stmt.name)
         {
             replacements.push((stmt.name.clone(), stmt.children[0].name.clone()));
         }
@@ -6767,7 +6834,14 @@ fn common_subexpr_elim(stmts: &mut Vec<Node>, stats: &mut OptStats) {
             }
         }
     }
-    let insert_pos = find_first_non_local(stmts);
+    // Insert CSE temporaries at the TOP of the block (position 0). They must
+    // appear before any statement that references them. Previously we used
+    // find_first_non_local, but CSE replacements are applied to locals whose
+    // initializers now reference the _cseN name, so those locals come BEFORE
+    // the first non-local — meaning the _cseN declaration landed after its
+    // first use. Putting them at position 0 is always safe: they depend only
+    // on constants/params, not on other locals.
+    let insert_pos = 0;
     for (i, local) in new_stmts.into_iter().enumerate() {
         stmts.insert(insert_pos + i, local);
     }
@@ -6903,6 +6977,13 @@ fn collect_reads_in_stmts(stmts: &[Node], reads: &mut std::collections::HashSet<
 fn dead_store_elim(stmts: &mut Vec<Node>, stats: &mut OptStats) {
     let mut reads: std::collections::HashSet<String> = std::collections::HashSet::new();
     collect_reads_in_stmts(stmts, &mut reads);
+    // Also collect names that are ASSIGNED later. A StmtLocal whose initial
+    // value is dead (never read before being overwritten) must NOT be removed
+    // if subsequent `X = ...` assignments target it — those assignments need
+    // the declaration. Previously we removed the declaration but left the
+    // assignments, producing "cannot find value `X`" errors in generated Rust.
+    let mut assigned: std::collections::HashSet<String> = std::collections::HashSet::new();
+    collect_mutable_names(stmts, &mut assigned);
     let before = stmts.len();
     stmts.retain(|s| {
         // R-OPT-1 (#918, W46): for StmtLocal the target name lives on
@@ -6920,7 +7001,8 @@ fn dead_store_elim(stmts: &mut Vec<Node>, stats: &mut OptStats) {
         // dropping them is unsound. We therefore guard on the LHS kind
         // before consulting `reads`.
         if s.kind == NodeKind::StmtLocal && !s.children.is_empty()
-            && !reads.contains(&s.name) {
+            && !reads.contains(&s.name)
+            && !assigned.contains(&s.name) {
                 return false;
             }
         if s.kind == NodeKind::StmtAssign && s.children.len() >= 2 {
@@ -7700,6 +7782,26 @@ pub struct RustCodegen {
     /// (via simple assignment `x = ...` or index assignment `arr[i] = ...`).
     /// Used to infer `let mut` for locals declared with `let`.
     mut_names: std::collections::HashSet<String>,
+    /// Map of function name -> Rust return type, collected before emission so
+    /// call sites can insert bool/int conversions (t27 conflates bool and int).
+    fn_ret_types: std::collections::HashMap<String, String>,
+    /// Names of parameters/locals in the current function whose type is a
+    /// Rust owned-heap collection (Vec). Passing these by value into another
+    /// function call MOVES them; t27 treats arrays as by-reference, so we emit
+    /// `.clone()` on every such use inside a call argument to preserve the
+    /// t27 by-reference semantics.
+    vec_names: std::collections::HashSet<String>,
+    /// Names of bool-typed params/locals in the current function, so a bare
+    /// bool identifier used as a condition is NOT wrapped with `!= 0`.
+    bool_names: std::collections::HashSet<String>,
+    /// Return type of the function currently being emitted, so nested return
+    /// statements (inside if/while bodies handled by gen_rust_stmt) can apply
+    /// the same int/bool cast as top-level returns.
+    current_ret_type: String,
+    /// Map of int-typed param/local name -> Rust integer type in the current
+    /// function. Lets comparison lowering choose a common cast type wide enough
+    /// for the operands instead of always truncating to u32 (u64 comparisons).
+    int_types: std::collections::HashMap<String, String>,
 }
 
 #[allow(dead_code)]
@@ -7709,6 +7811,11 @@ impl RustCodegen {
             output: String::new(),
             indent: 0,
             mut_names: std::collections::HashSet::new(),
+            fn_ret_types: std::collections::HashMap::new(),
+            vec_names: std::collections::HashSet::new(),
+            bool_names: std::collections::HashSet::new(),
+            current_ret_type: String::new(),
+            int_types: std::collections::HashMap::new(),
         }
     }
 
@@ -7754,6 +7861,11 @@ impl RustCodegen {
         self.write_line("// DO NOT EDIT — generated by t27c");
         self.blank_line();
 
+        // Pre-pass: collect every function's return type so call sites and
+        // condition positions can insert bool<->int conversions. t27 treats
+        // booleans and integers interchangeably; Rust does not.
+        Self::collect_fn_ret_types(ast, &mut self.fn_ret_types);
+
         // Find module node
         for child in &ast.children {
             match child.kind {
@@ -7769,6 +7881,20 @@ impl RustCodegen {
                 NodeKind::FnDecl => self.gen_fn(child),
                 _ => {}
             }
+        }
+    }
+
+    fn collect_fn_ret_types(node: &Node, map: &mut std::collections::HashMap<String, String>) {
+        if node.kind == NodeKind::FnDecl {
+            let ret = if node.extra_return_type.is_empty() {
+                "()".to_string()
+            } else {
+                Self::t27_type_to_rust(node.extra_return_type.as_str())
+            };
+            map.insert(node.name.clone(), ret);
+        }
+        for child in &node.children {
+            Self::collect_fn_ret_types(child, map);
         }
     }
 
@@ -7844,9 +7970,22 @@ impl RustCodegen {
     fn gen_fn(&mut self, node: &Node) {
         let fn_name = &node.name;
         let params: Vec<(String, String)> = node.params.clone();
+        // Infer which params are mutated in the body (either direct
+        // reassignment `p = x` or index/field writes `p[i] = x`, `p.f = x`).
+        // Rust requires `mut` on the binding for those, even for Vec params
+        // whose contents are mutated through index assignment.
+        let mut mutated_params: std::collections::HashSet<String> = std::collections::HashSet::new();
+        collect_mutable_names(&node.children, &mut mutated_params);
         let params_str = params
             .iter()
-            .map(|(n, t)| format!("{}: {}", n, Self::t27_type_to_rust(t)))
+            .map(|(n, t)| {
+                let rust_t = Self::t27_type_to_rust(t);
+                if mutated_params.contains(n) {
+                    format!("mut {}: {}", n, rust_t)
+                } else {
+                    format!("{}: {}", n, rust_t)
+                }
+            })
             .collect::<Vec<_>>()
             .join(", ");
         let ret_type = if node.extra_return_type.is_empty() {
@@ -7854,6 +7993,7 @@ impl RustCodegen {
         } else {
             Self::t27_type_to_rust(node.extra_return_type.as_str())
         };
+        self.current_ret_type = ret_type.clone();
 
         self.write(&format!(
             "pub fn {}({}) -> {} {{",
@@ -7869,23 +8009,114 @@ impl RustCodegen {
         self.mut_names.clear();
         collect_mutable_names(&node.children, &mut self.mut_names);
 
+        // Collect names of Vec-typed params AND Vec-typed locals so call
+        // arguments can be cloned to preserve t27 by-reference array passing.
+        self.vec_names.clear();
+        self.bool_names.clear();
+        // Record int-typed params/locals so comparison lowering can widen both
+        // operands to a common type large enough to hold them (u64 must not be
+        // truncated to u32). Collected recursively so locals declared in nested
+        // blocks are visible to comparisons inside those blocks.
+        self.int_types.clear();
+        for (pname, ptype) in &params {
+            let rt = Self::t27_type_to_rust(ptype);
+            if rt.starts_with("Vec<") {
+                self.vec_names.insert(pname.clone());
+            }
+            if rt == "bool" {
+                self.bool_names.insert(pname.clone());
+            }
+            if Self::is_int_type(&rt) {
+                self.int_types.insert(pname.clone(), rt);
+            }
+        }
+        collect_int_types(&node.children, &mut self.int_types);
+        for child in &node.children {
+            if child.kind == NodeKind::StmtLocal {
+                let rt = Self::t27_type_to_rust(&child.extra_type);
+                if rt.starts_with("Vec<") {
+                    self.vec_names.insert(child.name.clone());
+                }
+                if rt == "bool" {
+                    self.bool_names.insert(child.name.clone());
+                }
+            }
+        }
+
         if has_body {
             self.output.push('\n');
             self.indent += 1;
-            for child in &node.children {
+            // Pre-compute the index of the last body statement so a trailing
+            // StmtExpr (t27 implicit return) can be emitted without a
+            // semicolon, making it the function's return value in Rust.
+            let stmt_kinds = [
+                NodeKind::ExprReturn,
+                NodeKind::StmtExpr,
+                NodeKind::StmtLocal,
+                NodeKind::StmtAssign,
+                NodeKind::StmtIf,
+                NodeKind::StmtWhile,
+                NodeKind::StmtFor,
+                NodeKind::StmtForRange,
+            ];
+            let last_stmt_idx = node.children.iter().rposition(|c| stmt_kinds.contains(&c.kind));
+            let has_ret = node
+                .children
+                .iter()
+                .any(|c| c.kind == NodeKind::ExprReturn);
+            for (idx, child) in node.children.iter().enumerate() {
+                let is_trailing_expr = Some(idx) == last_stmt_idx
+                    && child.kind == NodeKind::StmtExpr
+                    && !has_ret
+                    && ret_type != "()";
                 match child.kind {
                     NodeKind::ExprReturn => {
                         let val = if child.children.is_empty() {
                             "()".to_string()
                         } else {
-                            Self::expr_to_rust(&child.children[0])
+                            let raw = self.expr_rust(&child.children[0]);
+                            // t27 lets an integer-typed function return a
+                            // comparison (treated as 0/1) and auto-widens/
+                            // narrows integer returns. Rust needs explicit
+                            // casts. Bool->int and int<->int both wrap as
+                            // `(<expr> as <ret_type>)` when ret_type is int.
+                            if ret_type != "()" && ret_type != "bool" && Self::is_int_type(&ret_type)
+                            {
+                                format!("({} as {})", raw, ret_type)
+                            } else if Self::expr_is_bool(&child.children[0])
+                                && ret_type != "bool"
+                                && ret_type != "()"
+                            {
+                                format!("({} as {})", raw, ret_type)
+                            } else {
+                                raw
+                            }
                         };
-                        self.write_line(&format!("return {};", val));
+                        self.write_line(&format!("return {};", Self::strip_outer_parens(&val)));
                     }
                     NodeKind::StmtExpr => {
                         if child.children.len() == 1 {
-                            let expr = Self::expr_to_rust(&child.children[0]);
-                            self.write_line(&format!("{};", expr));
+                            let expr = self.expr_rust(&child.children[0]);
+                            if is_trailing_expr {
+                                // t27 implicit return: drop the semicolon so
+                                // this expression is the function's value.
+                                // Cast int<->int and bool->int to match the
+                                // declared return type (t27 auto-converts).
+                                let expr = if Self::is_int_type(&ret_type) {
+                                    let cast = format!("({} as {})", expr, ret_type);
+                                    Self::strip_outer_parens(&cast)
+                                } else if Self::expr_is_bool(&child.children[0])
+                                    && ret_type != "bool"
+                                {
+                                    let cast = format!("({} as {})", expr, ret_type);
+                                    Self::strip_outer_parens(&cast)
+                                } else {
+                                    expr
+                                };
+                                self.write_line(&expr);
+                            } else {
+                                self.write_line(&format!("{};", expr));
+                            }
                         }
                     }
                     NodeKind::StmtLocal => {
@@ -7896,17 +8127,47 @@ impl RustCodegen {
                         if child.children.is_empty() {
                             if child.extra_type.is_empty() {
                                 self.write_line(&format!("{} {};", kw, var_name));
+                            } else if typ.starts_with("Vec<") {
+                                // Uninitialized Vec local that is later filled
+                                // via index assignment. Rust requires an
+                                // initialized value before indexing, so emit
+                                // `Vec::new()`. Use turbofish to avoid the `<`
+                                // in `Vec<T>` being parsed as comparison.
+                                let inner = &typ["Vec<".len()..typ.len() - 1];
+                                self.write_line(&format!(
+                                    "{} {}: {} = Vec::<{}>::new();",
+                                    kw, var_name, typ, inner
+                                ));
                             } else {
                                 self.write_line(&format!("{} {}: {};", kw, var_name, typ));
                             }
                         } else {
-                            let val = Self::expr_to_rust(&child.children[0]);
+                            // t27 implicitly widens/promotes integer operands;
+                            // Rust requires explicit casts. For int-typed
+                            // locals whose initializer is a binary/unary
+                            // expression that may mix operand types, cast each
+                            // leaf. For simple int initializers, a single
+                            // outer cast suffices.
+                            let val = if Self::is_int_type(&typ) {
+                                let init = &child.children[0];
+                                match init.kind {
+                                    NodeKind::ExprBinary | NodeKind::ExprUnary => {
+                                        Self::cast_int_leaves(init, &typ)
+                                    }
+                                    _ => {
+                                        let raw = self.expr_rust(init);
+                                        format!("({} as {})", raw, typ)
+                                    }
+                                }
+                            } else {
+                                self.expr_rust(&child.children[0])
+                            };
                             if child.extra_type.is_empty() {
-                                self.write_line(&format!("{} {} = {};", kw, var_name, val));
+                                self.write_line(&format!("{} {} = {};", kw, var_name, Self::strip_outer_parens(&val)));
                             } else {
                                 self.write_line(&format!(
                                     "{} {}: {} = {};",
-                                    kw, var_name, typ, val
+                                    kw, var_name, typ, Self::strip_outer_parens(&val)
                                 ));
                             }
                         }
@@ -7918,8 +8179,8 @@ impl RustCodegen {
                             Self::expr_to_rust(&child.children[0])
                         };
                         if child.children.len() >= 2 {
-                            let val = Self::expr_to_rust(&child.children[1]);
-                            self.write_line(&format!("{} = {};", target, val));
+                            let val = self.expr_rust(&child.children[1]);
+                            self.write_line(&format!("{} = {};", target, Self::strip_outer_parens(&val)));
                         } else {
                             self.write_line(&format!("{};", target));
                         }
@@ -7928,23 +8189,19 @@ impl RustCodegen {
                         self.write_indent();
                         self.write("if ");
                         if !child.children.is_empty() {
-                            self.write(&Self::expr_to_rust(&child.children[0]));
+                            self.write(&self.cond_to_rust(&child.children[0]));
                         }
                         self.write(" {\n");
                         self.indent += 1;
                         if child.children.len() > 1 {
-                            for stmt in &child.children[1].children {
-                                self.gen_rust_stmt(stmt);
-                            }
+                            self.gen_block_stmts(&child.children[1].children);
                         }
                         self.indent -= 1;
                         if child.children.len() > 2 {
                             self.write_indent();
                             self.write("} else {\n");
                             self.indent += 1;
-                            for stmt in &child.children[2].children {
-                                self.gen_rust_stmt(stmt);
-                            }
+                            self.gen_block_stmts(&child.children[2].children);
                             self.indent -= 1;
                         }
                         self.write_line("}");
@@ -7953,7 +8210,7 @@ impl RustCodegen {
                         self.write_indent();
                         self.write("while ");
                         if !child.children.is_empty() {
-                            self.write(&Self::expr_to_rust(&child.children[0]));
+                            self.write(&self.cond_to_rust(&child.children[0]));
                         }
                         self.write(" {\n");
                         self.indent += 1;
@@ -8014,19 +8271,57 @@ impl RustCodegen {
         self.blank_line();
     }
 
+    // Emit the statements of a then/else/while block. If the last statement
+    // is a bare expression (t27 implicit block value), emit it WITHOUT a
+    // trailing semicolon so the enclosing `if`/`else` evaluates to it. This
+    // mirrors how Rust treats the trailing expression of a block as its
+    // value, and lets t27 specs like `if c { x } else { y }` act as values.
+    fn gen_block_stmts(&mut self, stmts: &[Node]) {
+        let n = stmts.len();
+        for (i, s) in stmts.iter().enumerate() {
+            let is_last = i + 1 == n;
+            if is_last && s.kind == NodeKind::StmtExpr && s.children.len() == 1 {
+                // Trailing expression: the block's value. Emit with no `;`.
+                let raw = self.expr_rust(&s.children[0]);
+                let rt = &self.current_ret_type;
+                let expr = if Self::is_int_type(rt) {
+                    let cast = format!("(({}) as {})", raw, rt);
+                    Self::strip_outer_parens(&cast)
+                } else {
+                    raw
+                };
+                self.write_line(&expr);
+            } else {
+                self.gen_rust_stmt(s);
+            }
+        }
+    }
+
     fn gen_rust_stmt(&mut self, stmt: &Node) {
         match stmt.kind {
             NodeKind::ExprReturn => {
                 let val = if stmt.children.is_empty() {
                     "()".to_string()
                 } else {
-                    Self::expr_to_rust(&stmt.children[0])
+                    let raw = self.expr_rust(&stmt.children[0]);
+                    let rt = &self.current_ret_type;
+                    if rt != "()" && rt != "bool" && Self::is_int_type(rt) {
+                        format!("({} as {})", raw, rt)
+                    } else if Self::expr_is_bool(&stmt.children[0])
+                        && rt != "bool"
+                        && rt != "()"
+                    {
+                        format!("({} as {})", raw, rt)
+                    } else {
+                        raw
+                    }
                 };
-                self.write_line(&format!("return {};", val));
+                self.write_line(&format!("return {};", Self::strip_outer_parens(&val)));
             }
             NodeKind::StmtExpr => {
                 if stmt.children.len() == 1 {
-                    self.write_line(&format!("{};", Self::expr_to_rust(&stmt.children[0])));
+                    let expr_str = self.expr_rust(&stmt.children[0]);
+                    self.write_line(&format!("{};", Self::strip_outer_parens(&expr_str)));
                 }
             }
             NodeKind::StmtLocal => {
@@ -8039,42 +8334,51 @@ impl RustCodegen {
                         self.write_line(&format!("{} {}: {};", kw, stmt.name, typ));
                     }
                 } else {
-                    let val = Self::expr_to_rust(&stmt.children[0]);
-                    if stmt.extra_type.is_empty() {
-                        self.write_line(&format!("{} {} = {};", kw, stmt.name, val));
+                    let val = if Self::is_int_type(&typ) {
+                        let init = &stmt.children[0];
+                        match init.kind {
+                            NodeKind::ExprBinary | NodeKind::ExprUnary => {
+                                Self::cast_int_leaves(init, &typ)
+                            }
+                            _ => {
+                                let raw = self.expr_rust(init);
+                                format!("({} as {})", raw, typ)
+                            }
+                        }
                     } else {
-                        self.write_line(&format!("{} {}: {} = {};", kw, stmt.name, typ, val));
+                        self.expr_rust(&stmt.children[0])
+                    };
+                    if stmt.extra_type.is_empty() {
+                        self.write_line(&format!("{} {} = {};", kw, stmt.name, Self::strip_outer_parens(&val)));
+                    } else {
+                        self.write_line(&format!("{} {}: {} = {};", kw, stmt.name, typ, Self::strip_outer_parens(&val)));
                     }
                 }
             }
             NodeKind::StmtAssign => {
                 if stmt.children.len() >= 2 {
                     let target = Self::expr_to_rust(&stmt.children[0]);
-                    let val = Self::expr_to_rust(&stmt.children[1]);
-                    self.write_line(&format!("{} = {};", target, val));
+                    let val = self.expr_rust(&stmt.children[1]);
+                    self.write_line(&format!("{} = {};", target, Self::strip_outer_parens(&val)));
                 }
             }
             NodeKind::StmtIf => {
                 self.write_indent();
                 self.write("if ");
                 if !stmt.children.is_empty() {
-                    self.write(&Self::expr_to_rust(&stmt.children[0]));
+                    self.write(&self.cond_to_rust(&stmt.children[0]));
                 }
                 self.write(" {\n");
                 self.indent += 1;
                 if stmt.children.len() > 1 {
-                    for s in &stmt.children[1].children {
-                        self.gen_rust_stmt(s);
-                    }
+                    self.gen_block_stmts(&stmt.children[1].children);
                 }
                 self.indent -= 1;
                 if stmt.children.len() > 2 {
                     self.write_indent();
                     self.write("} else {\n");
                     self.indent += 1;
-                    for s in &stmt.children[2].children {
-                        self.gen_rust_stmt(s);
-                    }
+                    self.gen_block_stmts(&stmt.children[2].children);
                     self.indent -= 1;
                 }
                 self.write_line("}");
@@ -8083,7 +8387,7 @@ impl RustCodegen {
                 self.write_indent();
                 self.write("while ");
                 if !stmt.children.is_empty() {
-                    self.write(&Self::expr_to_rust(&stmt.children[0]));
+                    self.write(&self.cond_to_rust(&stmt.children[0]));
                 }
                 self.write(" {\n");
                 self.indent += 1;
@@ -8165,8 +8469,17 @@ impl RustCodegen {
                 format!("Vec<{}>", Self::t27_type_to_rust(inner))
             }
             t if t.starts_with('[') && t.contains(']') => {
-                // [N]T format - convert to Vec
-                if let Some(bracket_end) = t.find(']') {
+                // [T; N] or [N]T format - convert to Vec<T>
+                if t.starts_with("[]") {
+                    // []T format
+                    let inner = &t[2..];
+                    format!("Vec<{}>", Self::t27_type_to_rust(inner))
+                } else if let Some(semi) = t.find(';') {
+                    // [T; N] format — type is between [ and ;
+                    let inner = &t[1..semi];
+                    format!("Vec<{}>", Self::t27_type_to_rust(inner.trim()))
+                } else if let Some(bracket_end) = t.find(']') {
+                    // [N]T format
                     let inner = &t[bracket_end + 1..];
                     format!("Vec<{}>", Self::t27_type_to_rust(inner))
                 } else {
@@ -8183,18 +8496,400 @@ impl RustCodegen {
         }
     }
 
+    // True for Rust integer type names so StmtLocal initializers can be cast
+    // (t27 auto-widens integer assignments; Rust does not).
+    fn is_int_type(t: &str) -> bool {
+        matches!(
+            t,
+            "u8" | "u16" | "u32" | "u64" | "usize"
+                | "i8" | "i16" | "i32" | "i64" | "isize"
+        )
+    }
+
+    // Render a comparison operand, promoting integer-valued leaves to `target`
+    // so both sides of a comparison share a common Rust type. `target` is
+    // chosen by `cmp_target_type` from the operands' actual types (u32 floor,
+    // widened to a 64-bit type when an operand is 64-bit) so u64 operands are
+    // not truncated. Leaves that are already bool-producing or bool literals
+    // are left as-is. Instance method so Vec-typed call arguments are cloned
+    // (see expr_rust).
+    fn cmp_operand_as(&self, node: &Node, target: &str) -> String {
+        // Don't touch bool-producing sub-expressions.
+        if Self::expr_is_bool(node) {
+            return Self::expr_to_rust(node);
+        }
+        match node.kind {
+            NodeKind::ExprLiteral => {
+                if node.value == "true" || node.value == "false" {
+                    return node.value.clone();
+                }
+                format!("({} as {})", node.value, target)
+            }
+            NodeKind::ExprIdentifier => format!("({} as {})", node.name, target),
+            NodeKind::ExprBinary => {
+                format!("({} as {})", Self::expr_to_rust(node), target)
+            }
+            NodeKind::ExprCall => {
+                format!("({} as {})", self.expr_rust(node), target)
+            }
+            NodeKind::ExprCast => {
+                format!("({} as {})", Self::expr_to_rust(node), target)
+            }
+            NodeKind::ExprIndex | NodeKind::ExprFieldAccess => {
+                format!("({} as {})", Self::expr_to_rust(node), target)
+            }
+            _ => Self::expr_to_rust(node),
+        }
+    }
+
+    // Bit width of a Rust integer type name (0 if not a known int type).
+    // usize/isize are treated as 64-bit (the tri-net host target).
+    fn int_type_width(t: &str) -> u32 {
+        match t {
+            "u8" | "i8" => 8,
+            "u16" | "i16" => 16,
+            "u32" | "i32" => 32,
+            "u64" | "i64" | "usize" | "isize" => 64,
+            _ => 0,
+        }
+    }
+
+    // Of two optional int types, the wider one (a known type always beats
+    // None). Used to combine arithmetic operands and to pick a common
+    // comparison type.
+    fn wider_int_type(l: Option<String>, r: Option<String>) -> Option<String> {
+        match (l, r) {
+            (Some(a), Some(b)) => {
+                if Self::int_type_width(&b) > Self::int_type_width(&a) {
+                    Some(b)
+                } else {
+                    Some(a)
+                }
+            }
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        }
+    }
+
+    // Best-effort Rust integer type of an expression used as a comparison
+    // operand, from the int_types map (identifiers), fn return types (calls),
+    // the annotated target (casts), or the wider operand type (arithmetic).
+    // None when it cannot be determined (bare literal, index, field access) so
+    // the caller falls back to a default width.
+    fn infer_int_type(&self, node: &Node) -> Option<String> {
+        match node.kind {
+            NodeKind::ExprIdentifier => self.int_types.get(&node.name).cloned(),
+            NodeKind::ExprCall => self
+                .fn_ret_types
+                .get(&node.name)
+                .filter(|t| Self::is_int_type(t))
+                .cloned(),
+            NodeKind::ExprCast => {
+                let t = Self::t27_type_to_rust(&node.extra_type);
+                if Self::is_int_type(&t) {
+                    Some(t)
+                } else {
+                    None
+                }
+            }
+            NodeKind::ExprBinary if node.children.len() >= 2 => {
+                let l = self.infer_int_type(&node.children[0]);
+                let r = self.infer_int_type(&node.children[1]);
+                Self::wider_int_type(l, r)
+            }
+            NodeKind::ExprUnary if !node.children.is_empty() => {
+                self.infer_int_type(&node.children[0])
+            }
+            _ => None,
+        }
+    }
+
+    // Common Rust type to cast both operands of a comparison to. t27 auto-
+    // promotes integer operands; Rust requires a matching type on both sides.
+    // This was historically hardcoded to u32, which silently truncated u64
+    // operands (e.g. `prod >= two_sq` with 50-bit products). We keep u32 as the
+    // floor so existing <=32-bit output is byte-for-byte unchanged, but widen
+    // to the operands' 64-bit type when either side is 64-bit.
+    fn cmp_target_type(&self, l: &Node, r: &Node) -> String {
+        let t = Self::wider_int_type(self.infer_int_type(l), self.infer_int_type(r));
+        match t {
+            Some(ty) if Self::int_type_width(&ty) >= 64 => ty,
+            _ => "u32".to_string(),
+        }
+    }
+
+    // Rewrite an expression so every numeric leaf (identifier or integer
+    // literal) is cast to `target` int type. Used when a StmtLocal has an
+    // explicit int annotation but its initializer mixes narrower types
+    // (e.g. `(px - ax) * dx` where px: u16, ax/dx: u8). t27 auto-promotes
+    // operands; Rust requires explicit casts on every leaf. We only cast
+    // leaves we cannot prove are already the target type, and we skip
+    // comparison/logical sub-expressions (which yield bool).
+    fn cast_int_leaves(node: &Node, target: &str) -> String {
+        // Bool-producing expressions must not be force-cast.
+        if Self::expr_is_bool(node) {
+            return Self::expr_to_rust(node);
+        }
+        match node.kind {
+            NodeKind::ExprLiteral => {
+                // Numeric literal: cast to target.
+                format!("({} as {})", node.value, target)
+            }
+            NodeKind::ExprIdentifier => {
+                format!("({} as {})", node.name, target)
+            }
+            NodeKind::ExprBinary => {
+                if node.children.len() >= 2 {
+                    let left_raw = Self::cast_int_leaves(&node.children[0], target);
+                    let right = Self::cast_int_leaves(&node.children[1], target);
+                    let op = match node.extra_op.as_str() {
+                        "and" => "&&",
+                        "or" => "||",
+                        op => op,
+                    };
+                    // For shift operators, wrap left operand if it contains a cast
+                    // to prevent Rust from parsing `u64 << n` as generic args.
+                    let left = if (op == "<<" || op == ">>") && left_raw.contains(" as ") {
+                        format!("({left_raw})")
+                    } else {
+                        left_raw
+                    };
+                    format!("({} {} {})", left, op, right)
+                } else {
+                    Self::expr_to_rust(node)
+                }
+            }
+            NodeKind::ExprCall => {
+                // Function call: assume its result type is correct or cast.
+                let args: Vec<String> = node
+                    .children
+                    .iter()
+                    .map(|c| Self::strip_outer_parens(&Self::expr_to_rust(c)))
+                    .collect();
+                Self::strip_outer_parens(&format!("({}({}) as {})", node.name, args.join(", "), target))
+            }
+            NodeKind::ExprUnary => {
+                if !node.children.is_empty() {
+                    let operand = Self::cast_int_leaves(&node.children[0], target);
+                    format!("{}({})", node.extra_op, operand)
+                } else {
+                    node.extra_op.clone()
+                }
+            }
+            _ => {
+                // Default: render and wrap in a cast (safe for int targets).
+                Self::strip_outer_parens(&format!("({} as {})", Self::expr_to_rust(node), target))
+            }
+        }
+    }
+
+    // True if an expression yields a Rust `bool`: comparison operators, `&&`,
+    // `||`, or unary `!`. Used by gen_fn to insert `as <int>` casts when a
+    // t27 function declares an integer return type but its body returns a
+    // comparison (t27 treats these as 0/1 integers, Rust does not).
+    fn expr_is_bool(node: &Node) -> bool {
+        match node.kind {
+            NodeKind::ExprBinary => matches!(
+                node.extra_op.as_str(),
+                "==" | "!=" | "<" | ">" | "<=" | ">=" | "and" | "or"
+            ),
+            NodeKind::ExprUnary => node.extra_op == "!",
+            _ => false,
+        }
+    }
+
+    // True if an expression yields a Rust integer when used in a bool
+    // position (i.e. needs `!= 0` wrapping). Covers function calls returning
+    // an integer type and parenthesized/wrapped variants. Identifier/literal
+    // cases are ambiguous so we conservatively return false (Rust would flag
+    // a literal in condition position but those are rare in generated code).
+    fn expr_is_int_call(&self, node: &Node) -> bool {
+        match node.kind {
+            NodeKind::ExprCall => {
+                if let Some(ret) = self.fn_ret_types.get(&node.name) {
+                    return matches!(ret.as_str(), "u8" | "u16" | "u32" | "u64" | "i8" | "i16" | "i32" | "i64" | "usize" | "isize");
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    // Render a condition expression, inserting `!= 0` when the expression is
+    // integer-typed (t27 treats nonzero ints as true; Rust requires a bool).
+    // We can't do full type inference, so the rule is: if the expression is
+    // NOT a Rust-bool producer (comparison/and/or/not) and NOT a bool-typed
+    // function call or bool identifier, treat it as integer and wrap with
+    // `!= 0`.
+    fn cond_to_rust(&self, node: &Node) -> String {
+        // Special-case unary `!` on an integer expression: t27 means logical
+        // NOT, but Rust `!(int)` is bitwise NOT. Rewrite to `(expr == 0)`.
+        if node.kind == NodeKind::ExprUnary
+            && node.extra_op == "!"
+            && !node.children.is_empty()
+        {
+            let operand = &node.children[0];
+            let operand_is_bool = Self::expr_is_bool(operand)
+                || self.expr_is_bool_call(operand)
+                || (operand.kind == NodeKind::ExprIdentifier
+                    && self.bool_names.contains(&operand.name));
+            if operand_is_bool {
+                // operand is already bool — `!bool` is fine in Rust.
+                return Self::expr_to_rust(node);
+            } else {
+                // operand is integer — logical NOT becomes `== 0`.
+                let op_raw = Self::expr_to_rust(operand);
+                return format!("(({}) == 0)", op_raw);
+            }
+        }
+        let raw = Self::expr_to_rust(node);
+        if Self::expr_is_bool(node) {
+            // Already bool-producing in Rust. Use expr_rust so comparison
+            // operands get the u32 promotion and Vec args get cloned.
+            Self::strip_outer_parens(&self.expr_rust(node))
+        } else if self.expr_is_bool_call(node) {
+            // Call to a function returning bool. Use expr_rust for Vec clone.
+            Self::strip_outer_parens(&self.expr_rust(node))
+        } else if node.kind == NodeKind::ExprIdentifier
+            && self.bool_names.contains(&node.name)
+        {
+            // Bare bool param/local used directly as a condition.
+            raw
+        } else if node.kind == NodeKind::ExprLiteral
+            && (node.value == "true" || node.value == "false")
+        {
+            raw
+        } else {
+            // Conservative: anything else in condition position is treated
+            // as integer (t27 semantics) and converted via `!= 0`.
+            format!("(({}) != 0)", raw)
+        }
+    }
+
+    // True if the node is a call to a function whose declared return type is
+    // Rust `bool`.
+    fn expr_is_bool_call(&self, node: &Node) -> bool {
+        if node.kind == NodeKind::ExprCall {
+            if let Some(ret) = self.fn_ret_types.get(&node.name) {
+                return ret == "bool";
+            }
+        }
+        false
+    }
+
+    // Instance-aware expression renderer: identical to expr_to_rust except
+    // that call arguments which are bare identifiers naming a Vec param/local
+    // get `.clone()` appended. t27 passes arrays by reference; Rust moves
+    // them, so a param used in two calls would be "use of moved value".
+    // Cloning every Vec call-argument is correct (if occasionally redundant).
+    // Strip one layer of surrounding parentheses from a rendered expression
+    // string, so `return (expr);` becomes `return expr;`. Clippy flags
+    // unnecessary parens around return values, assignments, conditions, etc.
+    // We only strip when the ENTIRE string is `(…)` with matching parens.
+    fn strip_outer_parens(s: &str) -> String {
+        // Loop until stable: strips ALL redundant outer paren layers.
+        // e.g. "(((x)))" → "x", not just "((x))".
+        let mut current = s.trim().to_string();
+        loop {
+            let s = &current;
+            if !s.starts_with('(') || !s.ends_with(')') {
+                break;
+            }
+            // Verify the first `(` matches the LAST `)` (not a subset).
+            let mut depth: i32 = 0;
+            let mut is_full_wrap = true;
+            let bytes = s.as_bytes();
+            for (i, &b) in bytes.iter().enumerate() {
+                match b {
+                    b'(' => depth += 1,
+                    b')' => {
+                        depth -= 1;
+                        if depth == 0 && i != s.len() - 1 {
+                            // Closed before the end — not a full wrap.
+                            is_full_wrap = false;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if !is_full_wrap {
+                break;
+            }
+            current = s[1..s.len() - 1].trim().to_string();
+        }
+        current
+    }
+
+    fn expr_rust(&self, node: &Node) -> String {
+        match node.kind {
+            NodeKind::ExprCall => {
+                let args: Vec<String> = node
+                    .children
+                    .iter()
+                    .map(|c| {
+                        // Bare Vec identifier as a call argument: clone it so
+                        // the call doesn't move the caller's owned value.
+                        if c.kind == NodeKind::ExprIdentifier
+                            && self.vec_names.contains(&c.name)
+                        {
+                            format!("{}.clone()", c.name)
+                        } else {
+                            Self::strip_outer_parens(&self.expr_rust(c))
+                        }
+                    })
+                    .collect();
+                format!("{}({})", node.name, args.join(", "))
+            }
+            NodeKind::ExprBinary
+                if matches!(
+                    node.extra_op.as_str(),
+                    "==" | "!=" | "<" | ">" | "<=" | ">="
+                ) =>
+            {
+                // Comparison: promote both operands to a common type wide
+                // enough for the operands (u32 floor, 64-bit when either side
+                // is 64-bit) so u64 operands are not truncated. Instance method
+                // so Vec-typed call arguments inside operands are cloned.
+                if node.children.len() >= 2 {
+                    let op = match node.extra_op.as_str() {
+                        "and" => "&&",
+                        "or" => "||",
+                        op => op,
+                    };
+                    let target = self.cmp_target_type(&node.children[0], &node.children[1]);
+                    let l = self.cmp_operand_as(&node.children[0], &target);
+                    let r = self.cmp_operand_as(&node.children[1], &target);
+                    format!("({} {} {})", l, op, r)
+                } else {
+                    Self::expr_to_rust(node)
+                }
+            }
+            _ => Self::expr_to_rust(node),
+        }
+    }
+
     fn expr_to_rust(node: &Node) -> String {
         match node.kind {
             NodeKind::ExprLiteral => node.value.clone(),
             NodeKind::ExprIdentifier => node.name.clone(),
             NodeKind::ExprBinary => {
                 if node.children.len() >= 2 {
-                    let left = Self::expr_to_rust(&node.children[0]);
+                    let left_raw = Self::expr_to_rust(&node.children[0]);
                     let right = Self::expr_to_rust(&node.children[1]);
                     let op = match node.extra_op.as_str() {
                         "and" => "&&",
                         "or" => "||",
                         op => op,
+                    };
+                    // For shift operators, Rust parses `x as u32 << n` as
+                    // `x as (u32 << n)` (generic args). Wrap the left operand
+                    // in its own parens if it contains a bare ` as ` cast.
+                    let left = if (op == "<<" || op == ">>") && left_raw.contains(" as ") {
+                        format!("({left_raw})")
+                    } else {
+                        left_raw
                     };
                     format!("({} {} {})", left, op, right)
                 } else {
@@ -8205,7 +8900,7 @@ impl RustCodegen {
                 let args: Vec<String> = node
                     .children
                     .iter()
-                    .map(Self::expr_to_rust)
+                    .map(|c| Self::strip_outer_parens(&Self::expr_to_rust(c)))
                     .collect();
                 format!("{}({})", node.name, args.join(", "))
             }
@@ -8254,7 +8949,7 @@ impl RustCodegen {
             NodeKind::ExprIndex => {
                 if node.children.len() >= 2 {
                     format!(
-                        "{}[{}]",
+                        "{}[({}) as usize]",
                         Self::expr_to_rust(&node.children[0]),
                         Self::expr_to_rust(&node.children[1])
                     )
@@ -22621,6 +23316,50 @@ mod tests_phase40_coverage {
         assert!(
             out.contains("let min_role = policy"),
             "let binding dropped from Rust output: {}",
+            out
+        );
+    }
+
+    // Regression (found 2026-08-06): `gen-rust` lowered u64 comparison
+    // operands inside an `if` condition with a spurious `as u32` cast,
+    // truncating them to 32 bits. For `carries(2^25,0,0)` this made
+    // `prod (=2^50) >= two_sq (=2^51)` evaluate as `0 >= 0` -> true and return
+    // 1 instead of 0. The comparison must cast operands to their real width
+    // (u64), never u32. Blocks GF-T32 (25-bit mantissa) arithmetic in tri-net.
+    #[test]
+    fn test_u64_comparison_not_truncated_to_u32() {
+        let code = "module M { \
+            pub fn carries(mant_one: u64, ma: u64, mb: u64) -> u32 { \
+                let prod: u64 = (mant_one + ma) * (mant_one + mb); \
+                let two_sq: u64 = 2 * mant_one * mant_one; \
+                if (prod >= two_sq) { return 1; } else { return 0; } \
+            } }";
+        let out = Compiler::compile_rust(code).expect("compile should succeed");
+        assert!(
+            out.contains("(prod as u64) >= (two_sq as u64)"),
+            "u64 comparison operands not widened to u64: {}",
+            out
+        );
+        assert!(
+            !out.contains("prod as u32") && !out.contains("two_sq as u32"),
+            "u64 comparison operand truncated to u32: {}",
+            out
+        );
+    }
+
+    // Companion guard: <=32-bit comparisons must stay on the u32 path (the fix
+    // keeps u32 as the floor and only widens for 64-bit operands), so existing
+    // generated output for narrow types is byte-for-byte unchanged.
+    #[test]
+    fn test_u32_comparison_still_uses_u32() {
+        let code = "module M { \
+            pub fn f(a: u32, b: u32) -> u32 { \
+                if (a >= b) { return 1; } else { return 0; } \
+            } }";
+        let out = Compiler::compile_rust(code).expect("compile should succeed");
+        assert!(
+            out.contains("(a as u32) >= (b as u32)"),
+            "u32 comparison changed unexpectedly: {}",
             out
         );
     }

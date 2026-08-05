@@ -1,6 +1,24 @@
 # NOW -- Trinity t27 sync
 
-Last updated: 2026-05-24
+Last updated: 2026-08-06
+
+## fix(codegen) -- gen-rust u64 comparison truncated to u32 (Closes #1736)
+
+- BUG: `t27c gen-rust` lowered `u64` comparison operands inside an `if`
+  condition with a hardcoded `as u32` cast, truncating them to 32 bits.
+  `carries(2^25,0,0)` returned 1 instead of 0 (prod=2^50, two_sq=2^51 both
+  truncated to 0 -> `0>=0` true).
+- FIX: `bootstrap/src/compiler.rs` -- comparison lowering now chooses the cast
+  target from the operands' actual types (`cmp_target_type`/`infer_int_type`,
+  fed by a new `int_types` name->type map). u32 stays the floor (<=32-bit
+  output byte-for-byte unchanged); widens to the operands' 64-bit type when
+  either side is 64-bit. `cmp_operand_as_u32` -> `cmp_operand_as(node, target)`.
+- **NEW** spec: `specs/repro_u64_compare.t27` (regression, `test` block per L4)
+- **NEW** unit tests: `test_u64_comparison_not_truncated_to_u32`,
+  `test_u32_comparison_still_uses_u32`
+- FROZEN_HASH resealed for `compiler.rs` (M5). Unblocks GF-T32 (25-bit
+  mantissa) u64 arithmetic in tri-net.
+- Closes #1736
 
 ## docs(TRI-NET) -- cross-line package P0/P1/P2 (this PR, Closes #696)
 
