@@ -142,8 +142,9 @@ criteria, generator copy-hazard checklist, and open backlog.
 | 895 | #1853 | wave-loop-895 | 609 | 304 | 38,976 | 1,247,232 | 1.190 | open | #1854 |
 | 896 | #1855 | wave-loop-896 | 611 | 305 | 39,104 | 1,251,328 | 1.194 | open | #1856 |
 | 897 | #1857 | wave-loop-897 | 613 | 306 | 39,232 | 1,255,424 | 1.198 | closed | #1858 |
-| **898** | **#1859** | **wave-loop-898 (READY)** | **615** | **307** | **39,360** | **1,259,520** | **1.202** | **READY** | **TBD** |
-| 899 | TBD | wave-loop-899 | 617 | 308 | 39,488 | 1,263,616 | 1.206 | planned | TBD |
+| 898 | #1859 | wave-loop-898 | 615 | 307 | 39,360 | 1,259,520 | 1.202 | closed | #1900 |
+| **899** | **#1901** | **wave-loop-899 (READY)** | **617** | **308** | **39,488** | **1,263,616** | **1.206** | **READY** | **TBD** |
+| 900 | TBD | wave-loop-900 | 619 | 309 | 39,616 | 1,267,712 | 1.209 | planned | TBD |
 
 ### Run-list notes
 - Issue numbers follow the observed pattern (issue = previous issue + 2).
@@ -231,10 +232,10 @@ criteria, generator copy-hazard checklist, and open backlog.
 
 ## Current status
 
-- **Latest completed wave:** 897
-- **Latest issue/PR:** #1857 / #1858
-- **Current wave in progress:** 898
-- **Next wave queued:** 899
-- **Ladder depth:** W774–W897 = 124 waves
+- **Latest completed wave:** 898
+- **Latest issue/PR:** #1859 / #1900
+- **Current wave in progress:** 899
+- **Next wave queued:** 900
+- **Ladder depth:** W774–W898 = 125 waves
 
 *φ² + φ⁻² = 3 | TRINITY*
