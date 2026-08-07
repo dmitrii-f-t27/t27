@@ -1,6 +1,11 @@
-# NOW — feat: arbitrary-DEPTH trainer (>2 layers), proven bit-exact + synth (2026-08-07)
+# NOW — chore: civilian mesh wording (2026-08-07)
 
 Last updated: 2026-08-07
+
+## chore: civilian mesh positioning (Refs #1873)
+
+- `specs/fpga/bpsk.t27` header comment: drop 'drone-mesh' -> 'mesh' (civilian 5.8 GHz mesh radio PHY). Comment-only, no spec logic change.
+- Refs #1873
 
 ## feat: lift the 2-layer restriction -> arbitrary-depth net, bit-exact + synthesizable (Refs #1764)
 
