@@ -2725,7 +2725,9 @@ impl Parser {
             return ty;
         }
 
-        // Handle pointer prefix: *Type or *const Type
+        // Handle pointer prefix: *Type or *const Type. Parse the pointee through
+        // this same type grammar: `*Name(T)` is a pointer to the application
+        // `Name(T)`, not an attempt to apply `T` to a pointer.
         if self.current.kind == TokenKind::Star {
             ty.push('*');
             self.advance();
@@ -2733,10 +2735,7 @@ impl Parser {
                 ty.push_str("const ");
                 self.advance();
             }
-            if self.current.kind == TokenKind::Ident {
-                ty.push_str(&self.current.lexeme);
-                self.advance();
-            }
+            ty.push_str(&self.parse_type_annotation());
             return ty;
         }
 
@@ -2822,12 +2821,67 @@ impl Parser {
                 ty.push_str(&self.current.lexeme);
                 self.advance(); // consume the segment
             }
+
+            // #2164: `Name(T)` is a type application when the parser has
+            // already entered a type position. It is deliberately parsed here,
+            // rather than in expression parsing, because the same tokens in an
+            // expression position continue to mean a function call.
+            self.parse_type_application_args(&mut ty);
         } else if self.current.kind == TokenKind::KwVoid {
             ty.push_str("void");
             self.advance();
         }
 
         ty
+    }
+
+    /// Append one parenthesised type-argument list to a type name.
+    ///
+    /// The parser reaches this helper only after consuming the base type name.
+    /// Thus `Name(T)` in an annotation is an application, whereas `Name(T)` in
+    /// an expression remains the expression parser's call syntax. Numeric
+    /// arguments are retained verbatim because existing `P(2)`, `Z(1)`, and
+    /// `N(0)` applications are part of the accepted type surface.
+    fn parse_type_application_args(&mut self, ty: &mut String) {
+        if self.current.kind != TokenKind::LParen {
+            return;
+        }
+
+        ty.push('(');
+        self.advance(); // consume (
+        let mut first = true;
+        while self.current.kind != TokenKind::RParen && self.current.kind != TokenKind::Eof {
+            if !first {
+                if self.current.kind != TokenKind::Comma {
+                    // Keep an unfamiliar shape for the caller's existing
+                    // recovery rather than consuming a token without progress.
+                    break;
+                }
+                ty.push_str(", ");
+                self.advance(); // consume ,
+                if self.current.kind == TokenKind::RParen {
+                    break;
+                }
+            }
+
+            let before = self.current.kind;
+            if self.current.kind == TokenKind::Number {
+                ty.push_str(&self.current.lexeme);
+                self.advance();
+            } else {
+                let arg = self.parse_type_annotation();
+                if arg.is_empty() && self.current.kind == before {
+                    // Do not loop forever on a token outside the type grammar.
+                    break;
+                }
+                ty.push_str(&arg);
+            }
+            first = false;
+        }
+        if self.current.kind == TokenKind::RParen {
+            ty.push(')');
+            self.advance(); // consume )
+        }
     }
 
     fn parse_fn_decl(&mut self, is_pub: bool) -> Result<Node, String> {
@@ -2980,6 +3034,7 @@ impl Parser {
                 }
             }
             decl.extra_return_type = rt_name;
+            self.parse_type_application_args(&mut decl.extra_return_type);
             // Handle generic return types like Option<Foo>
             if self.current.kind == TokenKind::Lt {
                 let mut gt_depth = 1;
@@ -10000,7 +10055,31 @@ impl VerilogCodegen {
 
     /// Format a Verilog range declaration like [31:0]
     fn range_decl(width: u32) -> String {
-        if width == 1 {
+        // A width of 0 is not a narrow signal; it is `field_type_width`'s poison
+        // value arriving here, and `width - 1` has no case for it. What that
+        // produced depended on a build flag, and CI builds the quiet one:
+        //
+        //   debug   (overflow-checks on)   panic, "subtract with overflow"
+        //   release (overflow-checks off)  `[4294967295:0]`, exit 0, no stderr
+        //
+        // Ten specs emitted a four-billion-bit range past every green gate
+        // (#2566). `struct CoverPoint { name: &str, condition: &str, clock:
+        // &str, description: &str }` is the shape: a string field contributes 0
+        // by design -- correct in a MIXED struct, where the other fields carry
+        // the width -- and there is no other field.
+        //
+        // Clamped rather than refused. Making such a struct non-lowerable was
+        // tried first and cost 17 new elaboration errors in `hir`: the
+        // non-lowerable path declares per-field registers at some sites and not
+        // at function locals, so `result.assign_count` emitted a reference to a
+        // `result_assign_count` that nothing declares. Elaboration errors
+        // measured, not guessed: 176 before, 193 after, on the same iverilog.
+        //
+        // A 1-bit placeholder for a type that occupies no bits keeps every
+        // packing and slicing path exactly as it was -- there are no field
+        // offsets to disturb, since every field is zero-width -- and emits a
+        // legal declaration instead of an impossible one.
+        if width <= 1 {
             String::new()
         } else {
             format!("[{}:0]", width - 1)
@@ -10805,7 +10884,12 @@ impl VerilogCodegen {
                 if !self.struct_decls.contains_key(&elem_type) {
                     return false;
                 }
-                (base_name, dims, elem_type)
+                // T64: `base_name` stops being a lookup key here and becomes
+                // emitted TEXT. A parameter named for a Verilog keyword is
+                // escaped at its declaration (`\\cross `) and must be escaped
+                // at every use too, or the part-select below emits a bare
+                // keyword and iverilog reports a plain "syntax error".
+                (Self::verilog_safe_identifier(&base_name), dims, elem_type)
             }
             NodeKind::ExprCall if !current.name.is_empty() => {
                 let ret_ty = match self.fn_return_types.get(&current.name) {
@@ -13067,7 +13151,7 @@ impl VerilogCodegen {
                         _ => node.children[0].clone(),
                     };
                     self.emit_packed_struct_array_init(
-                        &node.name,
+                        &Self::verilog_safe_identifier(&node.name),
                         &node.extra_type,
                         &init_node,
                     );
@@ -14895,7 +14979,14 @@ impl VerilogCodegen {
                 let total_width = dims[0] * elem_w;
                 if phase != LocalEmitPhase::Init {
                     self.write_indent();
-                    self.write_line(&format!("reg [{}:0] {};", total_width - 1, Self::verilog_safe_identifier(&node.name)));
+                    // A zero-length array has no bits, and `0 - 1` on a usize is
+                    // 18446744073709551615. `[0]Notebook` is a legal spec
+                    // construct -- an empty list -- and it emitted
+                    // `reg [18446744073709551615:0] notebooks;` at exit 0
+                    // (#2566). Clamped the way `range_decl` clamps: a one-bit
+                    // placeholder for a type that occupies none, which is a legal
+                    // declaration rather than an impossible one.
+                    self.write_line(&format!("reg [{}:0] {};", total_width.saturating_sub(1), Self::verilog_safe_identifier(&node.name)));
                 }
                 if phase != LocalEmitPhase::Decl && !node.children.is_empty() {
                     let child = &node.children[0];
@@ -14923,7 +15014,14 @@ impl VerilogCodegen {
                 let total_width: usize = dims.iter().product::<usize>() * elem_w;
                 if phase != LocalEmitPhase::Init {
                     self.write_indent();
-                    self.write_line(&format!("reg [{}:0] {};", total_width - 1, Self::verilog_safe_identifier(&node.name)));
+                    // A zero-length array has no bits, and `0 - 1` on a usize is
+                    // 18446744073709551615. `[0]Notebook` is a legal spec
+                    // construct -- an empty list -- and it emitted
+                    // `reg [18446744073709551615:0] notebooks;` at exit 0
+                    // (#2566). Clamped the way `range_decl` clamps: a one-bit
+                    // placeholder for a type that occupies none, which is a legal
+                    // declaration rather than an impossible one.
+                    self.write_line(&format!("reg [{}:0] {};", total_width.saturating_sub(1), Self::verilog_safe_identifier(&node.name)));
                 }
                 if phase != LocalEmitPhase::Decl && !node.children.is_empty() {
                     let child = &node.children[0];
@@ -14940,7 +15038,7 @@ impl VerilogCodegen {
                         self.write_line("begin");
                         self.indent();
                         self.emit_packed_struct_array_init(
-                            &node.name,
+                            &Self::verilog_safe_identifier(&node.name),
                             &node.extra_type,
                             child,
                         );
@@ -15923,7 +16021,7 @@ impl VerilogCodegen {
                                     }
                                     if ok && fw > 0 {
                                         let signed = Self::scalar_field_is_signed(&ftype);
-                                        let slice = format!("{}[{} +: {}]", chain_base, total_off, fw);
+                                        let slice = format!("{}[{} +: {}]", Self::verilog_safe_identifier(&chain_base), total_off, fw);
                                         if signed && !self.in_lvalue {
                                             self.write(&format!("$signed({})", slice));
                                         } else {
@@ -15967,7 +16065,7 @@ impl VerilogCodegen {
                                         })
                                         .unwrap_or_default();
                                     let signed = Self::scalar_field_is_signed(&ftype);
-                                    let slice = format!("{}[{} +: {}]", base_name, off, fw);
+                                    let slice = format!("{}[{} +: {}]", Self::verilog_safe_identifier(&base_name), off, fw);
                                     if signed && !self.in_lvalue {
                                         self.write(&format!("$signed({})", slice));
                                     } else {
@@ -33263,6 +33361,32 @@ mod tests_hir_pipeline_parity {
         assert!(
             v.contains("pairs[((idx) * 16 + 0) +: 8]"),
             "expected packed slice for indexed field access, got:\n{}",
+            v
+        );
+    }
+
+    #[test]
+    fn test_verilog_keyword_named_param_escaped_at_use() {
+        // T64: a parameter whose name is a Verilog keyword was escaped at its
+        // DECLARATION (`\cross `) and emitted bare at every USE, so the
+        // part-select read `cross[8 +: 32]` and iverilog answered with a plain
+        // "syntax error" -- 4 of them in the corpus, and each one truncated
+        // the file, hiding whatever elaboration errors came after it.
+        let src = r#"module KeywordParam {
+    pub struct Crossing { kind : u8, bits : u32 }
+    pub fn crossing_bits(cross: Crossing) -> u32 {
+        return cross.bits
+    }
+}"#;
+        let v = Compiler::compile_verilog(src).unwrap();
+        assert!(
+            v.contains("\\cross [8 +: 32]"),
+            "keyword-named param must stay escaped where it is USED, got:\n{}",
+            v
+        );
+        assert!(
+            !v.contains(" cross[8 +: 32]"),
+            "bare keyword in a part-select is a syntax error, got:\n{}",
             v
         );
     }

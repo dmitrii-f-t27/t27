@@ -10,12 +10,41 @@ same ~3K-LUT datapath; only the microcode length (= time) and register file grow
 This tool GENERATES the backprop microcode for a 2-layer net (n_in inputs, n_hid
 ReLU hidden with fixed biases, n_out linear outputs) and self-tests it with a
 bit-faithful GF-T interpreter (trains XOR to 4/4), proving the generated program
-is correct. Emitting the Verilog case-ROM from `steps` is mechanical (see
-board/bpseq.v for the hand-written (2,2,1) version this reproduces).
+is correct. Emitting the Verilog case-ROM from `steps` is mechanical.
+
+This docstring used to point at `board/bpseq.v` for "the hand-written (2,2,1)
+version this reproduces". That path has never existed in this repository --
+`git log --all -- board/bpseq.v` is empty. The arithmetic this file mirrors is
+`specs/ternary/gft_sadd.t27`, which is what t27c compiles to Verilog, C and
+Rust, and which 30 specs under specs/ternary/ carry a copy of.
 
 Op: 'MUL'|'ADD'|'MOV'.  Operand mod: 0 none, 1 relu, 2 relu', 3 neg, 4 -eta*x
 (neg . scale_q, eta=2^-k). Hidden biases fixed at c=[0,-1,-1,...] (the XOR trick).
+
+WHAT THIS DOES NOT ESTABLISH
+----------------------------
+Everything here is Python. There is no t27c, no .t27 spec, and no iverilog in
+this file: it runs unchanged in a directory containing nothing but itself,
+which is how the scope was noticed at all (`tri gate-sweep`).
+
+So a green run says the GENERATED MICROCODE learns, on a bit-faithful GF-T
+interpreter, and that the emitted Verilog TEXT contains the ports and idioms
+asserted below. It does not say:
+
+  * that the compiler produces this microcode -- nothing here compiles a spec;
+  * that the emitted Verilog SIMULATES correctly -- the assertions read the
+    text, they do not run it;
+  * that any of it works on silicon.
+
+Those are separate claims with separate evidence elsewhere in the repository.
+The CI step that runs this was called "Prove the trainer LEARNS", which a
+reader of a green run reasonably took for one of the three above; it now says
+what this paragraph says.
 """
+import tempfile
+import subprocess
+import sys
+import os
 import math
 
 def enc(x):
@@ -178,6 +207,7 @@ def _magsub(hi, lo):
     ho = hi >> 9; hm = hi & 511; lo_o = lo >> 9; lm = lo & 511; d = ho - lo_o
     if d < 0: return 0
     hs = (512 + hm) << 14; la = 0; sticky = 0
+    # mutant-equivalent: at d == 26 the else branch computes la = ls >> 26 == 0 (ls is at most 1023 << 14, below 2**26) and sticky = 1 -- exactly what this branch assigns. 0 differences over 525918 points.
     if d >= 26: la = 0; sticky = 1
     else:
         ls = (512 + lm) << 14; la = ls >> d
@@ -188,6 +218,25 @@ def _magsub(hi, lo):
     q = diff >> 14; rem = diff - (q << 14); half = 8192; mant = q - 512
     if rem > half: mant += 1
     elif rem == half:
+        # The arm below is the ADDITION rule in the SUBTRACTION path: discarded
+        # bits of the subtrahend make the true difference SMALLER, so a tie with
+        # lost bits sits strictly below half and must round DOWN, not up. It has
+        # never been wrong only because it has never run -- `sticky` is 0 at
+        # every reachable tie (exhaustive over every (hm, lm, d); the same holds
+        # in specs/ternary/gft_sadd.t27, which 30 specs copy).
+        #
+        # That makes this function correct BY AN ACCIDENT NOTHING RECORDS, and
+        # a change to the alignment or the normalisation could wake the arm
+        # silently. This guard is the cheap half of #2652: it does not decide
+        # what the rule should be -- that is a datapath call across 30 specs --
+        # it only makes waking up loud. It costs one comparison on the rare tie
+        # branch and nothing at all on the common paths.
+        assert not sticky, (
+            "sub: a tie was reached with bits discarded (sticky=1). The arm "
+            "below rounds UP, which is the addition rule; for subtraction the "
+            "true remainder is strictly below half and must round DOWN. See "
+            "issue #2652 before changing either."
+        )
         if sticky: mant += 1
         elif q & 1: mant += 1
     if mant >= 512: mant = 0; off += 1; off = min(off, 80)
@@ -328,7 +377,373 @@ def _emit_module(reg, steps, initv, n_in, n_out, modname, clk_div=1):
     return "\n".join(L)
 
 
+def self_check():
+    """Prove this file's sixteen asserts can fail, by planting faults they name.
+
+    T124. The last gate in the tree with no negative control in any form. Its
+    verdicts are `assert`s -- XOR trains to 4/4, the held-out classifier clears
+    90%, the emitted Verilog carries the ports it claims -- and nothing showed
+    that any of them could go red. Sixteen assertions and no evidence that they
+    assert anything.
+
+    Worth recording about the FORM: an assert delivers its verdict through a
+    traceback, so exit 1 means both "XOR did not train" and "somebody typed a
+    name wrong three lines up". Each case here demands the ASSERTION'S OWN
+    MESSAGE, because the exit code cannot tell those apart -- which is the same
+    reason every other control in this tree asserts text.
+
+    The plants are copies of this file with one thing changed, run as whole
+    programs. Nothing here can affect a live run: the child never sees
+    --self-check, and the edits exist only in a temporary tree.
+    """
+    ok = True
+
+    def spawned(label, edit, want_rc, expect, absent):
+        nonlocal ok
+        with tempfile.TemporaryDirectory() as td:
+            tools = os.path.join(td, "tools")
+            os.makedirs(tools)
+            src = open(os.path.abspath(__file__), encoding="utf-8").read()
+            if edit:
+                before = src
+                src = edit(src)
+                assert src != before, f"{label}: the plant changed nothing"
+                # T212: and it must have changed the SUBJECT. Twice now a plant
+                # has passed while editing something else -- once this control's
+                # own source (T124), once the assertion that checks the result
+                # (T211, where the literal it targeted existed nowhere but
+                # inside that assertion). Both times the case went green and
+                # both times its name was a lie.
+                #
+                # Every piece of subject code in this file -- enc, the _mag*
+                # arithmetic, gen, emit_verilog -- sits ABOVE this function, and
+                # every assertion under test sits BELOW it in `__main__`. So one
+                # comparison decides it: the first byte the plant changed must
+                # come before this function starts.
+                #
+                # This is the check that would have caught both, and neither was
+                # caught by reading.
+                cut = next((i for i, (a, b) in enumerate(zip(before, src)) if a != b),
+                           min(len(before), len(src)))
+                guard = before.index("def self_ch" + "eck(")
+                assert cut < guard, (
+                    f"{label}: the plant edited the control or an assertion "
+                    f"(byte {cut}), not the subject (which ends at {guard}). "
+                    f"A plant that edits the check proves only that corrupting "
+                    f"a check makes it fail."
+                )
+            me = os.path.join(tools, os.path.basename(__file__))
+            open(me, "w", encoding="utf-8").write(src)
+            r = subprocess.run([sys.executable, me], capture_output=True, text=True)
+        out = r.stdout + r.stderr
+        missing = [s for s in expect if s not in out]
+        leaked = [s for s in absent if s in out]
+        good = (r.returncode == want_rc) if want_rc == 0 else (r.returncode != 0)
+        good = good and not missing and not leaked
+        print(f"  {label:<44} " + (f"exit {r.returncode}, right assertion" if good
+                                   else "CONTROL FAILED"))
+        if not good:
+            ok = False
+            print(f"       exit {r.returncode!r} (want {'0' if want_rc == 0 else 'non-zero'})")
+            if missing:
+                print(f"       the assertion never said: {missing!r}")
+            if leaked:
+                print(f"       neighbouring marker leaked: {leaked!r}")
+            print(f"       said {out[-320:]!r}")
+
+    # The clean direction first, or every case below passes for free on a file
+    # that raises unconditionally.
+    spawned("an unperturbed tree trains and emits", None, 0,
+            ["generated XOR microcode trains 4/4", "emit_verilog: clk_div=16"],
+            ["XOR self-test failed", "Traceback"])
+
+    # The arithmetic the whole microsequencer rests on. A sign flip in the
+    # shared multiplier makes the net stop converging, which is exactly what
+    # `assert acc == 4` exists to notice.
+    spawned("a broken multiplier stops XOR converging",
+            lambda s: s.replace(
+                "    return 0 if mag == 0 else (sgn << 16) | mag",
+                "    return 0 if mag == 0 else ((1 - sgn) << 16) | mag", 1),
+            1, ["XOR self-test failed"],
+            ["emit_verilog: clk_div=16"])
+
+    # And an emitter assertion, which is a different claim entirely: not that
+    # the net learns, but that the Verilog says what this file says it says.
+    # T124: the needle is ASSEMBLED, never written out. Spelled literally, its
+    # first occurrence in this file would be THIS LINE -- so `str.replace(.., 1)`
+    # edited the control's own source and left the assertion untouched, and the
+    # case reported the gate as blind when nothing had been planted at all.
+    #
+    # check_duplicate_agreement.py carries a comment warning about exactly this,
+    # written after the same thing happened there. I read that comment, wrote a
+    # control, and reproduced the defect it describes in the same repository.
+    # T211: assembling the needle was not enough, and the case passed for a
+    # reason unrelated to its name.
+    #
+    # `input [31:0] x0i` spelled out occurs EXACTLY ONCE in this file -- at the
+    # assertion that checks for it. The emitter never writes it: line 336 builds
+    # ports as an f-string, `f"input [31:0] x{k}i"`. So planting the spelled-out
+    # form rewrote THE ASSERTION'S OWN EXPECTED STRING, the emitted Verilog was
+    # untouched, and the assertion duly failed -- proving only that corrupting a
+    # check's expected text makes the check fail.
+    #
+    # T124 above fixed the case where the needle's first occurrence was the
+    # control's own source. This is the next one along: the needle's only
+    # occurrence is the SUBJECT'S check rather than the subject. A plant has to
+    # edit the thing under test, and "assembled, so it is not in my source" does
+    # not establish that.
+    #
+    # The needle is now the emitter's format string, whose first occurrence is
+    # line 336 -- above this control, so `replace(.., 1)` reaches the emitter.
+    # Still assembled, so this line can never become the first occurrence if the
+    # file is ever reordered.
+    port_fmt = 'f"input [31:0] x' + '{k}i"'
+    spawned("a renamed port is caught by the emitter check",
+            lambda s: s.replace(port_fmt, 'f"input [31:0] RENAMED{k}"', 1),
+            1, ["AssertionError"],
+            ["emit_verilog: clk_div=16"])
+
+    # T212: RAISING THE CEILING. The assert operator scored 2 of 34 for three
+    # iterations, read each time as a verdict on 32 weak assertions. It was
+    # nothing of the kind: this control planted exactly TWO faults, and Python
+    # stops at the first failing assert, so each plant can surface exactly one
+    # assertion. Two plants, two kills -- the number was arithmetic on the
+    # length of this list.
+    #
+    # So the list grows. One plant per ASSERTION, not per family: a plant that
+    # falsifies a whole family still surfaces only its first member. Measured:
+    # plant a sign flip in smul and the program dies at the XOR assertion, and
+    # the held-out assertion it ALSO falsifies stays invisible until the first
+    # one is neutered.
+    #
+    # These cost nothing. Each fires in the arithmetic block at the top of
+    # `__main__`, long before any training runs: 0.06s apiece against 11.8s for
+    # the three whole-program cases below.
+    spawned("enc: the smallest normal binade is not zero",
+            lambda s: s.replace("    if off < 0: return 0",
+                                "    if off <= 0: return 0", 1),
+            1, ["smallest normal binade must not encode as zero"], [])
+    spawned("enc: the sign bit survives",
+            lambda s: s.replace("    s = 1 if x < 0 else 0;", "    s = 0;", 1),
+            1, ["sign survives the smallest binade"], [])
+    spawned("enc: below the smallest binade is zero",
+            lambda s: s.replace("    if off < 0: return 0",
+                                "    if off < -1: return 0", 1),
+            1, ["below the smallest binade IS zero"], [])
+    spawned("add: round-half-to-EVEN, not half-to-odd",
+            lambda s: s.replace("        elif t == hf and (s & 1): mant += 1",
+                                "        elif t == hf and not (s & 1): mant += 1", 1),
+            1, ["tie with even s must NOT round up"], [])
+    spawned("mul: round-half-to-EVEN, not half-to-odd",
+            lambda s: s.replace("    elif r == half and (q & 1): mant += 1",
+                                "    elif r == half and not (q & 1): mant += 1", 1),
+            1, ["mul: tie, even q, no carry"], [])
+    spawned("enc: renormalisation carries into the exponent",
+            lambda s: s.replace("    if m >= 512: m = 0; off += 1",
+                                "    if m > 512: m = 0; off += 1", 1),
+            1, ["mantissa rounding to 512 must carry"], [])
+    spawned("sub: round-half-to-EVEN, not half-to-odd",
+            lambda s: s.replace("        elif q & 1: mant += 1",
+                                "        elif not (q & 1): mant += 1", 1),
+            1, ["sub: tie, odd q"], [])
+
+    # Seven more, and these had to be SURGICAL. Within one family the
+    # assertions test adjacent cases of the same code, so the obvious fault
+    # breaks all of them and only the first is ever seen. To surface the second
+    # member, the fault must falsify it while leaving the first true:
+    #
+    #   `elif t == hf and (s & 1)` -> `... and False`  kills the ODD tie only;
+    #   the even tie still correctly declines to round up, so it passes and the
+    #   odd one speaks.
+    #
+    # One resisted and is left alone deliberately. Disabling `_magsub`'s
+    # `if rem > half` to surface "strictly above half" also breaks the
+    # renormalisation-carry case, which is checked EARLIER -- so the plant fires
+    # that one instead. That is the shadowing this whole list is about, arriving
+    # in the list itself; a plant narrow enough to separate them would have to
+    # encode the exact remainders, which makes the control a second copy of the
+    # thing it checks.
+    spawned("sub: the sticky guard is not decoration",
+            lambda s: s.replace("if (ls - (la << d)) > 0: sticky = 1",
+                                "if (ls - (la << d)) >= 0: sticky = 1", 1),
+            1, ["a tie was reached with bits discarded"], [])
+    spawned("add: the ODD tie rounds up (the even one is a different case)",
+            lambda s: s.replace("        elif t == hf and (s & 1): mant += 1",
+                                "        elif t == hf and (s & 1) and False: mant += 1", 1),
+            1, ["tie with odd s must round up"], [])
+    spawned("add: strictly above half is not a tie",
+            lambda s: s.replace("        if t > hf: mant += 1", "        if False: mant += 1", 1),
+            1, ["strictly above half must round up"], [])
+    spawned("mul: the ODD tie rounds to even",
+            lambda s: s.replace("    elif r == half and (q & 1): mant += 1",
+                                "    elif r == half and (q & 1) and False: mant += 1", 1),
+            1, ["mul: tie, odd q, no carry"], [])
+    spawned("mul: the carry path has its own half",
+            lambda s: s.replace("if carry: q = prod >> 10; r = prod & 1023; half = 512",
+                                "if carry: q = prod >> 10; r = prod & 1023; half = 511", 1),
+            1, ["mul: tie, even q, carry"], [])
+    spawned("mul: renormalisation carries into the exponent",
+            lambda s: s.replace("    if mant >= 512: mant = 0; oo = min(oo + 1, 80)",
+                                "    if mant > 512: mant = 0; oo = min(oo + 1, 80)", 1),
+            1, ["mul: mant == 512 must carry"], [])
+    spawned("sub: the EVEN tie does not round up",
+            lambda s: s.replace("    if rem > half: mant += 1", "    if rem >= half: mant += 1", 1),
+            1, ["sub: tie, even q -- must NOT round up"], [])
+
+    print(f"  self-check: the training verdict and an emitter verdict both go red, "
+          f"and a clean tree stays green = {ok}")
+    return 0 if ok else 1
+
+
 if __name__ == "__main__":
+    if "--self-check" in sys.argv:
+        sys.exit(self_check())
+    # The smallest normal binade, [2^-40, 2^-39). `off = e + 40` is 0 there, and
+    # nothing else here reaches it: every value the training self-tests below
+    # encode sits many binades higher.
+    #
+    # Found by reading a surviving boundary mutant rather than by suspecting the
+    # encoder. `if off < 0: return 0` survived `<` -> `<=`, and the survivor is
+    # real: with `<=`, a value in this binade encodes as 0, which is the ZERO
+    # sentinel. 1.5*2^-40 encodes 256 and would become 0 -- a non-zero magnitude
+    # silently reported as zero, in the encoder every trained weight goes
+    # through.
+    #
+    # The exact power 2^-40 is NOT a witness: its mantissa is 0, so it already
+    # encodes as 0 and the mutant changes nothing. A witness needs a non-zero
+    # mantissa in that binade, which is why this pins 1.5*2^-40 and not the
+    # boundary value itself.
+    assert enc(1.5 * 2.0**-40) == 256, "smallest normal binade must not encode as zero"
+    assert enc(-1.5 * 2.0**-40) == (1 << 16) | 256, "sign survives the smallest binade"
+    assert enc(2.0**-41) == 0, "below the smallest binade IS zero (off < 0)"
+    print("self-test: smallest normal binade encodes non-zero (off == 0) -- OK")
+
+    # Round-half-to-EVEN, on exact ties. `_magadd` decides with
+    #
+    #     if t > hf: mant += 1                    strictly above half
+    #     elif t == hf and (s & 1): mant += 1     exactly half -> to even
+    #
+    # and `t > hf` survived `>` -> `>=`, which turns the pair into round-half-UP
+    # and ignores the parity test entirely. The self-tests below did not notice:
+    # they train a net and check ACCURACY, and an optimiser absorbs a last-bit
+    # error in every addition without changing whether XOR reaches 4/4.
+    #
+    # An outcome test cannot see an arithmetic defect that outcomes tolerate.
+    # These three pin the decision itself, one per branch:
+    assert _magadd(25600, 20480) == 25600, "tie with even s must NOT round up"
+    assert _magadd(20992, 20483) == 21250, "tie with odd s must round up (to even)"
+    assert _magadd(25600, 20481) == 25601, "strictly above half must round up"
+    print("self-test: round-half-to-even on exact ties -- OK")
+
+    # The MULTIPLIER carries the same decision, and it had the same gap.
+    # `_magmul` rounds with the identical pair, over a product rather than a
+    # sum, and its `r > half` survived `>` -> `>=` for the same reason: the
+    # training self-tests check accuracy, and an optimiser absorbs a last-bit
+    # error in every multiply too.
+    #
+    # It has TWO paths -- carry and no-carry -- with different `half`, so four
+    # cases are needed rather than three. Only the even-q rows distinguish
+    # `>=`, and only the odd-q rows distinguish a dead parity branch:
+    #
+    #   case                 clean   r >= half   parity off
+    #   carry=0, q even      20610     20611       20610
+    #   carry=0, q odd       20738     20738       20737
+    #   carry=1, q even      20998     20999       20998
+    #   carry=1, q odd       21016     21016       21015
+    #
+    # Measured by planting each mutant, not derived.
+    assert _magmul(20482, 20608) == 20610, "mul: tie, even q, no carry -- must NOT round up"
+    assert _magmul(20481, 20736) == 20738, "mul: tie, odd q, no carry -- must round to even"
+    assert _magmul(20512, 20944) == 20998, "mul: tie, even q, carry -- must NOT round up"
+    assert _magmul(20512, 20976) == 21016, "mul: tie, odd q, carry -- must round to even"
+    print("self-test: multiplier round-half-to-even, both carry paths -- OK")
+
+    # RENORMALISATION AFTER ROUNDING, at all four sites that carry it: `enc`,
+    # `_magmul`, `_magadd`, `_magsub` each end in
+    #     if mant >= 512: mant = 0; <exponent> += 1
+    # and each survived `>=` -> `>` for the same reason. The mutant leaves
+    # mant == 512, and `(off << 9) | 512` is IDENTICAL to `((off + 1) << 9)`
+    # whenever `off` is EVEN -- 512 == 1 << 9 is the low bit of the exponent
+    # field, so the stuck mantissa renormalises the value by accident. HALF THE
+    # EXPONENT SPACE HIDES THE DEFECT, and a sweep that does not vary the
+    # exponent's PARITY reads a correct answer every single time.
+    #
+    # Two further reasons a sweep misses this, both measured:
+    #   * mant == 512 is reached only by rounding UP from 511, so a sweep of
+    #     exactly-representable inputs never enters the branch at all;
+    #   * in `_magmul` the carry path cannot reach it even in principle -- the
+    #     largest product is 1023 * 1023 == 1046529, giving q == 1022 and
+    #     mant == 510. Only the no-carry path distinguishes that site.
+    #
+    # Each line below was checked both ways: it holds here, and it fails when
+    # its own site is mutated. None of them catches any other site's mutant,
+    # so all four are load-bearing.
+    assert enc(0.062469482421875) == 18432, "enc: mantissa rounding to 512 must carry into the exponent"
+    assert _magmul(10241, 11262) == 1024, "mul: mant == 512 must carry (odd exponent makes it visible)"
+    assert _magadd(10241, 11007) == 11264, "add: mant == 512 must carry"
+    assert _magsub(14338, 10241) == 14336, "sub: mant == 512 must carry"
+    print("self-test: renormalisation carries at all four sites -- OK")
+
+    # `_magsub` is the third and last site with round-half-to-even, and the only
+    # one whose tie is resolved THREE ways:
+    #
+    #     if rem > half: mant += 1
+    #     elif rem == half:
+    #         if sticky: mant += 1        # <-- never taken; see below
+    #         elif q & 1: mant += 1
+    #
+    # Only two of those arms are live. Measured over 525_918 points (ho in
+    # {2, 3, 40, 79}, hm and lm swept, d in 0..30):
+    #
+    #   forcing `sticky = 0` at BOTH producers      0 differences
+    #   deleting the `if sticky: mant += 1` arm     0 differences
+    #   forcing the sticky detector to always fire  9851 differences
+    #
+    # So the arm is not dead code the way an unreachable statement is dead --
+    # it is wired, and waking the SIGNAL wakes the arm. It is the value
+    # `sticky` actually takes that never reaches the tie: an exhaustive search
+    # over every (hm, lm, d) for those four `ho` finds no input at all where
+    # `rem == half` and `sticky == 1` hold together.
+    #
+    # AND THAT IS WHAT KEEPS THIS FUNCTION CORRECT. `if sticky: mant += 1` is
+    # the ADDITION rule sitting in the SUBTRACTION path. Discarded bits of the
+    # subtrahend make the true difference SMALLER than the computed one -- with
+    # hm=300, lm=401, d=20 the code's `diff` is 13303794 against an exact
+    # 13303793.734375 -- so a tie with lost bits sits strictly BELOW half and
+    # must round DOWN. The arm rounds up. It has never been wrong only because
+    # it has never run. Reported as #2652, not changed.
+    #
+    # MEASURED SINCE: the counterpart is `specs/ternary/gft_sadd.t27`, not
+    # `board/bpseq.v` -- that path has never existed in this repository. The
+    # spec carries the rule line for line, and 30 specs under specs/ternary/
+    # carry a copy of it. The arm is dead there too: an exhaustive search over
+    # every (hm, lm, d) for ho in {2, 3, 4, 13, 40, 79} finds no tie with
+    # sticky == 1, and the spec's barrel-shift normalisation agrees with this
+    # file's 12-step loop bit-for-bit over 2_193_075 points.
+    #
+    # So the generated Verilog, C and Rust all carry the same dormant rule, and
+    # the cross-target bit-exactness gates cannot see it: they prove the
+    # COMPILER faithful to the spec, never the spec correct.
+    #
+    # `if d >= 26` -> `if d > 26` is an EQUIVALENT mutant, not a survivor worth
+    # chasing: at d == 26 the else branch computes `la = ls >> 26 == 0` (ls is
+    # at most 1023 << 14, below 2**26) and `sticky = 1`, which is exactly what
+    # the taken branch assigns. 0 differences over the same 525_918 points.
+    # That reasoning now sits on the line itself as a `# mutant-equivalent:`
+    # claim, which `tri gates mutate` will CONTRADICT if the mutant ever dies --
+    # so if a later change makes d == 26 behave differently, the note stops
+    # being a note and becomes a finding.
+    #
+    # The three assertions below catch three DIFFERENT operator classes, and
+    # each catches only its own -- measured, not assumed:
+    #   q-even tie   -> `rem > half` becoming `>=`, and the woken sticky detector
+    #   q-odd tie    -> the parity arm going dead
+    #   above-half   -> the primary rounding branch being deleted entirely
+    assert _magsub(10240, 9217) == 9984, "sub: tie, odd q -- must round up (to even)"
+    assert _magsub(10240, 9219) == 9982, "sub: tie, even q -- must NOT round up"
+    assert _magsub(10240, 8705) == 10112, "sub: strictly above half -- must round up"
+    print("self-test: subtractor round-half-to-even, all three tie arms -- OK")
+
     for arch in [(2, 2, 1), (2, 3, 1), (2, 2, 2)]:
         reg, steps = gen(*arch)
         print(f"arch {arch}: {len(reg)} regs, {len(steps)} microcode steps")

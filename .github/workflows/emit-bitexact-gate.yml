@@ -26,6 +26,10 @@ on:
       - "cli/**"
       - "tools/check_specs_parse.py"
       - "tools/check_specs_generate.py"
+      # T77: the LEDGER, not just the script that reads it. Without this, the
+      # PR the gate's own NOTE tells you to open -- the one that edits
+      # specs_generate_baseline.txt -- does not run the gate that validates it.
+      - "tools/specs_generate_baseline.txt"
       - "specs/**"
       - "tools/verify_exhaustive.py"
       - "tools/check_duplicate_agreement.py"
@@ -89,9 +93,20 @@ jobs:
       # constitution calls the single source of truth. Not one is a backend mismatch:
       # on a 25-spec sample, zero generated with any of the four. They are recorded as
       # debt so this holds the line, and the number can only go down.
-      - name: Every spec still generates (negative control)
+      # Matches the step it controls: this proves the ratchet can fail, so
+      # it should not promise completeness the ratchet does not have.
+      - name: No spec newly fails to generate -- negative control
         run: python3 tools/check_specs_generate.py --self-check
-      - name: Every spec still generates
+      # "Every X" promises a proof. This gate is a RATCHET: it holds a ledger
+      # of the exceptions and fails only when the set GROWS. Both are worth
+      # having, and they are different claims -- a reader of a green check
+      # takes the name for the first one.
+      # Measured today: 595 of 718 specs generate; 123 are ledgered in
+      # tools/specs_generate_baseline.txt and do not.
+      # The count stays in this comment and out of the name: a name carrying
+      # a number becomes a WRONG number the day the ledger moves, which is
+      # a worse failure than the vague name it replaced.
+      - name: No spec newly fails to generate (known-broken set is ledgered)
         run: python3 tools/check_specs_generate.py
 
       # Ternary primitives have input spaces small enough to enumerate: a full adder
@@ -104,29 +119,78 @@ jobs:
       - name: Exhaustive cross-target agreement
         run: python3 tools/verify_exhaustive.py
 
-      # tmul is defined in 14 specs, dot27 in 9, quantize in 7. Nothing checked that
+      # tmul is defined in 14 specs, dot27 in 13, quantize in 9. Nothing checked that
       # the copies still compute the same thing, and copies drift. Compares BEHAVIOUR,
       # not text: hashing the source reported three "divergences" that were all
       # artefacts of the comparison rather than facts about the tree.
       - name: Duplicated functions agree (negative control)
         run: python3 tools/check_duplicate_agreement.py --self-check
+
+      # T79: a SECOND control, on a different branch. --self-check exercises the
+      # digest split; this exercises the drop join, where a copy the harness
+      # cannot build against used to vanish with no output -- 6 of 36 pairs did.
+      # Mutation-tested: neutering the drop accounting leaves --self-check green
+      # and takes this one red; inverting the divergence verdict does the
+      # opposite. Two controls, disjoint branches.
+      - name: Duplicated functions agree (drop control)
+        run: python3 tools/check_duplicate_agreement.py --self-check-drop
       - name: Duplicated functions agree
         run: python3 tools/check_duplicate_agreement.py
 
-      - name: Prove generated RTL == GF-T model (bit-exact) + synthesizes
-        run: python3 tools/verify_emit_bitexact.py
+      # "Prove" names a proof over the input space. The evidence here is a
+      # FIXED, SEEDED sample -- strong, and reproducible byte-for-byte
+      # across runs (checked), and not that.
+      #
+      # DOES NOT CHECK: inputs outside the sample. The sample never moves,
+      # so a disagreement outside it cannot be found here however many
+      # times this runs. verify_exhaustive.py in this same job is the step
+      # that enumerates, "wherever the space is small", and says so in its
+      # own first line. The distinction lived in the tools and not in the
+      # names.
+      - name: Generated RTL is bit-exact to the GF-T model on the listed topologies, and they synthesize
+        run: python3 tools/verify_emit_bitexact.py --require
 
-      - name: Prove GF-T primitives bit-exact across C + Rust + model
+      # "Prove" names a proof over the input space. The evidence here is a
+      # FIXED, SEEDED sample -- strong, and reproducible byte-for-byte
+      # across runs (checked), and not that.
+      #
+      # DOES NOT CHECK: inputs outside the sample. The sample never moves,
+      # so a disagreement outside it cannot be found here however many
+      # times this runs. verify_exhaustive.py in this same job is the step
+      # that enumerates, "wherever the space is small", and says so in its
+      # own first line. The distinction lived in the tools and not in the
+      # names.
+      - name: GF-T primitives agree across C + Rust + model on a fixed operand sample
         run: python3 tools/verify_multitarget.py --require
 
-      - name: Prove the WHOLE trainer bit-exact in C (== model == Verilog)
-        run: python3 tools/verify_trainer_c.py
+      # "Prove" names a proof over the input space. The evidence here is a
+      # FIXED, SEEDED sample -- strong, and reproducible byte-for-byte
+      # across runs (checked), and not that.
+      #
+      # DOES NOT CHECK: inputs outside the sample. The sample never moves,
+      # so a disagreement outside it cannot be found here however many
+      # times this runs. verify_exhaustive.py in this same job is the step
+      # that enumerates, "wherever the space is small", and says so in its
+      # own first line. The distinction lived in the tools and not in the
+      # names.
+      - name: Whole trainer is bit-exact in C against the model over a fixed training run
+        run: python3 tools/verify_trainer_c.py --require
 
-      - name: Prove the trainer LEARNS (XOR 4/4 + nonlinear held-out >=90%, incl. deep 3-layer)
+      # The step name is the claim most people read. This one said "Prove the
+      # trainer LEARNS", and a reader of a green run took that for the
+      # compiler, the RTL, or the board. It is none of those: the tool is pure
+      # Python. It generates backprop microcode, runs it on a bit-faithful GF-T
+      # INTERPRETER, and asserts on the text of the Verilog it emits. No t27c,
+      # no .t27 spec, no iverilog -- it passes unchanged in a tree containing
+      # nothing but itself, which is how this was found.
+      #
+      # That is a real result and worth gating on. It is not the result the old
+      # name promised.
+      - name: Generated microcode learns on the GF-T interpreter (XOR 4/4, held-out >=90%, deep 3-layer)
         run: python3 tools/gft_backprop_microcode.py
 
       - name: Differential-fuzz the trainer (random topologies, edge inputs)
-        run: python3 tools/fuzz_trainer.py 40
+        run: python3 tools/fuzz_trainer.py 40 --require
 
       - name: Cross-check IGLA RACE ternary MAC (C + Rust == model)
-        run: python3 tools/verify_igla_race.py
+        run: python3 tools/verify_igla_race.py --require
