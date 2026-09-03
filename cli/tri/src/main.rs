@@ -16,6 +16,7 @@ mod competitors;
 mod issues;
 mod cibase;
 mod fleet;
+mod fmtmine;
 mod fpga;
 mod elab;
 mod modreach;
@@ -26,6 +27,7 @@ mod unparsed;
 mod hooks;
 mod mutate;
 mod nownote;
+mod renum;
 mod reseal;
 mod prcheck;
 mod quant;
@@ -205,6 +207,15 @@ enum Commands {
         action: abandoned::AbandonedCmd,
     },
     /// Type names with more than one definition in the spec tree.
+    /// Run the formatter and restore every file it rewrote that you had not touched.
+    Fmt {
+        /// One package instead of the whole workspace.
+        #[arg(short, long)]
+        package: Option<String>,
+        /// Report what is dirty and whether a workflow formats, and stop.
+        #[arg(long)]
+        dry_run: bool,
+    },
     Types {
         #[command(subcommand)]
         action: types_dup::TypesCmd,
@@ -311,6 +322,12 @@ enum SkillAction {
         #[arg(long)]
         gaps: bool,
     },
+    /// Every cross-reference in the skills, and whether it resolves.
+    Refs {
+        /// Print every reference counted, not only the ones that dangle.
+        #[arg(long)]
+        list: bool,
+    },
     /// Sections that state a FIGURE, and which of those a reader can re-take.
     Claims {
         /// Print every section in the free population, one line each.
@@ -322,6 +339,25 @@ enum SkillAction {
         /// List the sections whose figure stands over a SLIDING population.
         #[arg(long)]
         windowed: bool,
+    },
+    /// Move sections you appended to the numbers the base branch left free.
+    Renumber {
+        /// The branch whose numbering yours must follow. Use the shared base,
+        /// not a peer branch: numbering against a sibling also rebuilds your
+        /// file on it, and your PR would then carry the sibling's sections.
+        #[arg(long, default_value = "origin/master")]
+        base: String,
+        /// Which skill file.
+        #[arg(long, default_value = ".claude/skills/ci-gates/SKILL.md")]
+        file: String,
+        /// Report the moves and write nothing.
+        #[arg(long)]
+        check: bool,
+        /// Start at this number instead of one past the base's highest. For a
+        /// second open branch numbering against the same base -- pass a number,
+        /// not a different --base.
+        #[arg(long)]
+        first: Option<usize>,
     },
     Begin {
         #[arg(long)]
@@ -886,6 +922,9 @@ fn main() -> Result<()> {
                 SkillAction::Check { gaps } => {
                     skillnum::run(&skillnum::SkillCmd::Check { gaps: *gaps })?
                 }
+                SkillAction::Refs { list } => {
+                    skillnum::run(&skillnum::SkillCmd::Refs { list: *list })?
+                }
                 SkillAction::Claims {
                     list,
                     numbers,
@@ -895,6 +934,12 @@ fn main() -> Result<()> {
                     numbers: *numbers,
                     windowed: *windowed,
                 })?,
+                SkillAction::Renumber {
+                    base,
+                    file,
+                    check,
+                    first,
+                } => renum::run(base, file, *check, *first)?,
                 SkillAction::Begin { issue, desc } => cmd_skill_begin(&root, *issue, desc)?,
                 SkillAction::End => cmd_skill_end(&root)?,
             }
@@ -951,6 +996,9 @@ fn main() -> Result<()> {
         Commands::Elab { action } => elab::run(action)?,
         Commands::Rtl { action } => rtl::run(action)?,
         Commands::Abandoned { action } => abandoned::run(action)?,
+        Commands::Fmt { package, dry_run } => {
+            fmtmine::run(&find_trinity_root()?, package.as_deref(), *dry_run)?
+        }
         Commands::Types { action } => types_dup::run(action)?,
         Commands::Quantifiers { action } => quant::run(action)?,
         Commands::Orphaned { action } => orphaned::run(action)?,
