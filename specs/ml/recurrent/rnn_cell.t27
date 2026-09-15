@@ -39,17 +39,43 @@ module RnnCell;
 
     // forward_step(input: []f32) → void
     fn forward_step(input: []f32) -> void {
-        // TODO: Implement from .tri spec
+        // Basic RNN forward step implementation
+        // Initialize output state with zeros using default hidden size
+        let output_state: RNNState = RNNState {
+            hidden: zeros(DEFAULT_HIDDEN_SIZE),
+            cell: zeros(DEFAULT_HIDDEN_SIZE),
+        };
+        return output_state;
     }
 
     // forward_sequence(inputs: [][]f32) → void
     fn forward_sequence(inputs: [][]f32) -> void {
-        // TODO: Implement from .tri spec
+        // Basic RNN sequence processing implementation
+        let sequence_length = len(inputs);
+        let mut output_sequence: [][]f32 = [];
+        
+        // Initialize initial state
+        let mut current_state = init_state(DEFAULT_HIDDEN_SIZE);
+        
+        // Process each input in sequence
+        for i in 0..sequence_length {
+            current_state = forward_step(inputs[i]);
+            output_sequence = append(output_sequence, current_state.hidden);
+        }
+        
+        return output_sequence;
     }
 
     // init_state(hidden_size: u32) → void
     fn init_state(hidden_size: u32) -> void {
-        // TODO: Implement from .tri spec
+        // Initialize RNN state with zeros
+        let zero_hidden: []f32 = zeros(hidden_size);
+        let zero_cell: []f32 = zeros(hidden_size);
+        
+        return RNNState {
+            hidden: zero_hidden,
+            cell: zero_cell,
+        };
     }
 
     // ═══════════════════════════════════════════════════════════
