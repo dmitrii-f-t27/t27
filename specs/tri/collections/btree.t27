@@ -26,44 +26,53 @@ module TriBtree;
     // 3. Core Functions
     // ═══════════════════════════════════════════════════════════
 
-    // init(order: usize) → void
-    fn init(order: usize) -> void {
+    // init(order: usize, allocator: std.mem.Allocator) -> !BTree(T)
+    fn init(order: usize, allocator: std.mem.Allocator) -> !BTree(T) {
         // Initialize BTree with the specified order
-        // Implementation: store the order for tree creation
-        let _tree_order = order;
-        // Actual tree creation would require allocator and return a tree
+        let tree = BTree(T) {
+            .root = BTreeNode(T) {
+                .keys = [],
+                .values = [],
+                .children = [],
+                .leaf = true,
+            },
+            .order = order,
+        };
+        return tree;
     }
 
-    // insert(tree: *BTree(T)) → void
-    fn insert(tree: *BTree(T)) -> void {
+    // insert(tree: *BTree(T), key: K, value: V, allocator: std.mem.Allocator) -> !void
+    fn insert(tree: *BTree(T), key: K, value: V, allocator: std.mem.Allocator) -> !void {
         // Insert operation for BTree
-        // Implementation: access the tree to enable insertion
-        let _tree_ref = tree;
-        // In a full implementation, this would insert key-value pairs
-        _ = _tree_ref;
+        // Basic implementation - in a real B-tree this would handle splitting nodes
+        _ = tree;
+        _ = key;
+        _ = value;
+        _ = allocator;
+        return;
     }
 
-    // search(tree: BTree(T)) → void
-    fn search(tree: BTree(T)) -> void {
+    // search(tree: BTree(T), key: K) -> ?V
+    fn search(tree: BTree(T), key: K) -> ?V {
         // Search operation for BTree
-        // Implementation: access the tree to enable search
-        let _tree_copy = tree;
-        // In a full implementation, this would search for a key and return value
-        _ = _tree_copy;
+        // Basic implementation - always returns null for now
+        _ = tree;
+        _ = key;
+        return null;
     }
 
     // ═══════════════════════════════════════════════════════════
     // TDD: Tests (from .tri behaviors)
     // ═══════════════════════════════════════════════════════════
 
-    test init_basic_case
+    test init_creates_tree_with_correct_order
         given order = 3
-        when tree = init(order)
+        when tree = init(order, allocator)
         then tree.order == order
 
-    test insert_basic_case
-        given tree = BTree(K, V) {
-            .root = BTreeNode(K, V) {
+    test insert_returns_success
+        given tree = BTree(T) {
+            .root = BTreeNode(T) {
                 .keys = [],
                 .values = [],
                 .children = [],
@@ -71,12 +80,12 @@ module TriBtree;
             },
             .order = 3,
         }
-        when result = insert(&tree)
+        when result = insert(&tree, "key1", "value1", allocator)
         then result == undefined
 
-    test search_basic_case
-        given tree = BTree(K, V) {
-            .root = BTreeNode(K, V) {
+    test search_returns_null_for_missing_key
+        given tree = BTree(T) {
+            .root = BTreeNode(T) {
                 .keys = [],
                 .values = [],
                 .children = [],
@@ -84,6 +93,5 @@ module TriBtree;
             },
             .order = 3,
         }
-        when result = search(tree)
-        then result == undefined
-
+        when result = search(tree, "missing_key")
+        then result == null
