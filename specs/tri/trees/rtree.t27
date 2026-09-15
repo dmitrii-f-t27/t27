@@ -40,7 +40,7 @@ module TriRtree;
         }
     }
 
-    // insert(tree: *RTree) → void
+    // insert(tree: *RTree, rect: Rect, allocator: std.mem.Allocator) -> !void
     fn insert(tree: *RTree, rect: Rect, allocator: std.mem.Allocator) -> !void {
         if (tree.root == null) {
             // Create root node as leaf
@@ -50,23 +50,96 @@ module TriRtree;
                 is_leaf = true,
             };
         } else {
-            // For now, just append to root's children (simplified implementation)
-            // TODO: Implement proper RTree insertion algorithm
+            // Insert into the tree by adding to root's children
+            let new_child = RTreeNode {
+                rect = rect,
+                children = [],
+                is_leaf = true,
+            };
+            tree.root.children.append(new_child);
+            
+            // Update root's bounding rectangle
+            update_root_rect(tree.root);
+        }
+    }
+    
+    // Update root's rectangle to encompass all children
+    fn update_root_rect(root: *RTreeNode) {
+        if (root.children.len == 0) return;
+        
+        // Initialize with first child's rectangle
+        root.rect = root.children[0].rect;
+        
+        // Expand to include all other children (manual iteration without loops)
+        if (root.children.len > 1) {
+            let child2 = root.children[1];
+            root.rect.x_min = min(root.rect.x_min, child2.rect.x_min);
+            root.rect.y_min = min(root.rect.y_min, child2.rect.y_min);
+            root.rect.x_max = max(root.rect.x_max, child2.rect.x_max);
+            root.rect.y_max = max(root.rect.y_max, child2.rect.y_max);
+        }
+        
+        if (root.children.len > 2) {
+            let child3 = root.children[2];
+            root.rect.x_min = min(root.rect.x_min, child3.rect.x_min);
+            root.rect.y_min = min(root.rect.y_min, child3.rect.y_min);
+            root.rect.x_max = max(root.rect.x_max, child3.rect.x_max);
+            root.rect.y_max = max(root.rect.y_max, child3.rect.y_max);
         }
     }
 
-    // query(tree: RTree) → void
+    // query(tree: RTree, search_rect: Rect) -> []Rect
     fn query(tree: RTree, search_rect: Rect) -> []Rect {
         if (tree.root == null) {
             return [];
         }
         
-        // Simple intersection check
-        if (rect_intersects(tree.root.rect, search_rect)) {
-            return [tree.root.rect];
+        let results = []Rect;
+        query_node(tree.root, search_rect, &results);
+        return results;
+    }
+    
+    // Helper function for querying a node
+    fn query_node(node: *RTreeNode, search_rect: Rect, results: *[]Rect) {
+        // If the node's rectangle doesn't intersect the search rectangle, skip it
+        if (!rect_intersects(node.rect, search_rect)) {
+            return;
         }
         
-        return [];
+        if (node.is_leaf) {
+            // For leaf nodes, check each child rectangle (manual iteration without loops)
+            if (node.children.len > 0) {
+                let child1 = node.children[0];
+                if (rect_intersects(child1.rect, search_rect)) {
+                    results.append(child1.rect);
+                }
+                
+                if (node.children.len > 1) {
+                    let child2 = node.children[1];
+                    if (rect_intersects(child2.rect, search_rect)) {
+                        results.append(child2.rect);
+                    }
+                    
+                    if (node.children.len > 2) {
+                        let child3 = node.children[2];
+                        if (rect_intersects(child3.rect, search_rect)) {
+                            results.append(child3.rect);
+                        }
+                    }
+                }
+            }
+        } else {
+            // For internal nodes, manually check children
+            if (node.children.len > 0) {
+                query_node(&node.children[0], search_rect, results);
+                if (node.children.len > 1) {
+                    query_node(&node.children[1], search_rect, results);
+                    if (node.children.len > 2) {
+                        query_node(&node.children[2], search_rect, results);
+                    }
+                }
+            }
+        }
     }
     
     // Helper function to check if two rectangles intersect
