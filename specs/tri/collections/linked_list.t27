@@ -259,3 +259,43 @@ module TriLinkedList;
         and  list.head.value == 10
         and  list.tail.value == 20
 
+    // Tests for each implemented function
+    test init_function_creates_empty_list
+        given list = init()
+        then list.head == null
+        and list.tail == null
+        and list.length == 0
+
+    test append_function_adds_value_to_list
+        given list = init()
+        and   append(&list, 42)
+        then list.length == 1
+        and list.head != null
+        and list.head.value == 42
+        and list.head == list.tail
+
+    test prepend_function_adds_value_to_list
+        given list = init()
+        and   prepend(&list, 42)
+        then list.length == 1
+        and list.head != null
+        and list.head.value == 42
+        and list.head == list.tail
+
+    test remove_function_removes_value_and_returns_true
+        given list = init()
+        and   append(&list, 10)
+        and   append(&list, 20)
+        and   result = remove(&list, 10)
+        then result == true
+        and list.length == 1
+        and list.head.value == 20
+
+    test deinit_function_clears_list
+        given list = init()
+        and   append(&list, 10)
+        and   deinit(&list)
+        then list.length == 0
+        and list.head == null
+        and list.tail == null
+
