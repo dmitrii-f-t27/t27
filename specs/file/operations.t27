@@ -139,31 +139,230 @@ module FileOperations {
     // normalize normalizes a file path
     fn normalize(path: str) -> str {
         // Implementation: Normalize path separators and resolve . and ..
+        var result = "";
+        var i: u32 = 0;
+        var len = path.len;
+        
+        // Preserve leading slash
+        var is_absolute = false;
+        if len > 0 && path[0] == '/' {
+            is_absolute = true;
+            result = "/";
+            i = 1;
+        }
+        
+        // Process path segments
+        var segments: [str] = [];
+        var current = "";
+        
+        while (i < len) {
+            if (path[i] == '/') {
+                if (current.len > 0) {
+                    segments.push(current);
+                    current = "";
+                }
+                // Skip repeated slashes
+                while (i < len && path[i] == '/') {
+                    i = i + 1;
+                }
+            } else {
+                current = current + str(path[i]);
+                i = i + 1;
+            }
+        }
+        
+        // Add last segment if not empty
+        if (current.len > 0) {
+            segments.push(current);
+        }
+        
+        // Process . and ..
+        var new_segments: [str] = [];
+        for segment in segments {
+            if (segment == ".") {
+                // Skip current directory
+                continue;
+            } else if (segment == "..") {
+                // Go up one level
+                if (new_segments.len > 0) {
+                    new_segments.pop();
+                }
+            } else {
+                new_segments.push(segment);
+            }
+        }
+        
+        // Build result
+        result = "";
+        if (is_absolute) {
+            result = "/";
+        }
+        
+        for segment in new_segments {
+            if (result.len > 0) {
+                result = result + "/";
+            }
+            result = result + segment;
+        }
+        
+        return result;
     }
 
     // join joins path components
     fn join(parts: [str]) -> str {
         // Implementation: Join path parts
+        var result = "";
+        for part in parts {
+            if (part.len > 0) {
+                if (result.len > 0) {
+                    result = result + "/";
+                }
+                result = result + part;
+            }
+        }
+        return result;
     }
 
     // dirname returns the directory name of a path
     fn dirname(path: str) -> str {
         // Implementation: Get directory name
+        var normalized = normalize(path);
+        var parts = split(normalized, "/");
+        
+        if (parts.len == 0) {
+            return ".";
+        } else if (parts.len == 1 && normalized[0] == '/') {
+            // Root directory
+            return "/";
+        } else {
+            // Join all parts except the last one
+            var dir_parts = [str];
+            for i in parts {
+                if (i != parts[parts.len - 1]) {
+                    dir_parts.push(i);
+                }
+            }
+            if (dir_parts.len == 0) {
+                return "/";
+            }
+            return join(dir_parts);
+        }
     }
 
     // basename returns the file name of a path
     fn basename(path: str) -> str {
         // Implementation: Get file name
+        var normalized = normalize(path);
+        var last_slash = -1;
+        
+        // Find the last slash
+        var index: u32 = 0;
+        for char in normalized {
+            if (char == '/') {
+                last_slash = index as i32;
+            }
+            index = index + 1;
+        }
+        
+        if (last_slash == -1) {
+            // No slash found, return the whole path
+            return normalized;
+        } else {
+            // Return everything after the last slash
+            return normalized[(last_slash + 1):];
+        }
     }
 
     // extname returns the file extension
     fn extname(path: str) -> str {
         // Implementation: Get file extension
+        var base = basename(path);
+        return get_extension(base);
     }
 
     // relative returns relative path from base to path
     fn relative(from: str, to: str) -> Result<str, FileError> {
         // Implementation: Get relative path
+        var normalized_from = normalize(from);
+        var normalized_to = normalize(to);
+        
+        // Check if one is absolute and the other is relative
+        var from_absolute = (normalized_from.len > 0 && normalized_from[0] == '/');
+        var to_absolute = (normalized_to.len > 0 && normalized_to[0] == '/');
+        
+        if (from_absolute != to_absolute) {
+            return Err(FileError::InvalidPath);
+        }
+        
+        // Split into segments
+        var from_segments: [str] = [];
+        var to_segments: [str] = [];
+        var current = "";
+        
+        // Split from path
+        for char in normalized_from {
+            if (char == '/') {
+                if (current.len > 0) {
+                    from_segments.push(current);
+                    current = "";
+                }
+            } else {
+                current = current + str(char);
+            }
+        }
+        if (current.len > 0) {
+            from_segments.push(current);
+        }
+        
+        // Split to path
+        current = "";
+        for char in normalized_to {
+            if (char == '/') {
+                if (current.len > 0) {
+                    to_segments.push(current);
+                    current = "";
+                }
+            } else {
+                current = current + str(char);
+            }
+        }
+        if (current.len > 0) {
+            to_segments.push(current);
+        }
+        
+        // Find common prefix
+        var common_len: u32 = 0;
+        while (common_len < from_segments.len && common_len < to_segments.len) {
+            if (from_segments[common_len] != to_segments[common_len]) {
+                break;
+            }
+            common_len = common_len + 1;
+        }
+        
+        // Build result
+        var result = "";
+        
+        // Add .. for remaining segments in from
+        for i in common_len..from_segments.len {
+            if (result.len > 0) {
+                result = result + "/";
+            }
+            result = result + "..";
+        }
+        
+        // Add remaining segments in to
+        for i in common_len..to_segments.len {
+            if (result.len > 0) {
+                result = result + "/";
+            }
+            result = result + to_segments[i];
+        }
+        
+        if (result.len == 0) {
+            return ".";
+        }
+        
+        return result;
     }
 
     // absolute returns absolute path
@@ -174,6 +373,13 @@ module FileOperations {
     // resolve resolves a path to absolute form
     fn resolve(base: str, path: str) -> str {
         // Implementation: Resolve path relative to base
+        if (path.len > 0 && path[0] == '/') {
+            // Path is already absolute
+            return normalize(path);
+        } else {
+            // Path is relative, join with base
+            return normalize(join([base, path]));
+        }
     }
 
     // ════════════════════════════════════════════════════════════════════
@@ -183,16 +389,66 @@ module FileOperations {
     // detect_type detects content type
     fn detect_type(path: str, content: str) -> ContentType {
         // Implementation: Detect if text, binary, or image
+        // First check for image by extension
+        var ext = extname(path);
+        if (ext == "png" || ext == "jpg" || ext == "jpeg" || ext == "gif" || 
+            ext == "bmp" || ext == "tiff" || ext == "webp" || ext == "svg") {
+            return ContentType::Image;
+        }
+        
+        // Check for binary content
+        for char in content {
+            if (char == 0) {
+                // NUL byte found, definitely binary
+                return ContentType::Binary;
+            }
+        }
+        
+        // Check for high proportion of non-printable bytes
+        var non_printable: u32 = 0;
+        for char in content {
+            if (char < 32 || char > 126) {
+                non_printable = non_printable + 1;
+            }
+        }
+        
+        if (content.len > 0 && non_printable * 10 > content.len) {
+            // More than 10% non-printable, consider binary
+            return ContentType::Binary;
+        }
+        
+        // Otherwise text
+        return ContentType::Text;
     }
 
     // count_lines counts lines in content
     fn count_lines(content: str) -> u32 {
         // Implementation: Count line breaks
+        var count: u32 = 0;
+        for char in content {
+            if (char == '\n') {
+                count = count + 1;
+            }
+        }
+        return count;
     }
 
     // truncate truncates content to max length
     fn truncate(content: str, maxLength: u32) -> str {
         // Implementation: Truncate and add ellipsis
+        if (content.len <= maxLength) {
+            return content;
+        }
+        
+        var truncated = "";
+        var ellipsis = "...";
+        var max_content = maxLength - ellipsis.len;
+        
+        if (max_content > 0) {
+            truncated = content[0:max_content];
+        }
+        
+        return truncated + ellipsis;
     }
 
     // ════════════════════════════════════════════════════════════════════
@@ -294,7 +550,7 @@ module FileOperations {
         ];
         var rules = IgnoreRules {
             patterns = patterns,
-            whitelists: [],
+            whitelists = [],
         };
         assert(rules.patterns.len == 1);
     }
