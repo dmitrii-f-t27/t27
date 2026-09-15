@@ -21,17 +21,26 @@ module TriSuffixArray;
 
     // build(allocator: std.mem.Allocator) → void
     fn build(allocator: std.mem.Allocator) -> void {
-        // TODO: Implement from .tri spec
+        // Create an empty suffix array
+        return SuffixArray {
+            data = [],
+            allocator = allocator,
+        };
     }
 
     // search(sa: *SuffixArray) → void
     fn search(sa: *SuffixArray) -> void {
-        // TODO: Implement from .tri spec
+        // Placeholder implementation - returns empty slice
+        // In a full implementation, this would search the suffix array
+        return [];
     }
 
     // deinit(sa: *SuffixArray) → void
     fn deinit(sa: *SuffixArray) -> void {
-        // TODO: Implement from .tri spec
+        // Free the allocated data
+        if (sa.data != null) {
+            std.mem.free(sa.allocator, sa.data);
+        }
     }
 
     // ═══════════════════════════════════════════════════════════
