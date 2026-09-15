@@ -5,6 +5,7 @@
 module AccountAuth {
     use base::types;
     use account::schema;
+    use compiler::stdlib;
 
     // ════════════════════════════════════════════════════════════════════
     // Authentication Operations
@@ -27,11 +28,12 @@ module AccountAuth {
     fn login(server: str) -> Result<Login, AccountError> {
         // Implementation: Request device code from auth server
         return Ok(Login {
-            device_code = DeviceCode("device-code"),
-            user_code = UserCode("ABCD-1234"),
-            verification_uri = "https://example.com/auth",
-            expires_at = 0,
-            poll_interval = 5,
+            code = DeviceCode("device-code"),
+            user = UserCode("ABCD-1234"),
+            url = "https://example.com/auth",
+            server = server,
+            expiry = 300000,  // 5 minutes in milliseconds
+            interval = 5000,  // 5 seconds in milliseconds
         });
     }
 
@@ -58,7 +60,7 @@ module AccountAuth {
     }
 
     // orgs_by_account returns all accounts with their orgs
-    fn orgs_by_account() -> Result<[(account: Info, orgs: [Org])], AccountError> {
+    fn orgs_by_account() -> Result<[AccountOrgs], AccountError> {
         // Implementation: Fetch all accounts and their orgs
         return Ok([]);
     }
@@ -72,6 +74,12 @@ module AccountAuth {
     // ════════════════════════════════════════════════════════════════════
     // User Operations
     // ════════════════════════════════════════════════════════════════════
+
+    // AccountOrgs represents an account with its organizations
+    struct AccountOrgs {
+        account: Info,
+        orgs: [Org],
+    }
 
     // UserInfo represents user information from API
     struct UserInfo {
@@ -261,6 +269,23 @@ module AccountAuth {
         };
         var result = parse_poll_result(response);
         assert(result == PollResult::Error);
+    }
+
+    test "account_orgs_creation" {
+        var account_orgs = AccountOrgs {
+            account = Info {
+                id = AccountID("user-123"),
+                email = "user@example.com",
+                url = "https://example.com",
+                active_org_id = OrgID("org-456"),
+            },
+            orgs = [Org {
+                id = OrgID("org-456"),
+                name = "Acme Inc",
+            }],
+        };
+        assert(account_orgs.account.id.0 == "user-123");
+        assert(account_orgs.orgs[0].name == "Acme Inc");
     }
 
     test "org_creation" {
