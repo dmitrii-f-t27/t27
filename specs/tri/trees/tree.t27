@@ -22,7 +22,7 @@ module TriTree;
     // ═══════════════════════════════════════════════════════════
 
     // leaf(value: T) → void
-    fn leaf(value: T) -> void {
+    fn leaf(value: T) -> Tree(T) {
         // Create a leaf tree with the given value
         let tree = Tree(T) {
             is_leaf: true,
@@ -34,25 +34,25 @@ module TriTree;
     }
 
     // branch(left: Tree(T)) → void
-    fn branch(left: Tree(T)) -> void {
-        // Create a branch tree with the given left subtree and a default right subtree
+    fn branch(left: Tree(T), right: Tree(T)) -> Tree(T) {
+        // Create a branch tree with the given left and right subtrees
         let tree = Tree(T) {
             is_leaf: false,
             value: undefined,
             left: left,
-            right: undefined,
+            right: right,
         };
         return tree;
     }
 
     // is_leaf(tree: Tree(T)) → void
-    fn is_leaf(tree: Tree(T)) -> void {
+    fn is_leaf(tree: Tree(T)) -> bool {
         // Return whether the tree is a leaf node
         return tree.is_leaf;
     }
 
     // height(tree: Tree(T)) → void
-    fn height(tree: Tree(T)) -> void {
+    fn height(tree: Tree(T)) -> usize {
         // Return the height of the tree (number of edges from root to deepest leaf)
         if tree == undefined {
             return 0;
@@ -66,7 +66,7 @@ module TriTree;
     }
 
     // size(tree: Tree(T)) → void
-    fn size(tree: Tree(T)) -> void {
+    fn size(tree: Tree(T)) -> usize {
         // Return the number of nodes in the tree
         if tree == undefined {
             return 0;
@@ -80,7 +80,7 @@ module TriTree;
     }
 
     // inorder(tree: Tree(T)) → void
-    fn inorder(tree: Tree(T)) -> void {
+    fn inorder(tree: Tree(T)) -> []T {
         // Return the values of the tree in inorder traversal (left, root, right)
         if tree == undefined {
             return [];
@@ -104,10 +104,12 @@ module TriTree;
         then result.value == input
 
     test "branch_basic_case"
-        given input = default_input()
-        when result = branch(input)
+        given left = default_input()
+        given right = default_input()
+        when result = branch(left, right)
         then result.is_leaf == false
-        then result.left == input
+        then result.left == left
+        then result.right == right
 
     test "is_leaf_basic_case"
         given input = default_input()
