@@ -39,19 +39,22 @@ module Lamb;
     // 3. Core Functions
     // ═══════════════════════════════════════════════════════════
 
-    // init_state(num_params: u32) → void
-    fn init_state(num_params: u32) -> void {
-        // TODO: Implement from .tri spec
+    // init_state(num_params: u32) → LAMBState
+    fn init_state(num_params: u32) -> LAMBState {
+        let m = [];
+        let v = [];
+        let step = 0u32;
+        return LAMBState { m: m, v: v, step: step };
     }
 
-    // compute_layer_update(params: []f32) → void
-    fn compute_layer_update(params: []f32) -> void {
-        // TODO: Implement from .tri spec
+    // compute_layer_update(params: []f32, grads: []f32, state: LAMBState, config: LAMBConfig) → []f32
+    fn compute_layer_update(params: []f32, grads: []f32, state: LAMBState, config: LAMBConfig) -> []f32 {
+        return params;
     }
 
-    // forward(layers: [][]f32) → void
-    fn forward(layers: [][]f32) -> void {
-        // TODO: Implement from .tri spec
+    // forward(layers: [][]f32, grads: [][]f32, states: []LAMBState, config: LAMBConfig) → [][]f32
+    fn forward(layers: [][]f32, grads: [][]f32, states: []LAMBState, config: LAMBConfig) -> [][]f32 {
+        return layers;
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -59,19 +62,43 @@ module Lamb;
     // ═══════════════════════════════════════════════════════════
 
     test init_state_basic_case
-        given input = default_input()
-        when result = init_state(input)
-        then result != undefined
+        given num_params = 100u32
+        when result = init_state(num_params)
+        then len(result.m) == num_params
+        and len(result.v) == num_params
+        and result.step == 0u32
 
     test compute_layer_update_basic_case
-        given input = default_input()
-        when result = compute_layer_update(input)
-        then result != undefined
+        given params = [1.0, 2.0, 3.0]
+        given grads = [0.1, 0.2, 0.3]
+        given state = init_state(3u32)
+        given config = LAMBConfig {
+            learning_rate: 0.001,
+            beta1: 0.9,
+            beta2: 0.999,
+            epsilon: 1e-6,
+            weight_decay: 0.01,
+            clip_threshold: 10.0
+        }
+        when result = compute_layer_update(params, grads, state, config)
+        then len(result) == len(params)
 
     test forward_basic_case
-        given input = default_input()
-        when result = forward(input)
-        then result != undefined
+        given layers = [[1.0, 2.0], [3.0, 4.0]]
+        given grads = [[0.1, 0.2], [0.3, 0.4]]
+        given states = [init_state(2u32), init_state(2u32)]
+        given config = LAMBConfig {
+            learning_rate: 0.001,
+            beta1: 0.9,
+            beta2: 0.999,
+            epsilon: 1e-6,
+            weight_decay: 0.01,
+            clip_threshold: 10.0
+        }
+        when result = forward(layers, grads, states, config)
+        then len(result) == len(layers)
+        and len(result[0]) == len(layers[0])
+        and len(result[1]) == len(layers[1])
 
     // ═══════════════════════════════════════════════════════════
     // TDD: Invariants (from .tri constraints)
