@@ -40,15 +40,19 @@ module Attention;
         
         // Scale query vectors
         const scaled_query = []f32(query.len);
-        for (var i : u32 = 0; i < query.len; i++) {
+        var i : u32 = 0;
+        while (i < query.len) : (i += 1) {
             scaled_query[i] = query[i] * @floatFromInt(1) / @sqrt(@floatFromInt(head_dim));
         }
         
         // Compute attention weights
-        for (var i : u32 = 0; i < seq_len; i++) {
-            for (var j : u32 = 0; j < seq_len; j++) {
+        var i : u32 = 0;
+        while (i < seq_len) : (i += 1) {
+            var j : u32 = 0;
+            while (j < seq_len) : (j += 1) {
+                var k : u32 = 0;
                 var score : f32 = 0.0;
-                for (var k : u32 = 0; k < head_dim; k++) {
+                while (k < head_dim) : (k += 1) {
                     score += scaled_query[i * head_dim + k] * key[j * head_dim + k];
                 }
                 
@@ -62,28 +66,35 @@ module Attention;
         }
         
         // Apply softmax to get attention probabilities
-        for (var i : u32 = 0; i < seq_len; i++) {
+        var i : u32 = 0;
+        while (i < seq_len) : (i += 1) {
             var max_score : f32 = -@infinity();
-            for (var j : u32 = 0; j < seq_len; j++) {
+            var j : u32 = 0;
+            while (j < seq_len) : (j += 1) {
                 max_score = @max(max_score, weights[i * seq_len + j]);
             }
             
+            j = 0;
             var sum_exp : f32 = 0.0;
-            for (var j : u32 = 0; j < seq_len; j++) {
+            while (j < seq_len) : (j += 1) {
                 weights[i * seq_len + j] = @exp(weights[i * seq_len + j] - max_score);
                 sum_exp += weights[i * seq_len + j];
             }
             
-            for (var j : u32 = 0; j < seq_len; j++) {
+            j = 0;
+            while (j < seq_len) : (j += 1) {
                 weights[i * seq_len + j] /= sum_exp;
             }
         }
         
         // Compute weighted sum of values
-        for (var i : u32 = 0; i < seq_len; i++) {
-            for (var k : u32 = 0; k < head_dim; k++) {
+        var i : u32 = 0;
+        while (i < seq_len) : (i += 1) {
+            var k : u32 = 0;
+            while (k < head_dim) : (k += 1) {
+                var j : u32 = 0;
                 var weighted_sum : f32 = 0.0;
-                for (var j : u32 = 0; j < seq_len; j++) {
+                while (j < seq_len) : (j += 1) {
                     weighted_sum += weights[i * seq_len + j] * value[j * head_dim + k];
                 }
                 output[i * head_dim + k] = weighted_sum;
@@ -92,7 +103,8 @@ module Attention;
         
         // Apply dropout if enabled
         if (config.dropout > 0.0) {
-            for (var i : u32 = 0; i < weights.len; i++) {
+            var i : u32 = 0;
+            while (i < weights.len) : (i += 1) {
                 if (@random() < config.dropout) {
                     weights[i] = 0.0;
                 }
@@ -106,20 +118,26 @@ module Attention;
         const head_dim : u32 = config.d_model / config.num_heads;
         
         // Initialize gradients to zero
-        for (var i : u32 = 0; i < grad_query.len; i++) {
+        var i : u32 = 0;
+        while (i < grad_query.len) : (i += 1) {
             grad_query[i] = 0.0;
         }
-        for (var i : u32 = 0; i < grad_key.len; i++) {
+        i = 0;
+        while (i < grad_key.len) : (i += 1) {
             grad_key[i] = 0.0;
         }
-        for (var i : u32 = 0; i < grad_value.len; i++) {
+        i = 0;
+        while (i < grad_value.len) : (i += 1) {
             grad_value[i] = 0.0;
         }
         
         // Compute gradients for value: grad_output · attention_weights^T
-        for (var i : u32 = 0; i < seq_len; i++) {
-            for (var k : u32 = 0; k < head_dim; k++) {
-                for (var j : u32 = 0; j < seq_len; j++) {
+        var i : u32 = 0;
+        while (i < seq_len) : (i += 1) {
+            var k : u32 = 0;
+            while (k < head_dim) : (k += 1) {
+                var j : u32 = 0;
+                while (j < seq_len) : (j += 1) {
                     grad_value[j * head_dim + k] += grad_output[i * head_dim + k] * attn_weights[i * seq_len + j];
                 }
             }
@@ -127,10 +145,13 @@ module Attention;
         
         // Compute gradients for attention weights: grad_output · value^T
         var grad_weights = []f32(attn_weights.len);
-        for (var i : u32 = 0; i < seq_len; i++) {
-            for (var j : u32 = 0; j < seq_len; j++) {
+        var i : u32 = 0;
+        while (i < seq_len) : (i += 1) {
+            var j : u32 = 0;
+            while (j < seq_len) : (j += 1) {
+                var k : u32 = 0;
                 var grad_attn : f32 = 0.0;
-                for (var k : u32 = 0; k < head_dim; k++) {
+                while (k < head_dim) : (k += 1) {
                     grad_attn += grad_output[i * head_dim + k] * value[j * head_dim + k];
                 }
                 grad_weights[i * seq_len + j] = grad_attn;
@@ -138,13 +159,16 @@ module Attention;
         }
         
         // Compute gradients for query and key through attention weights
-        for (var i : u32 = 0; i < seq_len; i++) {
-            for (var j : u32 = 0; j < seq_len; j++) {
+        var i : u32 = 0;
+        while (i < seq_len) : (i += 1) {
+            var j : u32 = 0;
+            while (j < seq_len) : (j += 1) {
                 if (config.causal and j > i) {
                     continue; // Skip causal positions
                 }
                 
-                for (var k : u32 = 0; k < head_dim; k++) {
+                var k : u32 = 0;
+                while (k < head_dim) : (k += 1) {
                     // Gradient for query
                     grad_query[i * head_dim + k] += grad_weights[i * seq_len + j] * key[j * head_dim + k];
                     
@@ -156,10 +180,12 @@ module Attention;
         
         // Apply scaling factor to gradients
         const scale : f32 = @floatFromInt(1) / @sqrt(@floatFromInt(head_dim));
-        for (var i : u32 = 0; i < grad_query.len; i++) {
+        var i : u32 = 0;
+        while (i < grad_query.len) : (i += 1) {
             grad_query[i] *= scale;
         }
-        for (var i : u32 = 0; i < grad_key.len; i++) {
+        i = 0;
+        while (i < grad_key.len) : (i += 1) {
             grad_key[i] *= scale;
         }
     }
@@ -169,21 +195,12 @@ module Attention;
     // ═══════════════════════════════════════════════════════════
 
     test forward_basic_case
-        // Test basic forward pass with small attention mechanism
-        const config = AttentionConfig {
-            d_model: 4,
-            num_heads: 2,
-            dropout: 0.0,
-            causal: false,
-        };
-        
-        const seq_len: u32 = 3;
-        const query = []const f32(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0);
-        const key = []const f32(1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0, 3.0, 3.0, 3.0, 3.0);
-        const value = []const f32(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2);
-        var output = []f32(query.len);
-        var weights = []f32(seq_len * seq_len);
-        
+        given query = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0]
+        given key = [1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0, 3.0, 3.0, 3.0, 3.0]
+        given value = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2]
+        given config = AttentionConfig{ .d_model = 4, .num_heads = 2, .dropout = 0.0, .causal = false }
+        var output = [0.0] * 12
+        var weights = [0.0] * 9
         when result = forward(query, key, value, output, weights, config)
         then result == void
         then output.len == 12
@@ -191,24 +208,15 @@ module Attention;
         then output[0] + output[1] + output[2] + output[3] > 0.0  // Should have computed meaningful output
 
     test backward_basic_case
-        // Test basic backward pass with gradients
-        const config = AttentionConfig {
-            d_model: 4,
-            num_heads: 2,
-            dropout: 0.0,
-            causal: false,
-        };
-        
-        const seq_len: u32 = 3;
-        const grad_output = []const f32(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2);
-        const query = []const f32(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0);
-        const key = []const f32(1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0, 3.0, 3.0, 3.0, 3.0);
-        const value = []const f32(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2);
-        const attn_weights = []f32(0.3, 0.3, 0.4, 0.3, 0.3, 0.4, 0.4, 0.4, 0.2);
-        var grad_query = []f32(query.len);
-        var grad_key = []f32(key.len);
-        var grad_value = []f32(value.len);
-        
+        given grad_output = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2]
+        given query = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0]
+        given key = [1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0, 3.0, 3.0, 3.0, 3.0]
+        given value = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2]
+        given attn_weights = [0.3, 0.3, 0.4, 0.3, 0.3, 0.4, 0.4, 0.4, 0.2]
+        given config = AttentionConfig{ .d_model = 4, .num_heads = 2, .dropout = 0.0, .causal = false }
+        var grad_query = [0.0] * 12
+        var grad_key = [0.0] * 12
+        var grad_value = [0.0] * 12
         when result = backward(grad_output, query, key, value, attn_weights, grad_query, grad_key, grad_value, config)
         then result == void
         then grad_query.len == 12
@@ -217,45 +225,27 @@ module Attention;
         then grad_query[0] + grad_query[1] + grad_query[2] + grad_query[3] != 0.0  // Should have computed gradients
 
     test forward_causal_masking
-        // Test that causal masking works correctly
-        const config = AttentionConfig {
-            d_model: 4,
-            num_heads: 2,
-            dropout: 0.0,
-            causal: true,
-        };
-        
-        const seq_len: u32 = 3;
-        const query = []const f32(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0);
-        const key = []const f32(1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0, 3.0, 3.0, 3.0, 3.0);
-        const value = []const f32(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2);
-        var output = []f32(query.len);
-        var weights = []f32(seq_len * seq_len);
-        
+        given query = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0]
+        given key = [1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0, 3.0, 3.0, 3.0, 3.0]
+        given value = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2]
+        given config = AttentionConfig{ .d_model = 4, .num_heads = 2, .dropout = 0.0, .causal = true }
+        var output = [0.0] * 12
+        var weights = [0.0] * 9
         when result = forward(query, key, value, output, weights, config)
         then result == void
         // Check that weights for positions j > i are effectively zero due to causal masking
-        then weights[1 * seq_len + 2] < 0.999  // Should be close to zero due to masking
+        then weights[1 * 3 + 2] < 0.999  // Should be close to zero due to masking
 
     test backward_dropout
-        // Test backward pass with dropout enabled
-        const config = AttentionConfig {
-            d_model: 4,
-            num_heads: 2,
-            dropout: 0.5,
-            causal: false,
-        };
-        
-        const seq_len: u32 = 3;
-        const grad_output = []const f32(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2);
-        const query = []const f32(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0);
-        const key = []const f32(1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0, 3.0, 3.0, 3.0, 3.0);
-        const value = []const f32(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2);
-        const attn_weights = []f32(0.3, 0.3, 0.4, 0.3, 0.3, 0.4, 0.4, 0.4, 0.2);
-        var grad_query = []f32(query.len);
-        var grad_key = []f32(key.len);
-        var grad_value = []f32(value.len);
-        
+        given grad_output = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2]
+        given query = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0]
+        given key = [1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0, 3.0, 3.0, 3.0, 3.0]
+        given value = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2]
+        given attn_weights = [0.3, 0.3, 0.4, 0.3, 0.3, 0.4, 0.4, 0.4, 0.2]
+        given config = AttentionConfig{ .d_model = 4, .num_heads = 2, .dropout = 0.5, .causal = false }
+        var grad_query = [0.0] * 12
+        var grad_key = [0.0] * 12
+        var grad_value = [0.0] * 12
         when result = backward(grad_output, query, key, value, attn_weights, grad_query, grad_key, grad_value, config)
         then result == void
         then grad_query.len == 12
