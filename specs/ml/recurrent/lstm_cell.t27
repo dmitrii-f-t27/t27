@@ -106,7 +106,7 @@ module Lstm;
     // TDD: Tests (from .tri behaviors)
     // ═══════════════════════════════════════════════════════════
 
-    test forward_basic_case
+    test "forward_basic_case"
         given input = default_input(), 
               state_prev = default_lstm_state(),
               weights = default_lstm_weights(),
@@ -115,7 +115,7 @@ module Lstm;
         when result = forward(input, state_prev, weights, state_next, config)
         then result != undefined
 
-    test init_basic_case
+    test "init_basic_case"
         given weights = default_lstm_weights(),
               config = default_lstm_config()
         when result = init(weights, config)
