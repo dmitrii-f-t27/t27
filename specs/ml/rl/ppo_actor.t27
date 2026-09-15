@@ -191,7 +191,7 @@ module PpoActor;
     // TDD: Tests (from .tri behaviors)
     // ═══════════════════════════════════════════════════════════
 
-    test "forward_discrete_basic_case" {
+    test forward_discrete_basic_case
         given state = [1.0, 2.0, 3.0]
              params = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 0.1, 0.2] // 3x4 weights + 4 bias
              config = ActorConfig{state_dim: 3, action_dim: 4, hidden_dims: [], action_space: ActionSpace{}, init_log_std: 0.0}
@@ -201,10 +201,10 @@ module PpoActor;
              result[1] >= 0.0 && result[1] <= 1.0
              result[2] >= 0.0 && result[2] <= 1.0
              result[3] >= 0.0 && result[3] <= 1.0
-             result[0] + result[1] + result[2] + result[3] ≈ 1.0 ± 0.001
+             (result[0] + result[1] + result[2] + result[3] - 1.0) * (result[0] + result[1] + result[2] + result[3] - 1.0) <= 0.001 * 0.001
     }
 
-    test "forward_continuous_basic_case" {
+    test forward_continuous_basic_case
         given state = [1.0, 2.0, 3.0]
              params = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 0.1, 0.2, 0.0, 0.0, 0.0, 0.0] // 3x4 weights + 4 bias + 4 log_std
              config = ActorConfig{state_dim: 3, action_dim: 4, hidden_dims: [], action_space: ActionSpace{}, init_log_std: 0.0}
@@ -218,7 +218,7 @@ module PpoActor;
              }
     }
 
-    test "sample_action_basic_case" {
+    test sample_action_basic_case
         given policy_output = PolicyOutput{logits: [1.0, 2.0, 3.0, 4.0], log_std: [0.1, 0.2, 0.3, 0.4]}
              action_space = ActionSpace{}
              deterministic = false
@@ -231,7 +231,7 @@ module PpoActor;
              }
     }
 
-    test "log_prob_basic_case" {
+    test log_prob_basic_case
         given action = [1.0, 2.0, 3.0, 4.0]
              policy_output = PolicyOutput{logits: [1.0, 2.0, 3.0, 4.0], log_std: [0.1, 0.2, 0.3, 0.4]}
              action_space = ActionSpace{}
@@ -240,7 +240,7 @@ module PpoActor;
              result != undefined
     }
 
-    test "entropy_basic_case" {
+    test entropy_basic_case
         given policy_output = PolicyOutput{logits: [1.0, 2.0, 3.0, 4.0], log_std: [0.1, 0.2, 0.3, 0.4]}
              action_space = ActionSpace{}
         when result = entropy(policy_output, action_space)
