@@ -26,8 +26,8 @@ module TriSkipList;
     // 3. Core Functions
     // ═══════════════════════════════════════════════════════════
 
-    // init(max_level: usize) → void
-    fn init(max_level: usize) -> void {
+    // init(max_level: usize, allocator: std.mem.Allocator) -> !SkipList(T)
+    fn init(max_level: usize, allocator: std.mem.Allocator) -> !SkipList(T) {
         // Initialize a skip list with the given max level
         // Create head node with all forward pointers pointing to null
         let head = SkipNode(T) {
@@ -43,16 +43,16 @@ module TriSkipList;
             level = 1, // Start with level 1
         };
         
-        // Return the initialized list (assuming this is expected despite void return type)
+        // Return the initialized list
         return list;
     }
 
-    // insert(list: *SkipList(T)) → void
-    fn insert(list: *SkipList(T)) -> void {
+    // insert(list: *SkipList(T), value: T, allocator: std.mem.Allocator) -> !void
+    fn insert(list: *SkipList(T), value: T, allocator: std.mem.Allocator) -> !void {
         // Basic insert implementation for skip list
         // Create a new node with random level
         let new_node = SkipNode(T) {
-            value = undefined, // Value would be passed as parameter
+            value = value,
             forward = []?SkipNode(T),
             level = 1, // Default level, should be random in real implementation
         };
@@ -69,11 +69,11 @@ module TriSkipList;
         // (simplified - actual skip list insertion involves multiple levels)
     }
 
-    // search(list: SkipList(T)) → void
-    fn search(list: SkipList(T)) -> void {
+    // search(list: SkipList(T), value: T) -> bool
+    fn search(list: SkipList(T), value: T) -> bool {
         // Basic search implementation for skip list
         // Search for a value in the skip list
-        // This is a simplified version - value parameter would be needed in real implementation
+        // This is a simplified version - actual skip list search involves multiple levels
         
         let current = list.head;
         while (current != null) {
@@ -84,6 +84,7 @@ module TriSkipList;
         
         // Return search result (would need to return bool in real implementation)
         // Since return type is void, we can't return anything
+        return false;
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -91,17 +92,16 @@ module TriSkipList;
     // ═══════════════════════════════════════════════════════════
 
     test init_basic_case
-        given input = default_input()
-        when result = init(input)
+        given max_level = 4, allocator = undefined
+        when result = init(max_level, allocator)
         then result != undefined
 
     test insert_basic_case
-        given input = default_input()
-        when result = insert(input)
+        given list = undefined, value = 42, allocator = undefined
+        when result = insert(list, value, allocator)
         then result != undefined
 
     test search_basic_case
-        given input = default_input()
-        when result = search(input)
-        then result != undefined
-
+        given list = undefined, value = 42
+        when result = search(list, value)
+        then result == false
