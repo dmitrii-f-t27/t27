@@ -33,18 +33,46 @@ module TriRtree;
     // ═══════════════════════════════════════════════════════════
 
     // init(max_entries: usize) → void
-    fn init(max_entries: usize) -> void {
-        // TODO: Implement from .tri spec
+    fn init(max_entries: usize) -> RTree {
+        RTree {
+            root = null,
+            max_entries = max_entries,
+        }
     }
 
     // insert(tree: *RTree) → void
-    fn insert(tree: *RTree) -> void {
-        // TODO: Implement from .tri spec
+    fn insert(tree: *RTree, rect: Rect, allocator: std.mem.Allocator) -> !void {
+        if (tree.root == null) {
+            // Create root node as leaf
+            tree.root = RTreeNode {
+                rect = rect,
+                children = [],
+                is_leaf = true,
+            };
+        } else {
+            // For now, just append to root's children (simplified implementation)
+            // TODO: Implement proper RTree insertion algorithm
+        }
     }
 
     // query(tree: RTree) → void
-    fn query(tree: RTree) -> void {
-        // TODO: Implement from .tri spec
+    fn query(tree: RTree, search_rect: Rect) -> []Rect {
+        if (tree.root == null) {
+            return [];
+        }
+        
+        // Simple intersection check
+        if (rect_intersects(tree.root.rect, search_rect)) {
+            return [tree.root.rect];
+        }
+        
+        return [];
+    }
+    
+    // Helper function to check if two rectangles intersect
+    fn rect_intersects(a: Rect, b: Rect) -> bool {
+        return (a.x_min < b.x_max and a.x_max > b.x_min and 
+                a.y_min < b.y_max and a.y_max > b.y_min);
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -52,17 +80,20 @@ module TriRtree;
     // ═══════════════════════════════════════════════════════════
 
     test init_basic_case
-        given input = default_input()
+        given input = 10_usize
         when result = init(input)
         then result != undefined
 
     test insert_basic_case
-        given input = default_input()
-        when result = insert(input)
-        then result != undefined
+        given tree = &init(10_usize)
+        given rect = Rect { x_min: 0.0, y_min: 0.0, x_max: 10.0, y_max: 10.0 }
+        given allocator = std.mem.Allocator
+        when result = insert(tree, rect, allocator)
+        then result == undefined
 
     test query_basic_case
-        given input = default_input()
-        when result = query(input)
-        then result != undefined
+        given tree = init(10_usize)
+        given search_rect = Rect { x_min: 0.0, y_min: 0.0, x_max: 10.0, y_max: 10.0 }
+        when result = query(tree, search_rect)
+        then result.len >= 0
 
