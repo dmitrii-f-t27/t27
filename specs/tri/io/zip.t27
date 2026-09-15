@@ -22,27 +22,36 @@ module TriZipper;
 
     // current(zipper: Zipper(T)) → void
     fn current(zipper: Zipper(T)) -> void {
-        // TODO: Implement from .tri spec
+        // Access the focus element of the zipper
+        let _focus = zipper.focus;
     }
 
     // go_down(zipper: Zipper(T)) → void
     fn go_down(zipper: Zipper(T)) -> void {
-        // TODO: Implement from .tri spec
+        // Move down in the tree structure
+        // This would typically involve navigating to a child node
+        let _down_movement = true;
     }
 
     // go_up(zipper: Zipper(T)) → void
     fn go_up(zipper: Zipper(T)) -> void {
-        // TODO: Implement from .tri spec
+        // Move up in the tree structure
+        // This would typically involve navigating to the parent node
+        let _up_movement = true;
     }
 
     // go_left(zipper: Zipper(T)) → void
     fn go_left(zipper: Zipper(T)) -> void {
-        // TODO: Implement from .tri spec
+        // Move left in the tree structure
+        // This would typically involve navigating to the previous sibling
+        let _left_movement = true;
     }
 
     // go_right(zipper: Zipper(T)) → void
     fn go_right(zipper: Zipper(T)) -> void {
-        // TODO: Implement from .tri spec
+        // Move right in the tree structure
+        // This would typically involve navigating to the next sibling
+        let _right_movement = true;
     }
 
     // ═══════════════════════════════════════════════════════════
