@@ -118,13 +118,13 @@ module TriTime;
     // TDD: Tests (from .tri behaviors)
     // ═══════════════════════════════════════════════════════════
 
-    test now_returns_valid_instant
+    test "now_returns_valid_instant"
         let instant = now()
         then instant.epoch_seconds >= 0
         then instant.nanos < 1000000000
         then instant.nanos >= 0
 
-    test since_epoch_calculates_duration
+    test "since_epoch_calculates_duration"
         let start = now()
         // Small delay to ensure duration is positive
         let end = now()
@@ -133,21 +133,21 @@ module TriTime;
         then duration.nanos < 1000000000
         then duration.nanos >= 0
 
-    test add_instant_with_duration
+    test "add_instant_with_duration"
         let base = Instant { epoch_seconds: 1000, nanos: 500000000 }
         let duration = Duration { seconds: 10, nanos: 500000000 }
         let result = add(base, duration)
         then result.epoch_seconds == 1010
         then result.nanos == 1000000000  // 1 second overflow
 
-    test sub_instants_returns_duration
+    test "sub_instants_returns_duration"
         let instant1 = Instant { epoch_seconds: 2000, nanos: 750000000 }
         let instant2 = Instant { epoch_seconds: 1000, nanos: 250000000 }
         let duration = sub(instant1, instant2)
         then duration.seconds == 1000
         then duration.nanos == 500000000
 
-    test format_instant_to_string
+    test "format_instant_to_string"
         let instant = Instant { epoch_seconds: 1234567890, nanos: 123456789 }
         let allocator = @builtin("test_allocator")
         let result = format(instant, "iso", allocator)
