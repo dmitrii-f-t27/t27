@@ -56,15 +56,35 @@ module Batchnorm;
     // TDD: Tests (from .tri behaviors)
     // ═══════════════════════════════════════════════════════════
 
-    test forward_basic_case
-        given input = default_input(), gamma = default_gamma(), beta = default_beta(), state = default_state(), output = default_output(), config = default_config()
-        when result = forward(input, gamma, beta, state, output, config)
-        then result != undefined
+    test "forward_basic_case" {
+        var input = []f32{1.0, 2.0, 3.0};
+        var gamma = []f32{1.0, 1.0, 1.0};
+        var beta = []f32{0.0, 0.0, 0.0};
+        var state = BatchNormState{running_mean = []f32{0.0, 0.0, 0.0}, running_var = []f32{1.0, 1.0, 1.0}};
+        var output = []f32{0.0, 0.0, 0.0};
+        var config = BatchNormConfig{num_features = 3, epsilon = 1.0e-5, momentum = 0.1, affine = true, track_running_stats = true};
+        
+        forward(input, gamma, beta, state, output, config);
+        assert(output[0] == input[0]);
+    }
 
-    test backward_basic_case
-        given grad_output = default_grad_output(), input = default_input(), gamma = default_gamma(), beta = default_beta(), mean = default_mean(), var = default_var(), grad_gamma = default_grad_gamma(), grad_beta = default_grad_beta(), grad_input = default_grad_input(), config = default_config()
-        when result = backward(grad_output, input, gamma, beta, mean, var, grad_gamma, grad_beta, grad_input, config)
-        then result != undefined
+    test "backward_basic_case" {
+        var grad_output = []f32{1.0, 1.0, 1.0};
+        var input = []f32{1.0, 2.0, 3.0};
+        var gamma = []f32{1.0, 1.0, 1.0};
+        var beta = []f32{0.0, 0.0, 0.0};
+        var mean = []f32{0.0, 0.0, 0.0};
+        var var = []f32{1.0, 1.0, 1.0};
+        var grad_gamma = []f32{0.0, 0.0, 0.0};
+        var grad_beta = []f32{0.0, 0.0, 0.0};
+        var grad_input = []f32{0.0, 0.0, 0.0};
+        var config = BatchNormConfig{num_features = 3, epsilon = 1.0e-5, momentum = 0.1, affine = true, track_running_stats = true};
+        
+        backward(grad_output, input, gamma, beta, mean, var, grad_gamma, grad_beta, grad_input, config);
+        assert(grad_gamma[0] == 0.0);
+        assert(grad_beta[0] == 0.0);
+        assert(grad_input[0] != 0.0);
+    }
 
     // ═══════════════════════════════════════════════════════════
     // TDD: Invariants (from .tri constraints)
