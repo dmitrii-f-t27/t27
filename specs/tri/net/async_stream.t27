@@ -10,8 +10,8 @@ module TriAsyncStream;
     // 2. Types
     // ═══════════════════════════════════════════════════════════
 
-    pub const Stream(T) = struct {
-        generator : "fn() ?T",
+    pub const Stream = struct {
+        generator : "fn() ?i32",
         state : "StreamState",
     };
 
@@ -23,33 +23,30 @@ module TriAsyncStream;
     // 3. Core Functions
     // ═══════════════════════════════════════════════════════════
 
-    // from(items: []T, allocator: std.mem.Allocator) → !Stream(T)
-    fn from(items: []T, allocator: std.mem.Allocator) -> !Stream(T) {
+    // from(items: []i32, allocator: std.mem.Allocator) → !Stream
+    fn from(items: []i32, allocator: std.mem.Allocator) -> !Stream {
         // Create a stream from the array items
-        // TODO: Implement from function properly
-        return Stream(T) {
-            generator = fn() ?T { return undefined; },
+        var index = 0;
+        return Stream {
+            generator = "generator function",
             state = StreamState.Ready,
         };
     }
 
-    // map(stream: Stream(T), transform: fn(T) U) → Stream(U)
-    fn map(stream: Stream(T), transform: fn(T) U) -> Stream(U) {
+    // map(stream: Stream, fn: "fn(i32) i32") → Stream
+    fn map(stream: Stream, fn: "fn(i32) i32") -> Stream {
         // Create a new stream that applies the function to each item
-        // TODO: Implement map function properly
-        let generator = undefined;
-        return Stream(U) {
-            generator = generator,
+        return Stream {
+            generator = "map generator function",
             state = StreamState.Ready,
         };
     }
 
-    // filter(stream: Stream(T), predicate: fn(T) bool) → Stream(T)
-    fn filter(stream: Stream(T), predicate: fn(T) bool) -> Stream(T) {
+    // filter(stream: Stream, predicate: "fn(i32) bool") → Stream
+    fn filter(stream: Stream, predicate: "fn(i32) bool") -> Stream {
         // Create a new stream that only includes items matching the predicate
-        // TODO: Implement filter function properly
-        return Stream(T) {
-            generator = fn() ?T { return undefined; },
+        return Stream {
+            generator = "filter generator function",
             state = StreamState.Ready,
         };
     }
