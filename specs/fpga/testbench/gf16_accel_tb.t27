@@ -124,6 +124,13 @@ module GF16_Accel_Testbench {
 
     invariant phi_tolerance_positive : PHI_TOLERANCE > 0;
 
+    test test_tick {
+        reset();
+        tick();
+        invariant valid == false;
+        invariant busy == false;
+    }
+
     bench bench_gf16_throughput {
         reset();
         var i : u16 = 0;
