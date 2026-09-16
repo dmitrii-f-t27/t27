@@ -47,20 +47,17 @@ FIGURES = [
     ("cast_i16 uses", "uses",
      r"(?<![\w.@])cast_i16\s*\(", 38, "#3497"),
     ("[]T{} empty slice literals", "literals",
-     r"\[\]\s*[A-Za-z_][\w:]*\s*\{\s*\}", 480, "#3495; queen harvest 2026-09-10 added 2"),
+     r"\[\]\s*[A-Za-z_][\w:]*\s*\{\s*\}", 478, "#3495"),
     ("x.len() with an identifier base", "call sites",
      r"\b[A-Za-z_]\w*\s*\.\s*len\s*\(", 1319, "#3489, corrected from 1322"),
     ("x.len with an identifier base", "field reads",
-     r"\b[A-Za-z_]\w*\s*\.\s*len\b(?!\s*\()", 710, "#3489, corrected from 687; queen harvest 2026-09-10 added 30"),
+     r"\b[A-Za-z_]\w*\s*\.\s*len\b(?!\s*\()", 680, "#3489, corrected from 687"),
     ("len(x) free-function spelling", "call sites",
      r"(?<![\w.@])len\s*\(", 296, "#3489 said 142 -- that was a DIAGNOSTIC count"),
     ("three-segment paths a::b::c", "occurrences",
      r"\b[A-Za-z_]\w*::[A-Za-z_]\w*::[A-Za-z_]\w*", 473, "#3473, corrected from 477"),
-    # #3567 (S05) added the forty-seven opcodes of specs/isa/ternary_encoding.t27 and OP_NOP, OP_HALT
-    # of specs/vm/trinity_vm.t27: 11 + 49 = 60.
     ("pub const OP_* declarations", "declarations",
-     # #3596 added specs/automation/crm-lead-magnet.t27 with `pub const OP_TOKENS`: 60 + 1 = 61.
-     r"^\s*pub\s+const\s+OP_\w+", 61, "#3497 said 20 -- that was a SITE count in the C; #3596 added 1"),
+     r"^\s*pub\s+const\s+OP_\w+", 11, "#3497 said 20 -- that was a SITE count in the C"),
     ("abs( uses", "uses",
      r"(?<![\w.@])abs\s*\(", 389, "#3501"),
     # The pin FOLLOWED the corpus, and the movement is explained rather than
@@ -99,9 +96,12 @@ FIGURES = [
     # specs/automation/agent-provider-chain.t27: 12752 + 4 = 12756.
     # #3617 added two to crm-duet.t27 (discovery gate, negation): 12756 + 2 = 12758.
     # reserve max_tokens added one to agent-provider-chain.t27: 12758 + 1 = 12759.
+    # #3576 added specs/memory/tmem/session.t27 (durable session record layout
+    # and recovery rules) with 24 test blocks, re-derived directly rather than
+    # trusted from the branch's own stale comment (which said 22): 12759 + 24 = 12783.
     ("test blocks", "blocks",
-     r"^\s*test\s+(?:\"[^\"]*\"|[A-Za-z_][\w\-]*)\s*\{?\s*$", 12759,
-     "#3479 pinned 12644; #3482 removed 188; #3557 added 6; #3556 added 3; #3560 added 77; #3561 added 51; #3596 added 5; #3598 added 5; #3600 added 5; #3613 added 3"),
+     r"^\s*test\s+(?:\"[^\"]*\"|[A-Za-z_][\w\-]*)\s*\{?\s*$", 12783,
+     "#3479 pinned 12644; #3482 removed 188; #3557 added 6; #3556 added 3; #3560 added 77; #3561 added 51; #3596 added 5; #3598 added 5; #3600 added 5; #3613 added 3; #3576 added 24"),
 ]
 
 
