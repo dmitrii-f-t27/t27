@@ -148,4 +148,11 @@ module APB_Bridge_Testbench {
             i = i + 1;
         }
     }
+
+    test "tick_function" {
+        reset();
+        var initial_clk : bool = clk;
+        tick();
+        invariant initial_clk != clk;
+    }
 }
