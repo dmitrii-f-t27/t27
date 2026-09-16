@@ -150,27 +150,108 @@ module LayerNorm;
     // phi_init_beta(hidden_size: u32) → []gf16::GF16
     // Initialize β with phi-based pattern.
     fn phi_init_beta(hidden_size: u32) -> []gf16::GF16 {
-        // beta[i] = ((i % 3) * PHI * 0.01)
-        // Creates pattern: [0.0, 0.0162, 0.0324, 0.0, ...]
+        var beta = array(hidden_size, 0.0);
+        var i : u32 = 0;
+        while (i < hidden_size) : (i += 1) {
+            beta[i] = (i % 3) * PHI * 0.01;
+        }
+        return beta;
     }
+
+    test phi_init_beta_creates_correct_pattern
+        given hidden_size = 9
+        when beta = phi_init_beta(hidden_size)
+        then beta[0] == 0.0
+        and   beta[1] == PHI * 0.01
+        and   beta[2] == 2.0 * PHI * 0.01
+        and   beta[3] == 0.0
+        and   beta[4] == PHI * 0.01
+        and   beta[5] == 2.0 * PHI * 0.01
+        and   beta[6] == 0.0
+        and   beta[7] == PHI * 0.01
+        and   beta[8] == 2.0 * PHI * 0.01
 
     // phi_normalize(x: gf16::GF16, mean: gf16::GF16, var: gf16::GF16) -> gf16::GF16
     // Phi-optimized normalization with reduced numerical error.
     fn phi_normalize(x: gf16::GF16, mean: gf16::GF16, var: gf16::GF16) -> gf16::GF16 {
-        // Uses PHI_EPSILON instead of default
-        // Returns (x - mean) / sqrt(var + PHI_EPSILON)
+        return (x - mean) / sqrt(var + PHI_EPSILON);
     }
+
+    test phi_normalize_uses_phi_epsilon
+        given x = 1.0
+        and   mean = 0.5
+        and   var = 0.1
+        when result = phi_normalize(x, mean, var)
+        then result == (1.0 - 0.5) / sqrt(0.1 + PHI_EPSILON)
 
     // create_strands(hidden_size: u32, gamma: []gf16::GF16, beta: []gf16::GF16) → []Strand
     // Create 3 strands for parallel processing.
     fn create_strands(hidden_size: u32, gamma: []gf16::GF16, beta: []gf16::GF16) -> []Strand {
-        // Strand I:   [0, hidden_size/3)
-        // Strand II:  [hidden_size/3, 2*hidden_size/3)
+        var strand_size = hidden_size / 3;
+        var strands = array(3, Strand{.id = 0, .start = 0, .end = 0, .gamma = [], .beta = [], .phi_gamma_offset = 0.0, .phi_beta_offset = 0.0});
+        
+        // Strand I: [0, hidden_size/3)
+        strands[0] = Strand{
+            .id = 0,
+            .start = 0,
+            .end = strand_size,
+            .gamma = slice(gamma, 0, strand_size),
+            .beta = slice(beta, 0, strand_size),
+            .phi_gamma_offset = 0.0,
+            .phi_beta_offset = 0.0
+        };
+        
+        // Strand II: [hidden_size/3, 2*hidden_size/3)
+        strands[1] = Strand{
+            .id = 1,
+            .start = strand_size,
+            .end = 2 * strand_size,
+            .gamma = slice(gamma, strand_size, 2 * strand_size),
+            .beta = slice(beta, strand_size, 2 * strand_size),
+            .phi_gamma_offset = INV_PHI_SQUARED * 0.1,
+            .phi_beta_offset = INV_PHI_SQUARED * 0.1
+        };
+        
         // Strand III: [2*hidden_size/3, hidden_size)
-        //
-        // Each strand gets phi_gamma_offset and phi_beta_offset:
-        //   offset = strand_id * INV_PHI_SQUARED * 0.1
+        strands[2] = Strand{
+            .id = 2,
+            .start = 2 * strand_size,
+            .end = hidden_size,
+            .gamma = slice(gamma, 2 * strand_size, hidden_size),
+            .beta = slice(beta, 2 * strand_size, hidden_size),
+            .phi_gamma_offset = 2.0 * INV_PHI_SQUARED * 0.1,
+            .phi_beta_offset = 2.0 * INV_PHI_SQUARED * 0.1
+        };
+        
+        return strands;
     }
+
+    test create_strands_partitions_correctly
+        given hidden_size = 192
+        and   gamma = array(hidden_size, 1.0)
+        and   beta = array(hidden_size, 0.0)
+        when strands = create_strands(hidden_size, gamma, beta)
+        then strands[0].id == 0
+        and   strands[0].start == 0
+        and   strands[0].end == 64
+        and   strands[1].id == 1
+        and   strands[1].start == 64
+        and   strands[1].end == 128
+        and   strands[2].id == 2
+        and   strands[2].start == 128
+        and   strands[2].end == 192
+
+    test create_strands_applies_phi_offsets
+        given hidden_size = 192
+        and   gamma = array(hidden_size, 1.0)
+        and   beta = array(hidden_size, 0.0)
+        when strands = create_strands(hidden_size, gamma, beta)
+        then strands[0].phi_gamma_offset == 0.0
+        and   strands[0].phi_beta_offset == 0.0
+        and   strands[1].phi_gamma_offset == INV_PHI_SQUARED * 0.1
+        and   strands[1].phi_beta_offset == INV_PHI_SQUARED * 0.1
+        and   strands[2].phi_gamma_offset == 2.0 * INV_PHI_SQUARED * 0.1
+        and   strands[2].phi_beta_offset == 2.0 * INV_PHI_SQUARED * 0.1
 
     // ═══════════════════════════════════════════════════════════
     // TDD: Tests
