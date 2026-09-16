@@ -57,7 +57,9 @@ module AuthConfig {
     // ════════════════════════════════════════════════════════════════════
 
     // Info represents authentication info (type tag)
-    struct Info(u8);
+    struct Info {
+        type_tag: u8,
+    }
 
     // ════════════════════════════════════════════════════════════════════
     // Config Operations
@@ -66,21 +68,43 @@ module AuthConfig {
     // get retrieves auth configuration for a provider
     fn get(provider_id: str) -> Result<Info, AuthConfigError> {
         // Implementation: Read auth config from storage
+        if (provider_id == "") {
+            return Err(AuthConfigError {
+                message = "Provider ID cannot be empty",
+                provider_id = provider_id,
+            });
+        }
+        return Ok(Info { type_tag: 0 }); // Placeholder implementation
     }
 
     // all returns all stored auth configurations
     fn all() -> Result<[str: Info], AuthConfigError> {
         // Implementation: Read all auth configs from storage
+        return []; // Placeholder implementation
     }
 
     // set stores auth configuration for a provider
     fn set(key: str, info: Info) -> Result<void, AuthConfigError> {
         // Implementation: Write auth config to storage
+        if (key == "") {
+            return Err(AuthConfigError {
+                message = "Key cannot be empty",
+                provider_id = key,
+            });
+        }
+        return Ok(); // Placeholder implementation
     }
 
     // remove deletes auth configuration for a provider
     fn remove(key: str) -> Result<void, AuthConfigError> {
         // Implementation: Delete auth config from storage
+        if (key == "") {
+            return Err(AuthConfigError {
+                message = "Key cannot be empty",
+                provider_id = key,
+            });
+        }
+        return Ok(); // Placeholder implementation
     }
 
     // exists checks if auth config exists for a provider
@@ -125,21 +149,30 @@ module AuthConfig {
     // from_oauth creates Info from Oauth
     fn from_oauth(oauth: Oauth) -> Info {
         // Implementation: Create Info with Oauth type tag
+        return Info { type_tag: 0 };
     }
 
     // from_api creates Info from Api
     fn from_api(api: Api) -> Info {
         // Implementation: Create Info with Api type tag
+        return Info { type_tag: 1 };
     }
 
     // from_well_known creates Info from WellKnown
     fn from_well_known(well_known: WellKnown) -> Info {
         // Implementation: Create Info with WellKnown type tag
+        return Info { type_tag: 2 };
     }
 
     // get_type extracts AuthType from Info
     fn get_type(info: Info) -> AuthType {
         // Implementation: Extract type tag from Info
+        match info.type_tag {
+            0 => AuthType::Oauth,
+            1 => AuthType::Api,
+            2 => AuthType::WellKnown,
+            _ => panic!("Invalid AuthType tag"),
+        }
     }
 
     // ════════════════════════════════════════════════════════════════════
@@ -215,14 +248,14 @@ module AuthConfig {
     }
 
     test "info_creation" {
-        var info = Info(0);  // Oauth type
-        assert(info.0 == 0);
+        var info = Info { type_tag: 0 };  // Oauth type
+        assert(info.type_tag == 0);
     }
 
     test "get_type_from_info" {
-        var oauth_info = Info(0);
-        var api_info = Info(1);
-        var wk_info = Info(2);
+        var oauth_info = Info { type_tag: 0 };
+        var api_info = Info { type_tag: 1 };
+        var wk_info = Info { type_tag: 2 };
 
         assert(get_type(oauth_info) == AuthType::Oauth);
         assert(get_type(api_info) == AuthType::Api);
@@ -290,5 +323,55 @@ module AuthConfig {
         assert(PROVIDER_OPENROUTER == "openrouter");
         assert(PROVIDER_MISTRAL == "mistral");
         assert(PROVIDER_GITLAB == "gitlab");
+    }
+
+    test "get_with_valid_provider" {
+        var result = get("openai");
+        assert(result.is_ok());
+        var info = result.unwrap();
+        assert(info.type_tag == 0);
+    }
+
+    test "get_with_empty_provider" {
+        var result = get("");
+        assert(result.is_err());
+        var err = result.unwrap_err();
+        assert(err.message == "Provider ID cannot be empty");
+        assert(err.provider_id? == "");
+    }
+
+    test "all_returns_empty_array" {
+        var result = all();
+        assert(result.is_ok());
+        var configs = result.unwrap();
+        assert(configs.length == 0);
+    }
+
+    test "set_with_valid_key" {
+        var info = Info { type_tag: 1 };
+        var result = set("openai", info);
+        assert(result.is_ok());
+    }
+
+    test "set_with_empty_key" {
+        var info = Info { type_tag: 1 };
+        var result = set("", info);
+        assert(result.is_err());
+        var err = result.unwrap_err();
+        assert(err.message == "Key cannot be empty");
+        assert(err.provider_id? == "");
+    }
+
+    test "remove_with_valid_key" {
+        var result = remove("openai");
+        assert(result.is_ok());
+    }
+
+    test "remove_with_empty_key" {
+        var result = remove("");
+        assert(result.is_err());
+        var err = result.unwrap_err();
+        assert(err.message == "Key cannot be empty");
+        assert(err.provider_id? == "");
     }
 }
