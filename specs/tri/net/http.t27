@@ -113,8 +113,90 @@ module TriHttp;
             .fragment = null,
         };
 
-        // Simple implementation for now - just return the URL as path
-        result.path = url;
+        // Find scheme separator
+        const scheme_end = std.mem.indexOf(u8, url, "://");
+        if (scheme_end) |end| {
+            result.scheme = url[0..end];
+            // Parse authority part (from end of scheme to first /, ?, or #)
+            const authority_start = end + 3;
+            var authority_end = std.mem.indexOfScalar(u8, url[authority_start..], '/');
+            if (authority_end == null) authority_end = std.mem.indexOfScalar(u8, url[authority_start..], '?');
+            if (authority_end == null) authority_end = std.mem.indexOfScalar(u8, url[authority_start..], '#');
+            const authority_end_abs = if (authority_end != null) authority_start + authority_end else url.len;
+            
+            if (authority_end_abs > authority_start) {
+                const authority = url[authority_start..authority_end_abs];
+                
+                // Split host and port at last :
+                const port_separator = std.mem.lastIndexOfScalar(u8, authority, ':');
+                if (port_separator != null) {
+                    const sep = port_separator;
+                    // Check if it's a port (digits after :) or IPv6 address
+                    const port_part = authority[sep + 1 ..];
+                    if (port_part.len > 0 and port_part[0] >= '0' and port_part[0] <= '9') {
+                        result.host = authority[0..sep];
+                        const port = std.fmt.parseInt(u16, port_part, 10);
+                        result.port = port;
+                    } else {
+                        result.host = authority;
+                    }
+                } else {
+                    result.host = authority;
+                }
+            }
+            
+            // Parse path, query, and fragment
+            const rest = url[authority_end_abs..];
+            const query_start = std.mem.indexOfScalar(u8, rest, '?');
+            const fragment_start = std.mem.indexOfScalar(u8, rest, '#');
+            
+            if (fragment_start != null) {
+                const frag_idx = fragment_start;
+                result.fragment = rest[frag_idx + 1 ..];
+                const before_fragment = rest[0..frag_idx];
+                if (query_start != null and query_start < frag_idx) {
+                    const query_idx = query_start;
+                    result.path = before_fragment[0..query_idx];
+                    result.query = before_fragment[query_idx + 1 ..];
+                } else {
+                    result.path = before_fragment;
+                }
+            } else {
+                if (query_start != null) {
+                    const query_idx = query_start;
+                    result.path = rest[0..query_idx];
+                    result.query = rest[query_idx + 1 ..];
+                } else {
+                    result.path = if (rest.len == 0) "/" else rest;
+                }
+            }
+        } else {
+            // No scheme - parse relative URL
+            const query_start = std.mem.indexOfScalar(u8, url, '?');
+            const fragment_start = std.mem.indexOfScalar(u8, url, '#');
+            
+            if (fragment_start != null) {
+                const frag_idx = fragment_start;
+                result.fragment = url[frag_idx + 1 ..];
+                const before_fragment = url[0..frag_idx];
+                if (query_start != null and query_start < frag_idx) {
+                    const query_idx = query_start;
+                    result.path = before_fragment[0..query_idx];
+                    result.query = before_fragment[query_idx + 1 ..];
+                } else {
+                    result.path = before_fragment;
+                }
+            } else {
+                if (query_start != null) {
+                    const query_idx = query_start;
+                    result.path = url[0..query_idx];
+                    result.query = url[query_idx + 1 ..];
+                } else {
+                    result.path = if (url.len == 0) "/" else url;
+                }
+            }
+        }
+
         return result;
     }
 
