@@ -11,7 +11,9 @@ module FileWatcher {
     // ════════════════════════════════════════════════════════════════════
 
     // WatcherID is a branded string representing a watcher identifier
-    struct WatcherID(str);
+    struct WatcherID {
+        // Placeholder for branded string type
+    }
 
     // ════════════════════════════════════════════════════════════════════
     // Watcher Operations
@@ -143,12 +145,14 @@ module FileWatcher {
 
     // watch_batch watches multiple paths at once
     fn watch_batch(watcherID: WatcherID, paths: [str], recursive: bool) -> Result<void, FileError> {
-        // Implementation: Watch multiple paths
+        // TODO: Implement actual file watching logic
+        return Ok();
     }
 
     // unwatch_batch stops watching multiple paths
     fn unwatch_batch(watcherID: WatcherID, paths: [str]) -> Result<void, FileError> {
-        // Implementation: Stop watching multiple paths
+        // TODO: Implement actual unwatching logic
+        return Ok();
     }
 
     // ════════════════════════════════════════════════════════════════════
@@ -166,12 +170,21 @@ module FileWatcher {
 
     // get_stats returns watcher statistics
     fn get_stats(watcherID: WatcherID) -> Result<WatcherStats, FileError> {
-        // Implementation: Get watcher statistics
+        // TODO: Implement actual statistics gathering
+        var stats = WatcherStats {
+            paths = 0,
+            events = 0,
+            errors = 0,
+            startTime = 0,
+            lastEvent = null,
+        };
+        return Ok(stats);
     }
 
     // reset_stats resets watcher statistics
     fn reset_stats(watcherID: WatcherID) -> Result<void, FileError> {
-        // Implementation: Reset event/error counters
+        // TODO: Implement actual statistics reset logic
+        return Ok();
     }
 
     // ════════════════════════════════════════════════════════════════════
@@ -546,5 +559,37 @@ module FileWatcher {
         };
         assert(stats.errors == 5);
         assert(stats.lastEvent == null);
+    }
+
+    test "watch_batch_multiple_paths" {
+        var id = WatcherID("test-watcher");
+        var paths = ["/tmp/test1", "/tmp/test2"];
+        var result = watch_batch(id, paths, true);
+        assert(result == Ok());
+    }
+
+    test "unwatch_batch_multiple_paths" {
+        var id = WatcherID("test-watcher");
+        var paths = ["/tmp/test1", "/tmp/test2"];
+        var result = unwatch_batch(id, paths);
+        assert(result == Ok());
+    }
+
+    test "get_stats_empty_watcher" {
+        var id = WatcherID("test-watcher");
+        var result = get_stats(id);
+        assert(result == Ok(WatcherStats {
+            paths = 0,
+            events = 0,
+            errors = 0,
+            startTime = 0,
+            lastEvent = null,
+        }));
+    }
+
+    test "reset_stats_success" {
+        var id = WatcherID("test-watcher");
+        var result = reset_stats(id);
+        assert(result == Ok());
     }
 }
