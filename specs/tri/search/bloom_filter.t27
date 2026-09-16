@@ -65,17 +65,17 @@ module TriBloomFilter;
     // TDD: Tests (from .tri behaviors)
     // ═══════════════════════════════════════════════════════════
 
-    test init_basic_case
+    test "init_basic_case"
         given size = 100, hash_count = 3
         when result = init(size, hash_count)
         then result.size == size and result.hash_count == hash_count and result.bits.len == size
 
-    test add_basic_case
+    test "add_basic_case"
         given filter = init(100, 3), item = "test_item"
         when add(filter, item)
         then true
 
-    test contains_basic_case
+    test "contains_basic_case"
         given filter = init(100, 3), item = "test_item"
         when add(filter, item)
         then contains(filter, item) == true
