@@ -23,6 +23,7 @@ module Linker_Testbench {
 
     fn tick() {
         // Clock cycle implementation
+        return;
     }
 
     fn reset() {
