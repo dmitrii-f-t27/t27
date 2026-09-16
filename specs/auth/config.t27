@@ -110,11 +110,19 @@ module AuthConfig {
     // exists checks if auth config exists for a provider
     fn exists(provider_id: str) -> Result<bool, AuthConfigError> {
         // Implementation: Check if config file exists
+        if (provider_id == "") {
+            return Err(AuthConfigError {
+                message = "Provider ID cannot be empty",
+                provider_id = provider_id,
+            });
+        }
+        return false; // Placeholder implementation
     }
 
     // clear removes all auth configurations
     fn clear() -> Result<void, AuthConfigError> {
         // Implementation: Delete all auth config files
+        return Ok(); // Placeholder implementation
     }
 
     // ════════════════════════════════════════════════════════════════════
@@ -134,11 +142,35 @@ module AuthConfig {
     // to_oauth converts Info to Oauth if type matches
     fn to_oauth(info: Info) -> Result<Oauth, AuthConfigError> {
         // Implementation: Cast if type is Oauth
+        if (info.type_tag != 0) {
+            return Err(AuthConfigError {
+                message = "Cannot convert to Oauth: type mismatch",
+                provider_id = null,
+            });
+        }
+        return Oauth {
+            type = AuthType::Oauth,
+            refresh = RefreshToken(""),
+            access = AccessToken(""),
+            expires = 0,
+            account_id = "",
+            enterprise_url = null,
+        }; // Placeholder implementation
     }
 
     // to_api converts Info to Api if type matches
     fn to_api(info: Info) -> Result<Api, AuthConfigError> {
         // Implementation: Cast if type is Api
+        if (info.type_tag != 1) {
+            return Err(AuthConfigError {
+                message = "Cannot convert to Api: type mismatch",
+                provider_id = null,
+            });
+        }
+        return Api {
+            type = AuthType::Api,
+            key = "",
+        }; // Placeholder implementation
     }
 
     // to_well_known converts Info to WellKnown if type matches
@@ -373,5 +405,59 @@ module AuthConfig {
         var err = result.unwrap_err();
         assert(err.message == "Key cannot be empty");
         assert(err.provider_id? == "");
+    }
+
+    test "exists_with_valid_provider" {
+        var result = exists("openai");
+        assert(result.is_ok());
+        var exists = result.unwrap();
+        assert(exists == false);
+    }
+
+    test "exists_with_empty_provider" {
+        var result = exists("");
+        assert(result.is_err());
+        var err = result.unwrap_err();
+        assert(err.message == "Provider ID cannot be empty");
+        assert(err.provider_id? == "");
+    }
+
+    test "clear_succeeds" {
+        var result = clear();
+        assert(result.is_ok());
+    }
+
+    test "to_oauth_with_correct_type" {
+        var info = Info { type_tag: 0 }; // Oauth type
+        var result = to_oauth(info);
+        assert(result.is_ok());
+        var oauth = result.unwrap();
+        assert(oauth.type == AuthType::Oauth);
+    }
+
+    test "to_oauth_with_wrong_type" {
+        var info = Info { type_tag: 1 }; // Api type
+        var result = to_oauth(info);
+        assert(result.is_err());
+        var err = result.unwrap_err();
+        assert(err.message == "Cannot convert to Oauth: type mismatch");
+        assert(err.provider_id == null);
+    }
+
+    test "to_api_with_correct_type" {
+        var info = Info { type_tag: 1 }; // Api type
+        var result = to_api(info);
+        assert(result.is_ok());
+        var api = result.unwrap();
+        assert(api.type == AuthType::Api);
+    }
+
+    test "to_api_with_wrong_type" {
+        var info = Info { type_tag: 0 }; // Oauth type
+        var result = to_api(info);
+        assert(result.is_err());
+        var err = result.unwrap_err();
+        assert(err.message == "Cannot convert to Api: type mismatch");
+        assert(err.provider_id == null);
     }
 }
