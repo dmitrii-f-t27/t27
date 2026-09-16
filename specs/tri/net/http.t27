@@ -5,13 +5,14 @@
 module TriHttp;
     use base::types;
     use math::constants;
+    use std;
 
     // ═══════════════════════════════════════════════════════════
     // 2. Types
     // ═══════════════════════════════════════════════════════════
 
     pub const HttpMethod = struct {
-        enum : ,
+        enum : [GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS],
     };
 
     pub const HttpStatus = struct {
@@ -32,8 +33,8 @@ module TriHttp;
     // 3. Core Functions
     // ═══════════════════════════════════════════════════════════
 
-    // method_to_string(method: HttpMethod) → void
-    fn method_to_string(method: HttpMethod) -> void {
+    // method_to_string(method: HttpMethod) → []const u8
+    fn method_to_string(method: HttpMethod) -> []const u8 {
         return switch (method) {
             .GET => "GET",
             .POST => "POST",
@@ -45,74 +46,59 @@ module TriHttp;
         };
     }
 
-    // status_from_code(code: u16) → void
-    fn status_from_code(code: u16) -> void {
-        if (code == 200) {
-            return HttpStatus{ .code = 200, .reason = "OK" };
-        } else if (code == 201) {
-            return HttpStatus{ .code = 201, .reason = "Created" };
-        } else if (code == 204) {
-            return HttpStatus{ .code = 204, .reason = "No Content" };
-        } else if (code == 301) {
-            return HttpStatus{ .code = 301, .reason = "Moved Permanently" };
-        } else if (code == 302) {
-            return HttpStatus{ .code = 302, .reason = "Found" };
-        } else if (code == 304) {
-            return HttpStatus{ .code = 304, .reason = "Not Modified" };
-        } else if (code == 400) {
-            return HttpStatus{ .code = 400, .reason = "Bad Request" };
-        } else if (code == 401) {
-            return HttpStatus{ .code = 401, .reason = "Unauthorized" };
-        } else if (code == 403) {
-            return HttpStatus{ .code = 403, .reason = "Forbidden" };
-        } else if (code == 404) {
-            return HttpStatus{ .code = 404, .reason = "Not Found" };
-        } else if (code == 405) {
-            return HttpStatus{ .code = 405, .reason = "Method Not Allowed" };
-        } else if (code == 409) {
-            return HttpStatus{ .code = 409, .reason = "Conflict" };
-        } else if (code == 429) {
-            return HttpStatus{ .code = 429, .reason = "Too Many Requests" };
-        } else if (code == 500) {
-            return HttpStatus{ .code = 500, .reason = "Internal Server Error" };
-        } else if (code == 502) {
-            return HttpStatus{ .code = 502, .reason = "Bad Gateway" };
-        } else if (code == 503) {
-            return HttpStatus{ .code = 503, .reason = "Service Unavailable" };
-        } else if (code == 504) {
-            return HttpStatus{ .code = 504, .reason = "Gateway Timeout" };
-        } else if (code >= 100 and code < 200) {
-            return HttpStatus{ .code = code, .reason = "Informational" };
-        } else if (code >= 200 and code < 300) {
-            return HttpStatus{ .code = code, .reason = "OK" };
-        } else if (code >= 300 and code < 400) {
-            return HttpStatus{ .code = code, .reason = "Redirection" };
-        } else if (code >= 400 and code < 500) {
-            return HttpStatus{ .code = code, .reason = "Client Error" };
-        } else if (code >= 500 and code < 600) {
-            return HttpStatus{ .code = code, .reason = "Server Error" };
-        } else {
-            return HttpStatus{ .code = code, .reason = "Unknown" };
-        }
+    // status_from_code(code: u16) → HttpStatus
+    fn status_from_code(code: u16) -> HttpStatus {
+        return switch (code) {
+            200 => HttpStatus{ .code = 200, .reason = "OK" },
+            201 => HttpStatus{ .code = 201, .reason = "Created" },
+            204 => HttpStatus{ .code = 204, .reason = "No Content" },
+            301 => HttpStatus{ .code = 301, .reason = "Moved Permanently" },
+            302 => HttpStatus{ .code = 302, .reason = "Found" },
+            304 => HttpStatus{ .code = 304, .reason = "Not Modified" },
+            400 => HttpStatus{ .code = 400, .reason = "Bad Request" },
+            401 => HttpStatus{ .code = 401, .reason = "Unauthorized" },
+            403 => HttpStatus{ .code = 403, .reason = "Forbidden" },
+            404 => HttpStatus{ .code = 404, .reason = "Not Found" },
+            405 => HttpStatus{ .code = 405, .reason = "Method Not Allowed" },
+            409 => HttpStatus{ .code = 409, .reason = "Conflict" },
+            429 => HttpStatus{ .code = 429, .reason = "Too Many Requests" },
+            500 => HttpStatus{ .code = 500, .reason = "Internal Server Error" },
+            502 => HttpStatus{ .code = 502, .reason = "Bad Gateway" },
+            503 => HttpStatus{ .code = 503, .reason = "Service Unavailable" },
+            504 => HttpStatus{ .code = 504, .reason = "Gateway Timeout" },
+            else => if (code >= 100 and code < 200) {
+                HttpStatus{ .code = code, .reason = "Informational" }
+            } else if (code >= 200 and code < 300) {
+                HttpStatus{ .code = code, .reason = "OK" }
+            } else if (code >= 300 and code < 400) {
+                HttpStatus{ .code = code, .reason = "Redirection" }
+            } else if (code >= 400 and code < 500) {
+                HttpStatus{ .code = code, .reason = "Client Error" }
+            } else if (code >= 500 and code < 600) {
+                HttpStatus{ .code = code, .reason = "Server Error" }
+            } else {
+                HttpStatus{ .code = code, .reason = "Unknown" }
+            },
+        };
     }
 
-    // is_success(code: u16) → void
-    fn is_success(code: u16) -> void {
+    // is_success(code: u16) → bool
+    fn is_success(code: u16) -> bool {
         return code >= 200 and code < 300;
     }
 
-    // is_redirect(code: u16) → void
-    fn is_redirect(code: u16) -> void {
+    // is_redirect(code: u16) → bool
+    fn is_redirect(code: u16) -> bool {
         return code >= 300 and code < 400;
     }
 
-    // is_client_error(code: u16) → void
-    fn is_client_error(code: u16) -> void {
+    // is_client_error(code: u16) → bool
+    fn is_client_error(code: u16) -> bool {
         return code >= 400 and code < 500;
     }
 
-    // is_server_error(code: u16) → void
-    fn is_server_error(code: u16) -> void {
+    // is_server_error(code: u16) → bool
+    fn is_server_error(code: u16) -> bool {
         return code >= 500 and code < 600;
     }
 
@@ -127,8 +113,7 @@ module TriHttp;
             .fragment = null,
         };
 
-        // Simple implementation - just return a basic URL for now
-        // TODO: Implement full URL parsing
+        // Simple implementation for now - just return the URL as path
         result.path = url;
         return result;
     }
