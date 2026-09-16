@@ -145,6 +145,15 @@ module FIFO_Testbench {
     invariant fifo_depth_positive : FIFO_DEPTH > 0;
     invariant data_width_positive : DATA_WIDTH > 0;
 
+    test test_tick_functionality {
+        reset();
+        invariant clk == false;
+        tick();
+        invariant clk == true;
+        tick();
+        invariant clk == false;
+    }
+
     test test_clock_toggling {
         reset();
         invariant clk == false;
