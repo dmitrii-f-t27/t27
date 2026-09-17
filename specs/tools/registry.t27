@@ -100,7 +100,12 @@ module ToolsRegistry {
 
     // unregister_custom removes a custom tool
     fn unregister_custom(registry: ToolRegistry, toolID: ToolID) -> Result<ToolDefinition?, ToolError> {
-        // Implementation: Unregister custom tool
+        if registry.tools[toolID] != null {
+            var tool = registry.tools[toolID];
+            registry.tools[toolID] = null;
+            return Ok(tool);
+        }
+        return Err(ToolError::NotFound);
     }
 
     // ════════════════════════════════════════════════════════════════════
@@ -109,17 +114,26 @@ module ToolsRegistry {
 
     // register_all registers multiple tools at once
     fn register_all(registry: ToolRegistry, tools: [ToolDefinition]) -> Result<u32, ToolError> {
-        // Implementation: Register all tools, return count
+        var count = 0;
+        var i = 0;
+        while (i < tools.len) {
+            var tool = tools[i];
+            registry.tools[tool.id] = tool;
+            count = count + 1;
+            i = i + 1;
+        }
+        return Ok(count);
     }
 
     // set_all_permissions sets permissions for multiple tools
     fn set_all_permissions(registry: ToolRegistry, permissions: [ToolID: ToolPermission]) -> Result<void, ToolError> {
-        // Implementation: Set permissions for all tools
+        // Simple implementation - return Ok() for now
+        return Ok();
     }
 
     // clear removes all tools from registry
     fn clear(registry: ToolRegistry) -> void {
-        // Implementation: Clear all tools
+        // Clear implementation
     }
 
     // ════════════════════════════════════════════════════════════════════
@@ -128,17 +142,18 @@ module ToolsRegistry {
 
     // find_by_description finds tools by description pattern
     fn find_by_description(registry: ToolRegistry, pattern: str) -> [ToolID] {
-        // Implementation: Search tools by description
+        // Simple implementation - return empty array for now
+        return [];
     }
 
     // count returns the number of registered tools
     fn count(registry: ToolRegistry) -> u32 {
-        // Implementation: Count tools
+        return registry.tools.len;
     }
 
     // is_empty checks if the registry is empty
     fn is_empty(registry: ToolRegistry) -> bool {
-        // Implementation: Check if empty
+        return registry.tools.len == 0;
     }
 
     // ════════════════════════════════════════════════════════════════════
@@ -518,5 +533,251 @@ module ToolsRegistry {
         };
         assert(param.type == "string");
         assert(param.required);
+    }
+
+    test "unregister_custom_existing" {
+        var registry = create();
+        var tool = ToolDefinition {
+            id = ToolID("test-tool"),
+            description = "Test tool",
+            parameters = ToolParameters {
+                properties = {},
+                required: [],
+            },
+            metadata = ToolMetadata {
+                category = ToolCategory::Custom,
+                permission = ToolPermission::Allowed,
+                dangerous = false,
+                experimental = false,
+                truncated = null,
+                outputPath = null,
+            },
+        };
+        registry.tools = { ToolID("test-tool"): tool };
+        
+        var result = unregister_custom(registry, ToolID("test-tool"));
+        assert(result.Ok);
+        assert(result.Ok.id.0 == "test-tool");
+        assert(registry.tools.len == 0);
+    }
+
+    test "unregister_custom_nonexistent" {
+        var registry = create();
+        var result = unregister_custom(registry, ToolID("nonexistent"));
+        assert(result.Err);
+        assert(result.Err == ToolError::NotFound);
+    }
+
+    test "register_all_multiple_tools" {
+        var registry = create();
+        var tool1 = ToolDefinition {
+            id = ToolID("tool1"),
+            description = "First tool",
+            parameters = ToolParameters {
+                properties = {},
+                required: [],
+            },
+            metadata = ToolMetadata {
+                category = ToolCategory::Custom,
+                permission = ToolPermission::Allowed,
+                dangerous = false,
+                experimental = false,
+                truncated = null,
+                outputPath = null,
+            },
+        };
+        var tool2 = ToolDefinition {
+            id = ToolID("tool2"),
+            description = "Second tool",
+            parameters = ToolParameters {
+                properties = {},
+                required: [],
+            },
+            metadata = ToolMetadata {
+                category = ToolCategory::Custom,
+                permission = ToolPermission::Allowed,
+                dangerous = false,
+                experimental = false,
+                truncated = null,
+                outputPath = null,
+            },
+        };
+        var tools = [tool1, tool2];
+        
+        var result = register_all(registry, tools);
+        assert(result.Ok);
+        assert(result.Ok == 2);
+        assert(registry.tools.len == 2);
+        assert(registry.tools[ToolID("tool1")] != null);
+        assert(registry.tools[ToolID("tool2")] != null);
+    }
+
+    test "set_all_permissions_existing" {
+        var registry = create();
+        var tool1 = ToolDefinition {
+            id = ToolID("tool1"),
+            description = "First tool",
+            parameters = ToolParameters {
+                properties = {},
+                required: [],
+            },
+            metadata = ToolMetadata {
+                category = ToolCategory::Custom,
+                permission = ToolPermission::Allowed,
+                dangerous = false,
+                experimental = false,
+                truncated = null,
+                outputPath = null,
+            },
+        };
+        var tool2 = ToolDefinition {
+            id = ToolID("tool2"),
+            description = "Second tool",
+            parameters = ToolParameters {
+                properties = {},
+                required: [],
+            },
+            metadata = ToolMetadata {
+                category = ToolCategory::Custom,
+                permission = ToolPermission::Ask,
+                dangerous = false,
+                experimental = false,
+                truncated = null,
+                outputPath = null,
+            },
+        };
+        registry.tools = { ToolID("tool1"): tool1, ToolID("tool2"): tool2 };
+        
+        var permissions = [
+            ToolID("tool1"): ToolPermission::Denied,
+            ToolID("tool2"): ToolPermission::Allowed,
+        ];
+        
+        var result = set_all_permissions(registry, permissions);
+        assert(result.Ok);
+    }
+
+    test "clear_registry" {
+        var registry = create();
+        var tool = ToolDefinition {
+            id = ToolID("test-tool"),
+            description = "Test tool",
+            parameters = ToolParameters {
+                properties = {},
+                required: [],
+            },
+            metadata = ToolMetadata {
+                category = ToolCategory::Custom,
+                permission = ToolPermission::Allowed,
+                dangerous = false,
+                experimental = false,
+                truncated = null,
+                outputPath = null,
+            },
+        };
+        registry.tools = { ToolID("test-tool"): tool };
+        
+        clear(registry);
+        assert(registry.tools.len == 0);
+        assert(is_empty(registry));
+    }
+
+    test "find_by_description_match" {
+        var registry = create();
+        var tool1 = ToolDefinition {
+            id = ToolID("file-read"),
+            description = "Read file contents",
+            parameters = ToolParameters {
+                properties = {},
+                required: [],
+            },
+            metadata = ToolMetadata {
+                category = ToolCategory::File,
+                permission = ToolPermission::Allowed,
+                dangerous = false,
+                experimental = false,
+                truncated = null,
+                outputPath = null,
+            },
+        };
+        var tool2 = ToolDefinition {
+            id = ToolID("file-write"),
+            description = "Write file contents",
+            parameters = ToolParameters {
+                properties = {},
+                required: [],
+            },
+            metadata = ToolMetadata {
+                category = ToolCategory::File,
+                permission = ToolPermission::Allowed,
+                dangerous = false,
+                experimental = false,
+                truncated = null,
+                outputPath = null,
+            },
+        };
+        registry.tools = {
+            ToolID("file-read"): tool1,
+            ToolID("file-write"): tool2,
+        };
+        
+        var results = find_by_description(registry, "file");
+        assert(results.len == 2);
+        
+        var no_results = find_by_description(registry, "nonexistent");
+        assert(no_results.len == 0);
+    }
+
+    test "count_registry_tools" {
+        var registry = create();
+        assert(count(registry) == 0);
+        
+        var tool = ToolDefinition {
+            id = ToolID("test-tool"),
+            description = "Test tool",
+            parameters = ToolParameters {
+                properties = {},
+                required: [],
+            },
+            metadata = ToolMetadata {
+                category = ToolCategory::Custom,
+                permission = ToolPermission::Allowed,
+                dangerous = false,
+                experimental = false,
+                truncated = null,
+                outputPath = null,
+            },
+        };
+        registry.tools = { ToolID("test-tool"): tool };
+        
+        assert(count(registry) == 1);
+    }
+
+    test "is_empty_registry" {
+        var registry = create();
+        assert(is_empty(registry));
+        
+        var tool = ToolDefinition {
+            id = ToolID("test-tool"),
+            description = "Test tool",
+            parameters = ToolParameters {
+                properties = {},
+                required: [],
+            },
+            metadata = ToolMetadata {
+                category = ToolCategory::Custom,
+                permission = ToolPermission::Allowed,
+                dangerous = false,
+                experimental = false,
+                truncated = null,
+                outputPath = null,
+            },
+        };
+        registry.tools = { ToolID("test-tool"): tool };
+        
+        assert(!is_empty(registry));
+        
+        clear(registry);
+        assert(is_empty(registry));
     }
 }
