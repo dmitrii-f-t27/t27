@@ -12,6 +12,7 @@
 
 mod bridge;
 mod compiler;
+mod codegen_js;
 mod use_resolve;
 mod check_calls;
 mod cc_gate;
@@ -1095,6 +1096,13 @@ enum Commands {
 
     /// Generate Rust code from .t27 file
     GenRust {
+        /// Input file path
+        input: String,
+    },
+
+    /// Generate a JavaScript ES module of declarations from a .t27 file
+    #[command(name = "gen-js")]
+    GenJs {
         /// Input file path
         input: String,
     },
@@ -5251,6 +5259,49 @@ fn run_gen_rust(input_path: &str) -> anyhow::Result<()> {
     };
     print!("{}", rust_code);
     Ok(())
+}
+
+/// `gen-js`: print the spec's declarations as a JavaScript ES module.
+///
+/// Our MCP servers run on JavaScript, and until this existed a .t27 spec that
+/// described one had no way to reach them -- so each such spec grew a
+/// hand-written generator in a foreign language beside it, and that generator,
+/// not the compiler, decided what the artifact said.
+///
+/// `use` resolution runs first, as it does for gen-c and gen-rust: it is
+/// backend-agnostic, and a backend that skips it silently drops every imported
+/// declaration.
+fn run_gen_js(input_path: &str) -> anyhow::Result<()> {
+    let path = Path::new(input_path);
+    let raw = fs::read_to_string(path)?;
+    let resolved = use_resolve::resolve(path, &raw);
+    for note in use_resolve::unresolved_notes(&resolved) {
+        eprintln!("{}", note);
+    }
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or(input_path);
+    // The same fallback the other backends use: if the spliced source will not
+    // parse, say so out loud rather than emitting a module that is quietly
+    // missing everything the imports brought in.
+    let ast = match compiler::Compiler::parse_ast(&resolved) {
+        Ok(ast) => ast,
+        Err(spliced_err) => match compiler::Compiler::parse_ast(&raw) {
+            Ok(ast) => {
+                eprintln!(
+                    "note: spliced source did not parse, falling back to the \
+            unresolved original -- imported declarations are NOT in this output"
+                );
+                ast
+            }
+            Err(_) => anyhow::bail!("Parse error: {}", spliced_err),
+        },
+    };
+    match codegen_js::generate(&ast, name) {
+        Ok(code) => {
+            print!("{}", code);
+            Ok(())
+        }
+        Err(e) => anyhow::bail!("{}", e),
+    }
 }
 
 fn sha256_hex(data: &[u8]) -> String {
@@ -11314,6 +11365,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::GenC { input } => run_gen_c(&input)?,
         Commands::GenRust { input } => run_gen_rust(&input)?,
+        Commands::GenJs { input } => run_gen_js(&input)?,
         Commands::Conformance { input } => run_conformance(&input)?,
         Commands::Path { input, synth } => {
             service::run_path(&std::env::current_dir()?, &input, synth)?
@@ -11727,6 +11779,7 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::GenC { input } => run_gen_c(&input)?,
         Commands::GenRust { input } => run_gen_rust(&input)?,
+        Commands::GenJs { input } => run_gen_js(&input)?,
         Commands::Conformance { input } => run_conformance(&input)?,
         Commands::Path { input, synth } => {
             service::run_path(&std::env::current_dir()?, &input, synth)?
