@@ -28,6 +28,26 @@
 // warning that matters.
 #![allow(dead_code)]
 
+// Testing this crate: `cargo test -- --skip compiler::` runs the 39 that are
+// ours. A bare `cargo test` runs 713, because `#[path]` brings the compiler's
+// own `#[cfg(test)]` modules along with its code -- that is the point of
+// including rather than copying, and it is a feature until you reach these
+// two:
+//
+//     compiler::tests_hir_roundtrip::test_roundtrip_uart_spec
+//     compiler::tests_hir_roundtrip::test_roundtrip_bridge_spec
+//
+// Both read `$CARGO_MANIFEST_DIR/../specs/fpga/*.t27`, so they pass from any
+// crate exactly one level below the repository root and fail from anywhere
+// else. From here that path is `bindings/specs/fpga/`, which does not exist.
+// They pass in `bootstrap`, where they live and where they run.
+//
+// Not worked around. `compiler.rs` is sealed, so the fix is a reseal; a copy
+// of the two fixtures under `bindings/` would be a second home for the truth;
+// and moving this crate up a level to satisfy a relative path would separate
+// it from `bindings/javascript` and `bindings/python`, which is where a
+// binding belongs. The skip is narrow, it is named, and this comment is why.
+
 #[path = "../../../bootstrap/src/compiler.rs"]
 mod compiler;
 
