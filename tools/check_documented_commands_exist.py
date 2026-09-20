@@ -425,6 +425,12 @@ def population() -> tuple[list[Path], list[Path]]:
     candidates = [ROOT / "README.md"]
     for base in (".claude/skills", "docs"):
         candidates += sorted((ROOT / base).rglob("*.md"))
+    # The issue bodies the swarm is sent are documents too, and they are the ones
+    # nobody proofreads: they are assembled by tools/queen/*.py and read by an
+    # agent that has never seen this repository. A brief naming a subcommand that
+    # exits 2 costs a whole dispatch, and this half of the gate was blind to it
+    # while the sibling half below already read every tracked text file.
+    candidates += sorted((ROOT / "tools" / "queen").glob("*.py"))
     for p in candidates:
         if not p.is_file():
             continue
@@ -480,8 +486,18 @@ def scan(
             lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError as exc:
             refuse(f"could not read {p}: {exc}")
+        # The anchored matcher exists for FENCED markdown, where there are no
+        # backticks to key on and the line a reader copies starts with the
+        # command. A Python source file has no fences, and its prose is WRAPPED:
+        # feed_empty_bodies.py:167 wraps a sentence onto a line beginning
+        # "t27c prints no such metrics", which the anchored matcher reads as an
+        # invocation of a subcommand called `prints`. The copyable surface in a
+        # brief is the backticked command inside the issue text, so only the
+        # backticked matcher runs there. Reflowing a comment must not turn a
+        # gate red.
+        fenced_surface = p.suffix != ".py"
         for i, line in enumerate(lines):
-            anchored = FENCED_HIT.match(line)
+            anchored = FENCED_HIT.match(line) if fenced_surface else None
             hits = [(a, b, c or "", "command-line") for a, b, c in HIT.findall(line)]
             if anchored:
                 hits.append((anchored.group(1), anchored.group(2),
