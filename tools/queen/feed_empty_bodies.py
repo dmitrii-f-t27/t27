@@ -342,6 +342,55 @@ def boundaried_open():
     return sum(1 for i in json.loads(out.stdout or "[]")
                if re.search(r"(?ims)^##\s*boundary\s*$", i.get("body") or ""))
 
+PULSE_TITLE = "System pulse: what the swarm is doing, and what has stopped"
+
+def last_scanned_skips():
+    """`skip_claimed` and `skip_completed` from the pusher's last SCANNED reading.
+
+    Empty when the issue is missing, unparseable, or its reading was itself
+    taken from a tick that had not scanned. A number this cannot vouch for is
+    worse than no number: it would feed a swarm that has plenty, or starve one
+    that has none.
+    """
+    out = subprocess.run(
+        ["gh", "issue", "list", "--repo", REPO, "--state", "open", "--limit", "50",
+         "--search", PULSE_TITLE, "--json", "title,body"],
+        capture_output=True, text=True, timeout=120,
+    )
+    if out.returncode != 0:
+        return {}
+    for issue in json.loads(out.stdout or "[]"):
+        if issue.get("title") != PULSE_TITLE:
+            continue
+        match = re.search(r"```json\n(\{.*?\})\n```", issue.get("body") or "", re.S)
+        if not match:
+            return {}
+        try:
+            reading = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            return {}
+        if not reading.get("skips_are_fresh"):
+            return {}
+        return {"claimed": int(reading.get("skip_claimed", 0) or 0),
+                "completed": int(reading.get("skip_completed", 0) or 0)}
+    return {}
+
+def resolve_runway(raw, capacity):
+    """`auto` means twice the lanes; a number means that number; 0 means off.
+
+    A fixed floor is the same mistake the lane count was. 24 was chosen when the
+    swarm ran ten bees; the day it ran twenty, one reading showed about 12
+    dispatchable issues for 20 lanes and the floor said 24, which is barely one
+    round. The lanes are reported by the swarm itself on every reading, so the
+    floor can come from them.
+    """
+    if isinstance(raw, str) and raw.strip().lower() == "auto":
+        return max(4, 2 * int(capacity or 0))
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return 0
+
 def queue_idle(runway=0):
     """How many issues to add now: enough to keep every lane fed.
 
@@ -372,9 +421,31 @@ def queue_idle(runway=0):
     # never finds an empty queue but the backlog never balloons either.
     free = (w.get("capacity") or 0) - (w.get("active") or 0)
     want = free + 2 if (q == "no-eligible-work" or free > 0) else 0
+    runway = resolve_runway(runway, w.get("capacity") or 0)
     if runway > 0:
         skips = {k: (v or {}).get("count", 0)
                  for k, v in ((d.get("lastTick") or {}).get("skipSummary") or {}).items()}
+        # A tick that refused on capacity never scanned the board, so its
+        # skipSummary is empty - and an empty summary reads exactly like a board
+        # with nothing claimed. Measured 2026-09-20T12:10Z: the estimate said
+        # "about 123 dispatchable" and added nothing, while the last scanning
+        # tick had counted 68 claimed and 42 completed, leaving about 12. Zero
+        # because nobody looked is not zero.
+        #
+        # The pusher takes a reading every fifteen minutes and keeps it in its
+        # own issue, including whether the tick had scanned. Reading it here is
+        # a coupling, and it is named as one: the alternative is a feeder that
+        # cannot judge the runway in the state it exists for, because a swarm at
+        # full capacity is exactly when its queue empties fastest.
+        if not skips:
+            skips = last_scanned_skips()
+            if skips:
+                log("runway: this tick refused before scanning, so the claimed and "
+                    "completed counts come from the pusher's last scanned reading")
+            else:
+                log("runway: this tick never scanned the board and no scanned reading "
+                    "is available, so only the free lanes are counted")
+                return want
         have = boundaried_open()
         if have < 0:
             log("runway: gh issue list failed, so only the free lanes are counted")
@@ -391,9 +462,10 @@ def main():
     ap.add_argument("--limit", type=int, default=8)
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--when-idle", action="store_true")
-    ap.add_argument("--runway", type=int, default=0,
-                    help="top the queue up to this many dispatchable issues, "
-                         "whatever the lanes are doing")
+    ap.add_argument("--runway", default="0",
+                    help="top the queue up to this many dispatchable issues "
+                         "whatever the lanes are doing; `auto` means twice the "
+                         "lanes the swarm reports")
     ap.add_argument("--order", choices=["big", "small"], default="big",
                     help="big: most empty bodies first (default); small: fewest first")
     a = ap.parse_args()
