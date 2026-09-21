@@ -28,14 +28,19 @@
 // warning that matters.
 #![allow(dead_code)]
 
-// Testing this crate: `cargo test -- --skip compiler::` runs the 39 that are
-// ours. A bare `cargo test` runs 713, because `#[path]` brings the compiler's
-// own `#[cfg(test)]` modules along with its code -- that is the point of
-// including rather than copying, and it is a feature until you reach these
-// two:
+// Testing this crate: `cargo test -- --skip compiler::` runs the ones that are
+// ours. A bare `cargo test` runs several hundred more, because `#[path]` brings
+// the compiler's own `#[cfg(test)]` modules along with its code -- that is the
+// point of including rather than copying, and it is a feature until you reach
+// these two:
 //
 //     compiler::tests_hir_roundtrip::test_roundtrip_uart_spec
 //     compiler::tests_hir_roundtrip::test_roundtrip_bridge_spec
+//
+// (This paragraph used to print both counts. One was wrong the day it was
+// written and both were wrong a commit later, because every test either crate
+// gains moves them. A number nobody can keep true is worse than no number --
+// the two names above are what a reader hitting the red needs anyway.)
 //
 // Both read `$CARGO_MANIFEST_DIR/../specs/fpga/*.t27`, so they pass from any
 // crate exactly one level below the repository root and fail from anywhere
@@ -56,6 +61,9 @@ mod use_resolve;
 
 #[path = "../../../bootstrap/src/codegen_js.rs"]
 mod codegen_js;
+
+#[path = "../../../bootstrap/src/codegen_ts.rs"]
+mod codegen_ts;
 
 use compiler::{Compiler, Lexer, Node};
 use serde_json::{json, Map, Value};
@@ -271,26 +279,42 @@ fn analyze_source(source: &str, name: Option<&str>) -> String {
         target(Compiler::compile_verilog_hir(source)),
     );
     targets.insert("js".into(), target(compile_js(source, name)));
+    targets.insert("ts".into(), target(compile_ts(source, name)));
     root.insert("targets".into(), Value::Object(targets));
 
     Value::Object(root).to_string()
 }
 
-/// The JavaScript backend, reached the way `t27c gen-js` reaches it.
+/// What the declaration backends need, on the terms a browser can meet.
 ///
 /// `use_resolve` is not run here: it reads the filesystem to splice imported
 /// declarations in, and a browser has no checkout to read. A spec whose
 /// declarations live behind a `use` therefore shows fewer of them on the page
 /// than at the CLI -- which is a limit of the medium, not of the backend, and
 /// is why the page says where its output came from.
-fn compile_js(source: &str, name: Option<&str>) -> Result<String, String> {
+///
+/// Shared by both declaration layers so the page cannot show a `js` tab and a
+/// `ts` tab built from two different readings of the same spec.
+fn declarations_ast(source: &str, name: Option<&str>) -> Result<(Node, String), String> {
     let ast = Compiler::parse_ast(source)?;
     let name = match name {
         Some(n) if !n.is_empty() => n.to_string(),
         _ if !ast.name.is_empty() => format!("{}.t27", ast.name),
         _ => "spec.t27".to_string(),
     };
+    Ok((ast, name))
+}
+
+/// The JavaScript backend, reached the way `t27c gen-js` reaches it.
+fn compile_js(source: &str, name: Option<&str>) -> Result<String, String> {
+    let (ast, name) = declarations_ast(source, name)?;
     codegen_js::generate(&ast, &name)
+}
+
+/// The TypeScript backend, reached the way `t27c gen-ts` reaches it.
+fn compile_ts(source: &str, name: Option<&str>) -> Result<String, String> {
+    let (ast, name) = declarations_ast(source, name)?;
+    codegen_ts::generate(&ast, &name)
 }
 
 fn target(result: Result<String, String>) -> Value {
@@ -421,9 +445,26 @@ mod tests {
         ] {
             assert!(j.get(key).is_some(), "missing {key}: {j}");
         }
-        for layer in ["zig", "c", "rust", "verilog", "verilog_hir", "js"] {
+        for layer in ["zig", "c", "rust", "verilog", "verilog_hir", "js", "ts"] {
             assert!(j["targets"].get(layer).is_some(), "missing target {layer}");
         }
+    }
+
+    #[test]
+    fn the_typescript_layer_carries_the_declared_type() {
+        // The one thing the `js` layer beside it cannot show. If this ever
+        // prints `export const N = 7;` the tab has silently become a second
+        // copy of the JavaScript one and has no reason to be on the page.
+        let j = analyze("module m;\npub const N: u32 = 7;\n");
+        let ts = &j["targets"]["ts"];
+        assert_eq!(ts["ok"], json!(true), "{j}");
+        assert!(
+            ts["code"]
+                .as_str()
+                .unwrap()
+                .contains("export const N = 7 satisfies number;"),
+            "{ts}"
+        );
     }
 
     #[test]
