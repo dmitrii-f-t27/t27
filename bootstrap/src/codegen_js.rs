@@ -16,11 +16,37 @@
 //!
 //! The emitted module is data. Nothing in it runs, so a spec cannot smuggle
 //! behaviour into a server through its own description.
+//!
+//! This file is also the *value* layer of `t27c gen-ts`. TypeScript's syntax
+//! for a value is JavaScript's, to the character, so `codegen_ts` calls the
+//! helpers below rather than carrying a second copy of them: the reserved-word
+//! list, the array-length check, the escape table and the constant-expression
+//! walk have one home. Only the words in their error messages differ, and that
+//! difference is a `Target` passed in, not a duplicated function.
 
 use crate::compiler::{Node, NodeKind};
 
+/// Which backend is driving the shared helpers below.
+///
+/// It exists so an error a caller sees names the subcommand they actually ran.
+/// `gen-ts` reusing this layer must not report itself as `gen-js`, and the fix
+/// for that is one argument -- not a parallel set of functions that drift.
+pub(crate) struct Target {
+    /// The subcommand to blame in an error: `gen-js` or `gen-ts`.
+    pub tag: &'static str,
+    /// The language to name in prose: `JavaScript` or `TypeScript`.
+    pub lang: &'static str,
+}
+
+pub(crate) const JS: Target = Target { tag: "gen-js", lang: "JavaScript" };
+pub(crate) const TS: Target = Target { tag: "gen-ts", lang: "TypeScript" };
+
 /// Reserved in a module context; `export const` with one of these is a syntax
 /// error, so it is refused here with a sentence rather than there with a stack.
+///
+/// TypeScript shares this list exactly. Its own additions (`type`, `interface`,
+/// `readonly`, ...) are *contextual* keywords and remain legal as value names,
+/// so widening the list for `gen-ts` would refuse specs that compile.
 const RESERVED: &[&str] = &[
     "await", "break", "case", "catch", "class", "const", "continue", "debugger", "default",
     "delete", "do", "else", "enum", "export", "extends", "false", "finally", "for", "function",
@@ -43,13 +69,13 @@ pub fn generate(ast: &Node, source_name: &str) -> Result<String, String> {
     for node in &ast.children {
         match node.kind {
             NodeKind::ConstDecl => {
-                let name = js_name(&node.name)?;
-                let value = const_value(node)?;
+                let name = js_name(&JS, &node.name)?;
+                let value = const_value(&JS, node)?;
                 out.push_str(&format!("export const {} = {};\n", name, value));
                 decl_order.push(node.name.clone());
             }
             NodeKind::EnumDecl => {
-                let name = js_name(&node.name)?;
+                let name = js_name(&JS, &node.name)?;
                 out.push_str(&format!("export const {} = Object.freeze({{ ", name));
                 let mut next = 0i64;
                 let mut first = true;
@@ -68,7 +94,7 @@ pub fn generate(ast: &Node, source_name: &str) -> Result<String, String> {
                     let value = if !variant.value.is_empty() {
                         variant.value.clone()
                     } else if let Some(child) = variant.children.first() {
-                        expr(child)?
+                        expr(&JS, child)?
                     } else {
                         next.to_string()
                     };
@@ -80,24 +106,14 @@ pub fn generate(ast: &Node, source_name: &str) -> Result<String, String> {
                         out.push_str(", ");
                     }
                     first = false;
-                    out.push_str(&format!("{}: {}", key(&variant.name), value));
+                    out.push_str(&format!("{}: {}", key(&JS, &variant.name), value));
                 }
                 out.push_str(" });\n");
                 decl_order.push(node.name.clone());
             }
             NodeKind::StructDecl => {
-                let name = js_name(&node.name)?;
-                let mut fields: Vec<String> = Vec::new();
-                for field in &node.children {
-                    if field.name.is_empty() {
-                        continue;
-                    }
-                    fields.push(format!(
-                        "[{}, {}]",
-                        js_string(&field.name),
-                        js_string(&field.extra_type)
-                    ));
-                }
+                let name = js_name(&JS, &node.name)?;
+                let fields = struct_fields(node);
                 out.push_str(&format!(
                     "export const {} = Object.freeze({{ __struct__: {}, fields: [{}] }});\n",
                     name,
@@ -134,16 +150,30 @@ pub fn generate(ast: &Node, source_name: &str) -> Result<String, String> {
     Ok(out)
 }
 
-fn list(names: &[String]) -> String {
+/// The `fields:` descriptor of a struct: `["name", "declared-t27-type"]` per
+/// field, carrying the spec's OWN spelling of the type rather than the target
+/// language's. Both backends emit this list, and they must agree on it -- a
+/// consumer that reads the JS descriptor and the TS descriptor of the same spec
+/// and gets two different answers has been lied to by one of them.
+pub(crate) fn struct_fields(node: &Node) -> Vec<String> {
+    node.children
+        .iter()
+        .filter(|field| !field.name.is_empty())
+        .map(|field| format!("[{}, {}]", js_string(&field.name), js_string(&field.extra_type)))
+        .collect()
+}
+
+pub(crate) fn list(names: &[String]) -> String {
     names.iter().map(|n| js_string(n)).collect::<Vec<_>>().join(", ")
 }
 
 /// A const's value, read with its declared type in hand.
-fn const_value(node: &Node) -> Result<String, String> {
+pub(crate) fn const_value(t: &Target, node: &Node) -> Result<String, String> {
+    let tag = t.tag;
     let child = node
         .children
         .first()
-        .ok_or_else(|| format!("gen-js: const {} has no value", node.name))?;
+        .ok_or_else(|| format!("{tag}: const {} has no value", node.name))?;
 
     // `[4]str = [POST, PUT, PATCH, DELETE]` -- the parser hands back the whole
     // bracketed text as one bare word, so the element type has to come from the
@@ -151,10 +181,10 @@ fn const_value(node: &Node) -> Result<String, String> {
     // does not have the length its own type claims is refused here rather than
     // shipped as a short array.
     if let Some((count, elem)) = array_type(&node.extra_type) {
-        let items = array_items(child)?;
+        let items = array_items(t, child)?;
         if items.len() != count {
             return Err(format!(
-                "gen-js: {} is declared [{}]{} but its literal has {} element(s)",
+                "{tag}: {} is declared [{}]{} but its literal has {} element(s)",
                 node.name,
                 count,
                 elem,
@@ -170,7 +200,7 @@ fn const_value(node: &Node) -> Result<String, String> {
                     Ok(item.clone())
                 } else {
                     Err(format!(
-                        "gen-js: {} is declared [{}]{} but {:?} is not a {}",
+                        "{tag}: {} is declared [{}]{} but {:?} is not a {}",
                         node.name, count, elem, item, elem
                     ))
                 }
@@ -179,16 +209,17 @@ fn const_value(node: &Node) -> Result<String, String> {
         return Ok(format!("[{}]", rendered?.join(", ")));
     }
 
-    expr(child)
+    expr(t, child)
 }
 
-fn array_type(t: &str) -> Option<(usize, String)> {
-    let rest = t.strip_prefix('[')?;
+pub(crate) fn array_type(decl: &str) -> Option<(usize, String)> {
+    let rest = decl.strip_prefix('[')?;
     let (count, elem) = rest.split_once(']')?;
     Some((count.trim().parse().ok()?, elem.trim().to_string()))
 }
 
-fn array_items(child: &Node) -> Result<Vec<String>, String> {
+pub(crate) fn array_items(t: &Target, child: &Node) -> Result<Vec<String>, String> {
+    let tag = t.tag;
     if child.kind == NodeKind::ExprArrayLiteral {
         return child
             .children
@@ -203,7 +234,7 @@ fn array_items(child: &Node) -> Result<Vec<String>, String> {
         .trim()
         .strip_prefix('[')
         .and_then(|s| s.strip_suffix(']'))
-        .ok_or_else(|| format!("gen-js: {:?} is not an array literal", text))?;
+        .ok_or_else(|| format!("{tag}: {:?} is not an array literal", text))?;
     if inner.trim().is_empty() {
         return Ok(Vec::new());
     }
@@ -213,7 +244,8 @@ fn array_items(child: &Node) -> Result<Vec<String>, String> {
         .collect())
 }
 
-fn expr(node: &Node) -> Result<String, String> {
+pub(crate) fn expr(t: &Target, node: &Node) -> Result<String, String> {
+    let (tag, lang) = (t.tag, t.lang);
     match &node.kind {
         NodeKind::ExprLiteral => {
             // `extra_kind == "string"` asks the one question that matters: was
@@ -235,7 +267,7 @@ fn expr(node: &Node) -> Result<String, String> {
             match node.value.as_str() {
                 "true" | "false" | "null" => Ok(node.value.clone()),
                 other => Err(format!(
-                    "gen-js: literal {:?} at line {} has no JavaScript spelling",
+                    "{tag}: literal {:?} at line {} has no {lang} spelling",
                     other, node.line
                 )),
             }
@@ -245,7 +277,7 @@ fn expr(node: &Node) -> Result<String, String> {
             name if name.starts_with('[') => {
                 // An array without a declared length: the elements are taken as
                 // written, which is all the parser preserved of them.
-                let items = array_items(node)?;
+                let items = array_items(t, node)?;
                 Ok(format!(
                     "[{}]",
                     items
@@ -256,28 +288,29 @@ fn expr(node: &Node) -> Result<String, String> {
                 ))
             }
             name if is_number(name) => Ok(name.to_string()),
-            name => Ok(js_name(name)?), // a reference to a const declared above
+            name => Ok(js_name(t, name)?), // a reference to a const declared above
         },
         NodeKind::ExprEnumValue => {
             let holder = if node.name.is_empty() { &node.extra_type } else { &node.name };
             let variant = if node.extra_field.is_empty() { &node.value } else { &node.extra_field };
             if holder.is_empty() || variant.is_empty() {
-                return Err(format!("gen-js: an enum value at line {} names no variant", node.line));
+                return Err(format!("{tag}: an enum value at line {} names no variant", node.line));
             }
-            Ok(format!("{}[{}]", js_name(holder)?, js_string(variant)))
+            Ok(format!("{}[{}]", js_name(t, holder)?, js_string(variant)))
         }
         NodeKind::ExprArrayLiteral => {
-            let items: Result<Vec<String>, String> = node.children.iter().map(expr).collect();
+            let items: Result<Vec<String>, String> =
+                node.children.iter().map(|c| expr(t, c)).collect();
             Ok(format!("[{}]", items?.join(", ")))
         }
         other => Err(format!(
-            "gen-js: {:?} at line {} is not a constant expression. This backend emits data, never code.",
+            "{tag}: {:?} at line {} is not a constant expression. This backend emits data, never code.",
             other, node.line
         )),
     }
 }
 
-fn is_number(s: &str) -> bool {
+pub(crate) fn is_number(s: &str) -> bool {
     let s = s.strip_prefix('-').unwrap_or(s);
     if s.is_empty() {
         return false;
@@ -302,7 +335,8 @@ fn is_number(s: &str) -> bool {
     seen_digit
 }
 
-fn js_name(name: &str) -> Result<String, String> {
+pub(crate) fn js_name(t: &Target, name: &str) -> Result<String, String> {
+    let (tag, lang) = (t.tag, t.lang);
     let mut chars = name.chars();
     let valid = match chars.next() {
         Some(c) if c.is_ascii_alphabetic() || c == '_' || c == '$' => {
@@ -311,18 +345,18 @@ fn js_name(name: &str) -> Result<String, String> {
         _ => false,
     };
     if !valid {
-        return Err(format!("gen-js: {:?} is not a name JavaScript can bind", name));
+        return Err(format!("{tag}: {:?} is not a name {lang} can bind", name));
     }
     if RESERVED.contains(&name) {
-        return Err(format!("gen-js: {:?} is a JavaScript keyword; rename it in the spec", name));
+        return Err(format!("{tag}: {:?} is a {lang} keyword; rename it in the spec", name));
     }
     Ok(name.to_string())
 }
 
 /// An object key: quoted unless it is plainly an identifier, so a variant named
 /// `default` is legal in the output.
-fn key(name: &str) -> String {
-    match js_name(name) {
+pub(crate) fn key(t: &Target, name: &str) -> String {
+    match js_name(t, name) {
         Ok(n) => n,
         Err(_) => js_string(name),
     }
@@ -346,7 +380,7 @@ fn key(name: &str) -> String {
 /// the reason -- but the overlap (`\\`, `"`, `\n`, `\r`, `\t`) is real, and
 /// folding all three into one table with a target parameter is worth doing on
 /// its own, away from a new backend.
-fn js_string(s: &str) -> String {
+pub(crate) fn js_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
     for c in s.chars() {
@@ -384,7 +418,7 @@ mod tests {
     fn a_string_keeps_its_quotes() {
         // The defect this backend was written beside: every other emitter
         // printed `habr_search` where `"habr_search"` belonged.
-        assert_eq!(expr(&lit("habr_search", "string")).unwrap(), "\"habr_search\"");
+        assert_eq!(expr(&JS, &lit("habr_search", "string")).unwrap(), "\"habr_search\"");
     }
 
     #[test]
@@ -394,7 +428,7 @@ mod tests {
         // backend used to do ate them and emitted `"wrapped"` -- the string
         // without the quotes that were its content.
         assert_eq!(
-            expr(&lit("\"wrapped\"", "string")).unwrap(),
+            expr(&JS, &lit("\"wrapped\"", "string")).unwrap(),
             "\"\\\"wrapped\\\"\""
         );
     }
@@ -404,15 +438,15 @@ mod tests {
         // U+2028 ends a line inside a JS string literal even between quotes, so
         // an unescaped one is a syntax error in the artifact, not a character.
         assert_eq!(
-            expr(&lit("a\u{2028}b", "string")).unwrap(),
+            expr(&JS, &lit("a\u{2028}b", "string")).unwrap(),
             "\"a\\u2028b\""
         );
     }
 
     #[test]
     fn a_number_is_not_a_string() {
-        assert_eq!(expr(&lit("20", "")).unwrap(), "20");
-        assert_eq!(expr(&lit("0x1f", "")).unwrap(), "0x1f");
+        assert_eq!(expr(&JS, &lit("20", "")).unwrap(), "20");
+        assert_eq!(expr(&JS, &lit("0x1f", "")).unwrap(), "0x1f");
     }
 
     #[test]
@@ -422,7 +456,7 @@ mod tests {
             name: "PAGE_MIN".to_string(),
             ..Default::default()
         };
-        assert_eq!(expr(&node).unwrap(), "PAGE_MIN");
+        assert_eq!(expr(&JS, &node).unwrap(), "PAGE_MIN");
     }
 
     #[test]
@@ -432,9 +466,9 @@ mod tests {
 
     #[test]
     fn a_keyword_is_refused_rather_than_emitted() {
-        assert!(js_name("class").is_err());
-        assert!(js_name("2fast").is_err());
-        assert!(js_name("HabrSearch").is_ok());
+        assert!(js_name(&JS, "class").is_err());
+        assert!(js_name(&JS, "2fast").is_err());
+        assert!(js_name(&JS, "HabrSearch").is_ok());
     }
 
     #[test]
@@ -450,7 +484,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let err = const_value(&node).unwrap_err();
+        let err = const_value(&JS, &node).unwrap_err();
         assert!(err.contains("3 element"), "{}", err);
     }
 
@@ -467,7 +501,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        assert_eq!(const_value(&node).unwrap(), "[\"POST\", \"PUT\"]");
+        assert_eq!(const_value(&JS, &node).unwrap(), "[\"POST\", \"PUT\"]");
     }
 
     #[test]

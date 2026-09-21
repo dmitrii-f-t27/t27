@@ -13,6 +13,7 @@
 mod bridge;
 mod compiler;
 mod codegen_js;
+mod codegen_ts;
 mod use_resolve;
 mod check_calls;
 mod cc_gate;
@@ -1103,6 +1104,13 @@ enum Commands {
     /// Generate a JavaScript ES module of declarations from a .t27 file
     #[command(name = "gen-js")]
     GenJs {
+        /// Input file path
+        input: String,
+    },
+
+    /// Generate a TypeScript module of declarations, with the declared types
+    #[command(name = "gen-ts")]
+    GenTs {
         /// Input file path
         input: String,
     },
@@ -5261,24 +5269,28 @@ fn run_gen_rust(input_path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `gen-js`: print the spec's declarations as a JavaScript ES module.
-///
-/// Our MCP servers run on JavaScript, and until this existed a .t27 spec that
-/// described one had no way to reach them -- so each such spec grew a
-/// hand-written generator in a foreign language beside it, and that generator,
-/// not the compiler, decided what the artifact said.
+/// Get a spec into an AST the declaration backends can walk, and hand back the
+/// display name they put in the generated file's header.
 ///
 /// `use` resolution runs first, as it does for gen-c and gen-rust: it is
 /// backend-agnostic, and a backend that skips it silently drops every imported
 /// declaration.
-fn run_gen_js(input_path: &str) -> anyhow::Result<()> {
+///
+/// It is one function because `gen-js` and `gen-ts` must fail on the same
+/// inputs. Two copies of this would be two answers to "did the imports land?"
+/// for one spec, and the second copy is where the fallback below gets forgotten.
+fn ast_for_codegen(input_path: &str) -> anyhow::Result<(compiler::Node, String)> {
     let path = Path::new(input_path);
     let raw = fs::read_to_string(path)?;
     let resolved = use_resolve::resolve(path, &raw);
     for note in use_resolve::unresolved_notes(&resolved) {
         eprintln!("{}", note);
     }
-    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or(input_path);
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(input_path)
+        .to_string();
     // The same fallback the other backends use: if the spliced source will not
     // parse, say so out loud rather than emitting a module that is quietly
     // missing everything the imports brought in.
@@ -5295,7 +5307,36 @@ fn run_gen_js(input_path: &str) -> anyhow::Result<()> {
             Err(_) => anyhow::bail!("Parse error: {}", spliced_err),
         },
     };
-    match codegen_js::generate(&ast, name) {
+    Ok((ast, name))
+}
+
+/// `gen-js`: print the spec's declarations as a JavaScript ES module.
+///
+/// Our MCP servers run on JavaScript, and until this existed a .t27 spec that
+/// described one had no way to reach them -- so each such spec grew a
+/// hand-written generator in a foreign language beside it, and that generator,
+/// not the compiler, decided what the artifact said.
+fn run_gen_js(input_path: &str) -> anyhow::Result<()> {
+    let (ast, name) = ast_for_codegen(input_path)?;
+    match codegen_js::generate(&ast, &name) {
+        Ok(code) => {
+            print!("{}", code);
+            Ok(())
+        }
+        Err(e) => anyhow::bail!("{}", e),
+    }
+}
+
+/// `gen-ts`: the same declarations, with the types the spec declared for them.
+///
+/// `gen-js` closed the hole where a hand-written generator decided what the
+/// artifact said. It left a smaller one: a `.t27` declaration carries a type,
+/// an ES module has nowhere to put it, and a `.d.ts` written by hand beside the
+/// output would be that same deciding-generator one file over. This prints the
+/// types from the spec, so there is nothing left to hand-write.
+fn run_gen_ts(input_path: &str) -> anyhow::Result<()> {
+    let (ast, name) = ast_for_codegen(input_path)?;
+    match codegen_ts::generate(&ast, &name) {
         Ok(code) => {
             print!("{}", code);
             Ok(())
@@ -11366,6 +11407,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::GenC { input } => run_gen_c(&input)?,
         Commands::GenRust { input } => run_gen_rust(&input)?,
         Commands::GenJs { input } => run_gen_js(&input)?,
+        Commands::GenTs { input } => run_gen_ts(&input)?,
         Commands::Conformance { input } => run_conformance(&input)?,
         Commands::Path { input, synth } => {
             service::run_path(&std::env::current_dir()?, &input, synth)?
@@ -11780,6 +11822,7 @@ fn main() -> anyhow::Result<()> {
         Commands::GenC { input } => run_gen_c(&input)?,
         Commands::GenRust { input } => run_gen_rust(&input)?,
         Commands::GenJs { input } => run_gen_js(&input)?,
+        Commands::GenTs { input } => run_gen_ts(&input)?,
         Commands::Conformance { input } => run_conformance(&input)?,
         Commands::Path { input, synth } => {
             service::run_path(&std::env::current_dir()?, &input, synth)?
