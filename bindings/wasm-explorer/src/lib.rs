@@ -278,8 +278,8 @@ fn analyze_source(source: &str, name: Option<&str>) -> String {
         "verilog_hir".into(),
         target(Compiler::compile_verilog_hir(source)),
     );
-    targets.insert("js".into(), target(compile_js(source, name)));
-    targets.insert("ts".into(), target(compile_ts(source, name)));
+    targets.insert("js".into(), declared_target(compile_js(source, name)));
+    targets.insert("ts".into(), declared_target(compile_ts(source, name)));
     root.insert("targets".into(), Value::Object(targets));
 
     Value::Object(root).to_string()
@@ -306,20 +306,38 @@ fn declarations_ast(source: &str, name: Option<&str>) -> Result<(Node, String), 
 }
 
 /// The JavaScript backend, reached the way `t27c gen-js` reaches it.
-fn compile_js(source: &str, name: Option<&str>) -> Result<String, String> {
+fn compile_js(source: &str, name: Option<&str>) -> Result<(String, usize), String> {
     let (ast, name) = declarations_ast(source, name)?;
-    codegen_js::generate(&ast, &name)
+    codegen_js::generate_reported(&ast, &name)
 }
 
 /// The TypeScript backend, reached the way `t27c gen-ts` reaches it.
-fn compile_ts(source: &str, name: Option<&str>) -> Result<String, String> {
+fn compile_ts(source: &str, name: Option<&str>) -> Result<(String, usize), String> {
     let (ast, name) = declarations_ast(source, name)?;
-    codegen_ts::generate(&ast, &name)
+    codegen_ts::generate_reported(&ast, &name)
 }
 
 fn target(result: Result<String, String>) -> Value {
     match result {
         Ok(code) => json!({"ok": true, "bytes": code.len(), "code": code}),
+        Err(e) => json!({"ok": false, "error": e}),
+    }
+}
+
+/// A declaration backend's target, carrying what it left out.
+///
+/// The five compiled backends either produce a translation unit or fail. These
+/// two have a third answer: an artifact that is real and incomplete, because a
+/// const holding something JavaScript has no spelling for is announced rather
+/// than allowed to take the other forty declarations down with it. `notEmitted`
+/// is that count, so a catalog can mark the spec partial. Without it the only
+/// way to learn the number is to parse `__NOT_EMITTED__` back out of the code --
+/// a second, weaker implementation of something the backend already knows.
+fn declared_target(result: Result<(String, usize), String>) -> Value {
+    match result {
+        Ok((code, not_emitted)) => {
+            json!({"ok": true, "bytes": code.len(), "code": code, "notEmitted": not_emitted})
+        }
         Err(e) => json!({"ok": false, "error": e}),
     }
 }
@@ -400,6 +418,33 @@ mod tests {
             js["code"].as_str().unwrap().contains("export const N = 7;"),
             "{js}"
         );
+    }
+
+    /// A spec the declaration backends can only half-print is neither broken nor
+    /// whole, and the page can only say so if the count travels with the code.
+    #[test]
+    fn a_partial_artifact_says_how_much_it_left_out() {
+        // `u8` names a type. A type alias has no value to export, so it is
+        // announced -- and the const beside it still is.
+        let j = analyze("module m;\npub const N: u32 = 7;\npub const PackedTrit = u8;\n");
+        for lang in ["js", "ts"] {
+            let t = &j["targets"][lang];
+            assert_eq!(t["ok"], json!(true), "{t}");
+            assert_eq!(t["notEmitted"], json!(1), "{lang}: {t}");
+            // `= 7;` in JavaScript, `= 7 satisfies number;` in TypeScript --
+            // the shared prefix is the part that says the whole spec survived.
+            assert!(t["code"].as_str().unwrap().contains("export const N = 7"), "{t}");
+        }
+        // The compiled backends have no such answer, and must not grow a field
+        // that would read as zero omissions rather than as no such question.
+        assert_eq!(j["targets"]["rust"]["notEmitted"], Value::Null, "{j}");
+    }
+
+    #[test]
+    fn a_whole_artifact_reports_no_omissions() {
+        let j = analyze("module m;\npub const N: u32 = 7;\n");
+        assert_eq!(j["targets"]["js"]["notEmitted"], json!(0));
+        assert_eq!(j["targets"]["ts"]["notEmitted"], json!(0));
     }
 
     #[test]
