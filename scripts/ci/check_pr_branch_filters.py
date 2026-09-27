@@ -91,6 +91,9 @@ NOT_MERGE_CRITICAL = {
     "oracle-nightly.yml": "a nightly report over the whole corpus; it measures, it does not gate a merge",
     "queen-feed-empty-bodies.yml": "it opens issues on a schedule; its own failure gates no merge",
     "queen-feed-untested.yml": "it opens issues on a schedule; its own failure gates no merge",
+    "queen-feed-roadmap.yml": "it opens issues on a schedule; its own failure gates no merge",
+    "needs-boundary.yml": "it labels issues that name no boundary; labelling gates no merge",
+    "queen-export-push.yml": "it pushes bee branches from the container on a schedule; the gates on the pull requests they become are what gate a merge",
     "queen-publish.yml": "it opens pull requests on a schedule; the gates on those pull requests are what gate a merge",
     "queen-refile.yml": "it re-files issues no bee can take again; filing work gates no merge",
     "queen-watchdog.yml": "it asks whether the swarm answers and restarts it; nothing it does gates a merge",
@@ -322,16 +325,20 @@ def self_test():
                 print(result.stdout + result.stderr)
 
     probe("clean classified tree passes", {}, 0, "CLEAN:")
-    for name in ("gate-topology.yml", "untrusted-input-gate.yml"):
+    # The probes name MERGE_CRITICAL's own members, not literals: #4787 moved
+    # gate-topology.yml and untrusted-input-gate.yml out of that list and left
+    # them spelled here, so the self-test unlinked a file it had never written
+    # and crashed on every tree, master included.
+    for name in MERGE_CRITICAL[:2]:
         for key in FILTER_KEYS:
             probe(
                 f"{name} rejects pull_request.{key}",
                 {name: f"on:\n  pull_request:\n    {key}: [master]\njobs: {{}}\n"},
                 1, f"pull_request.{key}",
             )
-    probe("missing classified guard fails", {"untrusted-input-gate.yml": None},
+    probe("missing classified guard fails", {MERGE_CRITICAL[-1]: None},
           1, "MISSING")
-    probe("malformed classified guard fails", {"gate-topology.yml": "on: [\n"},
+    probe("malformed classified guard fails", {MERGE_CRITICAL[0]: "on: [\n"},
           1, "UNPARSEABLE MERGE-CRITICAL")
     at_ceiling = {f"unclassified-{i}.yml": clean for i in range(MAX_UNCLASSIFIED)}
     probe("existing debt at ceiling passes", at_ceiling, 0, "CLEAN:")
