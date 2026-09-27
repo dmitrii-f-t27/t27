@@ -329,3 +329,22 @@ python3 tools/trinity_tools_registry.py --self-check [--trinity-root <clone>]
   card `specs.t27-vendored-compiler` records it as `deprecated` with `gHashTag/t27` as owner.
 - A local build on macOS was attempted and is not recorded: the local zig 0.15.2 could not link
   a hello-world against the Xcode 26 SDK, which is a host defect, not a finding about the tree.
+
+## The FPGA adapter contract (S11)
+
+`specs/fpga/adapter.t27` (card: `trinity/fpga.adapter`) is the FPGA adapter
+contract of [gHashTag/t27#3573](https://github.com/gHashTag/t27/issues/3573):
+the versioned inputs a caller brings (bitstream path, sha256 tied to its
+provenance, board identity under the full-IDCODE rule — the full 32-bit value
+recorded beside the printed nibble-dropped form, so a masked match can never
+pass), the configuration (flasher, cable, sram/flash target), the eight
+distinct error statuses, and the receipt schema `trinity.fpga-receipt.v1`
+with the dry-run/device boundary: a build-only record is `hardware: false`
+and must never carry a result line; a device receipt carries the bitstream
+sha256, the full IDCODE, the transcript hash and an `HW RESULT: N/M
+bit-exact` line. No hardware run may be inferred from synthesis (#3573's
+law). `tools/trinity_fpga_adapter.py check` holds the receipts of
+`conformance/trinity/fpga_adapter.json` to the contract and `self-check`
+plants every defect; the device receipts are the stage-2 runs of
+dmitrii-f-t27/trinity-memory on the AX7203 — the golden chunk (dense5 and
+baseline2, 320/320 Y lines bit-exact) and the #65 measurements.
