@@ -36,3 +36,19 @@
   endpoints and the pod by default; typed text is a length; probes are not work;
   the card opens `/game/browser`, the app's own view, never a `/live/` URL.
 - Its spec of record is `specs/automation/browser-sign-in.t27`.
+
+## v4 -- the caller's own meetings are a source (t27#5416)
+
+- Owner's ask: the board is the control centre of the whole game; the meetings the
+  agent books (`specs/automation/meeting-reminders.t27`) belong on it.
+- `SOURCE_MEETING = "meeting"`: the caller's own `meetings` rows only
+  (`MEETING_OWN_ONLY`), status `planned`, starting within `MEETING_AHEAD_H = 168`
+  hours or ended within `MEETING_ASK_BACK_H = 72`.
+- `meeting_ball`: ended and unanswered is due; ended and answered is no card's
+  move; starting within `MEETING_SOON_H = 24` is ours; later is none.
+- Privacy laws, each a test: `meeting_field_shown` names the five columns a card
+  may carry (title, starts_at, ends_at, mode, status); the tap and calendar
+  tokens, the call link and the place never reach a card
+  (`MEETING_CARD_NO_TOKEN`).
+- `t27c test-report` stays BLOCKED by #5162 (string `==`); the host's binding tests
+  exercise every title. Claim unchanged: `RUN_LIVE = false`.
