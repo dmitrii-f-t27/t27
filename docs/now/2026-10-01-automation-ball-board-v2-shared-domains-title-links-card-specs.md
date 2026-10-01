@@ -52,3 +52,16 @@
   (`MEETING_CARD_NO_TOKEN`).
 - `t27c test-report` stays BLOCKED by #5162 (string `==`); the host's binding tests
   exercise every title. Claim unchanged: `RUN_LIVE = false`.
+
+## v5 -- mail only machines or the owner wrote is nobody's move (t27#5419)
+
+- Live board: 115 mail cards on us. jcrm says "we owe" whenever the newest message
+  is inbound, and a machine's message is always inbound: DMARC reports, noreply
+  notices and a publisher's sign-in mail sat on the board as replies owed, and so
+  did the owner's own domain.
+- `automated_marker` names the markers (noreply, donotreply, mailerdaemon,
+  postmaster, bounce, dmarc, notification), looked for in the address with
+  . - _ + removed. `nobody_to_answer`: every address is a machine's or
+  `OWN_DOMAIN`; a matter with no address is not judged.
+- `mail_ball_weighed`: nobody to answer is `none`, otherwise jcrm's decision
+  stands. Such matters are counted (`AUTOMATED_IS_COUNTED`), never dropped.
