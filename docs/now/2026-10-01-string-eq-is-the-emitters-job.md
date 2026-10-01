@@ -34,11 +34,19 @@
   unexpected failures and 57 unexpected passes. Master is already red there,
   for parse, typecheck and Verilog reasons this change does not touch.
 - Seals: the FROZEN seal moves (FROZEN.md section 5), as it did in #3962,
-  #3973 and #4114. Four spec seals now record the old, invalid Zig. They cover
-  specs/account/auth.t27 and specs/github/tests/e2e_full_flow.t27, and in both
-  a literal-initialised local is now compared with `std.mem.eql`.
-  `check_seal_currency` goes from 592 to 596 stale; master is already red
-  there. They are not resealed here.
+  #3973 and #4114. The new emitter made four spec seals stale, because their
+  Zig output changed: two for specs/account/auth.t27 and two for
+  specs/github/tests/e2e_full_flow.t27. In both specs a literal-initialised
+  local is now compared with `std.mem.eql`, so the old seals recorded invalid
+  Zig.
+- Those four are resealed with this branch's t27c (`t27c seal <spec> --save`,
+  which also refreshes the second seal file that names the same spec).
+  `check_seal_currency` goes 596 -> 592 stale, the same count as master, which
+  is already red there. No other seal is touched.
+  - auth.t27: only `gen_hash_zig` and `sealed_at` change.
+  - e2e_full_flow.t27: `spec_hash` also changes, because the spec had been
+    edited after its 2026-08-28 seal. One of its two files also moves
+    `sealed_by` from 0.2.0 to 0.4.0.
 - Regression guard: bootstrap/tests/string_eq_zig.rs. It covers the literal,
   const, param, local and `-> str` call cases, a numeric control, a no-leak
   case, and a `test-report` run end to end (6/6).
