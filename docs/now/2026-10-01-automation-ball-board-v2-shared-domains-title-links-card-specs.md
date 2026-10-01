@@ -73,17 +73,3 @@
   conversations off "on us". That was the spec's mistake, not jcrm's.
 - `relay_domain`: an address on `RELAY_DOMAIN` (or under it) is never a
   machine's. `RELAY_SEEN` records the 48.
-
-## v7 -- a mailbox provider's matter is not one client (t27#5449)
-
-- Asked: one "where is the ball" status per client, the CRM and the mail joined.
-  Measured: 0 of 200 CRM clients and 1505 Telegram contacts match any of 128
-  mail matters or 127 senders by full name, username or domain stem; crm_people
-  carries no email. The join stays the explicit `ball_link`
-  (`CRM_MAIL_OVERLAP_SEEN = 0`), nothing is guessed.
-- The real break runs the other way: jcrm keys a matter by domain, so
-  `gmail.com` is one matter of 14 people under one terminal stage while 3 of
-  them wrote last within a day. `pooled_matter`: a shared-domain matter with
-  more than one person is a mailbox, not a client. Counted
-  (`POOLED_IS_COUNTED`, `POOLED_SEEN = 2`: gmail.com, groups.io) and named on
-  the card; the ball stays jcrm's. The split belongs in jcrm's `classify()`.
