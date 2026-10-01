@@ -7532,6 +7532,21 @@ impl Codegen {
         out
     }
 
+    /// #5162: locals a block declares as strings (see `declares_string`).
+    fn collect_string_locals(stmts: &[Node]) -> Vec<String> {
+        let mut out = Vec::new();
+        for stmt in stmts {
+            if stmt.kind == NodeKind::StmtLocal
+                && !stmt.name.is_empty()
+                && Self::declares_string(&stmt.extra_type, stmt.children.first())
+            {
+                out.push(stmt.name.clone());
+            }
+            out.extend(Self::collect_string_locals(&stmt.children));
+        }
+        out
+    }
+
     /// Locals a block declares with an explicit float type.
     fn collect_float_locals(stmts: &[Node]) -> Vec<String> {
         let mut out = Vec::new();
@@ -7649,8 +7664,29 @@ impl Codegen {
     }
 
     fn is_string_typed(&self, node: &Node) -> bool {
+        // #5162: a call to a function this spec declares `-> str` yields a
+        // string too -- `mail_ball("us") == BALL_OURS`. Read off the
+        // signature, not inferred.
+        if node.kind == NodeKind::ExprCall {
+            return self
+                .declared_fn_returns
+                .get(&node.name)
+                .map(|ret| Self::t27_array_type_to_zig(ret) == "[]const u8")
+                .unwrap_or(false);
+        }
         Self::trailing_name(node)
             .map(|n| self.string_names.contains(&n))
+            .unwrap_or(false)
+    }
+
+    /// #5162: whether a declaration (`const`, `let`) makes its name a string:
+    /// declared `: str` (anything mapping to `[]const u8`), or untyped and
+    /// initialised by a string literal. Decided from the declaration alone.
+    fn declares_string(declared_type: &str, init: Option<&Node>) -> bool {
+        if !declared_type.trim().is_empty() {
+            return Self::t27_array_type_to_zig(declared_type) == "[]const u8";
+        }
+        init.map(|n| n.kind == NodeKind::ExprLiteral && n.extra_kind == "string")
             .unwrap_or(false)
     }
 
@@ -7840,6 +7876,19 @@ impl Codegen {
                 }
                 NodeKind::EnumDecl if !d.name.is_empty() => {
                     self.declared_enums.insert(d.name.clone());
+                }
+                // #5162: a module-level string constant. `source == SOURCE_MEETING`
+                // compares two `[]const u8` with neither side a literal, so the
+                // literal test missed it and Zig refused the `==`. A const
+                // declared `: str`, or untyped but initialised by a string
+                // literal, is a string by declaration -- no inference needed.
+                // Global like the struct fields: Zig forbids a local or a
+                // parameter from shadowing a module-level declaration, so the
+                // name cannot mean anything else inside a function.
+                NodeKind::ConstDecl if !d.name.is_empty() => {
+                    if Self::declares_string(&d.extra_type, d.children.first()) {
+                        self.string_names.insert(d.name.clone());
+                    }
                 }
                 NodeKind::StructDecl => {
                     for f in &d.children {
@@ -8725,6 +8774,15 @@ impl Codegen {
         let mut param_float = Vec::new();
         let mut param_signed = Vec::new();
         let mut param_string = Vec::new();
+        // #5162: string LOCALS, the same way -- `let field: str = ...` then
+        // `field == other`. Recorded in `param_string` so they leave with the
+        // function; a name already known (a field, a module const) is left
+        // alone so its removal on exit cannot erase the outer fact.
+        for n in Self::collect_string_locals(&node.children) {
+            if self.string_names.insert(n.clone()) {
+                param_string.push(n);
+            }
+        }
         for (pname, pty) in &node.params {
             let t = pty.trim();
             if Self::t27_array_type_to_zig(pty) == "[]const u8" {
@@ -8881,6 +8939,13 @@ impl Codegen {
         // W625: len-taint is per-function; a name reused in the next function
         // must not inherit it.
         self.len_locals.clear();
+        // #5162: string locals a test declares, scoped to the test.
+        let mut test_string = Vec::new();
+        for n in Self::collect_string_locals(&node.children) {
+            if self.string_names.insert(n.clone()) {
+                test_string.push(n);
+            }
+        }
 
 
         // Test-block bindings (`b0 = f(...);`) parse as StmtAssign, not
@@ -8964,6 +9029,9 @@ impl Codegen {
         }
         self.dedent();
         self.write_line("}");
+        for n in &test_string {
+            self.string_names.remove(n);
+        }
     }
 
     fn gen_invariant_block(&mut self, node: &Node) {
