@@ -19,3 +19,20 @@
   strings (`==` on `[]const u8` in the Zig backend) -- v1 of this spec and
   mail-push included. Their tests are exercised only by the host's binding tests.
 - Claim unchanged: `RUN_LIVE = false`.
+
+## v3 -- the agent's browser is a source, and only ever the caller's own
+
+- Owner's ask: see on the board what the agent is doing in the AI browser, open
+  that browser at any moment to help or steer it, and keep people safe giving
+  their data.
+- `SOURCE_BROWSER = "browser"`: the caller's own `browser_sessions` row
+  (`BROWSER_OWN_ONLY`, `WHERE telegram_id = caller` -- the owner included), its
+  open ask (input request or approval, `ASK_TTL_MIN = 10`) and its last
+  non-probe journal step.
+- `browser_ball`: an open ask or the person holding the wheel is ours; a live
+  browser asking nothing is the agent's move, theirs; a stopped one is no card.
+- Privacy laws, each a test: `browser_field_shown` names the three columns a
+  card may carry (state, last_seen_at, person_wheel_until) and refuses tokens,
+  endpoints and the pod by default; typed text is a length; probes are not work;
+  the card opens `/game/browser`, the app's own view, never a `/live/` URL.
+- Its spec of record is `specs/automation/browser-sign-in.t27`.
