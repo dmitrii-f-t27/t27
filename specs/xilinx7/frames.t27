@@ -1,0 +1,157 @@
+// SPDX-License-Identifier: Apache-2.0
+; frames.t27 -- what a 7-series configuration frame carries besides configuration: its ECC.
+; A frame is 101 words. Word 50 holds a 13-bit ECC in its low bits (12 Hamming bits and an
+; overall parity bit); the device checks it on readback, and a writer must produce it.
+; ----
+; SOURCE (prjxray c9f02d857):
+;   lib/xilinx/xc7series/ecc.cc:18-60     icap_ecc, calculateECC, updateECC
+;   lib/include/prjxray/xilinx/frames.h:99   the frames reader re-computes it for every frame
+; ORACLE: the ECC Vivado wrote into every frame of its bitstreams (driver: bitwalk --ecc);
+; the in-spec test `ecc_matches_vivado_frame` folds one such frame, copied from a Vivado file.
+; prjxray-written (openXC7) bitstreams are not an independent oracle for this rule: their
+; ECC comes from the code this spec is read from.
+; ----
+; Driver: bitwalk.rs beside this file.
+;   t27c gen-rust specs/xilinx7/frames.t27 > specs/xilinx7/frames.rs
+
+module xilinx7_frames;
+
+pub const FRAME_WORDS : u32 = 101;
+pub const ECC_WORD : u32 = 0x32;
+pub const LAST_WORD : u32 = 0x64;
+pub const ECC_BITS : u32 = 0x1FFF;
+pub const ECC_KEEP : u32 = 0xFFFFE000;
+
+// ============================================================================
+// ECC (ecc.cc:20-48). Every set bit of the frame XORs one 13-bit code into the running
+// value: the bit's offset in the frame (word * 32 + bit) moved past the code points with a
+// single bit set or that are too low -- 0x1320 for words 0..6, 0x1340 for 7..37, 0x1360
+// from 38. Word 50's own ECC bits do not count. After word 100 the overall parity of the
+// low 12 bits goes into bit 12.
+// ============================================================================
+
+pub fn ecc_base(idx: u32) u32 {
+    const off = idx * 32;
+    const past_800 = idx > 0x25;
+    if (past_800) {
+        return off + 0x1360;
+    }
+    const past_400 = idx > 0x6;
+    if (past_400) {
+        return off + 0x1340;
+    }
+    return off + 0x1320;
+}
+
+pub fn ecc_data(idx: u32, data: u32) u32 {
+    const is_ecc_word = idx == ECC_WORD;
+    if (is_ecc_word) {
+        return data & ECC_KEEP;
+    }
+    return data;
+}
+
+pub fn parity(v: u32) u32 {
+    var x : u32 = v;
+    x = x ^ (x >> 16);
+    x = x ^ (x >> 8);
+    x = x ^ (x >> 4);
+    x = x ^ (x >> 2);
+    x = x ^ (x >> 1);
+    return x & 1;
+}
+
+// Fold word idx of a frame into the running ECC.
+pub fn ecc_after(idx: u32, data: u32, ecc: u32) u32 {
+    const d = ecc_data(idx, data);
+    const base = ecc_base(idx);
+    var e : u32 = ecc;
+    var i : u32 = 0;
+    while i < 32 {
+        const set = ((d >> i) & 1) == 1;
+        if (set) {
+            e = e ^ (base + i);
+        }
+        i = i + 1;
+    }
+    const is_last = idx == LAST_WORD;
+    if (is_last) {
+        return e ^ (parity(e & 0xFFF) << 12);
+    }
+    return e;
+}
+
+pub fn ecc_stored(word50: u32) u32 {
+    return word50 & ECC_BITS;
+}
+
+pub fn ecc_ok(word50: u32, computed: u32) bool {
+    return (word50 & ECC_BITS) == (computed & ECC_BITS);
+}
+
+// Word 50 with its ECC replaced (updateECC, ecc.cc:55-60).
+pub fn with_ecc(word50: u32, ecc: u32) u32 {
+    return (word50 & ECC_KEEP) | (ecc & ECC_BITS);
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+test ecc_codes_skip_single_bit_points {
+    assert ecc_base(0) == 0x1320;
+    assert ecc_base(6) == 6 * 32 + 0x1320;
+    assert ecc_base(7) == 7 * 32 + 0x1340;
+    assert ecc_base(0x25) == 0x25 * 32 + 0x1340;
+    assert ecc_base(0x26) == 0x26 * 32 + 0x1360;
+    assert ecc_base(LAST_WORD) + 31 <= ECC_BITS;
+}
+
+test ecc_ignores_its_own_bits {
+    assert ecc_after(ECC_WORD, ECC_BITS, 0) == 0;
+    assert ecc_after(ECC_WORD, 0x2000, 0) == ecc_base(ECC_WORD) + 13;
+}
+
+test ecc_parity_lands_in_bit_12 {
+    assert parity(0x320) == 1;
+    assert parity(0x321) == 0;
+    assert ecc_after(LAST_WORD, 0, 0x0320) == 0x1320;
+    assert ecc_after(LAST_WORD, 0, 0x0321) == 0x0321;
+}
+
+test with_ecc_keeps_the_high_bits {
+    assert with_ecc(0xABCDFFFF, 0x0123) == 0xABCDE123;
+    assert ecc_ok(with_ecc(0x12340000, 0x1ABC), 0x1ABC) == true;
+    assert ecc_stored(0xFFFFE001) == 1;
+}
+
+; The two frames below are copied word for word from a Vivado bitstream
+; (vivado/vendor/A_direct_top.bit, frames 833 and 1528 of its FDRI stream; every word not
+; listed is 0). Their ECC is the one Vivado wrote, not one this spec computed. Found with
+; `bitwalk --frame A_direct_top.bit 4` and `... 6`. Between them they set bits in all three
+; code ranges (words 0..6, 7..37, 38..100), and one stored ECC has bit 12 set and one not.
+test ecc_matches_vivado_frame_833 {
+    assert ecc_after(LAST_WORD, 0,
+           ecc_after(73, 0x00001005,
+           ecc_after(ECC_WORD, 0x00000ACC,
+           ecc_after(24, 0x00001005,
+           ecc_after(0, 0x0000D00D, 0))))) == 0x0ACC;
+}
+
+test ecc_matches_vivado_frame_1528 {
+    assert ecc_after(LAST_WORD, 0,
+           ecc_after(54, 0x00400000,
+           ecc_after(53, 0x40400000,
+           ecc_after(ECC_WORD, 0x00001AE2,
+           ecc_after(3, 0x40000000,
+           ecc_after(2, 0x00440005,
+           ecc_after(1, 0x40004400,
+           ecc_after(0, 0x40000001, 0)))))))) == 0x1AE2;
+}
+
+; Frame 1605 of the same file: word 50 is the only nonzero word, and it carries data above
+; its ECC bits (bit 26). The low 12 bits fold to odd parity, so this is the frame that fails
+; when the parity step is dropped -- the two frames above do not.
+test ecc_matches_vivado_frame_1605 {
+    assert ecc_after(LAST_WORD, 0, ecc_after(ECC_WORD, 0x040009BA, 0)) == 0x09BA;
+}
