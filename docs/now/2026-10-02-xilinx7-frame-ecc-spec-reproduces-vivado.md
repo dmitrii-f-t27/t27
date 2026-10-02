@@ -13,8 +13,13 @@
 - Oracle, in the spec: three frames copied word for word from a Vivado
   bitstream (`A_direct_top.bit`, FDRI frames 833, 1528 and 1605) and the ECC
   Vivado stored in them. Between them they cover all three code ranges, data
-  in word 50 above its ECC bits, and a nonzero parity step. 7/7 tests pass
+  in word 50 above its ECC bits, and a nonzero parity step. 8/8 tests pass
   under `t27c test-report`.
+- For comparison: fpga-assembler (lromor/fpga-assembler, the C++ rewrite of
+  this back half) tests the same function with six hand-computed vectors
+  (`fpga/xilinx/arch-xc7-frame_test.cc:31-44`); its test file has no frame
+  from a vendor bitstream. Those six vectors are now a test here too, so the
+  spec is checked against both that implementation and Vivado.
 - Oracle, through the driver: `bitwalk` now recomputes the ECC of every FDRI
   frame with the generated module. Over the 6 Vivado bitstreams (2 local, 4
   prjxray-db harness) that is 32,520 frames, bad 0. Most of those are empty;

@@ -155,3 +155,15 @@ test ecc_matches_vivado_frame_1528 {
 test ecc_matches_vivado_frame_1605 {
     assert ecc_after(LAST_WORD, 0, ecc_after(ECC_WORD, 0x040009BA, 0)) == 0x09BA;
 }
+
+; The six vectors fpga-assembler pins for the same function (lromor/fpga-assembler,
+; fpga/xilinx/arch-xc7-frame_test.cc:31-44, read 2026-10-02). They are computed from the rule,
+; not taken from a device, so they say "agrees with that implementation", nothing more.
+test ecc_agrees_with_fpga_assembler_vectors {
+    assert ecc_after(0, 0, 0) == 0;
+    assert ecc_after(0, 1, 0) == 0x1320;
+    assert ecc_after(0x7, 1, 0) == 0x1420;
+    assert ecc_after(0x26, 1, 0) == 0x1820;
+    assert ecc_after(ECC_WORD, 0xFFFFFFFF, 0) == 0x19AC;
+    assert ecc_after(LAST_WORD, 0, 1) == 0x1001;
+}
