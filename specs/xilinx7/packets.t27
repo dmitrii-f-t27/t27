@@ -1,0 +1,397 @@
+// SPDX-License-Identifier: Apache-2.0
+; packets.t27 -- the 7-series configuration packet stream, as one spec.
+; A `.bit` file after its ASCII header is a sequence of big-endian 32-bit words: a sync word,
+; then packets. This spec owns the grammar of those packets, the configuration registers they
+; address, the frame address layout, and the running CRC the device checks. Drivers only read
+; words and print; every rule a driver applies is a function below.
+; ----
+; SOURCE (prjxray c9f02d857, cited per section below):
+;   lib/xilinx/configuration_packet.cc:101-167      packet header decode
+;   lib/include/prjxray/xilinx/configuration_register.h:61-83   Series7 register numbers
+;   lib/include/prjxray/xilinx/xc7series/command.h:18-36         CMD register values
+;   lib/xilinx/xc7series/frame_address.cc:20-29     FAR layout
+;   lib/include/prjxray/xilinx/xc7series/crc.h:15-43            icap_crc
+;   tools/bits2rbt/configuration_packets.cc:156-172 CRC restarts after the RCRC command
+; ORACLE: the CRC tests below use a value Vivado wrote, not one this spec computed.
+; ----
+; Meant to replace, in cli/tri/src/fpga.rs, the hand-written packet walker in `patch_cor0`
+; (which leaves the CRC stale, see `crc_after`) and the packet walk and COR0 decode that
+; `bit_config` gets from scripts/dump_bit_config.py. Not yet the CTL0 / COR1 field names:
+; they need a cited source first.
+; ----
+; Driver: bitwalk.rs beside this file. It only reads files and prints:
+;   t27c gen-rust specs/xilinx7/packets.t27 > specs/xilinx7/packets.rs
+;   rustc -O --edition 2021 specs/xilinx7/bitwalk.rs -o specs/xilinx7/bitwalk
+
+module xilinx7_packets;
+
+// ============================================================================
+// Words that are not packets.
+// ============================================================================
+
+pub const SYNC : u32 = 0xAA995566;
+pub const DUMMY : u32 = 0xFFFFFFFF;
+pub const BUS_WIDTH_SYNC : u32 = 0x000000BB;
+pub const BUS_WIDTH_DETECT : u32 = 0x11220044;
+
+// A Type-1 header with opcode NOP, register 0 and no payload. Pads every command.
+pub const NOOP : u32 = 0x20000000;
+
+// ============================================================================
+// Header: [31:29] type, [28:27] opcode.
+// Type 1: [26:13] register, [10:0] word count.
+// Type 2: [26:0] word count; the register is the one the previous Type-1 named.
+// (configuration_packet.cc:101-167)
+// ============================================================================
+
+pub const TYPE_NONE : u32 = 0;
+pub const TYPE1 : u32 = 1;
+pub const TYPE2 : u32 = 2;
+
+pub const OP_NOP : u32 = 0;
+pub const OP_READ : u32 = 1;
+pub const OP_WRITE : u32 = 2;
+
+pub fn header_type(w: u32) u32 {
+    return w >> 29;
+}
+
+pub fn opcode(w: u32) u32 {
+    return (w >> 27) & 3;
+}
+
+pub fn t1_reg(w: u32) u32 {
+    return (w >> 13) & 0x3FFF;
+}
+
+pub fn t1_count(w: u32) u32 {
+    return w & 0x7FF;
+}
+
+pub fn t2_count(w: u32) u32 {
+    return w & 0x7FFFFFF;
+}
+
+pub fn is_header(w: u32) bool {
+    const t = header_type(w);
+    return t == TYPE1 or t == TYPE2;
+}
+
+// Payload words that follow this header. Any other word between packets is padding.
+pub fn count_of(w: u32) u32 {
+    const t = header_type(w);
+    if (t == TYPE1) {
+        return t1_count(w);
+    }
+    if (t == TYPE2) {
+        return t2_count(w);
+    }
+    return 0;
+}
+
+// The register a payload word lands in, after header `w`. Type 2 keeps the previous one.
+pub fn reg_after(prev: u32, w: u32) u32 {
+    const t1 = header_type(w) == TYPE1;
+    if (t1) {
+        return t1_reg(w);
+    }
+    return prev;
+}
+
+pub fn op_after(prev: u32, w: u32) u32 {
+    if (is_header(w)) {
+        return opcode(w);
+    }
+    return prev;
+}
+
+// Payload words still owed. `left` is the count before this word.
+pub fn left_after(left: u32, w: u32) u32 {
+    if (left > 0) {
+        return left - 1;
+    }
+    return count_of(w);
+}
+
+pub fn type1(op: u32, reg: u32, count: u32) u32 {
+    return (TYPE1 << 29) | ((op & 3) << 27) | ((reg & 0x3FFF) << 13) | (count & 0x7FF);
+}
+
+pub fn type2(op: u32, count: u32) u32 {
+    return (TYPE2 << 29) | ((op & 3) << 27) | (count & 0x7FFFFFF);
+}
+
+// ============================================================================
+// Series7 configuration registers (configuration_register.h:61-83).
+// ============================================================================
+
+pub const REG_CRC : u32 = 0x00;
+pub const REG_FAR : u32 = 0x01;
+pub const REG_FDRI : u32 = 0x02;
+pub const REG_FDRO : u32 = 0x03;
+pub const REG_CMD : u32 = 0x04;
+pub const REG_CTL0 : u32 = 0x05;
+pub const REG_MASK : u32 = 0x06;
+pub const REG_STAT : u32 = 0x07;
+pub const REG_LOUT : u32 = 0x08;
+pub const REG_COR0 : u32 = 0x09;
+pub const REG_MFWR : u32 = 0x0A;
+pub const REG_CBC : u32 = 0x0B;
+pub const REG_IDCODE : u32 = 0x0C;
+pub const REG_AXSS : u32 = 0x0D;
+pub const REG_COR1 : u32 = 0x0E;
+pub const REG_WBSTAR : u32 = 0x10;
+pub const REG_TIMER : u32 = 0x11;
+pub const REG_UNKNOWN : u32 = 0x13;
+pub const REG_BOOTSTS : u32 = 0x16;
+pub const REG_CTL1 : u32 = 0x18;
+pub const REG_BSPI : u32 = 0x1F;
+
+// ============================================================================
+// CMD register values (xc7series/command.h:18-36).
+// ============================================================================
+
+pub const CMD_NULL : u32 = 0x00;
+pub const CMD_WCFG : u32 = 0x01;
+pub const CMD_MFW : u32 = 0x02;
+pub const CMD_LFRM : u32 = 0x03;
+pub const CMD_RCFG : u32 = 0x04;
+pub const CMD_START : u32 = 0x05;
+pub const CMD_RCAP : u32 = 0x06;
+pub const CMD_RCRC : u32 = 0x07;
+pub const CMD_AGHIGH : u32 = 0x08;
+pub const CMD_SWITCH : u32 = 0x09;
+pub const CMD_GRESTORE : u32 = 0x0A;
+pub const CMD_SHUTDOWN : u32 = 0x0B;
+pub const CMD_GCAPTURE : u32 = 0x0C;
+pub const CMD_DESYNC : u32 = 0x0D;
+pub const CMD_IPROG : u32 = 0x0F;
+pub const CMD_CRCC : u32 = 0x10;
+pub const CMD_LTIMER : u32 = 0x11;
+pub const CMD_BSPI_READ : u32 = 0x12;
+pub const CMD_FALL_EDGE : u32 = 0x13;
+
+// ============================================================================
+// Frame address register (frame_address.cc:20-49):
+//   [25:23] block type, [22] bottom half, [21:17] row, [16:7] column, [6:0] minor.
+// ============================================================================
+
+pub const BLOCK_CLB_IO_CLK : u32 = 0;
+pub const BLOCK_BLOCK_RAM : u32 = 1;
+pub const BLOCK_CFG_CLB : u32 = 2;
+
+pub const WORDS_PER_FRAME : u32 = 101;
+
+pub fn far(block: u32, bottom: u32, row: u32, column: u32, minor: u32) u32 {
+    return ((block & 7) << 23) | ((bottom & 1) << 22) | ((row & 0x1F) << 17) | ((column & 0x3FF) << 7) | (minor & 0x7F);
+}
+
+pub fn far_block(a: u32) u32 {
+    return (a >> 23) & 7;
+}
+
+pub fn far_bottom(a: u32) u32 {
+    return (a >> 22) & 1;
+}
+
+pub fn far_row(a: u32) u32 {
+    return (a >> 17) & 0x1F;
+}
+
+pub fn far_column(a: u32) u32 {
+    return (a >> 7) & 0x3FF;
+}
+
+pub fn far_minor(a: u32) u32 {
+    return a & 0x7F;
+}
+
+// FDRI carries whole frames only.
+pub fn whole_frames(words: u32) bool {
+    return words - (words / WORDS_PER_FRAME) * WORDS_PER_FRAME == 0;
+}
+
+// ============================================================================
+// CRC (crc.h:15-43). CRC32C polynomial, fed 37 bits per written word: the 32 data bits
+// LSB first, then the low 5 bits of the register address. prjxray widens to 64 bits and
+// shifts the polynomial left by one; feeding the bits one at a time is the same function.
+// ============================================================================
+
+pub const CRC32C_POLY : u32 = 0x82F63B78;
+
+pub fn crc_bit(bit: u32, crc: u32) u32 {
+    const differ = ((bit ^ crc) & 1) == 1;
+    if (differ) {
+        return (crc >> 1) ^ CRC32C_POLY;
+    }
+    return crc >> 1;
+}
+
+pub fn crc_step(addr: u32, data: u32, prev: u32) u32 {
+    var crc : u32 = prev;
+    var i : u32 = 0;
+    while i < 32 {
+        crc = crc_bit(data >> i, crc);
+        i = i + 1;
+    }
+    var j : u32 = 0;
+    while j < 5 {
+        crc = crc_bit(addr >> j, crc);
+        j = j + 1;
+    }
+    return crc;
+}
+
+// The running CRC after one written payload word.
+//   CRC register: the device compares the word against the running value, then restarts.
+//   CMD RCRC:     restarts the running value (configuration_packets.cc:156-175).
+//   anything else: folded in.
+// Reads are not folded in; the walker only calls this for OP_WRITE.
+// Consequence: a tool that rewrites any word between an RCRC and the next CRC write --
+// COR0's OSCFSEL, say -- must rewrite that CRC word too, or the device stops with CRC_ERROR.
+pub fn crc_after(reg: u32, data: u32, crc: u32) u32 {
+    const is_check = reg == REG_CRC;
+    if (is_check) {
+        return 0;
+    }
+    const is_reset = reg == REG_CMD and data == CMD_RCRC;
+    if (is_reset) {
+        return 0;
+    }
+    return crc_step(reg & 0x1F, data, crc);
+}
+
+pub fn crc_ok(written: u32, running: u32) bool {
+    return written == running;
+}
+
+// The CRC word to write after a patch, given the running value over the original words and
+// over the patched ones. A check the original passed is re-sealed; a check the original
+// already failed is left failing -- a patch must not turn a broken bitstream into a good one.
+pub fn resealed(written: u32, orig_running: u32, new_running: u32) u32 {
+    if (crc_ok(written, orig_running)) {
+        return new_running;
+    }
+    return written;
+}
+
+// ============================================================================
+// COR0 (configuration options 0), field by field, in the order prjxray sets them
+// (xc7series/configuration_options_0_value.h:55-119). OSCFSEL is the field prjxray calls
+// SetCclkFrequency.
+// ============================================================================
+
+pub const COR0_FIELDS : [11]str = ["pwrdwn_stat", "done_pipe", "drive_done", "single", "oscfsel", "ssclksrc", "done_cycle", "match_cycle", "lock_cycle", "gts_cycle", "gwe_cycle"];
+pub const COR0_HI : [11]u32 = [27, 25, 24, 23, 22, 16, 14, 11, 8, 5, 2];
+pub const COR0_LO : [11]u32 = [27, 25, 24, 23, 17, 15, 12, 9, 6, 3, 0];
+
+pub fn field(v: u32, hi: u32, lo: u32) u32 {
+    const width = hi - lo + 1;
+    if (width >= 32) {
+        return v;
+    }
+    return (v >> lo) & ((1 << width) - 1);
+}
+
+pub const COR0_OSCFSEL_SHIFT : u32 = 17;
+pub const COR0_OSCFSEL_CLEAR : u32 = 0xFF81FFFF;
+
+pub fn cor0_oscfsel(cor0: u32) u32 {
+    return (cor0 >> COR0_OSCFSEL_SHIFT) & 0x3F;
+}
+
+pub fn cor0_with_oscfsel(cor0: u32, v: u32) u32 {
+    return (cor0 & COR0_OSCFSEL_CLEAR) | ((v & 0x3F) << COR0_OSCFSEL_SHIFT);
+}
+
+// ============================================================================
+// Tests. Headers are words taken from real bitstreams; the CRC value is Vivado's.
+// ============================================================================
+
+test header_words_vivado_writes {
+    assert type1(OP_WRITE, REG_CMD, 1) == 0x30008001;
+    assert type1(OP_WRITE, REG_FDRI, 0) == 0x30004000;
+    assert type1(OP_WRITE, REG_CRC, 1) == 0x30000001;
+    assert type1(OP_WRITE, REG_COR0, 1) == 0x30012001;
+    assert type1(OP_WRITE, REG_IDCODE, 1) == 0x30018001;
+    assert type1(OP_NOP, 0, 0) == NOOP;
+}
+
+test header_decode {
+    assert header_type(0x30012001) == TYPE1;
+    assert opcode(0x30012001) == OP_WRITE;
+    assert t1_reg(0x30012001) == REG_COR0;
+    assert t1_count(0x30012001) == 1;
+    assert count_of(NOOP) == 0;
+    assert count_of(SYNC) == 0;
+    assert is_header(SYNC) == false;
+    assert is_header(DUMMY) == false;
+}
+
+// xc7a35t: 5420 frames of 101 words in one Type-2 FDRI write.
+test type2_carries_the_frames {
+    const w = type2(OP_WRITE, 5420 * WORDS_PER_FRAME);
+    assert w == 0x50085A5C;
+    assert t2_count(w) == 547420;
+    assert reg_after(REG_FDRI, w) == REG_FDRI;
+    assert op_after(OP_NOP, w) == OP_WRITE;
+    assert whole_frames(547420) == true;
+    assert whole_frames(547421) == false;
+}
+
+test left_counts_down_then_reloads {
+    assert left_after(0, 0x30008001) == 1;
+    assert left_after(1, CMD_RCRC) == 0;
+    assert left_after(0, NOOP) == 0;
+}
+
+test far_round_trip {
+    const a = far(BLOCK_BLOCK_RAM, 1, 3, 42, 127);
+    assert far_block(a) == BLOCK_BLOCK_RAM;
+    assert far_bottom(a) == 1;
+    assert far_row(a) == 3;
+    assert far_column(a) == 42;
+    assert far_minor(a) == 127;
+}
+
+// Vivado, A_direct_top.bit (xc7a35tcsg324-1): after the CRC check that closes FDRI it writes
+// CMD GRESTORE, CMD LFRM, CMD START, FAR 0x03BE0000, MASK 0x501, CTL0 0x501, then CRC 0xE3AD7EA5.
+test crc_matches_vivado_tail {
+    const c1 = crc_after(REG_CMD, CMD_GRESTORE, 0);
+    const c2 = crc_after(REG_CMD, CMD_LFRM, c1);
+    const c3 = crc_after(REG_CMD, CMD_START, c2);
+    const c4 = crc_after(REG_FAR, 0x03BE0000, c3);
+    const c5 = crc_after(REG_MASK, 0x501, c4);
+    const c6 = crc_after(REG_CTL0, 0x501, c5);
+    assert crc_ok(0xE3AD7EA5, c6) == true;
+}
+
+test crc_restarts {
+    assert crc_after(REG_CMD, CMD_RCRC, 0x12345678) == 0;
+    assert crc_after(REG_CRC, 0x12345678, 0x12345678) == 0;
+    assert crc_step(0, 0, 0) == 0;
+}
+
+test reseal_only_what_passed {
+    assert resealed(0xE3AD7EA5, 0xE3AD7EA5, 0x11111111) == 0x11111111;
+    assert resealed(0xDEADBEEF, 0xE3AD7EA5, 0x11111111) == 0xDEADBEEF;
+}
+
+// Vivado's COR0 in every harness bitstream, field by field.
+test cor0_fields_of_vivado_default {
+    assert field(0x02003FE5, COR0_HI[1], COR0_LO[1]) == 1;
+    assert field(0x02003FE5, COR0_HI[4], COR0_LO[4]) == 0;
+    assert field(0x02003FE5, COR0_HI[6], COR0_LO[6]) == 3;
+    assert field(0x02003FE5, COR0_HI[7], COR0_LO[7]) == 7;
+    assert field(0x02003FE5, COR0_HI[8], COR0_LO[8]) == 7;
+    assert field(0x02003FE5, COR0_HI[9], COR0_LO[9]) == 4;
+    assert field(0x02003FE5, COR0_HI[10], COR0_LO[10]) == 5;
+    assert field(0x02003FE5, 31, 0) == 0x02003FE5;
+}
+
+test cor0_oscfsel_field {
+    assert cor0_oscfsel(0x02003FE5) == 0;
+    assert cor0_with_oscfsel(0x02003FE5, 5) == 0x020A3FE5;
+    assert cor0_oscfsel(cor0_with_oscfsel(0x02003FE5, 63)) == 63;
+    assert cor0_with_oscfsel(cor0_with_oscfsel(0x02003FE5, 9), 0) == 0x02003FE5;
+}
