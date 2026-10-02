@@ -47,6 +47,13 @@ struct Walk {
     frames: Vec<[u32; 101]>,
 }
 
+impl Walk {
+    // far.t27's part number for the IDCODE this stream writes (PARTS if none or unknown).
+    fn part(&self) -> u32 {
+        self.idcode.map_or(w::PARTS, w::part_of_idcode)
+    }
+}
+
 fn word(b: &[u8], i: usize) -> u32 {
     u32::from_be_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]])
 }
@@ -122,9 +129,10 @@ fn walk(b: &mut [u8], cor0_new: Option<u32>, reseal: bool, min_nz: usize) -> Wal
 }
 
 // Pad frames of a whole-part write starting at FAR 0: the ROW_PAD_FRAMES after each group.
-fn pad_positions() -> Vec<u32> {
+fn pad_positions(part: u32) -> Vec<u32> {
     let (mut at, mut pads) = (0u32, vec![]);
-    for g in 0..w::XC7A35T_GROUPS {
+    let g0 = w::first_group(part);
+    for g in g0..g0 + w::PART_GROUPS[part as usize] {
         at += w::group_frames(g);
         for k in 0..w::ROW_PAD_FRAMES { pads.push(at + k); }
         at += w::ROW_PAD_FRAMES;
@@ -140,9 +148,14 @@ fn report(name: &str, r: &Walk) {
     println!("{name}\n  sync @ byte {}  CRC checks {} (bad {})  FDRI {} words = {} frames (whole: {})\n  COR0 {}  IDCODE {}  CMD {:?}",
              r.sync_at, r.checks, r.bad, r.fdri, frames, whole, cor0, id, r.cmds);
     println!("  ECC frames {} (bad {}; with data {}, nonzero ECC {})", r.ecc_frames, r.ecc_bad, r.ecc_data, r.ecc_nonzero);
-    let walk = w::part_fdri_frames();
+    let part = r.part();
+    if part == w::PARTS {
+        println!("  FAR walk: IDCODE {} is not in far.t27's part table", id);
+        return;
+    }
+    let walk = w::part_fdri_frames(part);
     let off = (walk as i64 - r.frames.len() as i64).unsigned_abs();
-    let dirty = pad_positions().iter()
+    let dirty = pad_positions(part).iter()
         .filter(|&&k| r.frames.get(k as usize).map_or(false, |fr| fr.iter().any(|&v| v != 0))).count();
     println!("  FAR walk {} frames (FDRI {}, off by {}; pad frames with data {})", walk, r.frames.len(), off, dirty);
     if let Some(c) = r.cor0 {
@@ -174,7 +187,7 @@ fn main() {
             let t: Vec<&str> = line.split_whitespace().collect();
             let n: Vec<u32> = t[2..6].iter().map(|x| x.parse().unwrap()).collect();
             let (base, nfr, off, nw) = (n[0], n[1], n[2] as usize, n[3] as usize);
-            let data = (0..nfr).map(|k| w::fdri_index(base + k)).any(|i| {
+            let data = (0..nfr).map(|k| w::fdri_index(r.part(), base + k)).any(|i| {
                 i != w::NO_FRAME && r.frames.get(i as usize).map_or(false, |fr| fr[off..off + nw].iter().any(|&v| v != 0))
             });
             total += 1;
@@ -187,6 +200,7 @@ fn main() {
         let segs = std::fs::read_to_string(&a[1]).unwrap();
         let mut b = std::fs::read(&a[2]).unwrap();
         let r = walk(&mut b, None, false, 2);
+        let part = r.part();
         let mut bits: HashMap<&str, Vec<Vec<u32>>> = HashMap::new();
         let (mut known, mut window) = (HashSet::new(), HashSet::new());
         for line in segs.lines() {
@@ -202,7 +216,7 @@ fn main() {
             let (no_type, no_bits): (Vec<Vec<u32>>, Vec<u32>) = (vec![], vec![]);
             let by_minor = bits.get(t[1]).unwrap_or(&no_type);
             for k in 0..nfr {
-                let i = w::fdri_index(base + k);
+                let i = w::fdri_index(part, base + k);
                 let fr = match r.frames.get(i as usize) { Some(fr) if i != w::NO_FRAME => fr, _ => continue };
                 let quiet = fr[off as usize..(off + nw) as usize].iter().all(|&v| v == 0);
                 if quiet { continue; }
