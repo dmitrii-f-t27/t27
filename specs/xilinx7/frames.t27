@@ -113,6 +113,15 @@ pub fn seg_below(off: u32, bit: u32, shift: u32) bool {
     return off * 32 + bit < shift;
 }
 
+// A tile can also start below its frame: the kintex7 tilegrid gives the four
+// GTX_INT_INTERFACE_X89Y{150,200,250,300} tiles offset -2. prjxray computes
+// offset * 32 + bit (tile_segbits.py:165), so a negative offset subtracts the same way an
+// alias shift does, and the bit wraps as above. A driver keeps `off` unsigned and passes the
+// words below the frame here; the tile's own window still uses the alias shift alone.
+pub fn seg_shift(below_words: u32, shift: u32) u32 {
+    return below_words * 32 + shift;
+}
+
 pub fn seg_pos(off: u32, bit: u32, shift: u32) u32 {
     const below = off * 32 + bit < shift;
     if (below) {
@@ -260,6 +269,19 @@ test seg_positions_above_the_frame_are_dropped {
     assert pos_in_frame(seg_pos(99, 63, 0)) == true;
     assert pos_in_frame(seg_pos(99, 64, 0)) == false;
     assert seg_pos(99, 64, 0) == 3232;
+}
+
+; GTX_INT_INTERFACE_X89Y150 on xc7k325t: offset -2, no alias, 2 words. Its bit 5 is
+; word -2 to Python, which reads it as word 99.
+test seg_positions_of_a_tile_below_its_frame {
+    assert seg_shift(2, 0) == 64;
+    assert seg_shift(0, 64) == 64;
+    assert seg_below(0, 5, seg_shift(2, 0)) == true;
+    assert seg_pos(0, 5, seg_shift(2, 0)) == 3173;
+    assert pos_word(3173) == 99;
+    assert pos_bit(3173) == 5;
+    assert seg_pos(0, 63, seg_shift(2, 0)) == 3231;
+    assert seg_in_window(5, 0, 2) == true;
 }
 
 test seg_window_is_the_tiles_own_words {
