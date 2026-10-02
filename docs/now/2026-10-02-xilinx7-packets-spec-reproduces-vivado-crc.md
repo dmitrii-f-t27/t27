@@ -11,7 +11,7 @@
 - The CRC rule is CRC32C (0x82F63B78), fed 32 data bits and then the 5-bit
   register address, LSB first. A write to CRC compares and resets to 0; CMD
   RCRC resets to 0; reads are not folded in. The test oracle is a value Vivado
-  wrote (0xE3AD7EA5), not one the spec computed. 10/10 tests pass under
+  wrote (0xE3AD7EA5), not one the spec computed. 12/12 tests pass under
   `t27c test-report`.
 - Driver: specs/xilinx7/bitwalk.rs, built from `t27c gen-rust`. It does the
   I/O and the loop; every decision is a spec function. Over 6 Vivado
@@ -26,8 +26,17 @@
 - COR0 fields decoded from the table match what dump_bit_config.py printed
   for the same files.
 - Not replaced yet: the CTL0 / COR1 field names (no cited source yet), and
-  the call sites in fpga.rs, which are a follow-up. No speed claim: the
-  driver walks a 2 MB bitstream in roughly 0.3-0.9 s and was not tuned.
+  the call sites in fpga.rs, which are a follow-up.
+- Speed, corrected. The first draft of this entry said 0.3-0.9 s per 2 MB
+  bitstream; that was measured on a machine at load ~45 and is withdrawn.
+  With the CRC disabled the walk is ~3 ms, and the bitwise CRC (37 bit steps
+  per word) was ~90% of the rest. The spec now carries the table form:
+  `CRC32C_TABLE`, `crc_byte`, `crc_word` (4 lookups + 5 bit steps). The
+  table is not trusted -- `crc_table_is_derived` recomputes all 256 entries
+  from `crc_bit`, and `crc_word_equals_crc_step` compares both forms over
+  4096 xorshift pairs; a one-bit change to one entry fails both. One Vivado
+  file walks in ~17-22 ms against ~82 ms before, both at load1 ~10-13 on
+  8 cores; these are noisy single-machine numbers, not a benchmark.
 - Two t27c defects hit while writing it, both worked around in the spec and
   filed with repros: a `var` reassigned in a `test` block is emitted as a
   second `var` (Refs #5606); `gen-rust` emits `if (b) != 0` for a local bound
