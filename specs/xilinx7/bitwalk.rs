@@ -301,7 +301,7 @@ fn write_bit(a: &[String]) -> u32 {
 // Every bit position comes from frames.t27 (seg_pos, pos_in_frame, bit_merge); this is lookup
 // and text.
 
-struct Tile { own: String, seg: String, sites: Vec<(String, String)>, blocks: Vec<[u32; 6]>, iob: Vec<String> }
+struct Tile { own: String, seg: String, sites: Vec<(String, String)>, blocks: Vec<[u32; 7]>, iob: Vec<String> }
 
 struct Db {
     tiles: HashMap<String, Tile>,
@@ -330,8 +330,10 @@ fn read_db(text: &str) -> Db {
                 db.tiles.insert(cur.clone(), Tile { own: own.into(), seg: seg.into(), sites, blocks: vec![], iob: vec![] });
             }
             Some("K") => {
-                let n: Vec<u32> = t.map(|x| x.parse().unwrap()).collect();
-                db.tiles.get_mut(&cur).unwrap().blocks.push([n[0], n[1], n[2], n[3], n[4], n[5]]);
+                // The offset is signed: kintex7 has tiles that start below their frame (-2).
+                let n: Vec<i64> = t.map(|x| x.parse().unwrap()).collect();
+                let (off, below) = (n[3].max(0) as u32, (-n[3]).max(0) as u32);
+                db.tiles.get_mut(&cur).unwrap().blocks.push([n[0] as u32, n[1] as u32, n[2] as u32, off, n[4] as u32, n[5] as u32, below]);
             }
             Some("S") => {
                 let tile = t.next().unwrap();
@@ -436,6 +438,10 @@ struct Asm<'a> {
     dropped: u32,
     foreign: u32,
     first_foreign: Option<String>,
+    // The tile's own bits that still leave the frame, because the tile starts below it
+    // (kintex7 offset -2). Kept apart from `foreign` so that wrapped + dropped stays a second
+    // formula for `foreign` alone on every tile that starts inside its frame.
+    own_out: u32,
     ppip_lines: u32,
 }
 
@@ -468,18 +474,28 @@ impl<'a> Asm<'a> {
         let (bt, ref fb) = self.db.feats[i];
         let k = *t.blocks.iter().find(|k| k[0] == bt).ok_or_else(lost)?;
         let (base, off, shift, words) = (k[1], k[3], k[4], k[5]);
+        let at = f::seg_shift(k[6], shift);
         for &(minor, bit, set) in fb {
             // Outside the tile's own words: fasm2frames writes it anyway (or drops it above the
             // frame). Counted here; --strict refuses it.
             let own = f::seg_in_window(bit, shift, words);
+            let pos = f::seg_pos(off, bit, at);
+            let below = f::seg_below(off, bit, at);
+            let inside = f::pos_in_frame(pos);
             if !own {
                 self.foreign += 1;
                 if self.first_foreign.is_none() { self.first_foreign = Some(format!("{line} (tile {tile})")); }
             }
-            let pos = f::seg_pos(off, bit, shift);
-            let below = f::seg_below(off, bit, shift);
+            // A tile's own bit can still leave the frame, but only when the tile starts below it.
+            // On any other tile such a bit is left uncounted on purpose: it then breaks
+            // outside-the-tile == wrapped + dropped, which is how a wrong window shows up.
+            let starts_below = k[6] > 0;
+            let own_out = starts_below && own && (below || !inside);
+            if own_out {
+                self.own_out += 1;
+                if self.first_foreign.is_none() { self.first_foreign = Some(format!("{line} (tile {tile})")); }
+            }
             if below { self.wrapped += 1; }
-            let inside = f::pos_in_frame(pos);
             if !inside { self.dropped += 1; continue; }
             let want = if set { f::BIT_SET } else { f::BIT_CLEAR };
             let slot = self.bits.entry((base + minor, below, pos)).or_insert(f::BIT_NONE);
@@ -526,7 +542,7 @@ fn fasm_frames(a: &[String]) -> i32 {
     let t_db = t0.elapsed();
     let text = std::fs::read_to_string(&a[2]).unwrap();
     let mut asm = Asm { db: &db, bits: HashMap::new(), missing: vec![], set_features: vec![],
-                        wrapped: 0, dropped: 0, foreign: 0, first_foreign: None, ppip_lines: 0 };
+                        wrapped: 0, dropped: 0, foreign: 0, first_foreign: None, own_out: 0, ppip_lines: 0 };
     let strict = a.iter().any(|s| s == "--strict");
     let fail = |e: String| { eprintln!("{e}"); 1 };
     for line in text.lines().chain(db.required.iter().map(|s| s.as_str())) {
@@ -562,9 +578,10 @@ fn fasm_frames(a: &[String]) -> i32 {
         if let Err(e) = asm.add(line) { return fail(e); }
     }
     if !asm.missing.is_empty() { return fail(asm.missing.join("\n")); }
-    if strict && asm.foreign > 0 {
-        return fail(format!("--strict: {} bit(s) outside their tile's own words, first from line '{}'",
-                            asm.foreign, asm.first_foreign.as_deref().unwrap_or("")));
+    let strays = asm.foreign + asm.own_out;
+    if strict && strays > 0 {
+        return fail(format!("--strict: {} bit(s) outside their tile's own words or their frame, first from line '{}'",
+                            strays, asm.first_foreign.as_deref().unwrap_or("")));
     }
     // Non-sparse: every frame of every tile, zero, then the set bits.
     let mut frames: BTreeMap<u32, [u32; 101]> = BTreeMap::new();
@@ -589,8 +606,8 @@ fn fasm_frames(a: &[String]) -> i32 {
         out.push(b'\n');
     }
     std::fs::write(&a[3], &out).unwrap();
-    println!("{}: {} frames, {} bits, required {}, stepdown {}, ppip lines {}, outside the tile {} (wrapped below the frame {}, dropped above it {}) (db {:.1} ms, total {:.1} ms)",
-             a[3], frames.len(), asm.bits.len(), db.required.len(), extra.len(), asm.ppip_lines, asm.foreign, asm.wrapped, asm.dropped,
+    println!("{}: {} frames, {} bits, required {}, stepdown {}, ppip lines {}, outside the tile {} (wrapped below the frame {}, dropped above it {}), own bits outside the frame {} (db {:.1} ms, total {:.1} ms)",
+             a[3], frames.len(), asm.bits.len(), db.required.len(), extra.len(), asm.ppip_lines, asm.foreign, asm.wrapped, asm.dropped, asm.own_out,
              t_db.as_secs_f64() * 1e3, t0.elapsed().as_secs_f64() * 1e3);
     0
 }
