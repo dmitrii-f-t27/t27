@@ -95,6 +95,70 @@ pub fn with_ecc(word50: u32, ecc: u32) u32 {
 }
 
 // ============================================================================
+// Where a segbit lands (fasm2frames; prjxray tile_segbits.py:161-167,
+// tile_segbits_alias.py:34-41, fasm_assembler.py:79-137). A tile's segbit names a minor and
+// a bit counted from the tile's first word; the tile sits `off` words into the frame. An
+// aliased tile (*_SING IO tiles borrow the full IO tile's segbits) starts `shift` bits into
+// the borrowed table, so the bit lands at off*32 + bit - shift.
+// That can fall outside the frame on both sides. Above the frame (word >= 101) fasm2frames
+// prints an error and drops the bit. Below it -- the bottom *_SING tiles have off 0 and
+// shift 64 -- Python's floor division gives a negative word, and frames[addr][-1] is the
+// LAST word of the frame: the bit wraps to words 99..100. These functions reproduce both,
+// so a driver can count them; neither is a rule of the device.
+// ============================================================================
+
+pub const SEG_BITS : u32 = 3232;
+
+pub fn seg_below(off: u32, bit: u32, shift: u32) bool {
+    return off * 32 + bit < shift;
+}
+
+pub fn seg_pos(off: u32, bit: u32, shift: u32) u32 {
+    const below = off * 32 + bit < shift;
+    if (below) {
+        return off * 32 + bit + SEG_BITS - shift;
+    }
+    return off * 32 + bit - shift;
+}
+
+pub fn pos_word(p: u32) u32 {
+    return p >> 5;
+}
+
+pub fn pos_bit(p: u32) u32 {
+    return p & 31;
+}
+
+pub fn pos_in_frame(p: u32) bool {
+    return p < SEG_BITS;
+}
+
+// The other direction (naming the bits of a bitstream): a segbit of the borrowed table
+// belongs to the tile only if it falls inside the tile's own `words`.
+pub fn seg_in_window(bit: u32, shift: u32, words: u32) bool {
+    return bit >= shift && bit < shift + words * 32;
+}
+
+// One bit asked for by several FASM lines (frame_set / frame_clear): asking twice for the
+// same value is fine, asking for both is FasmInconsistentBits.
+pub const BIT_NONE : u32 = 0;
+pub const BIT_SET : u32 = 1;
+pub const BIT_CLEAR : u32 = 2;
+pub const BIT_CONFLICT : u32 = 3;
+
+pub fn bit_merge(prev: u32, want: u32) u32 {
+    const fresh = prev == BIT_NONE;
+    if (fresh) {
+        return want;
+    }
+    const agrees = prev == want;
+    if (agrees) {
+        return prev;
+    }
+    return BIT_CONFLICT;
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -166,4 +230,51 @@ test ecc_agrees_with_fpga_assembler_vectors {
     assert ecc_after(0x26, 1, 0) == 0x1820;
     assert ecc_after(ECC_WORD, 0xFFFFFFFF, 0) == 0x19AC;
     assert ecc_after(LAST_WORD, 0, 1) == 0x1001;
+}
+
+; Positions, with the offsets of real xc7a100t tiles (prjxray-db 517d66a tilegrid):
+; CLBLM_R_X3Y0 sits at word 0, LIOB33_SING_X0Y0 at word 0 with alias start_offset 2
+; (shift 64), LIOB33_SING_X0Y149 at word 99 with no shift.
+test seg_positions_inside_the_frame {
+    assert seg_pos(0, 5, 0) == 5;
+    assert seg_pos(50, 13, 0) == 1613;
+    assert pos_word(1613) == 50;
+    assert pos_bit(1613) == 13;
+    assert seg_pos(0, 64, 64) == 0;
+    assert seg_pos(0, 127, 64) == 63;
+    assert seg_below(0, 64, 64) == false;
+}
+
+test seg_positions_below_the_frame_wrap_to_its_end {
+    assert seg_below(0, 2, 64) == true;
+    assert seg_pos(0, 2, 64) == 3170;
+    assert pos_word(3170) == 99;
+    assert pos_bit(3170) == 2;
+    assert seg_pos(0, 63, 64) == 3231;
+    assert pos_word(3231) == 100;
+    assert pos_in_frame(3231) == true;
+}
+
+test seg_positions_above_the_frame_are_dropped {
+    assert seg_pos(99, 63, 0) == 3231;
+    assert pos_in_frame(seg_pos(99, 63, 0)) == true;
+    assert pos_in_frame(seg_pos(99, 64, 0)) == false;
+    assert seg_pos(99, 64, 0) == 3232;
+}
+
+test seg_window_is_the_tiles_own_words {
+    assert seg_in_window(64, 64, 2) == true;
+    assert seg_in_window(127, 64, 2) == true;
+    assert seg_in_window(63, 64, 2) == false;
+    assert seg_in_window(128, 64, 2) == false;
+    assert seg_in_window(0, 0, 2) == true;
+}
+
+test bit_merge_flags_set_and_clear {
+    assert bit_merge(0, 1) == 1;
+    assert bit_merge(0, 2) == 2;
+    assert bit_merge(1, 1) == 1;
+    assert bit_merge(2, 2) == 2;
+    assert bit_merge(1, 2) == 3;
+    assert bit_merge(2, 1) == 3;
 }
