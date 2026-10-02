@@ -338,6 +338,149 @@ pub fn cor0_with_oscfsel(cor0: u32, v: u32) u32 {
 }
 
 // ============================================================================
+// The stream xc7frames2bit writes around the frame data, step by step.
+//   preamble     prjxray c9f02d857 lib/xilinx/bitstream_writer.cc:27-30
+//   packets      lib/xilinx/configuration.cc:301-470 (Series7 createConfigurationPackage)
+// A step is three words of SEQ: kind, a, b.
+//   STEP_RAW     b copies of the word a                 (dummy words, sync, NOP packets)
+//   STEP_WRITE   type1(WRITE, a, 1) then the value b    (one register write)
+//   STEP_IDCODE  type1(WRITE, IDCODE, 1) then the part's IDCODE, which the caller passes
+//   STEP_FDRI    type1(WRITE, FDRI, 0) then type2(WRITE, n), n the frame words the caller
+//                passes; the n frame words follow, and are the caller's to write
+// No CRC word is written: xc7frames2bit leaves the check to the RCRC/DESYNC pair.
+// ============================================================================
+
+pub const STEP_RAW : u32 = 0;
+pub const STEP_WRITE : u32 = 1;
+pub const STEP_IDCODE : u32 = 2;
+pub const STEP_FDRI : u32 = 3;
+
+// COR0 as configuration.cc:340-356 builds it: DONE pipelined, DONE released in phase 4,
+// no wait for DCI or MMCM lock, GTS in phase 5, GWE in phase 6. Vivado's default too
+// (test cor0_fields_of_vivado_default).
+pub const COR0_FRAMES2BIT : u32 = 0x02003FE5;
+
+pub const SEQ_STEPS : u32 = 42;
+pub const SEQ : [126]u32 = [
+    STEP_RAW, DUMMY, 8,
+    STEP_RAW, BUS_WIDTH_SYNC, 1,
+    STEP_RAW, BUS_WIDTH_DETECT, 1,
+    STEP_RAW, DUMMY, 2,
+    STEP_RAW, SYNC, 1,
+    STEP_RAW, NOOP, 1,
+    STEP_WRITE, REG_TIMER, 0,
+    STEP_WRITE, REG_WBSTAR, 0,
+    STEP_WRITE, REG_CMD, CMD_NULL,
+    STEP_RAW, NOOP, 1,
+    STEP_WRITE, REG_CMD, CMD_RCRC,
+    STEP_RAW, NOOP, 2,
+    STEP_WRITE, REG_UNKNOWN, 0,
+    STEP_WRITE, REG_COR0, COR0_FRAMES2BIT,
+    STEP_WRITE, REG_COR1, 0,
+    STEP_IDCODE, 0, 0,
+    STEP_WRITE, REG_CMD, CMD_SWITCH,
+    STEP_RAW, NOOP, 1,
+    STEP_WRITE, REG_MASK, 0x401,
+    STEP_WRITE, REG_CTL0, 0x501,
+    STEP_WRITE, REG_MASK, 0,
+    STEP_WRITE, REG_CTL1, 0,
+    STEP_RAW, NOOP, 8,
+    STEP_WRITE, REG_FAR, 0,
+    STEP_WRITE, REG_CMD, CMD_WCFG,
+    STEP_RAW, NOOP, 1,
+    STEP_FDRI, 0, 0,
+    STEP_WRITE, REG_CMD, CMD_RCRC,
+    STEP_RAW, NOOP, 2,
+    STEP_WRITE, REG_CMD, CMD_GRESTORE,
+    STEP_RAW, NOOP, 1,
+    STEP_WRITE, REG_CMD, CMD_LFRM,
+    STEP_RAW, NOOP, 100,
+    STEP_WRITE, REG_CMD, CMD_START,
+    STEP_RAW, NOOP, 1,
+    STEP_WRITE, REG_FAR, 0x3BE0000,
+    STEP_WRITE, REG_MASK, 0x501,
+    STEP_WRITE, REG_CTL0, 0x501,
+    STEP_WRITE, REG_CMD, CMD_RCRC,
+    STEP_RAW, NOOP, 2,
+    STEP_WRITE, REG_CMD, CMD_DESYNC,
+    STEP_RAW, NOOP, 400
+];
+
+pub fn step_kind(s: u32) u32 {
+    return SEQ[s * 3];
+}
+
+// Words step s writes itself (the frame data after STEP_FDRI is not counted).
+pub fn step_words(s: u32) u32 {
+    const kind = step_kind(s);
+    const raw = kind == STEP_RAW;
+    if (raw) {
+        return SEQ[s * 3 + 2];
+    }
+    return 2;
+}
+
+// Word j of step s.
+pub fn step_word(s: u32, j: u32, idcode: u32, frame_words: u32) u32 {
+    const kind = step_kind(s);
+    const a = SEQ[s * 3 + 1];
+    const b = SEQ[s * 3 + 2];
+    const raw = kind == STEP_RAW;
+    if (raw) {
+        return a;
+    }
+    const first = j == 0;
+    const write = kind == STEP_WRITE;
+    if (write) {
+        if (first) {
+            return type1(OP_WRITE, a, 1);
+        }
+        return b;
+    }
+    const id = kind == STEP_IDCODE;
+    if (id) {
+        if (first) {
+            return type1(OP_WRITE, REG_IDCODE, 1);
+        }
+        return idcode;
+    }
+    if (first) {
+        return type1(OP_WRITE, REG_FDRI, 0);
+    }
+    return type2(OP_WRITE, frame_words);
+}
+
+// The step after which the frame data goes.
+pub fn fdri_step() u32 {
+    var s : u32 = 0;
+    while s < SEQ_STEPS {
+        const hit = step_kind(s) == STEP_FDRI;
+        if (hit) {
+            return s;
+        }
+        s = s + 1;
+    }
+    return SEQ_STEPS;
+}
+
+// Words the steps from..to-1 write.
+pub fn steps_words(from: u32, to: u32) u32 {
+    var s : u32 = from;
+    var n : u32 = 0;
+    while s < to {
+        n = n + step_words(s);
+        s = s + 1;
+    }
+    return n;
+}
+
+// The .bit header (bitstream_writer.h:158-205): these 13 bytes, then fields 'a' (source
+// ";Generator=" generator), 'b' (part name), 'c' (date), 'd' (time), each a 2-byte big-endian
+// length that counts a trailing NUL, then 'e' and a 4-byte big-endian length of the word
+// stream in bytes. Words are written most significant byte first.
+pub const BIT_MAGIC : [13]u32 = [0x00, 0x09, 0x0F, 0xF0, 0x0F, 0xF0, 0x0F, 0xF0, 0x0F, 0xF0, 0x00, 0x00, 0x01];
+
+// ============================================================================
 // Tests. Headers are words taken from real bitstreams; the CRC value is Vivado's.
 // ============================================================================
 
@@ -455,4 +598,27 @@ test cor0_oscfsel_field {
     assert cor0_with_oscfsel(0x02003FE5, 5) == 0x020A3FE5;
     assert cor0_oscfsel(cor0_with_oscfsel(0x02003FE5, 63)) == 63;
     assert cor0_with_oscfsel(cor0_with_oscfsel(0x02003FE5, 9), 0) == 0x02003FE5;
+}
+
+// hb.bit, written by xc7frames2bit for xc7a100tfgg676-1 from 9012 frames: 58 words before the
+// frame data (sync at word 12, the FDRI type-2 header at word 58), 524 after it.
+test seq_matches_xc7frames2bit_around_the_frames {
+    const d = fdri_step();
+    assert d == 26;
+    assert steps_words(0, d) == 57;
+    assert steps_words(0, d + 1) == 59;
+    assert steps_words(d + 1, SEQ_STEPS) == 524;
+    assert step_word(4, 0, 0, 0) == SYNC;
+    assert steps_words(0, 4) == 12;
+    assert step_word(d, 1, 0, 955864) == 0x500E95D8;
+    assert step_word(d, 0, 0, 955864) == 0x30004000;
+    assert step_word(15, 0, 0x03631093, 0) == 0x30018001;
+    assert step_word(15, 1, 0x03631093, 0) == 0x03631093;
+    assert step_word(13, 0, 0, 0) == 0x30012001;
+    // the COR0 value as a literal: comparing against COR0_FRAMES2BIT would test the name, not the value
+    assert step_word(13, 1, 0, 0) == 0x02003FE5;
+    assert step_word(12, 0, 0, 0) == 0x30026001;
+    assert step_word(21, 0, 0, 0) == 0x30030001;
+    assert step_word(35, 1, 0, 0) == 0x03BE0000;
+    assert step_word(SEQ_STEPS - 2, 1, 0, 0) == CMD_DESYNC;
 }
