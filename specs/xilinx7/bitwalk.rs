@@ -9,6 +9,12 @@
 //                                           "T type base frames offset words shift" tiles (shift: alias)
 //   bitwalk --frame FILE [MIN]              print the sparsest frame with a nonzero ECC and >= MIN nonzero words
 //   bitwalk --cor0 N [--no-reseal] IN OUT   rewrite COR0's OSCFSEL, re-seal the CRC words
+//   bitwalk --write FRAMES OUT --part_file part.yaml --part_name NAME [--source S] [--generator G]
+//           [--date D] [--time T]           write FRAMES (prjxray .frames text) as a .bit: frames placed
+//                                           by the FAR walk, ECC sealed, packets as packets.t27's SEQ;
+//                                           the header fields default to xc7frames2bit's
+//   bitwalk --frames BIT OUT                write BIT's nonzero frames as .frames text, addresses from
+//                                           the FAR walk (the inverse of --write)
 //
 // Build (packets.rs and frames.rs are generated, never committed):
 //   t27c gen-rust specs/xilinx7/packets.t27 > specs/xilinx7/packets.rs
@@ -166,6 +172,124 @@ fn report(name: &str, r: &Walk) {
     }
 }
 
+// Every address of part p, in FDRI order; pads are None.
+fn walk_addresses(part: u32) -> Vec<Option<u32>> {
+    let mut out = vec![];
+    let g0 = w::first_group(part);
+    for g in g0..g0 + w::PART_GROUPS[part as usize] {
+        let first = w::first_column(g);
+        let cols = w::GROUP_COLS[g as usize];
+        let mut a = w::group_start(w::GROUP_KEY[g as usize]);
+        while a != w::NO_FRAME {
+            out.push(Some(a));
+            a = w::far_next_in_row(a, w::COL_FRAMES[(first + w::far_column(a)) as usize], cols);
+        }
+        for _ in 0..w::ROW_PAD_FRAMES {
+            out.push(None);
+        }
+    }
+    out
+}
+
+fn flag<'a>(a: &'a [String], name: &str) -> Option<&'a str> {
+    a.iter().position(|s| s == name).and_then(|i| a.get(i + 1)).map(|s| s.as_str())
+}
+
+fn bit_field(out: &mut Vec<u8>, key: u8, text: &str) {
+    out.push(key);
+    let n = text.len() + 1;
+    out.extend_from_slice(&[(n >> 8) as u8, n as u8]);
+    out.extend_from_slice(text.as_bytes());
+    out.push(0);
+}
+
+// frames text -> .bit. Returns the number of frames rejected (no address of the part).
+fn write_bit(a: &[String]) -> u32 {
+    let (frames_path, out_path) = (&a[1], &a[2]);
+    let yaml = std::fs::read_to_string(flag(a, "--part_file").expect("--part_file part.yaml")).unwrap();
+    let part_name = flag(a, "--part_name").expect("--part_name NAME");
+    let idcode = yaml
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("idcode:"))
+        .map(|v| {
+            let v = v.trim();
+            v.strip_prefix("0x").map_or_else(|| v.parse().unwrap(), |h| u32::from_str_radix(h, 16).unwrap())
+        })
+        .expect("idcode: in part file");
+    let part = w::part_of_idcode(idcode);
+    assert!(part != w::PARTS, "IDCODE 0x{idcode:08X} is not in far.t27's part table");
+    let nframes = w::part_fdri_frames(part) as usize;
+    let fw = f::FRAME_WORDS as usize;
+    let mut data = vec![0u32; nframes * fw];
+    let mut placed = vec![false; nframes];
+    let (mut rejected, mut dup, mut short) = (0u32, 0u32, 0u32);
+    for line in std::fs::read_to_string(frames_path).unwrap().lines() {
+        if line.starts_with('#') || line.trim().is_empty() {
+            continue;
+        }
+        let (addr, words) = line.split_once(' ').expect("ADDR WORDS");
+        let addr = u32::from_str_radix(addr.trim_start_matches("0x"), 16).unwrap();
+        let words: Vec<u32> = words.split(',').map(|v| u32::from_str_radix(v.trim().trim_start_matches("0x"), 16).unwrap()).collect();
+        if words.len() != fw {
+            short += 1;
+            continue;
+        }
+        let i = w::fdri_index(part, addr);
+        if i == w::NO_FRAME {
+            println!("  REJECT 0x{addr:08X}: not an address of this part");
+            rejected += 1;
+            continue;
+        }
+        let i = i as usize;
+        if placed[i] {
+            dup += 1;
+            continue;
+        }
+        placed[i] = true;
+        data[i * fw..(i + 1) * fw].copy_from_slice(&words);
+    }
+    for fr in data.chunks_mut(fw) {
+        let mut ecc = 0u32;
+        for (k, v) in fr.iter().enumerate() {
+            ecc = f::ecc_after(k as u32, *v, ecc);
+        }
+        let e = f::ECC_WORD as usize;
+        fr[e] = f::with_ecc(fr[e], ecc);
+    }
+    let mut words: Vec<u32> = vec![];
+    let frame_words = data.len() as u32;
+    for s in 0..p::SEQ_STEPS {
+        for j in 0..p::step_words(s) {
+            words.push(p::step_word(s, j, idcode, frame_words));
+        }
+        if p::step_kind(s) == p::STEP_FDRI {
+            words.extend_from_slice(&data);
+        }
+    }
+    let mut out: Vec<u8> = p::BIT_MAGIC.iter().map(|&b| b as u8).collect();
+    let source = flag(a, "--source").map_or_else(
+        || std::path::Path::new(frames_path).file_name().unwrap().to_string_lossy().into_owned(),
+        |s| s.to_string(),
+    );
+    let generator = flag(a, "--generator").unwrap_or("bitwalk");
+    bit_field(&mut out, b'a', &format!("{source};Generator={generator}"));
+    bit_field(&mut out, b'b', part_name);
+    bit_field(&mut out, b'c', flag(a, "--date").unwrap_or("2000/01/01"));
+    bit_field(&mut out, b'd', flag(a, "--time").unwrap_or("00:00:00"));
+    out.push(b'e');
+    out.extend_from_slice(&((words.len() * 4) as u32).to_be_bytes());
+    for v in &words {
+        out.extend_from_slice(&v.to_be_bytes());
+    }
+    std::fs::write(out_path, &out).unwrap();
+    let given = placed.iter().filter(|&&x| x).count();
+    println!(
+        "{out_path}: {} bytes, {} words, FDRI {} frames ({} from FRAMES, rejected {}, duplicate {}, wrong length {})",
+        out.len(), words.len(), nframes, given, rejected, dup, short
+    );
+    rejected
+}
+
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
     if a.first().map(|s| s.as_str()) == Some("--cor0") {
@@ -176,6 +300,30 @@ fn main() {
         let r = walk(&mut b, Some(v), reseal, 2);
         std::fs::write(files[1], &b).unwrap();
         println!("patched {} word(s), reseal={reseal}", r.patched);
+        return;
+    }
+    if a.first().map(|s| s.as_str()) == Some("--write") {
+        let rejected = write_bit(&a);
+        std::process::exit(if rejected == 0 { 0 } else { 1 });
+    }
+    if a.first().map(|s| s.as_str()) == Some("--frames") {
+        let mut b = std::fs::read(&a[1]).unwrap();
+        let r = walk(&mut b, None, false, 2);
+        let part = r.part();
+        assert!(part != w::PARTS, "IDCODE not in far.t27's part table");
+        let addrs = walk_addresses(part);
+        let mut text = String::new();
+        let mut n = 0;
+        for (fr, addr) in r.frames.iter().zip(addrs.iter()) {
+            let data = fr.iter().any(|&v| v != 0);
+            if let (true, Some(addr)) = (data, addr) {
+                let ws: Vec<String> = fr.iter().map(|v| format!("0x{v:08X}")).collect();
+                text.push_str(&format!("0x{addr:08X} {}\n", ws.join(",")));
+                n += 1;
+            }
+        }
+        std::fs::write(&a[2], text).unwrap();
+        println!("{}: {} frames with data", a[2], n);
         return;
     }
     if a.first().map(|s| s.as_str()) == Some("--pins") {
