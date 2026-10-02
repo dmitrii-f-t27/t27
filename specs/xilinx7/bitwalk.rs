@@ -15,6 +15,10 @@
 //                                           the header fields default to xc7frames2bit's
 //   bitwalk --frames BIT OUT                write BIT's nonzero frames as .frames text, addresses from
 //                                           the FAR walk (the inverse of --write)
+//   bitwalk --fasm DIGEST FASM OUT [--strict]  FASM -> .frames text as prjxray's fasm2frames writes it (not
+//                                           sparse); DIGEST is prjxray-db as x7.py fasm_digest renders it;
+//                                           segbit positions from frames.t27; --strict refuses a bit
+//                                           outside its tile's own words (fasm2frames writes it)
 //
 // Build (packets.rs and frames.rs are generated, never committed):
 //   t27c gen-rust specs/xilinx7/packets.t27 > specs/xilinx7/packets.rs
@@ -290,6 +294,307 @@ fn write_bit(a: &[String]) -> u32 {
     rejected
 }
 
+// ---- --fasm: FASM -> frames, as prjxray's fasm2frames (non-sparse) --------------------------
+// The db digest (x7.py fasm_digest) is prjxray-db as prjxray's own Database reads it:
+//   T tile own_type seg_type [site=alias_site ...]   K block base frames offset shift words
+//   S tile IOB_Yn   F block KEY minor_bit|!minor_bit ...   P KEY   R feature   B tile bank
+// Every bit position comes from frames.t27 (seg_pos, pos_in_frame, bit_merge); this is lookup
+// and text.
+
+struct Tile { own: String, seg: String, sites: Vec<(String, String)>, blocks: Vec<[u32; 6]>, iob: Vec<String> }
+
+struct Db {
+    tiles: HashMap<String, Tile>,
+    feats: Vec<(u32, Vec<(u32, u32, bool)>)>,
+    exact: HashMap<String, [usize; 2]>,
+    addr: HashMap<(String, u32), usize>,
+    ppips: HashSet<String>,
+    required: Vec<String>,
+    tile_bank: HashMap<String, String>,
+    bank_tiles: HashMap<String, Vec<String>>,
+}
+
+const NOFEAT: usize = usize::MAX;
+
+fn read_db(text: &str) -> Db {
+    let mut db = Db { tiles: HashMap::new(), feats: vec![], exact: HashMap::new(), addr: HashMap::new(),
+                      ppips: HashSet::new(), required: vec![], tile_bank: HashMap::new(), bank_tiles: HashMap::new() };
+    let mut cur = String::new();
+    for line in text.lines() {
+        let mut t = line.split(' ');
+        match t.next() {
+            Some("T") => {
+                let (name, own, seg) = (t.next().unwrap(), t.next().unwrap(), t.next().unwrap());
+                let sites = t.map(|kv| { let (a, b) = kv.split_once('=').unwrap(); (a.to_string(), b.to_string()) }).collect();
+                cur = name.to_string();
+                db.tiles.insert(cur.clone(), Tile { own: own.into(), seg: seg.into(), sites, blocks: vec![], iob: vec![] });
+            }
+            Some("K") => {
+                let n: Vec<u32> = t.map(|x| x.parse().unwrap()).collect();
+                db.tiles.get_mut(&cur).unwrap().blocks.push([n[0], n[1], n[2], n[3], n[4], n[5]]);
+            }
+            Some("S") => {
+                let tile = t.next().unwrap();
+                db.tiles.get_mut(tile).unwrap().iob.push(t.next().unwrap().to_string());
+            }
+            Some("F") => {
+                let bt: u32 = t.next().unwrap().parse().unwrap();
+                let key = t.next().unwrap();
+                let bits = t.filter(|x| !x.is_empty()).map(|x| {
+                    let (set, x) = match x.strip_prefix('!') { Some(r) => (false, r), None => (true, x) };
+                    let (m, b) = x.split_once('_').unwrap();
+                    (m.parse().unwrap(), b.parse().unwrap(), set)
+                }).collect();
+                let i = db.feats.len();
+                db.feats.push((bt, bits));
+                db.exact.entry(key.to_string()).or_insert([NOFEAT; 2])[bt as usize] = i;
+                if let (Some(s), Some(e)) = (key.rfind('['), key.rfind(']')) {
+                    if let Ok(n) = key[s + 1..e].parse::<u32>() {
+                        db.addr.insert((key[..s].to_string(), n), i);
+                    }
+                }
+            }
+            Some("P") => { db.ppips.insert(t.next().unwrap().to_string()); }
+            Some("R") => db.required.push(line[2..].to_string()),
+            Some("B") => {
+                let (tile, bank) = (t.next().unwrap().to_string(), t.next().unwrap().to_string());
+                db.tile_bank.insert(tile.clone(), bank.clone());
+                let v = db.bank_tiles.entry(bank).or_default();
+                if !v.contains(&tile) { v.push(tile); }
+            }
+            _ => {}
+        }
+    }
+    db
+}
+
+// A FASM line, as fasm's textX grammar reads it: feature, optional [a] or [e:s], optional
+// "= value" (Verilog literal or plain decimal), annotations {...}, comment #... .
+// Returns (feature, start, end, value bits LSB first); None for a line with no feature.
+fn parse_fasm_line(line: &str) -> Result<Option<(String, Option<u32>, Option<u32>, Vec<bool>)>, String> {
+    let s = line.trim_start();
+    let n = s.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.')).unwrap_or(s.len());
+    if n == 0 {
+        let rest = s.trim_start();
+        let blank = rest.is_empty() || rest.starts_with('#') || rest.starts_with('{');
+        return if blank { Ok(None) } else { Err(format!("cannot parse: {line}")) };
+    }
+    let feature = s[..n].to_string();
+    let mut rest = &s[n..];
+    let (mut start, mut end) = (None, None);
+    if let Some(r) = rest.strip_prefix('[') {
+        let close = r.find(']').ok_or(format!("no ]: {line}"))?;
+        let inner = &r[..close];
+        let num = |x: &str| x.replace('_', "").parse::<u32>().map_err(|_| format!("address: {line}"));
+        match inner.split_once(':') {
+            Some((e, st)) => { end = Some(num(e)?); start = Some(num(st)?); }
+            None => start = Some(num(inner)?),
+        }
+        rest = &r[close + 1..];
+    }
+    rest = rest.trim_start();
+    let mut value = vec![true];
+    if let Some(r) = rest.strip_prefix('=') {
+        let stop = r.find(|c| c == '{' || c == '#').unwrap_or(r.len());
+        let v: String = r[..stop].chars().filter(|c| !c.is_whitespace()).collect();
+        value = verilog_bits(&v).ok_or(format!("value: {line}"))?;
+    }
+    Ok(Some((feature, start, end, value)))
+}
+
+fn verilog_bits(v: &str) -> Option<Vec<bool>> {
+    let (base, digits) = match v.split_once('\'') {
+        Some((_, r)) => (r.chars().next()?.to_ascii_lowercase(), &r[1..]),
+        None => ('d', v),
+    };
+    let digits: Vec<u32> = digits.chars().filter(|&c| c != '_').map(|c| c.to_digit(16)).collect::<Option<_>>()?;
+    let mut bits = vec![];
+    let per = match base { 'h' => 4, 'o' => 3, 'b' => 1, 'd' => 0, _ => return None };
+    if per > 0 {
+        for &d in digits.iter().rev() {
+            if d >> per != 0 { return None; }
+            for k in 0..per { bits.push(d >> k & 1 == 1); }
+        }
+        return Some(bits);
+    }
+    let mut dec = digits;
+    if dec.iter().any(|&d| d > 9) { return None; }
+    while dec.iter().any(|&d| d != 0) {
+        let mut carry = 0;
+        for d in dec.iter_mut() { let x = carry * 10 + *d; *d = x / 2; carry = x % 2; }
+        bits.push(carry == 1);
+    }
+    Some(bits)
+}
+
+struct Asm<'a> {
+    db: &'a Db,
+    bits: HashMap<(u32, bool, u32), u32>,
+    missing: Vec<String>,
+    set_features: Vec<String>,
+    wrapped: u32,
+    dropped: u32,
+    foreign: u32,
+    first_foreign: Option<String>,
+    ppip_lines: u32,
+}
+
+impl<'a> Asm<'a> {
+    fn lookup(&self, key: &str, address: u32) -> Option<usize> {
+        if address == 0 {
+            if let Some(e) = self.db.exact.get(key) {
+                for &i in e { if i != NOFEAT { return Some(i); } }
+            }
+        }
+        self.db.addr.get(&(key.to_string(), address)).copied()
+    }
+
+    fn enable(&mut self, tile: &str, feature: &str, address: u32, line: &str) -> Result<(), String> {
+        let t = self.db.tiles.get(tile).ok_or(format!("no tile {tile} in the part, line '{line}'"))?;
+        let db_k = format!("{}.{}", t.own, feature);
+        if self.db.ppips.contains(&db_k) { self.ppip_lines += 1; return Ok(()); }
+        let mut key = db_k.clone();
+        if t.seg != t.own {
+            let mut parts: Vec<&str> = db_k.split('.').collect();
+            parts[0] = &t.seg;
+            if parts.len() > 1 {
+                if let Some((_, to)) = t.sites.iter().find(|(from, _)| from == parts[1]) { parts[1] = to; }
+            }
+            key = parts.join(".");
+            if self.db.ppips.contains(&key) { self.ppip_lines += 1; return Ok(()); }
+        }
+        let lost = || format!("Segment DB {}, key {} not found from line '{}'", t.own, db_k, line);
+        let i = self.lookup(&key, address).ok_or_else(lost)?;
+        let (bt, ref fb) = self.db.feats[i];
+        let k = *t.blocks.iter().find(|k| k[0] == bt).ok_or_else(lost)?;
+        let (base, off, shift, words) = (k[1], k[3], k[4], k[5]);
+        for &(minor, bit, set) in fb {
+            // Outside the tile's own words: fasm2frames writes it anyway (or drops it above the
+            // frame). Counted here; --strict refuses it.
+            let own = f::seg_in_window(bit, shift, words);
+            if !own {
+                self.foreign += 1;
+                if self.first_foreign.is_none() { self.first_foreign = Some(format!("{line} (tile {tile})")); }
+            }
+            let pos = f::seg_pos(off, bit, shift);
+            let below = f::seg_below(off, bit, shift);
+            if below { self.wrapped += 1; }
+            let inside = f::pos_in_frame(pos);
+            if !inside { self.dropped += 1; continue; }
+            let want = if set { f::BIT_SET } else { f::BIT_CLEAR };
+            let slot = self.bits.entry((base + minor, below, pos)).or_insert(f::BIT_NONE);
+            let now = f::bit_merge(*slot, want);
+            let conflict = now == f::BIT_CONFLICT;
+            if conflict {
+                return Err(format!("FasmInconsistentBits: line '{line}' at frame 0x{:08X} bit {pos}", base + minor));
+            }
+            *slot = now;
+        }
+        Ok(())
+    }
+
+    // add_fasm_line: canonical_features, then enable_feature per set bit.
+    fn add(&mut self, line: &str) -> Result<(), String> {
+        let Some((feature, start, end, value)) = parse_fasm_line(line)? else { return Ok(()) };
+        let nonzero = value.iter().any(|&b| b);
+        if nonzero { self.set_features.push(feature.clone()); }
+        let (tile, rest) = feature.split_once('.').unwrap_or((&feature, ""));
+        let addrs: Vec<u32> = match (start, end) {
+            (None, _) | (Some(_), None) => if nonzero { vec![start.unwrap_or(0)] } else { vec![] },
+            (Some(s), Some(e)) => (s..=e).filter(|&a| value.get((a - s) as usize).copied().unwrap_or(false)).collect(),
+        };
+        for address in addrs {
+            match self.enable(tile, rest, address, line.trim()) {
+                Ok(()) => {}
+                Err(e) if e.starts_with("FasmInconsistentBits") => return Err(e),
+                Err(e) => self.missing.push(e),
+            }
+        }
+        Ok(())
+    }
+}
+
+fn hex8(out: &mut Vec<u8>, v: u32) {
+    const H: &[u8; 16] = b"0123456789ABCDEF";
+    out.extend_from_slice(b"0x");
+    for k in (0..8).rev() { out.push(H[(v >> (4 * k) & 15) as usize]); }
+}
+
+fn fasm_frames(a: &[String]) -> i32 {
+    let t0 = std::time::Instant::now();
+    let db = read_db(&std::fs::read_to_string(&a[1]).unwrap());
+    let t_db = t0.elapsed();
+    let text = std::fs::read_to_string(&a[2]).unwrap();
+    let mut asm = Asm { db: &db, bits: HashMap::new(), missing: vec![], set_features: vec![],
+                        wrapped: 0, dropped: 0, foreign: 0, first_foreign: None, ppip_lines: 0 };
+    let strict = a.iter().any(|s| s == "--strict");
+    let fail = |e: String| { eprintln!("{e}"); 1 };
+    for line in text.lines().chain(db.required.iter().map(|s| s.as_str())) {
+        if let Err(e) = asm.add(line) { return fail(e); }
+    }
+    if !asm.missing.is_empty() { return fail(asm.missing.join("\n")); }
+    // STEPDOWN (fasm2frames.py:233-283): a bank with one STEPDOWN feature gets it on every unused
+    // IOB site and on its HCLK_IOI3 tile.
+    let (mut used, mut tags): (HashSet<(String, String)>, BTreeMap<String, Vec<String>>) = (HashSet::new(), BTreeMap::new());
+    for feat in &asm.set_features {
+        let p: Vec<&str> = feat.splitn(3, '.').collect();
+        if p.len() < 3 { continue; }
+        if p[0].contains("IOB33") { used.insert((p[0].to_string(), p[1].to_string())); }
+        if p[2].contains("STEPDOWN") {
+            let Some(bank) = db.tile_bank.get(p[0]) else { return fail(format!("STEPDOWN in {} with no bank", p[0])) };
+            let v = tags.entry(bank.clone()).or_default();
+            if !v.contains(&p[2].to_string()) { v.push(p[2].to_string()); }
+        }
+    }
+    let mut extra = vec![];
+    for (bank, tg) in &tags {
+        for tile in db.bank_tiles.get(bank).map(|v| v.as_slice()).unwrap_or(&[]) {
+            if tile.contains("IOB33") {
+                for site in db.tiles.get(tile).map(|t| t.iob.as_slice()).unwrap_or(&[]) {
+                    if used.contains(&(tile.clone(), site.clone())) { continue; }
+                    for tag in tg { extra.push(format!("{tile}.{site}.{tag}")); }
+                }
+            }
+            if tile.contains("HCLK_IOI3") { extra.push(format!("{tile}.STEPDOWN")); }
+        }
+    }
+    for line in &extra {
+        if let Err(e) = asm.add(line) { return fail(e); }
+    }
+    if !asm.missing.is_empty() { return fail(asm.missing.join("\n")); }
+    if strict && asm.foreign > 0 {
+        return fail(format!("--strict: {} bit(s) outside their tile's own words, first from line '{}'",
+                            asm.foreign, asm.first_foreign.as_deref().unwrap_or("")));
+    }
+    // Non-sparse: every frame of every tile, zero, then the set bits.
+    let mut frames: BTreeMap<u32, [u32; 101]> = BTreeMap::new();
+    for t in db.tiles.values() {
+        for k in &t.blocks {
+            for m in 0..k[2] { frames.entry(k[1] + m).or_insert([0; 101]); }
+        }
+    }
+    for (&(fr, _, pos), &v) in &asm.bits {
+        let fw = frames.entry(fr).or_insert([0; 101]);
+        let set = v == f::BIT_SET;
+        if set { fw[f::pos_word(pos) as usize] |= 1 << f::pos_bit(pos); }
+    }
+    let mut out = Vec::with_capacity(frames.len() * 1120);
+    for (addr, words) in &frames {
+        hex8(&mut out, *addr);
+        out.push(b' ');
+        for (i, w) in words.iter().enumerate() {
+            if i > 0 { out.push(b','); }
+            hex8(&mut out, *w);
+        }
+        out.push(b'\n');
+    }
+    std::fs::write(&a[3], &out).unwrap();
+    println!("{}: {} frames, {} bits, required {}, stepdown {}, ppip lines {}, outside the tile {} (wrapped below the frame {}, dropped above it {}) (db {:.1} ms, total {:.1} ms)",
+             a[3], frames.len(), asm.bits.len(), db.required.len(), extra.len(), asm.ppip_lines, asm.foreign, asm.wrapped, asm.dropped,
+             t_db.as_secs_f64() * 1e3, t0.elapsed().as_secs_f64() * 1e3);
+    0
+}
+
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
     if a.first().map(|s| s.as_str()) == Some("--cor0") {
@@ -301,6 +606,9 @@ fn main() {
         std::fs::write(files[1], &b).unwrap();
         println!("patched {} word(s), reseal={reseal}", r.patched);
         return;
+    }
+    if a.first().map(|s| s.as_str()) == Some("--fasm") {
+        std::process::exit(fasm_frames(&a));
     }
     if a.first().map(|s| s.as_str()) == Some("--write") {
         let rejected = write_bit(&a);
@@ -370,8 +678,8 @@ fn main() {
                 if quiet { continue; }
                 for wd in off..off + nw { window.insert((i, wd)); }
                 for &bit in by_minor.get(k as usize).unwrap_or(&no_bits) {
-                    let inside = bit >= shift && bit < shift + nw * 32;
-                    if inside { known.insert((i, off * 32 + bit - shift)); }
+                    let inside = f::seg_in_window(bit, shift, nw);
+                    if inside { known.insert((i, f::seg_pos(off, bit, shift))); }
                 }
             }
         }
