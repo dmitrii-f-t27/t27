@@ -2,14 +2,13 @@
 ; packets.t27 -- the 7-series configuration packet stream, as one spec.
 ; A `.bit` file after its ASCII header is a sequence of big-endian 32-bit words: a sync word,
 ; then packets. This spec owns the grammar of those packets, the configuration registers they
-; address, the frame address layout, and the running CRC the device checks. Drivers only read
+; address, and the running CRC the device checks. Drivers only read
 ; words and print; every rule a driver applies is a function below.
 ; ----
 ; SOURCE (prjxray c9f02d857, cited per section below):
 ;   lib/xilinx/configuration_packet.cc:101-167      packet header decode
 ;   lib/include/prjxray/xilinx/configuration_register.h:61-83   Series7 register numbers
 ;   lib/include/prjxray/xilinx/xc7series/command.h:18-36         CMD register values
-;   lib/xilinx/xc7series/frame_address.cc:20-29     FAR layout
 ;   lib/include/prjxray/xilinx/xc7series/crc.h:15-43            icap_crc
 ;   tools/bits2rbt/configuration_packets.cc:156-172 CRC restarts after the RCRC command
 ; ORACLE: the CRC tests below use a value Vivado wrote, not one this spec computed.
@@ -171,40 +170,8 @@ pub const CMD_LTIMER : u32 = 0x11;
 pub const CMD_BSPI_READ : u32 = 0x12;
 pub const CMD_FALL_EDGE : u32 = 0x13;
 
-// ============================================================================
-// Frame address register (frame_address.cc:20-49):
-//   [25:23] block type, [22] bottom half, [21:17] row, [16:7] column, [6:0] minor.
-// ============================================================================
-
-pub const BLOCK_CLB_IO_CLK : u32 = 0;
-pub const BLOCK_BLOCK_RAM : u32 = 1;
-pub const BLOCK_CFG_CLB : u32 = 2;
-
 pub const WORDS_PER_FRAME : u32 = 101;
 
-pub fn far(block: u32, bottom: u32, row: u32, column: u32, minor: u32) u32 {
-    return ((block & 7) << 23) | ((bottom & 1) << 22) | ((row & 0x1F) << 17) | ((column & 0x3FF) << 7) | (minor & 0x7F);
-}
-
-pub fn far_block(a: u32) u32 {
-    return (a >> 23) & 7;
-}
-
-pub fn far_bottom(a: u32) u32 {
-    return (a >> 22) & 1;
-}
-
-pub fn far_row(a: u32) u32 {
-    return (a >> 17) & 0x1F;
-}
-
-pub fn far_column(a: u32) u32 {
-    return (a >> 7) & 0x3FF;
-}
-
-pub fn far_minor(a: u32) u32 {
-    return a & 0x7F;
-}
 
 // FDRI carries whole frames only.
 pub fn whole_frames(words: u32) bool {
@@ -409,15 +376,6 @@ test left_counts_down_then_reloads {
     assert left_after(0, 0x30008001) == 1;
     assert left_after(1, CMD_RCRC) == 0;
     assert left_after(0, NOOP) == 0;
-}
-
-test far_round_trip {
-    const a = far(BLOCK_BLOCK_RAM, 1, 3, 42, 127);
-    assert far_block(a) == BLOCK_BLOCK_RAM;
-    assert far_bottom(a) == 1;
-    assert far_row(a) == 3;
-    assert far_column(a) == 42;
-    assert far_minor(a) == 127;
 }
 
 // Vivado, A_direct_top.bit (xc7a35tcsg324-1): after the CRC check that closes FDRI it writes
