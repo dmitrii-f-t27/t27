@@ -1,4 +1,4 @@
-# NOW -- Port scripts/tri-issue-create.py (Python, 1 function) to specs/port/scripts/tri-issue-create.t27 (published 2026-10-03)
+# NOW -- Published: Port scripts/tri-issue-create.py (Python, 1 function) to specs/port/scripts/tri-issue-create.t27 (2026-10-03)
 
 ## A bee's work on #5750, published from `queen-5750` (Closes #5750)
 
