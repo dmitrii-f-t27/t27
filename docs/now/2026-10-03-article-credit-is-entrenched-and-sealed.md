@@ -22,3 +22,17 @@ Closes #5666
 - A hidden copy could still sit under a heading the duplicate count missed: a setext heading, an `<h2>` tag, a zero-width space or a Greek capital iota inside "CREDIT", or a collapsed `<details>`. The charter now refuses raw HTML, invisible formatting characters, setext headings and non-ASCII letters in headings, so nothing in it can hide or disguise a copy.
 - A `## ` indented four spaces or by a tab ended the sealed text, though Markdown shows it as code. Only a line indented by at most three spaces, with no tab, now counts as a heading or a fence.
 - The article gains point 4: no other text in the charter overrides it.
+
+## What review 3 found
+
+- The original article could be moved into a `~~~` block labelled "superseded" while a changed copy stood below under a heading the byte-exact count missed: two spaces between the words, a tab, `&#82;`, a variation selector, a lone carriage return, or a quoted `> ## ` line. The build passed, and GitHub showed one heading.
+- Review 2's answer was a list of Markdown tricks, and each round found another. Now the seal stops chasing tricks and relies on rules that a parser written here cannot get wrong:
+  - no code fence may open above the article or inside it, at any indent or inside any quote or list;
+  - the heading line must appear exactly once, at column 0;
+  - no other heading-like line may read as CREDIT. A line counts as heading-like with any indent, quote or list marker, inside a fence or outside it, or above a setext underline. Letters are compared without case, `l`, `1`, `|` and `!` count as `i`, non-letters are skipped, and any non-ASCII letter matches any Latin one;
+  - raw HTML, character references, invisible and format characters (variation selectors and tags included), front matter and a lone carriage return are refused anywhere in the charter.
+- Review 3 also listed false refusals:
+  - setext headings outside the article and a list followed by `---` now pass;
+  - non-ASCII letters in headings now pass unless the heading reads as CREDIT (`Łukasiewicz` passes);
+  - autolinks such as `<https://...>` now pass.
+- Still refused, on purpose: a `<` followed by a letter inside a code span, and a quoted copy of the heading in a code block. A code span is where this code and GitHub would first disagree, and the cost is writing `Result of Ast` instead of `Result<Ast>` in the charter.
