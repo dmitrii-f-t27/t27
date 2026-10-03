@@ -1,4 +1,4 @@
-# NOW -- Nothing builds bindings/wasm-explorer, which is how the artifact it replaces drifted in the first place (published 2026-09-21)
+# NOW -- Published: Nothing builds bindings/wasm-explorer, which is how the artifact it replaces drifted in the first place (2026-09-21)
 
 ## A bee's work on #4489, published from `queen-4489` (Closes #4489)
 
