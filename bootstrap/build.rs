@@ -331,9 +331,12 @@ const CREDIT_HEADING: &str = "## Article CREDIT \u{2014} who is rewarded (entren
 /// - a code fence opens anywhere above the article or inside it, at any indent
 ///   and inside any quote or list, so the heading cannot be code in disguise;
 /// - the heading line is not there exactly once, at column 0;
-/// - any other heading-like line reads as CREDIT (`reads_credit`): an ATX line
-///   under any indent, quote or list marker, in a fence or not, or a line above
-///   a setext underline. A copy cannot be renamed into a look-alike.
+/// - any other heading-like text reads as CREDIT (`reads_credit`): an ATX line
+///   under any indent, quote or list marker, in a fence or not, or the whole
+///   paragraph above a setext underline (every line up to the blank line above
+///   it, joined, counted once), since a setext heading's text is that whole
+///   paragraph. A copy cannot be renamed into a look-alike, nor have its title
+///   split over two lines.
 fn credit_article(doc: &str) -> Option<String> {
     let doc = doc.replace("\r\n", "\n");
     if doc.contains('\r') || hides_text(&doc) {
@@ -359,13 +362,22 @@ fn credit_article(doc: &str) -> Option<String> {
         let t: String = without_containers(l).chars().filter(|c| !c.is_whitespace()).collect();
         !t.is_empty() && (t.bytes().all(|b| b == b'=') || t.bytes().all(|b| b == b'-'))
     };
-    let named = (0..lines.len())
-        .filter(|&i| {
-            let atx = without_containers(lines[i]).starts_with('#');
-            let setext = !lines[i].trim().is_empty() && lines.get(i + 1).is_some_and(|n| underline(n));
-            (atx || setext) && reads_credit(lines[i])
-        })
+    let atx = (0..lines.len())
+        .filter(|&i| without_containers(lines[i]).starts_with('#') && reads_credit(lines[i]))
         .count();
+    // A setext heading is the whole paragraph above its underline. Walk up to the
+    // blank line, join, and count each paragraph once, whichever underline names it.
+    let mut paragraphs = std::collections::BTreeSet::new();
+    for j in 1..lines.len() {
+        if !underline(lines[j]) || lines[j - 1].trim().is_empty() {
+            continue;
+        }
+        let first = (0..j).rev().take_while(|&i| !lines[i].trim().is_empty()).last().unwrap_or(j - 1);
+        if reads_credit(&lines[first..j].join(" ")) {
+            paragraphs.insert(first);
+        }
+    }
+    let named = atx + paragraphs.len();
     if named != 1 {
         return None;
     }
@@ -402,22 +414,41 @@ fn without_containers(line: &str) -> &str {
     }
 }
 
-/// True if the line reads as "credit" to an eye: ASCII letters compared without
-/// case, `l`, `1`, `|` and `!` read as `i`, anything that is not a letter is
-/// skipped (spaces, tabs, punctuation, combining marks, emphasis), and any
-/// non-ASCII letter could look like any Latin one, so it matches any letter.
-fn reads_credit(line: &str) -> bool {
-    let seen: Vec<Option<char>> = line
-        .chars()
-        .filter_map(|c| match c {
-            'l' | 'L' | '1' | '|' | '!' => Some(Some('i')),
-            c if c.is_ascii_alphabetic() => Some(Some(c.to_ascii_lowercase())),
-            c if c.is_alphabetic() => Some(None),
-            _ => None,
-        })
-        .collect();
-    seen.windows(6)
-        .any(|w| w.iter().zip("credit".chars()).all(|(c, want)| c.map_or(true, |c| c == want)))
+/// True if the text reads as "credit" to an eye. ASCII letters are compared
+/// without case, and `l`, `1`, `|` and `!` read as `i`. Any other ASCII character
+/// (space, tab, punctuation, emphasis) is skipped. Every non-ASCII character that
+/// is not whitespace is a wildcard: it may stand for any letter (a Greek iota, a
+/// Cyrillic Es, U+2223 or U+FF5C drawn as a stroke) or for nothing (a combining
+/// accent, a dash between letters), so neither a look-alike nor a mark breaks
+/// the match. It runs as a small automaton over the six positions of "credit".
+fn reads_credit(text: &str) -> bool {
+    const WANT: [char; 6] = ['c', 'r', 'e', 'd', 'i', 't'];
+    // Bit j set: the first j letters of "credit" have been read.
+    let mut live: u8 = 1;
+    for c in text.chars() {
+        let letter = match c {
+            'l' | 'L' | '1' | '|' | '!' => Some('i'),
+            c if c.is_ascii_alphabetic() => Some(c.to_ascii_lowercase()),
+            c if !c.is_ascii() && !c.is_whitespace() => None,
+            _ => continue,
+        };
+        let mut next: u8 = 1;
+        for (j, want) in WANT.iter().enumerate() {
+            if live & (1 << j) == 0 {
+                continue;
+            }
+            match letter {
+                Some(l) if l == *want => next |= 1 << (j + 1),
+                Some(_) => {}
+                None => next |= (1 << (j + 1)) | (1 << j),
+            }
+        }
+        if next & (1 << 6) != 0 {
+            return true;
+        }
+        live = next;
+    }
+    false
 }
 
 /// True if the charter could show a reader something other than its text: front
