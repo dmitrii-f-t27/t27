@@ -1,4 +1,4 @@
-# NOW -- Port gHashTag/trinity:fpga/openxc7-synth/symbiflow_blink.v (Verilog, 1 module) to specs/port/trinity/fpga/openxc7-synth/symbiflow_blink.t27 (published 2026-10-03)
+# NOW -- Published: Port gHashTag/trinity:fpga/openxc7-synth/symbiflow_blink.v (Verilog, 1 module) to specs/port/trinity/fpga/openxc7-synth/symbiflow_blink.t27 (2026-10-03)
 
 ## A bee's work on #5655, published from `queen-5655` (Closes #5655)
 
