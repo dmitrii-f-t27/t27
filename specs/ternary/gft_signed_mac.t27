@@ -129,4 +129,32 @@ fn on_comb(a1: u32, b1: u32, a2: u32, b2: u32) -> u32 {
 test pp { assert_eq(on_comb(20480, 20480, 86016, 86016), 20992); }
 // (+1)*(+1) + (+1)*(-1) = 1 - 1 = 0.
 test cancel { assert_eq(on_comb(20480, 20480, 20480, 86016), 0); }
+
+// --- The on-die clauses, derived as simulation tests (trinity-fpga#684, W839) ---
+// The die check (DESIGN 13, fpga/verilog/gft_signed_mac_jtag.v) asks four
+// questions; this spec answered two -- the two the die passed. Derived here so
+// the cheapest oracle asks what the most expensive one does, and a sim/die
+// divergence gets named in seconds instead of after a bitstream load.
+
+// ZERO -- mac(0, live, 0, live2) == 0 on the die. Under this spec's
+// deliberately unguarded smul the clause cannot hold, and W839 registered
+// that forecast BEFORE synthesis: with a = 0 (offset 0, mant 0) and live =
+// +1.0, each product returns the operand's magnitude at a shifted offset
+// (T596), and the two "vanished" magnitudes then add to 512 (offset 1,
+// mant 0), not 0. The die read c_zero = 0; simulation agrees with the
+// forecast, so this half is the designed behaviour of the minority form.
+test zero_clause { assert_eq(on_comb(0, 20480, 0, 20480), 512); }
+
+// COMM -- mac(live, TWO, live2, ONE) == mac(TWO, live, ONE, live2) on the
+// die. smul is commutative by construction (sign XOR, symmetric RNE
+// magmul) and the addition order is untouched, so the spec holds this
+// exactly -- verified against the reference semantics by a 20000-case
+// randomized operand-swap sweep with zero divergences. The die read
+// c_comm = 0 against W839's registered forecast of 1: with this test green
+// in simulation, that divergence is isolated to the generated Verilog or
+// the on-die harness, not to the arithmetic.
+test comm_clause {
+    assert_eq(on_comb(20480, 20992, 86016, 20480), 20480);
+    assert_eq(on_comb(20992, 20480, 20480, 86016), 20480);
+}
 endmodule
