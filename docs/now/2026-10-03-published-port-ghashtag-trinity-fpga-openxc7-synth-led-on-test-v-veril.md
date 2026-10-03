@@ -1,4 +1,4 @@
-# NOW -- Port gHashTag/trinity:fpga/openxc7-synth/led_on_test.v (Verilog, 1 module) to specs/port/trinity/fpga/openxc7-synth/led_on_test.t27 (published 2026-10-03)
+# NOW -- Published: Port gHashTag/trinity:fpga/openxc7-synth/led_on_test.v (Verilog, 1 module) to specs/port/trinity/fpga/openxc7-synth/led_on_test.t27 (2026-10-03)
 
 ## A bee's work on #5768, published from `queen-5768` (Closes #5768)
 
