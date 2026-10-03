@@ -263,6 +263,70 @@ fn main() {
     rerun_line(&manifest_dir, &root, &frozen_path);
     rerun_line(&manifest_dir, &root, &compiler_path);
 
+    // --- CREDIT_HASH seal enforcement for docs/T27-CONSTITUTION.md Article CREDIT ---
+    // The article is entrenched: its text may only change together with its seal.
+    let constitution_path = root.join("docs").join("T27-CONSTITUTION.md");
+    let credit_seal_path = manifest_dir.join("stage0").join("CREDIT_HASH");
+    let constitution = fs::read_to_string(&constitution_path).unwrap_or_else(|e| {
+        panic!(
+            "t27c CREDIT SEAL violation: cannot read docs/T27-CONSTITUTION.md: {e}\n\
+             See docs/T27-CONSTITUTION.md Article CREDIT."
+        )
+    });
+    let article = credit_article(&constitution).unwrap_or_else(|| {
+        panic!(
+            "t27c CREDIT SEAL violation: docs/T27-CONSTITUTION.md has no '## Article CREDIT' \
+             section ending at a '---' line. The article is entrenched and may not be removed."
+        )
+    });
+    let live_credit = format!("{:x}", Sha256::digest(article.as_bytes()));
+    let sealed_credit = fs::read_to_string(&credit_seal_path).unwrap_or_else(|e| {
+        panic!(
+            "t27c CREDIT SEAL violation: cannot read bootstrap/stage0/CREDIT_HASH: {e}\n\
+             See docs/T27-CONSTITUTION.md Article CREDIT."
+        )
+    });
+    let sealed_credit = sealed_credit
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with('#'))
+        .and_then(|line| line.split_whitespace().next())
+        .unwrap_or("");
+    if live_credit != sealed_credit {
+        panic!(
+            "t27c CREDIT SEAL violation: Article CREDIT in docs/T27-CONSTITUTION.md differs from its seal.\n\
+             Sealed: {sealed_credit}\n\
+             Live:   {live_credit}\n\
+             The article is entrenched. Change it only in a PR that also updates \
+             bootstrap/stage0/CREDIT_HASH, quotes the owner's explicit approval and bumps \
+             the charter version. See docs/T27-CONSTITUTION.md Article CREDIT."
+        );
+    }
+    rerun_line(&manifest_dir, &root, &constitution_path);
+    rerun_line(&manifest_dir, &root, &credit_seal_path);
+
     println!("cargo:rerun-if-changed=../docs/.legacy-non-english-docs");
     println!("cargo:rerun-if-changed=build.rs");
+}
+
+/// The sealed text of Article CREDIT: from its heading line up to, not including,
+/// the next line that is exactly `---`. Carriage returns are dropped so a CRLF
+/// checkout seals the same bytes as an LF one.
+fn credit_article(doc: &str) -> Option<String> {
+    let doc = doc.replace('\r', "");
+    let mut out = String::new();
+    let mut inside = false;
+    for line in doc.split_inclusive('\n') {
+        if !inside {
+            if line.starts_with("## Article CREDIT") {
+                inside = true;
+            } else {
+                continue;
+            }
+        } else if line.trim_end_matches('\n') == "---" {
+            return Some(out);
+        }
+        out.push_str(line);
+    }
+    None
 }

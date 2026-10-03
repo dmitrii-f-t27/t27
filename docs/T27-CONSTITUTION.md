@@ -1,8 +1,8 @@
 # Trinity S³AI / t27 — Repository constitution
 
 **Status:** Active  
-**Version:** 1.2  
-**Date:** 2026-04-06  
+**Version:** 1.3  
+**Date:** 2026-10-03  
 
 ---
 
@@ -33,6 +33,18 @@ The numeric formalism relies on repository standards (**NUMERIC-STANDARD-001**, 
 Grandfathered non-English paths are listed only in **`docs/.legacy-non-english-docs`** until translated; **do not expand** that list without Architect approval. Vendored content under **`external/`** is exempt.
 
 **Enforcement:** (1) **`cargo build` / `cargo build --release` in `bootstrap/`** — `build.rs` fails the build with a cited error; (2) **`scripts/check-first-party-doc-language.sh`** in CI (Python checker).
+
+---
+
+## Article CREDIT — who is rewarded (entrenched)
+
+**Article CREDIT.** Adopted 2026-10-03 on the owner's word (#5666). This article is **entrenched**. Its text, from the heading above down to the line before the next `---`, is sealed by SHA-256 in **`bootstrap/stage0/CREDIT_HASH`**, and `bootstrap/build.rs` refuses to build `t27c` when the two disagree. Changing it takes one pull request that edits the article and the seal together, quotes the owner's explicit approval in its body, and bumps the charter version. The general path in **Amendments** is not enough on its own.
+
+1. **A reward goes to one of two people.** Either (a) the **author of a `.t27` spec**, identified by their GitHub login, or (b) the **compute provider** who supplied proof of compute: work done on their own CPU, FPGA or GPU, proven rather than claimed.
+2. **One player, one GitHub, one hive.** Everyone who connects their own token plays under their own GitHub account and runs their own bees. A bee is not a player. A commit made by a bee ("Trinity Bee" or any other shared bot identity) is credited to the owner of the claimed key the bee ran under. A commit made under a key that nobody has claimed is credited to the author of the pull request that carried it.
+3. **Ledgers implement this article; they do not restate it.** The queen's leaderboard and `apps/website/scripts/spec-authors.mjs` in gHashTag/trinity compute credit by this article. Where a ledger disagrees with it, the ledger is wrong.
+
+**Enforcement:** `bootstrap/build.rs` (the seal); the GitHub-side lock (code-owner review of this file by an account other than the PR author) is a repository setting and is not claimed here until it exists.
 
 ---
 
@@ -138,3 +150,7 @@ In conflict scenarios, the higher-priority law prevails.
 ## Amendments
 
 Amendments to this constitution are made via pull request with an explicit charter version bump and rationale.
+
+| Version | Date | Change |
+|---------|------|--------|
+| 1.3 | 2026-10-03 | **Article CREDIT** added and entrenched (#5666): the reward goes to the `.t27` spec author by GitHub login or to the proof-of-compute provider; a bee's commit is credited to the owner of its claimed key, an unclaimed key to the PR author. Sealed in `bootstrap/stage0/CREDIT_HASH`, checked by `bootstrap/build.rs`. Rationale: the rule lived only in chat and in the code that computes the leaderboard, so every implementation was free to grow its own version of it. |

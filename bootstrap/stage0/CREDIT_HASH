@@ -1,0 +1,4 @@
+# SHA-256 seal of Article CREDIT in docs/T27-CONSTITUTION.md (entrenched).
+# Checked by bootstrap/build.rs. Update only together with the article, with the
+# owner's explicit approval quoted in the PR body and a charter version bump.
+bc3e6ad6d35ac5bc575b492ed7032fa1a438babbc081d95004aaf4a6a1362600 docs/T27-CONSTITUTION.md#article-credit
