@@ -276,7 +276,8 @@ fn main() {
     let article = credit_article(&constitution).unwrap_or_else(|| {
         panic!(
             "t27c CREDIT SEAL violation: docs/T27-CONSTITUTION.md has no '## Article CREDIT' \
-             section ending at a '---' line. The article is entrenched and may not be removed."
+             heading, or names it in more than one heading line. Exactly one line must read: \
+             {CREDIT_HEADING}. The article is entrenched and may not be removed or duplicated."
         )
     });
     let live_credit = format!("{:x}", Sha256::digest(article.as_bytes()));
@@ -309,24 +310,44 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
 }
 
-/// The sealed text of Article CREDIT: from its heading line up to, not including,
-/// the next line that is exactly `---`. Carriage returns are dropped so a CRLF
-/// checkout seals the same bytes as an LF one.
+/// The heading of the entrenched article, compared as a whole line.
+const CREDIT_HEADING: &str = "## Article CREDIT \u{2014} who is rewarded (entrenched)";
+
+/// The sealed text of Article CREDIT: from its heading up to, not including, the
+/// next level-1 or level-2 heading outside a code fence, or the end of the file.
+/// A `---` rule does not end it: in Markdown that is a line, and text after it
+/// still reads as part of the article. Exactly one line may name the article as
+/// a heading, so a hidden copy (say inside an HTML comment) cannot stand in for
+/// the visible one. Carriage returns are dropped so CRLF seals the same bytes.
 fn credit_article(doc: &str) -> Option<String> {
     let doc = doc.replace('\r', "");
+    let named = doc
+        .lines()
+        .filter(|l| l.trim_start().starts_with('#') && l.contains("Article CREDIT"))
+        .count();
+    if named != 1 {
+        return None;
+    }
     let mut out = String::new();
     let mut inside = false;
+    let mut fence = false;
     for line in doc.split_inclusive('\n') {
+        let bare = line.trim_end_matches('\n');
         if !inside {
-            if line.starts_with("## Article CREDIT") {
+            if bare == CREDIT_HEADING {
                 inside = true;
-            } else {
-                continue;
+                out.push_str(line);
             }
-        } else if line.trim_end_matches('\n') == "---" {
-            return Some(out);
+            continue;
+        }
+        let lead = bare.trim_start();
+        if lead.starts_with("```") || lead.starts_with("~~~") {
+            fence = !fence;
+        }
+        if !fence && (lead.starts_with("# ") || lead.starts_with("## ")) {
+            break;
         }
         out.push_str(line);
     }
-    None
+    inside.then_some(out)
 }

@@ -38,11 +38,11 @@ Grandfathered non-English paths are listed only in **`docs/.legacy-non-english-d
 
 ## Article CREDIT — who is rewarded (entrenched)
 
-**Article CREDIT.** Adopted 2026-10-03 on the owner's word (#5666). This article is **entrenched**. Its text, from the heading above down to the line before the next `---`, is sealed by SHA-256 in **`bootstrap/stage0/CREDIT_HASH`**, and `bootstrap/build.rs` refuses to build `t27c` when the two disagree. Changing it takes one pull request that edits the article and the seal together, quotes the owner's explicit approval in its body, and bumps the charter version. The general path in **Amendments** is not enough on its own.
+**Article CREDIT.** Adopted 2026-10-03 on the owner's word (#5666). This article is **entrenched**. Its text, from the heading above down to the next level-1 or level-2 heading (a `---` rule does not end it), is sealed by SHA-256 in **`bootstrap/stage0/CREDIT_HASH`**, and `bootstrap/build.rs` refuses to build `t27c` when the two disagree. Changing it takes one pull request that edits the article and the seal together, quotes the owner's explicit approval in its body, and bumps the charter version. The general path in **Amendments** is not enough on its own.
 
 1. **A reward goes to one of two people.** Either (a) the **author of a `.t27` spec**, identified by their GitHub login, or (b) the **compute provider** who supplied proof of compute: work done on their own CPU, FPGA or GPU, proven rather than claimed.
 2. **One player, one GitHub, one hive.** Everyone who connects their own token plays under their own GitHub account and runs their own bees. A bee is not a player. A commit made by a bee ("Trinity Bee" or any other shared bot identity) is credited to the owner of the claimed key the bee ran under. A commit made under a key that nobody has claimed is credited to the author of the pull request that carried it.
-3. **Ledgers implement this article; they do not restate it.** The queen's leaderboard and `apps/website/scripts/spec-authors.mjs` in gHashTag/trinity compute credit by this article. Where a ledger disagrees with it, the ledger is wrong.
+3. **Ledgers implement this article; they do not restate it.** Every ledger that computes credit, the queen's leaderboard and the spec-authors count among them, computes it by this article. Where a ledger disagrees with it, the ledger is wrong.
 
 **Enforcement:** `bootstrap/build.rs` (the seal); the GitHub-side lock (code-owner review of this file by an account other than the PR author) is a repository setting and is not claimed here until it exists.
 
