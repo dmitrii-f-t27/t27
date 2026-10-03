@@ -827,17 +827,6 @@
       }
     },
     {
-      "path": "specs/numeric/gf12.t27",
-      "phase": "parse-no-discard",
-      "reason": "parser reaches EOF but DISCARDS top-level tokens; newly visible now that the parenthesised range for parses",
-      "issue": 2474,
-      "expires": "2026-11-30",
-      "discard_tokens": 31,
-      "discard_by_channel": {
-        "bdd-block-fallback": 31
-      }
-    },
-    {
       "path": "specs/numeric/gft1024.t27",
       "phase": "typecheck",
       "reason": "EXP_OFFSET and OFFSET_MAX declare u32 and carry values 12 to 187 digits wide. Newly DETECTED, not newly broken: the constants are unchanged and three backends still emit them verbatim -- only cc ever said so. The header says E_t = round((N-1)/phi^2) = 391, so which number is meant is a question about the format, not the compiler.",
