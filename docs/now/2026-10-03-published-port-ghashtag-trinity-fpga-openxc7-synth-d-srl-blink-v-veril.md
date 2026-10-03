@@ -1,4 +1,4 @@
-# NOW -- Port gHashTag/trinity:fpga/openxc7-synth/d_srl_blink.v (Verilog, 1 module) to specs/port/trinity/fpga/openxc7-synth/d_srl_blink.t27 (published 2026-10-03)
+# NOW -- Published: Port gHashTag/trinity:fpga/openxc7-synth/d_srl_blink.v (Verilog, 1 module) to specs/port/trinity/fpga/openxc7-synth/d_srl_blink.t27 (2026-10-03)
 
 ## A bee's work on #5774, published from `queen-5774` (Closes #5774)
 
