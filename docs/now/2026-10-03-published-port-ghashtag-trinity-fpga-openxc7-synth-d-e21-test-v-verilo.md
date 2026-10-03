@@ -1,4 +1,4 @@
-# NOW -- Port gHashTag/trinity:fpga/openxc7-synth/d_e21_test.v (Verilog, 1 module) to specs/port/trinity/fpga/openxc7-synth/d_e21_test.t27 (published 2026-10-03)
+# NOW -- Published: Port gHashTag/trinity:fpga/openxc7-synth/d_e21_test.v (Verilog, 1 module) to specs/port/trinity/fpga/openxc7-synth/d_e21_test.t27 (2026-10-03)
 
 ## A bee's work on #5687, published from `queen-5687` (Closes #5687)
 
