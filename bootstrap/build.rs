@@ -276,8 +276,10 @@ fn main() {
     let article = credit_article(&constitution).unwrap_or_else(|| {
         panic!(
             "t27c CREDIT SEAL violation: docs/T27-CONSTITUTION.md has no '## Article CREDIT' \
-             heading, or names it in more than one heading line. Exactly one line must read: \
-             {CREDIT_HEADING}. The article is entrenched and may not be removed or duplicated."
+             heading, names it in more than one heading line, or could hide text from a reader \
+             (raw HTML, an invisible character, a setext heading, a non-ASCII letter in a \
+             heading). Exactly one line must read: {CREDIT_HEADING}. The article is \
+             entrenched and may not be removed, duplicated or shadowed."
         )
     });
     let live_credit = format!("{:x}", Sha256::digest(article.as_bytes()));
@@ -316,14 +318,24 @@ const CREDIT_HEADING: &str = "## Article CREDIT \u{2014} who is rewarded (entren
 /// The sealed text of Article CREDIT: from its heading up to, not including, the
 /// next level-1 or level-2 heading outside a code fence, or the end of the file.
 /// A `---` rule does not end it: in Markdown that is a line, and text after it
-/// still reads as part of the article. Exactly one line may name the article as
-/// a heading, so a hidden copy (say inside an HTML comment) cannot stand in for
-/// the visible one. Carriage returns are dropped so CRLF seals the same bytes.
+/// still reads as part of the article. Only a line with at most three leading
+/// spaces and no tab is a heading or a fence; deeper, it is an indented code
+/// block and ends nothing. Carriage returns are dropped so CRLF seals the same
+/// bytes.
+///
+/// The seal must cover what a reader sees, so the charter may not hide text or
+/// disguise a heading at all: `None` (refused) if it carries raw HTML (a comment,
+/// `<details>`, `<h2>`), an invisible formatting character, a setext heading, a
+/// heading with a non-ASCII letter (a look-alike `I`), or more than one heading
+/// line naming the article.
 fn credit_article(doc: &str) -> Option<String> {
     let doc = doc.replace('\r', "");
+    if hides_or_disguises(&doc) {
+        return None;
+    }
     let named = doc
         .lines()
-        .filter(|l| l.trim_start().starts_with('#') && l.contains("Article CREDIT"))
+        .filter(|l| markdown_lead(l).is_some_and(|t| t.starts_with('#')) && l.contains("Article CREDIT"))
         .count();
     if named != 1 {
         return None;
@@ -340,7 +352,7 @@ fn credit_article(doc: &str) -> Option<String> {
             }
             continue;
         }
-        let lead = bare.trim_start();
+        let lead = markdown_lead(bare).unwrap_or("");
         if lead.starts_with("```") || lead.starts_with("~~~") {
             fence = !fence;
         }
@@ -350,4 +362,58 @@ fn credit_article(doc: &str) -> Option<String> {
         out.push_str(line);
     }
     inside.then_some(out)
+}
+
+/// The line without its indent, if the indent is at most three spaces and holds
+/// no tab: only such a line can open a heading or a fence in Markdown.
+fn markdown_lead(line: &str) -> Option<&str> {
+    let lead = line.trim_start_matches(' ');
+    let indent = &line[..line.len() - lead.len()];
+    (indent.len() <= 3 && !lead.starts_with('\t')).then_some(lead)
+}
+
+/// True if the charter could show a reader something other than its text: raw
+/// HTML, an invisible formatting character, a setext heading, or a heading that
+/// carries a non-ASCII letter.
+fn hides_or_disguises(doc: &str) -> bool {
+    const INVISIBLE: &[char] = &[
+        '\u{00AD}', '\u{034F}', '\u{061C}', '\u{115F}', '\u{1160}', '\u{180E}', '\u{200B}',
+        '\u{200C}', '\u{200D}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}',
+        '\u{202D}', '\u{202E}', '\u{2060}', '\u{2061}', '\u{2062}', '\u{2063}', '\u{2064}',
+        '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}', '\u{3164}', '\u{FEFF}', '\u{FFA0}',
+    ];
+    if doc.contains(INVISIBLE) {
+        return true;
+    }
+    let raw_html = doc.as_bytes().windows(2).any(|w| {
+        w[0] == b'<' && (w[1].is_ascii_alphabetic() || matches!(w[1], b'/' | b'!' | b'?'))
+    });
+    if raw_html {
+        return true;
+    }
+    let mut prev_text = false;
+    let mut fence = false;
+    for line in doc.lines() {
+        let lead = markdown_lead(line);
+        let l = lead.unwrap_or("");
+        if l.starts_with("```") || l.starts_with("~~~") {
+            fence = !fence;
+            prev_text = false;
+            continue;
+        }
+        if fence {
+            continue;
+        }
+        let underline = lead.is_some()
+            && !l.trim_end().is_empty()
+            && (l.trim_end().bytes().all(|b| b == b'=') || l.trim_end().bytes().all(|b| b == b'-'));
+        if underline && prev_text {
+            return true;
+        }
+        if l.starts_with('#') && line.chars().any(|c| c.is_alphabetic() && !c.is_ascii()) {
+            return true;
+        }
+        prev_text = !line.trim().is_empty() && !l.starts_with('#') && !underline;
+    }
+    false
 }

@@ -16,3 +16,9 @@ Closes #5666
 ## Not claimed
 
 - A seal makes a change deliberate and visible, not impossible. The `t27-master-protection` ruleset requires 0 approvals and no code-owner review.
+
+## What review 2 found
+
+- A hidden copy could still sit under a heading the duplicate count missed: a setext heading, an `<h2>` tag, a zero-width space or a Greek capital iota inside "CREDIT", or a collapsed `<details>`. The charter now refuses raw HTML, invisible formatting characters, setext headings and non-ASCII letters in headings, so nothing in it can hide or disguise a copy.
+- A `## ` indented four spaces or by a tab ended the sealed text, though Markdown shows it as code. Only a line indented by at most three spaces, with no tab, now counts as a heading or a fence.
+- The article gains point 4: no other text in the charter overrides it.
