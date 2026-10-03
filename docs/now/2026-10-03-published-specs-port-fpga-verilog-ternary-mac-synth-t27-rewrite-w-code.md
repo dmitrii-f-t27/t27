@@ -1,4 +1,4 @@
-# NOW -- specs/port/fpga/verilog/ternary_mac_synth.t27: rewrite w_code_to_mult/product in t27 form (explicit return, element-wise compare) (published 2026-10-03)
+# NOW -- Published: specs/port/fpga/verilog/ternary_mac_synth.t27: rewrite w_code_to_mult/product in t27 form (explicit return, element-wise compare) (2026-10-03)
 
 ## A bee's work on #5652, published from `queen-5652` (Closes #5652)
 
