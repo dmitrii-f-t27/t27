@@ -1,4 +1,4 @@
-# NOW -- Port gHashTag/trinity:fpga/openxc7-synth/clk_test.v (Verilog, 1 module) to specs/port/trinity/fpga/openxc7-synth/clk_test.t27 (published 2026-10-03)
+# NOW -- Published: Port gHashTag/trinity:fpga/openxc7-synth/clk_test.v (Verilog, 1 module) to specs/port/trinity/fpga/openxc7-synth/clk_test.t27 (2026-10-03)
 
 ## A bee's work on #5674, published from `queen-5674` (Closes #5674)
 
