@@ -1,4 +1,4 @@
-# NOW -- Test the 1 untested function in specs/boards/arty_a7.t27 (published 2026-10-03)
+# NOW -- Published: Test the 1 untested function in specs/boards/arty_a7.t27 (2026-10-03)
 
 ## A bee's work on #5722, published from `queen-5722` (Closes #5722)
 
