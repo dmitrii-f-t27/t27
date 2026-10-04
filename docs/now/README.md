@@ -1,6 +1,8 @@
 # docs/now/ -- the coordination log, one file per entry
 
-Every PR and every push to `master` must add exactly one entry here:
+Nothing requires an entry here any more: the NOW gate that asked every PR and
+every push to `master` for one was removed by owner decision 2026-10-04 (#5935).
+An entry is optional. When you write one, it goes here:
 
 ```
 docs/now/<YYYY-MM-DD>-<slug>.md
@@ -46,10 +48,11 @@ This is also the repo's dominant convention already: `docs/reports/` holds 1,564
 date-and-wave-stamped files, `.claude/plans/` holds 417, and
 `.trinity/experience/` is one append-only file per track.
 
-## What the gate checks
+## What the gate checked (removed in #5935)
 
-`.github/workflows/now-sync-gate.yml` runs `scripts/ci/now-sync-gate-diff.sh`,
-which asserts all of:
+`.github/workflows/now-sync-gate.yml` ran `scripts/ci/now-sync-gate-diff.sh` on
+every PR until #5935. The script is kept and still answers when asked
+(`tri hooks pre-push`, `tri hooks now-gate`); it asserts all of:
 
 1. **Presence** -- the diff **adds** (`--diff-filter=A`) at least one file
    matching `docs/now/<YYYY-MM-DD>-<slug>.md`. Editing an existing entry is not
@@ -63,11 +66,8 @@ which asserts all of:
    bullet. Under the old layout a whitespace touch satisfied the gate; an empty
    new file would be the same vacuous pass, so it is rejected.
 
-Trusted bots (`dependabot[bot]`, `github-actions[bot]`) still pass as a no-op.
-
-The same three conditions are previewed locally by `scripts/verify.sh` and
-enforced before commit by `.githooks/pre-commit`, `scripts/pre-commit`,
-`t27c check-now`, and `tri hooks now-gate`.
+No hook and no CI job runs these conditions since #5935. `t27c check-now` and
+`tri hooks now-gate` still answer on request.
 
 ## Files that are not entries
 
