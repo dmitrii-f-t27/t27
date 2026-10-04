@@ -50,6 +50,7 @@
 //! `[]const T`, `[]T` to `[]const T`, and `&[_]T{ ... }` to `[]const T`.
 //! `for (s) |x|` reads the slice's address and length once, before the loop.
 
+use crate::codegen;
 use crate::compiler::{Node, NodeKind};
 use crate::ir::*;
 use std::collections::{HashMap, HashSet};
@@ -440,7 +441,7 @@ fn lower_mode<'a>(
                     }
                 }
             }
-            NodeKind::TestBlock | NodeKind::InvariantBlock | NodeKind::StructDecl => {}
+            NodeKind::TestBlock | NodeKind::InvariantBlock | NodeKind::BenchBlock | NodeKind::StructDecl => {}
             // Built after pass 1, once every constant a tag may name is known.
             NodeKind::EnumDecl if !item.name.is_empty() => {}
             // `union(enum) { ... }`: t27c keeps only its text.
@@ -510,11 +511,18 @@ fn lower_mode<'a>(
         }
     }
     let mut unchecked = Vec::new();
+    let mut benches: Vec<Func> = Vec::new();
     for item in &items {
         match item.kind {
             NodeKind::TestBlock => {
                 if let Ok(f) = l.test(item, false) {
                     funcs.push(f);
+                }
+            }
+            // Lowered and compiled below, never run and never a test.
+            NodeKind::BenchBlock => {
+                if let Ok(f) = l.bench(item) {
+                    benches.push(f);
                 }
             }
             // An invariant with no lowered body is one whose clause the
@@ -541,7 +549,7 @@ fn lower_mode<'a>(
         funcs.insert(l.nfuncs as usize, str_eql_func(site));
         l.internal_abi.push(l.nfuncs);
     }
-    Ok(Program {
+    let prog = Program {
         module,
         funcs,
         sites: l.sites,
@@ -549,7 +557,29 @@ fn lower_mode<'a>(
         unchecked,
         data: l.data,
         internal_abi: l.internal_abi,
-    })
+    };
+    // Bench bodies are compiled to machine code, so a body that lowers but
+    // that the code generator refuses still rejects the file, and then
+    // dropped: the program that runs is exactly the one without them.
+    if !benches.is_empty() {
+        let mut with = prog.clone();
+        let first = with.funcs.len();
+        with.funcs.extend(benches);
+        let mut errors = Vec::new();
+        for id in first..with.funcs.len() {
+            if let Err(e) = codegen::compile_func(&with, id as FuncId, codegen::TrapStyle::Jit) {
+                errors.push(Reject {
+                    construct: e.construct.to_string(),
+                    line: e.line,
+                    detail: format!("bench {}: {}", with.funcs[id].name, e.detail),
+                });
+            }
+        }
+        if !errors.is_empty() {
+            return Err(errors);
+        }
+    }
+    Ok(prog)
 }
 
 /// Line (1-based) of the first `<keyword> <name>` header in `src`, the name
@@ -950,14 +980,30 @@ impl<'a> Lower<'a> {
     /// A `test` block, or an `invariant` block: both are a parameterless body
     /// of statements run once, and both use the test binding rule.
     fn test(&mut self, n: &Node, invariant: bool) -> R<Func> {
+        let (k, what) = if invariant { ("InvariantBlock", "invariant") } else { ("TestBlock", "test") };
+        self.block_body(n, k, what, invariant)
+    }
+
+    /// A `bench` block. t27c's Zig backend emits one as a plain
+    /// `fn bench_<name>() void { ... }` that nothing calls, so `zig test`
+    /// neither runs it nor counts it. Its body is lowered here with the test
+    /// binding rule (the one t27c's `gen_bench_block` uses) and compiled by the
+    /// caller, but never run: a construct t27b cannot lower in it rejects the
+    /// file under that construct's own name.
+    fn bench(&mut self, n: &Node) -> R<Func> {
+        let mut f = self.block_body(n, "BenchBlock", "bench", false)?;
+        f.is_test = false;
+        Ok(f)
+    }
+
+    fn block_body(&mut self, n: &Node, k: &str, what: &str, invariant: bool) -> R<Func> {
         self.see(n);
         if n.line == 0 {
-            if let Some(l) = self.src.and_then(|s| header_line(s, if invariant { "invariant" } else { "test" }, &n.name)) {
+            if let Some(l) = self.src.and_then(|s| header_line(s, what, &n.name)) {
                 self.line = l;
             }
         }
         if n.extra_field == "partial" {
-            let (k, what) = if invariant { ("InvariantBlock", "invariant") } else { ("TestBlock", "test") };
             return self.reject(
                 k,
                 format!("{} `{}` was only partially parsed by the front-end", what, n.name),
