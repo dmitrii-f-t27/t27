@@ -12,6 +12,7 @@ spec's verdict codes. An unknown string is an error, never a guess.
 """
 
 import ctypes
+import functools
 import hashlib
 import os
 import subprocess
@@ -30,6 +31,18 @@ DELTAS = (None, "REF-MOVED", "REGRESSED", "NEW-MISMATCH", "GAINED", "CHECK-LOST"
 RATCHETS = (None, "VACUITY MEASURED", "UNEXPECTED FAILURE", "UNEXPECTED PASS", "MOVED",
             "STALE", "UNJUDGED", "UNLISTED", "OVER CAP", "BAD REASON")
 REASONS = (None, "unimplemented", "reference-bug", "n/a")
+CLAIMS = (None, "CLAIM-DEAD", "CLAIM-OLD")
+CHECKOUTS = (None, "LAB-CHECKOUT", "LAB-RECLONED")
+# Merge gate (#6244): GitHub's check states, in the spec's state codes.
+CHECK_STATES = {"SUCCESS": 0,
+                "PENDING": 1, "QUEUED": 1, "IN_PROGRESS": 1, "WAITING": 1, "REQUESTED": 1, "EXPECTED": 1,
+                "FAILURE": 2, "ERROR": 2, "CANCELLED": 2, "TIMED_OUT": 2, "ACTION_REQUIRED": 2,
+                "STARTUP_FAILURE": 2,
+                "ABSENT": 3,
+                "SKIPPED": 4, "NEUTRAL": 4, "STALE": 4}
+MERGEABLES = {"MERGEABLE": 0, "CONFLICTING": 1, "UNKNOWN": 2}
+EFFECTS = (None, "WAIT", "BLOCK")
+READINESS = ("READY", "WAIT", "RED", "CONFLICT", "RETARGET", "BLOCKED", "CLOSED")
 
 
 class RulesUnavailable(RuntimeError):
@@ -79,6 +92,25 @@ def _build():
     so.bless_reason.restype = ctypes.c_uint8
     so.cap_rises.argtypes = [ctypes.c_uint32, ctypes.c_uint32, ctypes.c_bool]
     so.cap_rises.restype = ctypes.c_bool
+    for name in ("lab_stale", "ledger_quiet"):
+        getattr(so, name).argtypes = [ctypes.c_uint32, ctypes.c_uint32]
+        getattr(so, name).restype = ctypes.c_bool
+    so.claim_code.argtypes = [ctypes.c_uint8, ctypes.c_uint32, ctypes.c_uint32]
+    so.claim_code.restype = ctypes.c_uint8
+    so.railway_old.argtypes = [ctypes.c_uint32]
+    so.railway_old.restype = ctypes.c_bool
+    so.checkout_code.argtypes = [ctypes.c_bool, ctypes.c_bool]
+    so.checkout_code.restype = ctypes.c_uint8
+    so.cap_rise_is_new.argtypes = [ctypes.c_uint32] * 3
+    so.cap_rise_is_new.restype = ctypes.c_bool
+    so.is_alarm.argtypes = [ctypes.c_uint8, ctypes.c_uint8]
+    so.is_alarm.restype = ctypes.c_bool
+    so.check_effect.argtypes = [ctypes.c_uint8, ctypes.c_uint8, ctypes.c_bool]
+    so.check_effect.restype = ctypes.c_uint8
+    so.effect_fold.argtypes = [ctypes.c_uint8, ctypes.c_uint8]
+    so.effect_fold.restype = ctypes.c_uint8
+    so.pr_ready.argtypes = [ctypes.c_bool, ctypes.c_uint8, ctypes.c_bool, ctypes.c_uint8, ctypes.c_uint8]
+    so.pr_ready.restype = ctypes.c_uint8
     return so
 
 
@@ -147,3 +179,61 @@ def bless_reason(got, kept):
 def cap_rises(not_pass, old_cap):
     has = isinstance(old_cap, int) and not isinstance(old_cap, bool) and old_cap >= 0
     return bool(lib().cap_rises(not_pass, old_cap if has else 0, has))
+
+
+def _minutes(x):
+    """Whole minutes for the spec's u32 thresholds; a negative age (clock skew) is 0."""
+    return max(0, min(int(x), 2**32 - 1))
+
+
+def lab_stale(age_min, limit_min):
+    return bool(lib().lab_stale(_minutes(age_min), _minutes(limit_min)))
+
+
+def ledger_quiet(age_min, limit_min):
+    return bool(lib().ledger_quiet(_minutes(age_min), _minutes(limit_min)))
+
+
+def claim(alive, age_min, limit_min):
+    """The doctor's claim finding, or None. `alive` is True, False, or None (could not tell)."""
+    code = 0 if alive is False else 1 if alive is True else 2
+    return CLAIMS[lib().claim_code(code, _minutes(age_min or 0), _minutes(limit_min))]
+
+
+def railway_old(major):
+    return bool(lib().railway_old(_minutes(major)))
+
+
+def checkout(ok, recloned):
+    return CHECKOUTS[lib().checkout_code(bool(ok), bool(recloned))]
+
+
+def cap_rise_is_new(not_pass, old_cap, new_not_pass):
+    """True when the rise over `old_cap` is no larger than the specs new to the ledger."""
+    return bool(lib().cap_rise_is_new(_minutes(not_pass), _minutes(old_cap), _minutes(new_not_pass)))
+
+
+def is_alarm(t27b, reference):
+    """True when a run record is a lab alarm: a mismatch or crash always, a fail or
+    timeout only where the reference passes."""
+    return bool(lib().is_alarm(verdict(t27b), verdict(reference)))
+
+
+def check_state(s):
+    """A GitHub check state or conclusion as the spec's state code; an unknown one is an error."""
+    key = (s or "ABSENT").upper()
+    if key not in CHECK_STATES:
+        raise ValueError(f"unknown check state {s!r}")
+    return CHECK_STATES[key]
+
+
+def check_effect(state, master, required):
+    return EFFECTS[lib().check_effect(check_state(state), check_state(master), bool(required))]
+
+
+def pr_ready(is_open, mergeable, base_master, effects_required, effects_other):
+    """READY | WAIT | RED | CONFLICT | RETARGET | BLOCKED | CLOSED. The effects are lists of
+    check_effect results; the spec folds them."""
+    fold = lambda xs: functools.reduce(lambda a, e: lib().effect_fold(a, EFFECTS.index(e)), xs, 0)  # noqa: E731
+    m = MERGEABLES.get((mergeable or "UNKNOWN").upper(), 2)
+    return READINESS[lib().pr_ready(bool(is_open), m, bool(base_master), fold(effects_required), fold(effects_other))]

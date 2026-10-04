@@ -30,6 +30,16 @@ bool ratchet_is_red(uint8_t code);
 bool is_unimplemented(uint8_t v);
 uint8_t bless_reason(uint8_t got, uint8_t kept);
 bool cap_rises(uint32_t not_pass, uint32_t old_cap, bool has_old);
+bool lab_stale(uint32_t age_min, uint32_t limit_min);
+uint8_t claim_code(uint8_t alive, uint32_t age_min, uint32_t limit_min);
+bool railway_old(uint32_t major);
+bool ledger_quiet(uint32_t age_min, uint32_t limit_min);
+uint8_t checkout_code(bool ok, bool recloned);
+bool cap_rise_is_new(uint32_t not_pass, uint32_t old_cap, uint32_t new_not_pass);
+bool is_alarm(uint8_t t, uint8_t reference);
+uint8_t check_effect(uint8_t state, uint8_t master, bool required);
+uint8_t effect_fold(uint8_t acc, uint8_t e);
+uint8_t pr_ready(bool open, uint8_t mergeable, bool base_master, uint8_t required, uint8_t other);
 
 /* -------------------------------------------------------
    Function implementations
@@ -220,6 +230,119 @@ bool cap_rises(uint32_t not_pass, uint32_t old_cap, bool has_old) {
     return (not_pass > old_cap);
 }
 
+bool lab_stale(uint32_t age_min, uint32_t limit_min) {
+    return (age_min > limit_min);
+}
+
+uint8_t claim_code(uint8_t alive, uint32_t age_min, uint32_t limit_min) {
+    if ((alive == 0)) {
+        return 1;
+    }
+    if ((alive == 1)) {
+        if ((age_min > limit_min)) {
+            return 2;
+        }
+    }
+    return 0;
+}
+
+bool railway_old(uint32_t major) {
+    return (major < 5);
+}
+
+bool ledger_quiet(uint32_t age_min, uint32_t limit_min) {
+    return (age_min > limit_min);
+}
+
+uint8_t checkout_code(bool ok, bool recloned) {
+    if ((ok == false)) {
+        return 1;
+    }
+    if (recloned) {
+        return 2;
+    }
+    return 0;
+}
+
+bool cap_rise_is_new(uint32_t not_pass, uint32_t old_cap, uint32_t new_not_pass) {
+    if ((not_pass < new_not_pass)) {
+        return true;
+    }
+    return ((not_pass - new_not_pass) <= old_cap);
+}
+
+bool is_alarm(uint8_t t, uint8_t reference) {
+    if ((t == 6)) {
+        return true;
+    }
+    if ((t == 7)) {
+        return true;
+    }
+    if ((reference != 0)) {
+        return false;
+    }
+    if ((t == 5)) {
+        return true;
+    }
+    if ((t == 8)) {
+        return true;
+    }
+    return false;
+}
+
+uint8_t check_effect(uint8_t state, uint8_t master, bool required) {
+    if (required) {
+        if ((state == 0)) {
+            return 0;
+        }
+        if ((state == 2)) {
+            return 2;
+        }
+        return 1;
+    }
+    if ((state == 2)) {
+        if ((master == 0)) {
+            return 2;
+        }
+        if ((master == 1)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+uint8_t effect_fold(uint8_t acc, uint8_t e) {
+    if ((e > acc)) {
+        return e;
+    }
+    return acc;
+}
+
+uint8_t pr_ready(bool open, uint8_t mergeable, bool base_master, uint8_t required, uint8_t other) {
+    if ((open == false)) {
+        return 6;
+    }
+    if ((mergeable == 1)) {
+        return 3;
+    }
+    if ((base_master == false)) {
+        return 4;
+    }
+    if ((required == 2)) {
+        return 2;
+    }
+    if ((other == 2)) {
+        return 5;
+    }
+    if ((required == 1)) {
+        return 1;
+    }
+    if ((mergeable != 0)) {
+        return 1;
+    }
+    return 0;
+}
+
 /* -------------------------------------------------------
    Invariants (compile-time assertions)
    ------------------------------------------------------- */
@@ -396,6 +519,182 @@ void test_bless_first_cap(void) {
     assert_eq(cap_rises(9, 0, false), false);
 }
 
+void test_doctor_stale(void) {
+    assert(lab_stale(361, 360));
+}
+
+void test_doctor_fresh_at_limit(void) {
+    assert((lab_stale(360, 360) == false));
+}
+
+void test_doctor_claim_dead_young(void) {
+    assert_eq(claim_code(0, 1, 100), 1);
+}
+
+void test_doctor_claim_old(void) {
+    assert_eq(claim_code(1, 101, 100), 2);
+}
+
+void test_doctor_claim_live_at_limit(void) {
+    assert_eq(claim_code(1, 100, 100), 0);
+}
+
+void test_doctor_claim_unknown_old(void) {
+    assert_eq(claim_code(2, 999, 100), 0);
+}
+
+void test_doctor_railway(void) {
+    assert(railway_old(4));
+    assert((railway_old(5) == false));
+    assert(railway_old(0));
+}
+
+void test_doctor_ledger_quiet(void) {
+    assert(ledger_quiet(181, 180));
+    assert((ledger_quiet(180, 180) == false));
+}
+
+void test_doctor_checkout_failed(void) {
+    assert_eq(checkout_code(false, false), 1);
+}
+
+void test_doctor_checkout_reclone_failed(void) {
+    assert_eq(checkout_code(false, true), 1);
+}
+
+void test_doctor_checkout_healed(void) {
+    assert_eq(checkout_code(true, true), 2);
+}
+
+void test_doctor_checkout_kept(void) {
+    assert_eq(checkout_code(true, false), 0);
+}
+
+void test_bless_rise_all_new(void) {
+    assert(cap_rise_is_new(594, 582, 41));
+}
+
+void test_bless_rise_old_entries_over_cap(void) {
+    assert((cap_rise_is_new(624, 582, 41) == false));
+}
+
+void test_bless_rise_at_old_cap(void) {
+    assert(cap_rise_is_new(623, 582, 41));
+}
+
+void test_bless_rise_none_new(void) {
+    assert((cap_rise_is_new(583, 582, 0) == false));
+}
+
+void test_bless_rise_more_new_than_total(void) {
+    assert(cap_rise_is_new(3, 0, 5));
+}
+
+void test_alarm_fail_where_reference_passes(void) {
+    assert(is_alarm(5, 0));
+}
+
+void test_alarm_fail_reference_shares(void) {
+    assert((is_alarm(5, 5) == false));
+}
+
+void test_alarm_timeout_reference_shares(void) {
+    assert((is_alarm(8, 8) == false));
+}
+
+void test_alarm_timeout(void) {
+    assert(is_alarm(8, 0));
+}
+
+void test_alarm_crash_always(void) {
+    assert(is_alarm(7, 5));
+}
+
+void test_alarm_mismatch_always(void) {
+    assert(is_alarm(6, 2));
+}
+
+void test_alarm_blocked_never(void) {
+    assert((is_alarm(2, 0) == false));
+}
+
+void test_gate_required_green(void) {
+    assert_eq(check_effect(0, 3, true), 0);
+}
+
+void test_gate_required_pending_waits(void) {
+    assert_eq(check_effect(1, 0, true), 1);
+}
+
+void test_gate_required_absent_waits(void) {
+    assert_eq(check_effect(3, 0, true), 1);
+}
+
+void test_gate_required_skipped_waits(void) {
+    assert_eq(check_effect(4, 0, true), 1);
+}
+
+void test_gate_required_red_blocks_even_if_master_red(void) {
+    assert_eq(check_effect(2, 2, true), 2);
+}
+
+void test_gate_other_red_green_on_master_blocks(void) {
+    assert_eq(check_effect(2, 0, false), 2);
+}
+
+void test_gate_other_red_red_on_master_passes(void) {
+    assert_eq(check_effect(2, 2, false), 0);
+}
+
+void test_gate_other_red_absent_on_master_passes(void) {
+    assert_eq(check_effect(2, 3, false), 0);
+}
+
+void test_gate_other_pending_never_waits(void) {
+    assert_eq(check_effect(1, 0, false), 0);
+}
+
+void test_gate_other_red_master_running_waits(void) {
+    assert_eq(check_effect(2, 1, false), 1);
+}
+
+void test_gate_fold(void) {
+    assert_eq(effect_fold(effect_fold(effect_fold(0, 1), 0), 2), 2);
+    assert_eq(effect_fold(effect_fold(0, 0), 1), 1);
+}
+
+void test_gate_ready(void) {
+    assert_eq(pr_ready(true, 0, true, 0, 0), 0);
+}
+
+void test_gate_conflict_first(void) {
+    assert_eq(pr_ready(true, 1, false, 2, 2), 3);
+}
+
+void test_gate_retarget(void) {
+    assert_eq(pr_ready(true, 0, false, 0, 0), 4);
+}
+
+void test_gate_required_red(void) {
+    assert_eq(pr_ready(true, 0, true, 2, 2), 2);
+}
+
+void test_gate_blocked_by_other(void) {
+    assert_eq(pr_ready(true, 0, true, 1, 2), 5);
+}
+
+void test_gate_waits_on_required(void) {
+    assert_eq(pr_ready(true, 0, true, 1, 0), 1);
+}
+
+void test_gate_closed_first(void) {
+    assert_eq(pr_ready(false, 1, false, 2, 2), 6);
+}
+
+void test_gate_waits_on_mergeable_unknown(void) {
+    assert_eq(pr_ready(true, 2, true, 0, 0), 1);
+}
+
 
 /* -------------------------------------------------------
    Test runner (compile with -DT27_TEST_MAIN to execute)
@@ -442,7 +741,50 @@ int main(void) {
     test_bless_cap_rises();
     test_bless_cap_holds();
     test_bless_first_cap();
-    printf("All %d tests passed.\n", 38);
+    test_doctor_stale();
+    test_doctor_fresh_at_limit();
+    test_doctor_claim_dead_young();
+    test_doctor_claim_old();
+    test_doctor_claim_live_at_limit();
+    test_doctor_claim_unknown_old();
+    test_doctor_railway();
+    test_doctor_ledger_quiet();
+    test_doctor_checkout_failed();
+    test_doctor_checkout_reclone_failed();
+    test_doctor_checkout_healed();
+    test_doctor_checkout_kept();
+    test_bless_rise_all_new();
+    test_bless_rise_old_entries_over_cap();
+    test_bless_rise_at_old_cap();
+    test_bless_rise_none_new();
+    test_bless_rise_more_new_than_total();
+    test_alarm_fail_where_reference_passes();
+    test_alarm_fail_reference_shares();
+    test_alarm_timeout_reference_shares();
+    test_alarm_timeout();
+    test_alarm_crash_always();
+    test_alarm_mismatch_always();
+    test_alarm_blocked_never();
+    test_gate_required_green();
+    test_gate_required_pending_waits();
+    test_gate_required_absent_waits();
+    test_gate_required_skipped_waits();
+    test_gate_required_red_blocks_even_if_master_red();
+    test_gate_other_red_green_on_master_blocks();
+    test_gate_other_red_red_on_master_passes();
+    test_gate_other_red_absent_on_master_passes();
+    test_gate_other_pending_never_waits();
+    test_gate_other_red_master_running_waits();
+    test_gate_fold();
+    test_gate_ready();
+    test_gate_conflict_first();
+    test_gate_retarget();
+    test_gate_required_red();
+    test_gate_blocked_by_other();
+    test_gate_waits_on_required();
+    test_gate_closed_first();
+    test_gate_waits_on_mergeable_unknown();
+    printf("All %d tests passed.\n", 81);
     return 0;
 }
 #endif /* T27_TEST_MAIN */
