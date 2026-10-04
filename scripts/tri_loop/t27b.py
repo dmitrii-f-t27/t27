@@ -298,7 +298,7 @@ class Sources:
         if not shas:
             raise Unreadable("no master commits from the GitHub API")
         return fold_master([run(["gh", "api", "--paginate", f"repos/{REPO}/commits/{sha}/check-runs?per_page=100",
-                                 "--jq", r'.check_runs[] | select(.status == "completed") | "\(.name)\t\(.conclusion)"'],
+                                 "--jq", r'.check_runs[] | "\(.name)\t\(.conclusion // .status)"'],
                                 timeout=90) for sha in shas])
 
     def claim(self):
@@ -1149,11 +1149,16 @@ def gen_check_main(argv, runner=None):
 
 
 MASTER_VERDICTS = ("SUCCESS", "FAILURE", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE")
+# A run still going on a newer master commit than the last verdict: master's
+# answer is not known yet, so a red check on the PR waits (Q29) instead of
+# being judged against a stale verdict.
+MASTER_RUNNING = ("QUEUED", "IN_PROGRESS", "WAITING", "PENDING", "REQUESTED")
 
 
 def fold_master(outputs):
     """`name<TAB>conclusion` lines per master commit, newest commit first ->
-    {name: the newest conclusion that is a verdict}. Cancelled, skipped and
+    {name: the newest conclusion that is a verdict, or PENDING when a newer run
+    is still going (Q29)}. Cancelled, skipped and
     neutral runs are passed over (MASTER_VERDICTS)."""
     got = {}
     for out in outputs:
@@ -1162,6 +1167,8 @@ def fold_master(outputs):
             concl = concl.strip().upper()
             if name and concl in MASTER_VERDICTS:
                 got.setdefault(name, concl)
+            elif name and concl in MASTER_RUNNING:
+                got.setdefault(name, "PENDING")
     return got
 
 

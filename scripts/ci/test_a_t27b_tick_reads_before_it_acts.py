@@ -353,6 +353,9 @@ with tempfile.TemporaryDirectory() as tmp:
     check(t27b_tool.fold_master(["a\tcancelled\nb\tfailure\nc\tskipped\n", "a\tsuccess\nb\tsuccess\nc\tneutral\n"])
           == {"a": "SUCCESS", "b": "FAILURE"},
           "ready: master's newest verdict per check; cancelled, skipped and neutral runs are passed over")
+    check(t27b_tool.fold_master(["a\tin_progress\nb\tcancelled\n", "a\tsuccess\nb\tqueued\n", "b\tsuccess\n"])
+          == {"a": "PENDING", "b": "PENDING"},
+          "ready: a master run still going on a newer commit makes master PENDING, not the older verdict (Q29)")
 
     check(snapshot([clean, mid, dirty]) == before, "never write: the worktrees' git state is unchanged")
     # negative control for the snapshot: a change must show

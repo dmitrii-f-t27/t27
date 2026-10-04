@@ -304,6 +304,9 @@ uint8_t check_effect(uint8_t state, uint8_t master, bool required) {
         if ((master == 0)) {
             return 2;
         }
+        if ((master == 1)) {
+            return 1;
+        }
     }
     return 0;
 }
@@ -651,6 +654,10 @@ void test_gate_other_pending_never_waits(void) {
     assert_eq(check_effect(1, 0, false), 0);
 }
 
+void test_gate_other_red_master_running_waits(void) {
+    assert_eq(check_effect(2, 1, false), 1);
+}
+
 void test_gate_fold(void) {
     assert_eq(effect_fold(effect_fold(effect_fold(0, 1), 0), 2), 2);
     assert_eq(effect_fold(effect_fold(0, 0), 1), 1);
@@ -767,6 +774,7 @@ int main(void) {
     test_gate_other_red_red_on_master_passes();
     test_gate_other_red_absent_on_master_passes();
     test_gate_other_pending_never_waits();
+    test_gate_other_red_master_running_waits();
     test_gate_fold();
     test_gate_ready();
     test_gate_conflict_first();
@@ -776,7 +784,7 @@ int main(void) {
     test_gate_waits_on_required();
     test_gate_closed_first();
     test_gate_waits_on_mergeable_unknown();
-    printf("All %d tests passed.\n", 80);
+    printf("All %d tests passed.\n", 81);
     return 0;
 }
 #endif /* T27_TEST_MAIN */

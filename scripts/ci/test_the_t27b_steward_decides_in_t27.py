@@ -51,7 +51,7 @@ def runs_tests(src: Path) -> tuple[int, str]:
 
 
 code, out = runs_tests(GEN)
-check(code == 0 and "80 tests passed" in out, f"the generated C passes the spec's tests ({code}: {out})")
+check(code == 0 and "81 tests passed" in out, f"the generated C passes the spec's tests ({code}: {out})")
 
 text = GEN.read_text()
 needle = "return (((in_ref * 1000) + (reference / 2)) / reference);"
@@ -137,6 +137,8 @@ check((r.check_effect("FAILURE", "SUCCESS", False), r.check_effect("FAILURE", "F
        r.check_effect("SKIPPED", "SUCCESS", True), r.check_effect("SUCCESS", "FAILURE", True))
       == ("BLOCK", None, None, "WAIT", "WAIT", None),
       "ready: a non-required red blocks only if master is green; a required check must be SUCCESS (#6244)")
+check(r.check_effect("FAILURE", "PENDING", False) == "WAIT",
+      "ready: a non-required red waits while master's newest run of it is still going (Q29)")
 check((r.pr_ready(True, "MERGEABLE", True, [None, None], [None]), r.pr_ready(True, "MERGEABLE", True, [None], ["BLOCK"]),
        r.pr_ready(True, "CONFLICTING", True, ["BLOCK"], []), r.pr_ready(False, "MERGEABLE", True, [], []))
       == ("READY", "BLOCKED", "CONFLICT", "CLOSED"), "ready: the spec folds the effects into one verdict")
