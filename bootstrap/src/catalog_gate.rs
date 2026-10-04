@@ -733,7 +733,10 @@ mod tests {
     #[test]
     fn concurrent_regenerations_do_not_remove_each_other() {
         use std::sync::{Arc, Barrier};
+        // One round of 8 did not overlap on a GitHub runner (control run 37202843986 passed it on
+        // master's code); 25 back-to-back rounds per thread keep the runs overlapping.
         const RUNS: usize = 8;
+        const ROUNDS: usize = 25;
         let cat = repo_catalog();
         let src = std::fs::read_to_string(&cat).expect("the tracked catalog is readable");
         let records = Arc::new(parse_records(&src));
@@ -742,16 +745,19 @@ mod tests {
             .map(|_| {
                 let (cat, records, barrier) = (cat.clone(), records.clone(), barrier.clone());
                 std::thread::spawn(move || {
-                    let mut r = empty_report();
                     barrier.wait();
-                    check_emitted_at(&no_emitted_dir(), &records, &mut r, Some(&cat));
-                    r
+                    (0..ROUNDS)
+                        .map(|_| {
+                            let mut r = empty_report();
+                            check_emitted_at(&no_emitted_dir(), &records, &mut r, Some(&cat));
+                            r
+                        })
+                        .collect::<Vec<_>>()
                 })
             })
             .collect();
         let mut broken = Vec::new();
-        for h in handles {
-            let r = h.join().expect("a run panicked");
+        for r in handles.into_iter().flat_map(|h| h.join().expect("a run panicked")) {
             let unreadable: Vec<String> = r
                 .findings
                 .iter()
@@ -766,8 +772,9 @@ mod tests {
         }
         assert!(
             broken.is_empty(),
-            "{} of {RUNS} concurrent runs reported emitted-unreadable: {:?}",
+            "{} of {} concurrent runs reported emitted-unreadable: {:?}",
             broken.len(),
+            RUNS * ROUNDS,
             broken
         );
     }
