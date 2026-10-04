@@ -48,6 +48,8 @@ ANOMALY CODES (doctor exits 1 when any is printed, 0 when none, 2 on usage)
                       defect or a vacuous pass; either way not in the number
   LAB-ERROR           lab_error, crash, timeout or t27b fail > 0
   LAB-TESTS-RED       a lab step reported ok=false, or cargo test failed
+  LAB-RATCHET         the lab's ratchet step is red: a spec moved against
+                      docs/reports/t27b_expectations.json (see RATCHET below)
   PR-CONFLICTING      an open t27b PR cannot merge into its base
   PR-REQUIRED-RED     validate / check-linked-issue / parse-ratchet failed
   PR-BASE-NOT-MASTER  stacked PR: retarget after its parent merges
@@ -73,6 +75,43 @@ WHAT THIS DOES NOT ESTABLISH
     tri t27b status                # the tick card
     tri t27b doctor                # anomalies, one per line, with the fix
     tri t27b doctor --json         # the same, machine-readable
+
+RATCHET (#6115): the per-spec ledger, so the t27b number cannot move silently
+------------------------------------------------------------------------------
+A total ("t27b 56 / reference 648") cannot show a regression: one spec that
+breaks while another starts passing leaves it unchanged. The ledger
+docs/reports/t27b_expectations.json names, for EVERY spec the reference path
+passes, what t27b does with it: `pass`, `pass_vacuous` (passes, but its tests
+executed 0 runtime asserts), or its first blocker with a reason
+(`unimplemented` | `reference-bug` | `n/a`). `ratchet` diffs one lab run
+(latest.json shape) against it:
+
+  UNEXPECTED FAILURE  a ledger pass that is not a pass now (a pass that turned
+                      vacuous included); a ledger pass_vacuous that no longer
+                      passes at all
+  UNEXPECTED PASS     a ledger non-pass that passes now; a pass_vacuous that
+                      is a real pass now. Red too: an improvement nobody
+                      blesses leaves slack for the next regression
+  UNLISTED            the reference passes a spec the ledger does not name
+  STALE               a ledger spec the reference now fails, or that is gone
+  OVER CAP            more non-pass entries than `max_not_pass`, which only
+                      moves down (raising it is a hand edit in the PR)
+  BAD REASON          a non-pass entry whose reason is not one of the three
+  -- not red --
+  MOVED               still not a pass, but the first blocker changed
+  UNJUDGED            the reference could not judge the spec in this run
+                      (lab_error, timeout, skip): no verdict either way
+  VACUITY MEASURED    a ledger pass blessed from a run that did not count
+                      asserts (source.asserts_counted false) is pass_vacuous
+                      in a run that does: a first measurement, not a
+                      regression. Bless to record it
+
+    tri t27b ratchet                          # latest lab run vs the ledger
+    tri t27b ratchet --run runs/<sha>.json    # a saved run (path or URL)
+    tri t27b ratchet --bless                  # rewrite the ledger from the run
+    tri t27b ratchet --json                   # the verdict, machine-readable
+
+Exit 0 green, 1 red (or a refused bless), 2 usage or an unreadable input.
 """
 import argparse
 import datetime as dt
@@ -89,6 +128,7 @@ REPO = "gHashTag/t27"
 STATE = os.path.expanduser("~/.local/state/t27b-queen")
 REQUIRED = ("validate", "check-linked-issue", "parse-ratchet")
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+LEDGER = os.path.join(ROOT, "docs", "reports", "t27b_expectations.json")
 
 
 class Unreadable(Exception):
@@ -319,7 +359,12 @@ def anomalies(d, args):
         if errs:
             add("LAB-ERROR", ", ".join(f"{k} {v}" for k, v in errs.items()), "read runs/<sha>.log for each")
         steps = lab.get("steps") or {}
-        red = [k for k, v in steps.items() if isinstance(v, dict) and v.get("ok") is False]
+        red = [k for k, v in steps.items() if isinstance(v, dict) and v.get("ok") is False and k != "ratchet"]
+        rat = steps.get("ratchet") or {}
+        if rat.get("ok") is False:
+            add("LAB-RATCHET", f"ratchet {rat.get('verdict')}: " + ", ".join(
+                f"{k} {v}" for k, v in sorted((rat.get("counts") or {}).items()) if v),
+                "read steps.ratchet.findings in latest.json; fix the spec, or bless: tri t27b ratchet --bless")
         ct = steps.get("cargo_test_t27b") or {}
         if ct.get("failed", 0):
             red.append(f"cargo_test_t27b failed {ct['failed']}")
@@ -442,9 +487,219 @@ def status(d):
     return lines
 
 
+# ------------------------------------------------------------------ ratchet
+
+REASONS = ("unimplemented", "reference-bug", "n/a")
+PASSES = ("pass", "pass_vacuous")
+# A t27b verdict bless may record as `unimplemented` on its own: t27b says it
+# cannot compile the spec. A `fail`, `mismatch`, `crash` or `timeout` where the
+# reference passes is a defect somebody has to read; bless will not file it.
+UNIMPLEMENTED = ("blocked", "frontend", "codegen")
+RED = ("UNEXPECTED FAILURE", "UNEXPECTED PASS", "UNLISTED", "STALE", "OVER CAP", "BAD REASON")
+INFO = ("MOVED", "UNJUDGED", "VACUITY MEASURED")
+
+
+def read_run(where):
+    """A lab run document from a path or an http(s) URL."""
+    try:
+        if re.match(r"^https?://", where):
+            with urllib.request.urlopen(where, timeout=60) as r:
+                text = r.read().decode("utf-8")
+        else:
+            with open(where, encoding="utf-8") as f:
+                text = f.read()
+        doc = json.loads(text)
+    except Exception as e:  # noqa: BLE001 -- any failure is "could not read"
+        raise Unreadable(f"run {where}: {e}")
+    results = doc.get("results") if isinstance(doc, dict) else None
+    if not isinstance(results, list) or not results:
+        raise Unreadable(f"run {where}: no results[]")
+    if not any(r.get("reference") == "pass" for r in results):
+        raise Unreadable(f"run {where}: no reference verdicts (reference never ran?)")
+    return doc
+
+
+def observed(rec):
+    """(verdict, first blocker) of one run record, t27b's side."""
+    v = rec.get("t27b") or "missing"
+    if v in PASSES:
+        return v, None
+    blockers = rec.get("blockers") or []
+    first = blockers[0] if blockers else (rec.get("detail") or "")
+    return v, first[:200]
+
+
+def ratchet(run, ledger):
+    """Every finding of `run` against `ledger`, as [{kind, path, what}]."""
+    found = []
+    add = lambda kind, path, what: found.append({"kind": kind, "path": path, "what": what})  # noqa: E731
+    by_path = {r.get("file"): r for r in run["results"]}
+    entries = {e["path"]: e for e in ledger.get("entries", [])}
+    # A ledger blessed from a run without assert counts cannot tell pass from
+    # pass_vacuous; the first counted run measures it instead of regressing it.
+    counted = (ledger.get("source") or {}).get("asserts_counted") is not False
+    for path, e in sorted(entries.items()):
+        want = e.get("t27b")
+        if want not in PASSES and e.get("reason") not in REASONS:
+            add("BAD REASON", path, f"reason {e.get('reason')!r} is not one of {', '.join(REASONS)}")
+        rec = by_path.get(path)
+        if rec is None:
+            add("STALE", path, "not in this run: the spec is gone or was renamed")
+            continue
+        ref = rec.get("reference")
+        if ref != "pass":
+            if ref in ("blocked", "fail"):
+                add("STALE", path, f"the reference does not pass it any more ({ref}: "
+                    f"{(rec.get('reference_detail') or '')[:120]})")
+            else:
+                add("UNJUDGED", path, f"reference {ref}: no verdict either way")
+            continue
+        got, blocker = observed(rec)
+        if want == "pass" and got == "pass_vacuous" and not counted:
+            add("VACUITY MEASURED", path, "ledger pass was blessed before asserts were counted; "
+                "this run counts 0 runtime asserts: bless to record pass_vacuous")
+        elif want == "pass" and got != "pass":
+            why = "passes with 0 runtime asserts" if got == "pass_vacuous" else f"{got}: {blocker}"
+            add("UNEXPECTED FAILURE", path, f"ledger pass, now {why}")
+        elif want == "pass_vacuous" and got not in PASSES:
+            add("UNEXPECTED FAILURE", path, f"ledger pass_vacuous, now {got}: {blocker}")
+        elif want == "pass_vacuous" and got == "pass":
+            add("UNEXPECTED PASS", path, f"ledger pass_vacuous, now a pass with {rec.get('asserts')} runtime asserts")
+        elif want not in PASSES and got in PASSES:
+            add("UNEXPECTED PASS", path, f"ledger {want} ({e.get('blocker')}), now {got}")
+        elif want not in PASSES and blocker != e.get("blocker"):
+            add("MOVED", path, f"{want} ({e.get('blocker')}) -> {got} ({blocker})")
+    for path, rec in sorted(by_path.items()):
+        if rec.get("reference") == "pass" and path not in entries:
+            got, blocker = observed(rec)
+            add("UNLISTED", path, f"the reference passes it and the ledger does not name it (t27b {got}"
+                + (f": {blocker})" if blocker else ")"))
+    not_pass = sum(1 for e in entries.values() if e.get("t27b") not in PASSES)
+    cap = ledger.get("max_not_pass")
+    if not isinstance(cap, int) or not_pass > cap:
+        add("OVER CAP", "-", f"{not_pass} non-pass entries, max_not_pass {cap}")
+    return found
+
+
+def bless(run, old):
+    """(new ledger, refusals). Reasons a human wrote are kept; the cap never rises."""
+    old_entries = {e["path"]: e for e in (old or {}).get("entries", [])}
+    entries, refused = [], []
+    for rec in sorted(run["results"], key=lambda r: r.get("file") or ""):
+        if rec.get("reference") != "pass":
+            continue
+        path = rec["file"]
+        got, blocker = observed(rec)
+        if got in PASSES:
+            entries.append({"path": path, "t27b": got})
+            continue
+        prev = old_entries.get(path) or {}
+        reason = prev.get("reason") if prev.get("reason") in REASONS else None
+        if reason is None and got in UNIMPLEMENTED:
+            reason = "unimplemented"
+        if reason is None:
+            refused.append(f"{path}: t27b {got} where the reference passes ({blocker}); read it, then add the "
+                           f"entry by hand with reason reference-bug or n/a")
+            continue
+        entries.append({"path": path, "t27b": got, "blocker": blocker, "reason": reason})
+    counts = {"pass": sum(1 for e in entries if e["t27b"] == "pass"),
+              "pass_vacuous": sum(1 for e in entries if e["t27b"] == "pass_vacuous")}
+    counts["not_pass"] = len(entries) - counts["pass"] - counts["pass_vacuous"]
+    asserts_counted = any("asserts" in r for r in run["results"])
+    if not asserts_counted:
+        # The run's t27b did not count runtime asserts: 0 would be a claim.
+        counts["pass_vacuous"] = None
+    old_cap = (old or {}).get("max_not_pass")
+    if isinstance(old_cap, int) and counts["not_pass"] > old_cap:
+        refused.append(f"{counts['not_pass']} non-pass entries would exceed max_not_pass {old_cap}; the cap only "
+                       f"moves down. If the rise is deliberate, raise it by hand in the PR and say why")
+    new = {
+        "schema_version": 1,
+        "generated_by": "tri t27b ratchet --bless (scripts/tri_loop/t27b.py), #6115",
+        "source": {"commit": run.get("commit"), "ref": run.get("ref"), "finished": run.get("finished"),
+                   "asserts_counted": asserts_counted},
+        "reasons": {"unimplemented": "t27b cannot compile the spec yet; the blocker is the first construct it rejects",
+                    "reference-bug": "the reference passes it for the wrong reason; t27b is right not to",
+                    "n/a": "outside what t27b is for (say why in the PR that sets it)"},
+        "max_not_pass": counts["not_pass"],
+        "counts": counts,
+        "entries": entries,
+    }
+    return new, refused
+
+
+def dump_ledger(doc):
+    """The header indented, then one entry per line: a spec that moves is a
+    one-line diff in review."""
+    head = {k: v for k, v in doc.items() if k != "entries"}
+    text = json.dumps(head, indent=1)[:-2]
+    rows = ",\n".join("  " + json.dumps(e) for e in doc["entries"])
+    return text + ',\n "entries": [\n' + rows + "\n ]\n}\n"
+
+
+def ratchet_main(argv):
+    ap = argparse.ArgumentParser(prog="tri t27b ratchet", description="t27b per-spec ledger vs a lab run (#6115)")
+    ap.add_argument("--run", default=LAB + "/latest.json", help="lab run JSON: a path or a URL")
+    ap.add_argument("--ledger", default=LEDGER)
+    ap.add_argument("--bless", action="store_true", help="rewrite the ledger from the run")
+    ap.add_argument("--json", action="store_true")
+    try:
+        args = ap.parse_args(argv)
+    except SystemExit as e:
+        return 2 if e.code else 0
+    try:
+        run = read_run(args.run)
+    except Unreadable as e:
+        print(f"tri t27b ratchet: UNREADABLE {e}", file=sys.stderr)
+        return 2
+    old = None
+    if os.path.exists(args.ledger):
+        try:
+            with open(args.ledger, encoding="utf-8") as f:
+                old = json.load(f)
+        except ValueError as e:
+            print(f"tri t27b ratchet: UNREADABLE ledger {args.ledger}: {e}", file=sys.stderr)
+            return 2
+    if args.bless:
+        new, refused = bless(run, old)
+        for r in refused:
+            print(f"REFUSED  {r}", file=sys.stderr)
+        if refused:
+            print(f"tri t27b ratchet --bless: {len(refused)} refusal(s); ledger not written", file=sys.stderr)
+            return 1
+        tmp = args.ledger + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(dump_ledger(new))
+        os.replace(tmp, args.ledger)
+        c = new["counts"]
+        print(f"blessed {args.ledger} from {str(run.get('commit'))[:9]}: pass {c['pass']}, "
+              f"pass_vacuous {'not counted' if c['pass_vacuous'] is None else c['pass_vacuous']}, not_pass {c['not_pass']} (max_not_pass {new['max_not_pass']})")
+        return 0
+    if old is None:
+        print(f"tri t27b ratchet: UNREADABLE ledger {args.ledger}: absent", file=sys.stderr)
+        return 2
+    found = ratchet(run, old)
+    counts = {k: sum(1 for f in found if f["kind"] == k) for k in RED + INFO}
+    red = sum(counts[k] for k in RED)
+    verdict = "red" if red else "green"
+    if args.json:
+        print(json.dumps({"verdict": verdict, "commit": run.get("commit"),
+                          "ledger_commit": (old.get("source") or {}).get("commit"),
+                          "counts": counts, "findings": found}, indent=1))
+    else:
+        for f in found:
+            print(f"{f['kind']:<19} {f['path']}: {f['what']}")
+        print(f"tri t27b ratchet: {verdict} -- run {str(run.get('commit'))[:9]} vs ledger "
+              f"{str((old.get('source') or {}).get('commit'))[:9]}: "
+              + ", ".join(f"{k} {v}" for k, v in counts.items()))
+    return 1 if red else 0
+
+
 def main(argv):
+    if argv[:1] == ["ratchet"]:
+        return ratchet_main(argv[1:])
     ap = argparse.ArgumentParser(prog="tri t27b", description=__doc__.split("\n")[0])
-    ap.add_argument("action", choices=("status", "doctor"))
+    ap.add_argument("action", choices=("status", "doctor", "ratchet"))
     ap.add_argument("--fixture", help="read every source from this directory (tests)")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--lab", default=LAB)

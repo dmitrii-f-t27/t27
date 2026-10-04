@@ -24,7 +24,11 @@ One run, in order:
    already carried reference verdicts;
 6. `cargo test --release -p t27b` for aarch64 under qemu-user (the JIT
    differential tests);
-7. write /srv/runs/<sha>.json and /srv/latest.json.
+7. the per-spec ratchet (#6115): `python3 scripts/tri_loop/t27b.py ratchet`
+   of that same commit diffs the merged per-file verdicts against
+   docs/reports/t27b_expectations.json; its verdict and findings go into
+   steps.ratchet, which is ok=false on any UNEXPECTED FAILURE / PASS;
+8. write /srv/runs/<sha>.json and /srv/latest.json.
 
 A step that fails is recorded with its error and the run is still published;
 no number is filled in that a command did not produce.
@@ -459,8 +463,13 @@ def lab_run(sha, log):
             "reference_pass": len(ref_pass) if reference else None,
             # Files the lab could not judge (fork/thread exhaustion): never folded into pass or fail.
             "reference_lab_error": sum(1 for r in results if r["reference"] == "lab_error") if reference else None,
+            # `pass_vacuous` (#6115): passes, but its tests executed 0 runtime
+            # asserts. Never folded into t27b_pass.
             "t27b_pass": sum(1 for r in results if r["t27b"] == "pass"),
+            "t27b_pass_vacuous": sum(1 for r in results if r["t27b"] == "pass_vacuous"),
             "t27b_pass_where_reference_passes": sum(1 for r in ref_pass if r["t27b"] == "pass") if reference else None,
+            "t27b_pass_vacuous_where_reference_passes": sum(1 for r in ref_pass if r["t27b"] == "pass_vacuous")
+            if reference else None,
             "t27b_pass_where_reference_does_not": sum(1 for r in results if r["t27b"] == "pass" and r["reference"] != "pass")
             if reference else None,
             "mismatch": sum(1 for r in results if r["t27b"] == "mismatch"),
@@ -470,6 +479,8 @@ def lab_run(sha, log):
         }
         doc["top_blockers"] = corpus.get("top_blockers", [])[:30]
         doc["results"] = results
+        if reference:
+            steps["ratchet"] = ratchet(doc, log)
     elif reference:
         # Reference-only lab: t27b could not run here, say so and count the reference.
         doc["summary"] = {
@@ -481,6 +492,46 @@ def lab_run(sha, log):
             {"file": f, "reference": v, "reference_detail": w, "t27b": "not run"} for f, (v, w) in sorted(reference.items())
         ]
     return doc
+
+
+def ratchet(doc, log):
+    """The per-spec ratchet of this commit against its own ledger (#6115).
+
+    The checker is the commit's own scripts/tri_loop/t27b.py, so the ledger and
+    the code that reads it always come from the same tree. Exit 0 green, 1 red,
+    2 unreadable input; a commit without the ledger or the checker is skipped
+    (ok None), never green."""
+    t0 = time.time()
+    tool = CLONE / "scripts" / "tri_loop" / "t27b.py"
+    ledger = CLONE / "docs" / "reports" / "t27b_expectations.json"
+    if not tool.exists() or not ledger.exists():
+        return {"ok": None, "skipped": "no ledger or checker at this commit", "seconds": 0.0}
+    run_file = WORK / "ratchet-run.json"
+    write_json(run_file, doc)
+    cmd = [sys.executable, tool, "ratchet", "--run", run_file, "--ledger", ledger, "--json"]
+    log("$ " + " ".join(str(c) for c in cmd))
+    try:
+        out = subprocess.run([str(c) for c in cmd], cwd=CLONE, capture_output=True, text=True, timeout=600)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return {"ok": False, "error": "ratchet did not run: %s" % e, "seconds": round(time.time() - t0, 1)}
+    log("ratchet exit %s" % out.returncode)
+    if out.returncode == 2 and "invalid choice" in out.stderr:
+        return {"ok": None, "skipped": "the checker at this commit has no ratchet", "seconds": 0.0}
+    try:
+        verdict = json.loads(out.stdout)
+    except ValueError:
+        return {"ok": False, "exit": out.returncode, "error": (out.stderr.strip() or out.stdout.strip())[:300],
+                "seconds": round(time.time() - t0, 1)}
+    return {
+        "ok": out.returncode == 0 and verdict.get("verdict") == "green",
+        "exit": out.returncode,
+        "command": "python3 scripts/tri_loop/t27b.py ratchet --ledger docs/reports/t27b_expectations.json",
+        "verdict": verdict.get("verdict"),
+        "ledger_commit": verdict.get("ledger_commit"),
+        "counts": verdict.get("counts"),
+        "findings": verdict.get("findings"),
+        "seconds": round(time.time() - t0, 1),
+    }
 
 
 def publish(doc, sha):

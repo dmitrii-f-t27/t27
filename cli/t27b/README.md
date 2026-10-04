@@ -312,14 +312,21 @@ Options:
   lower, codegen, jit-map / emit, run / write.
 * `--check`: runs every test in the interpreter too, and fails with exit 4 if
   the two disagree.
+  It also prints `<file>: runtime asserts N`: the asserts the interpreter
+  executed whose condition is not a constant (callees and loop iterations
+  included). A constant assert compiles to nothing, so a test made only of them
+  checks nothing (#6115).
 * `corpus`: runs `test --quiet --check` on every `.t27` under a directory, one
   process per file, with a timeout. It prints:
   * supported / rejected / front-end-error / failed / crash counts;
   * the 15 most common rejecting constructs.
 * `corpus --json <path>`: also writes the same totals, every rejecting
   construct, and one record per file (`file`, `reference`, `t27b`: pass /
-  fail / blocked / frontend / mismatch / codegen / timeout / crash, `tests`,
-  `invariants`, `blockers`, `detail`). With `--reference`, each record's
+  pass_vacuous / fail / blocked / frontend / mismatch / codegen / timeout /
+  crash, `tests`, `invariants`, `asserts`, `blockers`, `detail`).
+  `pass_vacuous` is a pass whose `asserts` is 0; it is not counted in `pass`.
+  `asserts` is null when it is unknown. `tri t27b ratchet` diffs a lab run of
+  these records against `docs/reports/t27b_expectations.json` (#6115). With `--reference`, each record's
   `reference` is the reference path's verdict (`pass` / `blocked` / `fail` /
   `timeout`, reason in `reference_detail`) and `totals.reference.ran` is
   true; without it, `reference` is `skip`.

@@ -22,6 +22,9 @@ on:
       - "scripts/ci/test_a_tick_resumes_from_what_it_reads.py"
       - "scripts/ci/test_an_open_pr_is_not_a_green_one.py"
       - "scripts/ci/test_a_t27b_tick_reads_before_it_acts.py"
+      - "scripts/ci/test_a_t27b_spec_cannot_move_silently.py"
+      - "docs/reports/t27b_expectations.json"
+      - "contrib/railway/t27b-lab/lab.py"
       - "scripts/ci/test_a_page_is_measured_at_both_widths.py"
       - ".github/workflows/loop-tools-gate.yml"
   push:
@@ -35,6 +38,9 @@ on:
       - "scripts/ci/test_a_tick_resumes_from_what_it_reads.py"
       - "scripts/ci/test_an_open_pr_is_not_a_green_one.py"
       - "scripts/ci/test_a_t27b_tick_reads_before_it_acts.py"
+      - "scripts/ci/test_a_t27b_spec_cannot_move_silently.py"
+      - "docs/reports/t27b_expectations.json"
+      - "contrib/railway/t27b-lab/lab.py"
       - "scripts/ci/test_a_page_is_measured_at_both_widths.py"
   # Without this the missing reading cannot be taken on purpose: a gate with
   # a `paths:` filter that nothing has matched in months is unmeasured, not
@@ -143,6 +149,16 @@ jobs:
         # names each. Fixtures for every source; the worktrees are real git
         # repositories. The healthy fixture is the negative control.
         run: python3 scripts/ci/test_a_t27b_tick_reads_before_it_acts.py
+
+      - name: No t27b spec moves without being named
+        # #6115. A total ("t27b N / reference M") hides a regression that lands
+        # beside an improvement. tri t27b ratchet diffs a lab run against
+        # docs/reports/t27b_expectations.json per spec: UNEXPECTED FAILURE and
+        # UNEXPECTED PASS are red, a pass that ran no runtime assert is
+        # pass_vacuous. A run identical to the ledger is the negative control;
+        # a copy of the checker without its UNEXPECTED PASS branch is the
+        # mutation control. The lab half imports the real lab.py.
+        run: python3 scripts/ci/test_a_t27b_spec_cannot_move_silently.py
 
       - name: The dispatcher runs its helpers without a built compiler
         # tri triage and tri damage read the tracker and the spec text and have no

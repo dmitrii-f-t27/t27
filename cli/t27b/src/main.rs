@@ -312,6 +312,9 @@ fn cmd_test(prog: &Program, ph: &mut Phases, o: &Opts) -> ExitCode {
     let mut failed = 0usize;
     let (mut held, mut broken) = (0usize, 0usize);
     let mut mismatches = 0usize;
+    // Runtime asserts the interpreter executed (#6115), with `--check` only.
+    let mut runtime_asserts = 0u64;
+    let mut asserts_known = true;
     let mut lines: Vec<String> = Vec::new();
     let t0 = Instant::now();
     for (id, f) in prog.tests() {
@@ -350,6 +353,12 @@ fn cmd_test(prog: &Program, ph: &mut Phases, o: &Opts) -> ExitCode {
             // Cross-check against the reference interpreter.
             let mut it = Interp::new(prog);
             let want = it.call(id, &[]);
+            runtime_asserts += it.asserts;
+            if matches!(want, Err(Stop::Fuel) | Err(Stop::Depth)) {
+                // The interpreter stopped early: its count is a lower bound,
+                // so it cannot show that the pass is vacuous.
+                asserts_known = false;
+            }
             let agree = match (&r, &want) {
                 (Ok(_), Ok(_)) => true,
                 (Err(t), Err(Stop::Trap { site, a, b })) => {
@@ -397,6 +406,15 @@ fn cmd_test(prog: &Program, ph: &mut Phases, o: &Opts) -> ExitCode {
             broken,
             prog.unchecked.len()
         );
+    }
+    if o.check {
+        // Read by `corpus`: a pass with 0 here is `pass_vacuous` (#6115).
+        // Counted over tests and invariants, callees included.
+        if asserts_known {
+            outln!("{}: runtime asserts {}", name, runtime_asserts);
+        } else {
+            outln!("{}: runtime asserts unknown", name);
+        }
     }
     // Tests only; this line is last, and `corpus` reads its total.
     outln!(
@@ -502,8 +520,9 @@ fn cmd_asm(prog: &Program) -> ExitCode {
 
 #[derive(Clone, Debug)]
 enum Outcome {
-    /// Tests run, invariants run.
-    Pass(usize, usize),
+    /// Tests run, invariants run, runtime asserts executed (None: not
+    /// counted, or the interpreter stopped early).
+    Pass(usize, usize, Option<u64>),
     TestFail(String),
     Unsupported(Vec<String>),
     FrontEnd(String),
@@ -517,6 +536,8 @@ impl Outcome {
     /// The per-file `t27b` verdict in `--json`.
     fn label(&self) -> &'static str {
         match self {
+            // A pass that executed no runtime assert checked nothing (#6115).
+            Outcome::Pass(_, _, Some(0)) => "pass_vacuous",
             Outcome::Pass(..) => "pass",
             Outcome::TestFail(_) => "fail",
             Outcome::Unsupported(_) => "blocked",
@@ -620,7 +641,11 @@ fn run_one(exe: &Path, file: &Path, o: &Opts) -> Outcome {
                 .and_then(|t| t.split(' ').next())
                 .and_then(|n| n.parse::<usize>().ok())
                 .unwrap_or(0);
-            Outcome::Pass(total, invariants)
+            let asserts = stdout
+                .lines()
+                .find_map(|l| l.split_once(": runtime asserts ").map(|x| x.1))
+                .and_then(|n| n.trim().parse::<u64>().ok());
+            Outcome::Pass(total, invariants, asserts)
         }
         Some(1) => Outcome::TestFail(
             stdout
@@ -730,21 +755,27 @@ fn cmd_corpus(dir: &Path, o: &Opts) -> ExitCode {
     results.sort_by_key(|r| r.0);
 
     let (mut pass, mut pass_tests, mut pass_inv, mut pass_zero) = (0, 0usize, 0usize, 0);
+    let mut pass_vacuous = 0usize;
     let (mut fail, mut unsup, mut fe, mut mism, mut cg, mut tout, mut crash) = (0, 0, 0, 0, 0, 0, 0);
     let mut first: HashMap<String, usize> = HashMap::new();
     let mut all: HashMap<String, usize> = HashMap::new();
     for (i, r, _) in &results {
         let name = files[*i].display();
         match r {
-            Outcome::Pass(n, inv) => {
-                pass += 1;
+            Outcome::Pass(n, inv, asserts) => {
+                if *asserts == Some(0) {
+                    pass_vacuous += 1;
+                } else {
+                    pass += 1;
+                }
                 pass_tests += n;
                 pass_inv += inv;
                 if *n == 0 {
                     pass_zero += 1;
                 }
                 if o.list {
-                    outln!("PASS        {} ({} tests, {} invariants)", name, n, inv);
+                    let tag = if *asserts == Some(0) { "PASS VACUOUS" } else { "PASS        " };
+                    outln!("{}{} ({} tests, {} invariants)", tag, name, n, inv);
                 }
             }
             Outcome::TestFail(m) => {
@@ -799,6 +830,7 @@ fn cmd_corpus(dir: &Path, o: &Opts) -> ExitCode {
         "  supported, all tests pass : {} ({} tests, {} invariants; {} files have no test block)",
         pass, pass_tests, pass_inv, pass_zero
     );
+    outln!("  pass, 0 runtime asserts   : {} (pass_vacuous: not counted above)", pass_vacuous);
     outln!("  supported, a test fails   : {} (a test or an invariant)", fail);
     outln!("  rejected (unsupported)    : {}", unsup);
     outln!("  front-end error           : {}", fe);
@@ -827,13 +859,14 @@ fn cmd_corpus(dir: &Path, o: &Opts) -> ExitCode {
         }
         let totals = format!(
             concat!(
-                "{{\"pass\": {}, \"tests\": {}, \"invariants\": {}, \"pass_no_tests\": {}, ",
+                "{{\"pass\": {}, \"pass_vacuous\": {}, \"tests\": {}, \"invariants\": {}, \"pass_no_tests\": {}, ",
                 "\"fail\": {}, \"blocked\": {}, \"frontend\": {}, \"mismatch\": {}, ",
                 "\"codegen\": {}, \"timeout\": {}, \"crash\": {}, ",
                 "\"reference\": {{\"ran\": {}, \"pass\": {}, \"blocked\": {}, \"fail\": {}, ",
                 "\"timeout\": {}, \"skip\": {}}}}}"
             ),
             pass,
+            pass_vacuous,
             pass_tests,
             pass_inv,
             pass_zero,
@@ -865,7 +898,7 @@ fn cmd_corpus(dir: &Path, o: &Opts) -> ExitCode {
         let recs: Vec<String> = results
             .iter()
             .map(|(i, r, rf)| {
-                let (tests, inv) = if let Outcome::Pass(n, inv) = r { (*n, *inv) } else { (0, 0) };
+                let (tests, inv, asserts) = if let Outcome::Pass(n, inv, a) = r { (*n, *inv, *a) } else { (0, 0, None) };
                 // Each construct once, in the order the lowering reported them.
                 let mut blockers: Vec<&str> = Vec::new();
                 if let Outcome::Unsupported(cs) = r {
@@ -886,13 +919,14 @@ fn cmd_corpus(dir: &Path, o: &Opts) -> ExitCode {
                     }
                 };
                 format!(
-                    "{{\"file\": {}, \"reference\": \"{}\", \"reference_detail\": {}, \"t27b\": \"{}\", \"tests\": {}, \"invariants\": {}, \"blockers\": [{}], \"detail\": {}}}",
+                    "{{\"file\": {}, \"reference\": \"{}\", \"reference_detail\": {}, \"t27b\": \"{}\", \"tests\": {}, \"invariants\": {}, \"asserts\": {}, \"blockers\": [{}], \"detail\": {}}}",
                     json_str(&files[*i].display().to_string()),
                     rtag,
                     json_str(&rwhy),
                     r.label(),
                     tests,
                     inv,
+                    asserts.map_or("null".to_string(), |a| a.to_string()),
                     blockers.iter().map(|b| json_str(b)).collect::<Vec<_>>().join(", "),
                     json_str(r.detail())
                 )
@@ -918,7 +952,7 @@ fn cmd_corpus(dir: &Path, o: &Opts) -> ExitCode {
         report_reference(&files, &results);
     }
     if o.blockers {
-        report_blockers(&results, reference.is_some(), pass);
+        report_blockers(&results, reference.is_some(), pass + pass_vacuous);
     }
     if crash > 0 || mism > 0 {
         ExitCode::from(EXIT_MISMATCH)
