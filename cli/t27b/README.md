@@ -5,11 +5,13 @@ call LLVM, zig, clang or rustc, at build time or at run time. It produces two
 outputs:
 
 * `t27b test`: an in-process JIT test runner. The code is written into one
-  `MAP_JIT` region and the module's `test` blocks run there.
+  executable region (`MAP_JIT` on macOS; `mmap` RW, then `mprotect` RX on
+  Linux) and the module's `test` blocks run there.
 * `t27b build -o out.o`: a Mach-O `MH_OBJECT` for arm64. It links with
   `cc driver.c out.o`.
 
-Only arm64 macOS is supported.
+The JIT runs on arm64 macOS and arm64 Linux. The Railway t27b lab
+(`contrib/railway/t27b-lab`) runs the Linux build under qemu-user on x86_64.
 
 The front-end is t27c's own, unmodified. `bootstrap/src/compiler.rs` and
 `bootstrap/src/use_resolve.rs` are mounted with `#[path]`, so
@@ -104,7 +106,9 @@ reference interpreter (see Verification).
   multiplication, `smull`/`umull` with an extend-compare (`smulh`/`umulh` at
   64 bits). Narrow types use an extend-compare. Division gets
   `cbz` (divide by zero) and a MIN/-1 check. Shifts get an unsigned range
-  compare on the amount.
+  compare on the amount. A checked cast compares the operand with its own
+  low bits extended (`cmp x, w, sxtb` and the like) and, where only the
+  sign can be wrong, with zero.
 
   Each check branches to an out-of-line stub at the end of the function:
   * in the JIT, the stub records the site and jumps to `trap_common`, which
@@ -119,6 +123,7 @@ reference interpreter (see Verification).
   | 4 | assert |
   | 5 | assert_eq |
   | 6 | missing return |
+  | 7 | cast out of range |
 
 Example: `t27b asm` on one benchmark function. Left is trap mode (the
 default); right is `--overflow wrap`.
@@ -176,7 +181,8 @@ _k0:  ; line 3                          _k0:  ; line 3
   block declares it.
 
 Everything else is rejected by name. That includes structs, enums, floats,
-strings, slices and arrays, casts, `invariant` and `bench` blocks, builtins
+strings, slices and arrays, casts to or from a float or to `bool`,
+`invariant` and `bench` blocks, builtins
 (`@...`) and labelled loops. The corpus section lists what that rejects in
 practice.
 
@@ -220,6 +226,22 @@ code, and the differential test checks them trap for trap.
     masked in wrap mode.
   * An untyped literal shifted by a runtime amount (`1 << n`) is rejected,
     because its width would be a guess.
+* **Casts.** `x as T` converts an integer or `bool` to integer `T`.
+  * A lossless one is a plain widening, and `bool` becomes 0 or 1.
+  * Between two unsigned types, a narrowing keeps the low bits, like Zig's
+    `@truncate`: `300 as u8` from a `u32` is 44.
+  * Every other conversion is checked, like `@intCast`, and traps when the
+    value is outside `T` (`brk #7`): `-1 as u8`, `200 as i8`,
+    `0x8000_0000 as i32` from a `u32`.
+  * In wrap mode every narrowing keeps the low bits, as a C cast does.
+  * A literal must fit `T`. `x as bool` is rejected, as Zig rejects it.
+  * The Zig backend decides between `@truncate` and `@intCast` by the shape of
+    the operand: an expression it can prove unsigned, such as a typed
+    variable, a typed literal, a cast, or an arithmetic or shift of these.
+    t27b decides by the operand's type. They differ only for an unsigned
+    operand of another shape, such as a call result, that is out of range:
+    t27b truncates it and the Zig backend panics. It also emits `@intCast` on
+    a `bool`, which does not compile.
 * **Missing return.** A function with a result type that falls off its end
   traps (`brk #6`).
 
@@ -279,6 +301,7 @@ t27b test   <file.t27> [--overflow trap|wrap] [--time] [--quiet] [--check] [--bl
 t27b build  <file.t27> -o <out.o> [--overflow trap|wrap] [--time]
 t27b asm    <file.t27> [--overflow trap|wrap]
 t27b corpus <dir> [--timeout-ms N] [--jobs N] [--overflow trap|wrap] [--list]
+                  [--json <path>] [--runner "<cmd> [args]"]
                   [--blockers [--reference <t27c> [--reference-cache <file>]
                                [--reference-timeout-ms N]]]
 ```
@@ -289,10 +312,28 @@ Options:
   lower, codegen, jit-map / emit, run / write.
 * `--check`: runs every test in the interpreter too, and fails with exit 4 if
   the two disagree.
+  It also prints `<file>: runtime asserts N`: the asserts the interpreter
+  executed whose condition is not a constant (callees and loop iterations
+  included). A constant assert compiles to nothing, so a test made only of them
+  checks nothing (#6115).
 * `corpus`: runs `test --quiet --check` on every `.t27` under a directory, one
   process per file, with a timeout. It prints:
   * supported / rejected / front-end-error / failed / crash counts;
   * the 15 most common rejecting constructs.
+* `corpus --json <path>`: also writes the same totals, every rejecting
+  construct, and one record per file (`file`, `reference`, `t27b`: pass /
+  pass_vacuous / fail / blocked / frontend / mismatch / codegen / timeout /
+  crash, `tests`, `invariants`, `asserts`, `blockers`, `detail`).
+  `pass_vacuous` is a pass whose `asserts` is 0; it is not counted in `pass`.
+  `asserts` is null when it is unknown. `tri t27b ratchet` diffs a lab run of
+  these records against `docs/reports/t27b_expectations.json` (#6115). With `--reference`, each record's
+  `reference` is the reference path's verdict (`pass` / `blocked` / `fail` /
+  `timeout`, reason in `reference_detail`) and `totals.reference.ran` is
+  true; without it, `reference` is `skip`.
+* `corpus --runner "<cmd> [args]"`: starts each per-file `t27b test` as
+  `<cmd> [args] <t27b> test ...`. Under qemu-user without binfmt_misc the
+  driver cannot exec its own aarch64 binary; the lab passes
+  `--runner "qemu-aarch64 -L /usr/aarch64-linux-gnu"`.
 * `--blockers`: lists every unsupported construct of a file, not only the
   first. With `corpus`, it also prints the greedy order in which supporting
   constructs unlocks the most whole files. See "Blockers" below.
@@ -787,8 +828,10 @@ built on the same overloaded machine.
   * No `MH_SUBSECTIONS_VIA_SYMBOLS`, so the linker cannot dead-strip single
     functions.
   * No unwind info and no debug info.
-* **`mprotect`** is declared as required but unused: `MAP_JIT` plus
-  `pthread_jit_write_protect_np` is the whole W^X protocol.
+* **W^X.** On macOS, `MAP_JIT` plus `pthread_jit_write_protect_np` is the
+  whole protocol and `mprotect` is unused. On Linux the region is mapped RW,
+  written, flushed (`dc cvau` / `ic ivau`) and switched to RX with
+  `mprotect`; it is never writable and executable at once.
 * **Untyped shift.** `1 << n` with a runtime `n` is rejected until literals
   can be given a type with a cast.
 * **The front-end is mounted by path.** `src/lib.rs` uses

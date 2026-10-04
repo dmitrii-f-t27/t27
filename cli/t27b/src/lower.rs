@@ -1543,6 +1543,16 @@ impl<'a> Lower<'a> {
                     None => self.reject("ExprCall", format!("void fn `{}` used as a value", n.name)),
                 }
             }
+            NodeKind::ExprCast => {
+                if n.children.len() != 1 {
+                    return self.reject("ExprCast", "unexpected shape".into());
+                }
+                // The operand first, so that in recovery mode an unsupported
+                // operand and an unsupported target type are both named.
+                let v = self.expr(&n.children[0])?;
+                let to = self.ty(n.extra_type.trim())?;
+                self.cast(v, to)
+            }
             NodeKind::ExprFieldAccess => {
                 // `.len` of a compile-time string is a constant.
                 if n.name == "len"
@@ -1592,6 +1602,51 @@ impl<'a> Lower<'a> {
             }
             None => Ok(None),
         }
+    }
+
+    /// `v as to`. Lossless conversions (bool to an integer as 0 / 1
+    /// included) are a `Widen`. A narrowing between two unsigned types
+    /// truncates, like Zig's `@truncate`; every other one is checked, like
+    /// `@intCast`, and traps when the value is outside `to`. In Wrap mode every
+    /// narrowing truncates, as a C cast does.
+    fn cast(&mut self, v: Val, to: Ty) -> R<Val> {
+        let e = match v {
+            Val::Poison => return Err(()),
+            Val::Ct(c) if to.is_int() => return Ok(Val::E(self.coerce(Val::Ct(c), to)?)),
+            Val::Ct(_) => return self.reject("ExprCast(to bool)", "integer literal as bool".into()),
+            Val::E(e) => e,
+            Val::P(..) => return self.reject("ExprCast", format!("pointer as {}", to.name())),
+            Val::M(_) => return self.reject("ExprCast", format!("struct as {}", to.name())),
+            Val::S(..) => return self.reject("ExprCast", format!("string as {}", to.name())),
+        };
+        let from = e.ty;
+        if from == to {
+            return Ok(Val::E(e));
+        }
+        if to == Ty::Bool {
+            return self.reject("ExprCast(to bool)", format!("{} as bool", from.name()));
+        }
+        if from == Ty::Bool || to.can_widen_from(from) {
+            if let ExprKind::Const(c) = e.kind {
+                return Ok(Val::E(Expr { ty: to, kind: ExprKind::Const(c) }));
+            }
+            return Ok(Val::E(Expr { ty: to, kind: ExprKind::Widen(Box::new(e)) }));
+        }
+        let truncate = self.mode == OverflowMode::Wrap || (!from.signed() && !to.signed());
+        if let ExprKind::Const(c) = e.kind {
+            if truncate {
+                return Ok(Val::E(Expr { ty: to, kind: ExprKind::Const(to.wrap(c)) }));
+            }
+            if to.fits(c) {
+                return Ok(Val::E(Expr { ty: to, kind: ExprKind::Const(c) }));
+            }
+        }
+        let site = if truncate {
+            0
+        } else {
+            self.site(TrapKind::Cast, format!("{} as {}", from.name(), to.name()), to)
+        };
+        Ok(Val::E(Expr { ty: to, kind: ExprKind::Cast { arg: Box::new(e), site } }))
     }
 
     /// A name that is neither in scope nor a module-level constant.

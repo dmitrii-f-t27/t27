@@ -166,8 +166,19 @@ pub struct Interp<'p> {
     pub prog: &'p Program,
     pub fuel: u64,
     pub max_depth: u32,
+    /// Runtime asserts executed so far (#6115): every `assert` / `assert_eq`
+    /// statement reached whose operands are not all compile-time constants.
+    /// An assert the lowering folded to a constant is not counted: the code
+    /// generator emits nothing for `assert(true)`, so it checks nothing at
+    /// run time. A test that passes with this at 0 is a vacuous pass.
+    pub asserts: u64,
     depth: u32,
     mem: Mem,
+}
+
+/// True when the IR expression is a compile-time constant.
+fn is_const(e: &Expr) -> bool {
+    matches!(e.kind, ExprKind::Const(_))
 }
 
 /// Exact arithmetic of one IR operation on in-range operands.
@@ -231,6 +242,7 @@ impl<'p> Interp<'p> {
             prog,
             fuel: 50_000_000,
             max_depth: 2000,
+            asserts: 0,
             depth: 0,
             mem: Mem::new(prog),
         }
@@ -329,12 +341,18 @@ impl<'p> Interp<'p> {
                 Ok(Flow::Next)
             }
             Stmt::Assert { cond, site } => {
+                if !is_const(cond) {
+                    self.asserts += 1;
+                }
                 if self.expr(cond, env)? == 0 {
                     return Err(Stop::Trap { site: *site, a: 0, b: 0 });
                 }
                 Ok(Flow::Next)
             }
             Stmt::AssertEq { lhs, rhs, site } => {
+                if !(is_const(lhs) && is_const(rhs)) {
+                    self.asserts += 1;
+                }
                 let a = self.expr(lhs, env)?;
                 let b = self.expr(rhs, env)?;
                 if a != b {
@@ -447,6 +465,16 @@ impl<'p> Interp<'p> {
                 }
             }
             ExprKind::Widen(a) => self.expr(a, env),
+            ExprKind::Cast { arg, site } => {
+                let v = self.expr(arg, env)?;
+                if *site == 0 {
+                    Ok(e.ty.wrap(v))
+                } else if e.ty.fits(v) {
+                    Ok(v)
+                } else {
+                    Err(Stop::Trap { site: *site, a: 0, b: 0 })
+                }
+            }
             ExprKind::Slot(k) => Ok(env.slots[*k as usize] as i128),
             ExprKind::Data(k) => Ok(self.mem.data_addr(*k) as i128),
             ExprKind::Load { addr, off } => {
