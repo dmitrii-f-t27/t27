@@ -27840,7 +27840,22 @@ impl RustCodegen {
                     // [T; N] return. Element text is valid Rust as-is.
                     let txt = node.extra_size.trim();
                     if let Some((val, count)) = txt.rsplit_once(';') {
-                        format!("[{}; {}]", val.trim(), count.trim())
+                        let count = count.trim();
+                        // Convert only a declared integral width. Casting every
+                        // count would silently admit bool/float lengths and add
+                        // redundant casts to usize or inferred literal counts.
+                        let mut parser = Parser::new(Lexer::new(count));
+                        let count_type = parser
+                            .parse_expr()
+                            .ok()
+                            .filter(|_| parser.current.kind == TokenKind::Eof)
+                            .and_then(|expr| self.infer_int_type(&expr));
+                        if count_type.is_some_and(|ty| ty != "usize") {
+                            // Preserve grouping before converting the full count.
+                            format!("[{}; ({}) as usize]", val.trim(), count)
+                        } else {
+                            format!("[{}; {}]", val.trim(), count)
+                        }
                     } else {
                         format!("[{}]", txt)
                     }
