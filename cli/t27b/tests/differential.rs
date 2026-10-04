@@ -2068,6 +2068,53 @@ fn f64_run(src: &str) -> Vec<(String, Result<(), TrapKind>)> {
     out
 }
 
+// ------------------------------------------------------------ bench blocks
+
+const BENCH_SRC: &str = r#"module b;
+
+fn sq(x: u32) u32 {
+    return x * x;
+}
+
+test sq_small {
+    assert(sq(3) == 9);
+}
+
+bench "sq_loop" {
+    var acc: u32 = 0;
+    var i: u32 = 0;
+    while (i < 10) : (i += 1) {
+        acc = acc +% sq(i);
+    }
+    assert(acc == 0);
+}
+
+bench sq_colon: sq(2) == 5
+"#;
+
+fn lower_text(src: &str) -> Result<Program, Vec<String>> {
+    let parsed = t27b::front::parse(std::path::Path::new("/nonexistent/b.t27"), src).map_err(|e| vec![format!("parse: {}", e)])?;
+    t27b::lower::lower_src(&parsed.ast, OverflowMode::Trap, Some(src)).map_err(|rs| rs.iter().map(|r| r.message()).collect())
+}
+
+/// Every test of `prog` in the JIT and the interpreter: (name, trapped).
+fn run_both(prog: &Program) -> Vec<(String, bool)> {
+    let code = codegen::compile(prog, TrapStyle::Jit, true).expect("codegen");
+    let mut jit = Jit::load(&code, prog.funcs.len(), &prog.data).expect("jit load");
+    let mut out = Vec::new();
+    for (id, f) in prog.tests() {
+        let want = Interp::new(prog).call(id, &[]);
+        let got = jit.call(id as FuncId, &[]);
+        let trapped = match (&want, &got) {
+            (Ok(_), Ok(_)) => false,
+            (Err(Stop::Trap { site, .. }), Err(t)) if *site == t.site => true,
+            _ => panic!("{}: interpreter {:?}, jit {:?}", f.name, want, got),
+        };
+        out.push((f.name.clone(), trapped));
+    }
+    out
+}
+
 /// f64 from source: literals, `+ - * /`, negation, comparisons, f64
 /// parameters, results, locals and constants, and the two conversions in
 /// Zig's spelling with the result type from context. Every block's verdict
@@ -2168,4 +2215,37 @@ fn f64_refusals_name_the_construct() {
     // Exact literals fold: 1e22 is an f64 exactly, 1e23 is not.
     assert!(f64_lower("module ok;\nfn f() f64 {\nreturn 1e22 * 0.5 + 0.5 * 3.0;\n}\n").is_ok());
     assert!(f64_lower("module no;\nfn f() f64 {\nreturn 1e23 * 1.0;\n}\n").is_err());
+}
+
+/// t27c emits a bench as `fn bench_<name>() void { ... }` that nothing calls,
+/// so `zig test` neither runs nor counts it. t27b compiles the body and leaves
+/// it out of the tests: the failing asserts in both benches here do not fail
+/// the file. The same bodies, renamed to tests, run and trap identically in
+/// the JIT and the interpreter, so what was compiled is the body as written.
+#[test]
+fn bench_bodies_compile_but_never_run() {
+    let prog = lower_text(BENCH_SRC).unwrap_or_else(|e| panic!("{}", e.join("\n")));
+    assert_eq!(run_both(&prog), vec![("sq_small".to_string(), false)]);
+    assert!(prog.funcs.iter().all(|f| !f.name.starts_with("sq_loop") && !f.name.starts_with("sq_colon")));
+
+    let as_tests = BENCH_SRC.replace("bench \"sq_loop\"", "test \"sq_loop\"").replace("bench sq_colon: sq(2) == 5", "invariant sq_colon: sq(2) == 5");
+    let prog = lower_text(&as_tests).unwrap_or_else(|e| panic!("{}", e.join("\n")));
+    let r = run_both(&prog);
+    assert_eq!(r.len(), 3, "{:?}", r);
+    assert!(r.iter().any(|(n, t)| n == "sq_small" && !t), "{:?}", r);
+    assert!(r.iter().any(|(n, t)| n == "sq_loop" && *t), "{:?}", r);
+    assert!(r.iter().any(|(n, t)| n == "sq_colon" && *t), "{:?}", r);
+}
+
+/// A bench body t27b cannot lower rejects the file under the construct it
+/// contains, never under `BenchBlock`.
+#[test]
+fn bench_unlowerable_body_names_its_construct() {
+    let src = BENCH_SRC.replace(
+        "    var i: u32 = 0;\n    while (i < 10) : (i += 1) {\n        acc = acc +% sq(i);\n    }",
+        "    for (0..10) |i| {\n        acc = acc +% sq(@as(u32, i));\n    }",
+    );
+    let e = lower_text(&src).err().expect("a rejection");
+    assert!(e[0].starts_with("t27b: unsupported construct StmtFor(range) at line "), "{:?}", e);
+    assert!(e.iter().all(|m| !m.contains("BenchBlock")), "{:?}", e);
 }
