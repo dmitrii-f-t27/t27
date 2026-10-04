@@ -364,7 +364,14 @@ fn cmd_build(prog: &Program, ph: &mut Phases, o: &Opts) -> ExitCode {
         Ok(c) => c,
         Err(e) => return codegen_error(&e),
     };
-    let names: Vec<String> = prog.funcs.iter().map(|f| f.name.clone()).collect();
+    // A function taking or returning a struct uses t27b's own convention
+    // (a struct is passed by address), not the platform's, so no C caller
+    // can link to it.
+    let mut names: Vec<String> = prog.funcs.iter().map(|f| f.name.clone()).collect();
+    for &id in &prog.internal_abi {
+        errln!("t27b: note: `{}` takes or returns a struct and is not exported", names[id as usize]);
+        names[id as usize].clear();
+    }
     let obj = ph.time("emit", || {
         codegen::link(Vec::new(), None, &code, prog.funcs.len()).map(|l| (macho::object(&l, &names, &prog.data), l.code.len()))
     });

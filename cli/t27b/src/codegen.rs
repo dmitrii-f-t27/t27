@@ -1082,6 +1082,20 @@ impl<'a> Gen<'a> {
                 }
                 self.done(d, t)
             }
+            ExprKind::Seq { stmts, value } => {
+                // Store, Copy and Eval only use x8/x16/x17/x30 as scratch and
+                // allocate temps above the live ones; a call saves those.
+                for s in stmts {
+                    self.stmt(s);
+                }
+                match dst {
+                    Some(r) => {
+                        self.eval_into(value, r);
+                        V::Reg(r)
+                    }
+                    None => self.eval(value),
+                }
+            }
         }
     }
 
@@ -1566,6 +1580,19 @@ fn weigh_expr(e: &Expr, unit: u64, w: &mut [u64], has_call: &mut bool) {
         ExprKind::Offset { base: a, idx: b, .. } | ExprKind::Bounds { idx: a, len: b, .. } => {
             weigh_expr(a, unit, w, has_call);
             weigh_expr(b, unit, w, has_call);
+        }
+        ExprKind::Seq { stmts, value } => {
+            for s in stmts {
+                match s {
+                    Stmt::Store { addr: a, value: b, .. } | Stmt::Copy { dst: a, src: b, .. } => {
+                        weigh_expr(a, unit, w, has_call);
+                        weigh_expr(b, unit, w, has_call);
+                    }
+                    Stmt::Eval(a) => weigh_expr(a, unit, w, has_call),
+                    _ => {}
+                }
+            }
+            weigh_expr(value, unit, w, has_call);
         }
     }
 }

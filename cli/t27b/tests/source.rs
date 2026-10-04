@@ -125,3 +125,139 @@ invariant q
     assert!(m.starts_with("t27b: unsupported construct InvariantBlock at line 5"), "{}", m);
     assert!(m.contains("invariant `q` was only partially parsed"), "{}", m);
 }
+
+// --------------------------------------------------------------- structs
+
+#[test]
+fn structs_fields_pointers_and_results() {
+    let src = "module st;
+
+const Pt = struct {
+    x: i32,
+    y: i32,
+    ok: bool,
+};
+
+const Box = struct { a: Pt, tag: u8, n: u64 = 7 };
+
+const Node = struct { v: u32, next: *const Node };
+
+const ORIGIN: Pt = Pt{ .x = -3, .y = 4, .ok = true };
+const UNIT = Box{ .a = ORIGIN, .tag = 1 };
+const OX: i32 = ORIGIN.x;
+
+fn mk(x: i32, y: i32) Pt {
+    return Pt{ .x = x, .y = y, .ok = false };
+}
+
+fn swap(p: Pt) Pt {
+    return .{ .x = p.y, .y = p.x, .ok = p.ok };
+}
+
+fn sum(p: Pt) i32 {
+    return p.x + p.y;
+}
+
+fn bump(p: *Pt) void {
+    p.x += 1;
+    p.*.y = 2;
+}
+
+fn incr(c: *u32) void {
+    c.* += 1;
+}
+
+fn wrap(t: u8) Box {
+    return Box{ .a = mk(5, 6), .tag = t };
+}
+
+test literals_and_fields {
+    var p = mk(1, 2);
+    p.x = 5;
+    const q: Pt = .{ .x = 1, .y = 2, .ok = true };
+    var b = Box{ .a = q, .tag = 3 };
+    b.a.y = 9;
+    bump(&p);
+    assert(sum(p) == 8);
+    assert(b.a.y == 9);
+    assert(b.n == 7);
+    assert(q.y == 2);
+    assert(ORIGIN.x == -3);
+    assert(OX == -3);
+    assert(UNIT.a.y == 4 and UNIT.n == 7);
+}
+
+test results_and_copies {
+    var p = mk(1, 2);
+    p = swap(p);
+    assert(p.x == 2 and p.y == 1);
+    var w = wrap(9);
+    assert(w.a.x == 5 and w.tag == 9);
+    w.a = p;
+    assert(w.a.y == 1);
+    const c = w;
+    w.tag = 0;
+    assert(c.tag == 9);
+    assert(sum(swap(mk(10, 20))) == 30);
+    assert(mk(3, 4).y == 4);
+    assert(sum(.{ .x = 1, .y = 1, .ok = true }) == 2);
+}
+
+test addresses {
+    var n: u32 = 4;
+    incr(&n);
+    incr(&n);
+    assert(n == 6);
+    const tail = Node{ .v = 2, .next = undefined };
+    const head = Node{ .v = 1, .next = &tail };
+    assert(head.next.v == 2);
+    var p = mk(0, 0);
+    const pp = &p;
+    pp.x = 7;
+    pp.*.y += 3;
+    assert(p.x == 7 and p.y == 3);
+}
+
+test overflow_through_a_field {
+    var p = mk(2147483647, 0);
+    p.x += 1;
+}
+";
+    let r = run(src);
+    assert_eq!(
+        names_ok(&r),
+        vec![
+            ("literals_and_fields", false, true),
+            ("results_and_copies", false, true),
+            ("addresses", false, true),
+            ("overflow_through_a_field", false, false),
+        ]
+    );
+    assert_eq!(r[3].2.unwrap_err().0, TrapKind::Overflow);
+    let prog = lower_src(src).unwrap();
+    // mk, swap, sum, wrap take or return a struct; bump and incr take pointers.
+    let internal: Vec<&str> = prog.internal_abi.iter().map(|&i| prog.funcs[i as usize].name.as_str()).collect();
+    assert_eq!(internal, vec!["mk", "swap", "sum", "wrap"]);
+}
+
+#[test]
+fn struct_rejections_are_precise() {
+    let head = "module st;\n\nconst Pt = struct { x: u32, y: u32 };\n\n";
+    let cases: &[(&str, &str, &str)] = &[
+        ("test t { const p = Pt{ .x = 1 }; _ = p; }", "ExprStructLit", "missing field `y` of `Pt`"),
+        ("test t { const p = Pt{ .x = 1, .y = 2, .z = 3 }; _ = p; }", "ExprStructLit", "`Pt` has no field `z`"),
+        ("test t { const p = Pt{ .x = 1, .x = 2, .y = 3 }; _ = p; }", "ExprStructLit", "field `x` initialised twice"),
+        ("test t { const p = .{ .x = 1, .y = 2 }; _ = p; }", "ExprStructLit", "anonymous `.{}` literal"),
+        ("test t { const p = Pt{ .x = 1, .y = 2 }; p.x = 3; }", "StmtAssign", "assignment through a constant"),
+        ("test t { const p = Pt{ .x = 1, .y = 2 }; assert(p == p); }", "type mismatch", "on a struct"),
+        ("test t { const p = Pt{ .x = 1, .y = 2 }; assert(p.w == 1); }", "ExprFieldAccess", "`Pt` has no field `w`"),
+        ("test t { assert(Color.red == 1); }", "ExprFieldAccess", "`Color.red`"),
+        ("const L = struct { a: u32, l: L };\ntest t { const v: L = undefined; _ = v; }", "StructDecl", "`L` contains itself"),
+        ("fn f(p: Pt) u32 { return p.x; }\ntest t { assert(f(3) == 3); }", "type mismatch", "expected Pt, found a scalar"),
+    ];
+    for (body, construct, detail) in cases {
+        let m = rejected(&format!("{}{}\n", head, body));
+        assert!(m.starts_with(&format!("t27b: unsupported construct {} at line", construct)), "{}: {}", body, m);
+        assert!(m.contains(detail), "{}: {}", body, m);
+    }
+}

@@ -390,6 +390,10 @@ pub enum ExprKind {
         len: Box<Expr>,
         site: SiteId,
     },
+    /// Run `stmts` -- only `Store`, `Copy` and `Eval` -- then evaluate
+    /// `value`. How an aggregate temporary (a struct literal passed as an
+    /// argument) is built at the exact point the expression is evaluated.
+    Seq { stmts: Vec<Stmt>, value: Box<Expr> },
 }
 
 #[derive(Clone, Debug)]
@@ -486,6 +490,11 @@ pub struct Program {
     /// Read-only data blobs (string bytes, constant aggregates), addressed by
     /// `ExprKind::Data`. Each is placed 8-byte aligned.
     pub data: Vec<Vec<u8>>,
+    /// Functions that pass or return an aggregate. They use t27b's own
+    /// convention (a pointer to the caller's copy; a hidden last pointer
+    /// parameter for the result, which is also returned), not AAPCS64, so an
+    /// object file does not export them.
+    pub internal_abi: Vec<FuncId>,
 }
 
 impl Program {
