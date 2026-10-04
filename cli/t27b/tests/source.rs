@@ -261,3 +261,109 @@ fn struct_rejections_are_precise() {
         assert!(m.contains(detail), "{}: {}", body, m);
     }
 }
+
+// --------------------------------------------------------------- strings
+
+#[test]
+fn strings_literals_params_fields_and_equality() {
+    let src = "module s;
+
+pub const NAME: str = \"clk\";
+const OTHER: &str = \"clk\";
+const EMPTY = \"\";
+const N = NAME.len;
+
+const Pin = struct { name: str, num: u32 };
+
+fn is_denied(answer: str) bool {
+    return answer == \"denied\";
+}
+
+fn pick(b: bool) str {
+    if (b) {
+        return \"yes\";
+    }
+    return \"no\";
+}
+
+fn pin_name(p: Pin) []const u8 {
+    return p.name;
+}
+
+fn length(s: string) u64 {
+    return s.len;
+}
+
+test consts_fold {
+    assert(NAME == \"clk\");
+    assert(NAME == OTHER);
+    assert(NAME != \"clK\");
+    assert(EMPTY.len == 0 and N == 3);
+    assert(\"a b \".len == 4);
+}
+
+test runtime_compare {
+    assert(is_denied(\"denied\"));
+    assert(!is_denied(\"denie\"));
+    assert(!is_denied(\"Denied\"));
+    assert(!is_denied(\"\"));
+    assert(pick(true) == \"yes\" and pick(false) != \"yes\");
+    assert(length(pick(false)) == 2);
+}
+
+test locals_and_fields {
+    var s: str = \"abc\";
+    const t = s;
+    s = \"tab\\tq\";
+    assert(s.len == 5 and t.len == 3);
+    assert(t == \"abc\" and s == \"tab\\tq\");
+    var p = Pin{ .name = \"T9\", .num = 9 };
+    assert(p.name == \"T9\");
+    p.name = NAME;
+    assert(pin_name(p) == NAME and pin_name(p).len == 3);
+    var u = \"lit\";
+    u = \"other\";
+    assert(u.len == 5);
+}
+
+test unequal_fails {
+    assert(is_denied(\"granted\"));
+}
+";
+    let r = run(src);
+    assert_eq!(
+        names_ok(&r),
+        vec![
+            ("consts_fold", false, true),
+            ("runtime_compare", false, true),
+            ("locals_and_fields", false, true),
+            ("unequal_fails", false, false),
+        ]
+    );
+    assert_eq!(r[3].2, Err((TrapKind::Assert, 62)));
+    let prog = lower_src(src).unwrap();
+    let internal: Vec<&str> = prog.internal_abi.iter().map(|&i| prog.funcs[i as usize].name.as_str()).collect();
+    assert_eq!(internal, vec!["is_denied", "pick", "pin_name", "length", lower::STR_EQL]);
+    // The helper sits right after the source fns, before the tests.
+    assert_eq!(prog.funcs[4].name, lower::STR_EQL);
+    assert!(prog.funcs[5].is_test);
+}
+
+#[test]
+fn string_rejections_are_precise() {
+    let head = "module s;\n\nconst S: str = \"ab\";\n\n";
+    let cases: &[(&str, &str, &str)] = &[
+        ("test t { assert(S == 3); }", "type mismatch", "expected str, found a scalar"),
+        ("test t { assert(S < \"b\"); }", "ExprBinary(<)", "on a string"),
+        ("test t { assert(S.ptr == 0); }", "ExprFieldAccess(str)", "`.ptr` of a str"),
+        ("test t { var s: str = \"x\"; s.len = 2; }", "StmtAssign", "assignment through a constant"),
+        ("test t { assert(S); }", "condition", "expected bool, found a string"),
+        ("const P = struct { s: str };\nconst Q = P{ .s = \"x\" };\ntest t { assert(Q.s.len == 1); }", "ConstDecl(str field)", "str field"),
+        ("fn f() u32 { return 1; }\nconst T: str = f();\ntest t { assert(T.len == 0); }", "ConstDecl", "not a string literal"),
+    ];
+    for (body, construct, detail) in cases {
+        let m = rejected(&format!("{}{}\n", head, body));
+        assert!(m.starts_with(&format!("t27b: unsupported construct {} at line", construct)), "{}: {}", body, m);
+        assert!(m.contains(detail), "{}: {}", body, m);
+    }
+}
