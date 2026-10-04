@@ -519,6 +519,76 @@ pub fn ldp_x_post(rt1: Reg, rt2: Reg, rn: Reg, simm: i32) -> u32 {
     0xA8C0_0000 | ((simm / 8) as u32 & 0x7f) << 15 | r(rt2) << 10 | r(rn) << 5 | r(rt1)
 }
 
+// ------------------------------------------------------ floating point
+//
+// Double precision only (ftype 01). `d` registers are numbered 0..31 like the
+// general ones; register 31 of a general operand of FMOV / SCVTF / UCVTF is
+// the zero register.
+
+/// FMOV dd, xn (general to FP register, the 64-bit pattern unchanged).
+pub fn fmov_d_x(rd: Reg, rn: Reg) -> u32 {
+    0x9E67_0000 | r(rn) << 5 | r(rd)
+}
+/// FMOV xd, dn (FP to general register).
+pub fn fmov_x_d(rd: Reg, rn: Reg) -> u32 {
+    0x9E66_0000 | r(rn) << 5 | r(rd)
+}
+/// FADD dd, dn, dm.
+pub fn fadd(rd: Reg, rn: Reg, rm: Reg) -> u32 {
+    0x1E60_2800 | r(rm) << 16 | r(rn) << 5 | r(rd)
+}
+/// FSUB dd, dn, dm.
+pub fn fsub(rd: Reg, rn: Reg, rm: Reg) -> u32 {
+    0x1E60_3800 | r(rm) << 16 | r(rn) << 5 | r(rd)
+}
+/// FMUL dd, dn, dm.
+pub fn fmul(rd: Reg, rn: Reg, rm: Reg) -> u32 {
+    0x1E60_0800 | r(rm) << 16 | r(rn) << 5 | r(rd)
+}
+/// FDIV dd, dn, dm.
+pub fn fdiv(rd: Reg, rn: Reg, rm: Reg) -> u32 {
+    0x1E60_1800 | r(rm) << 16 | r(rn) << 5 | r(rd)
+}
+/// FNEG dd, dn.
+pub fn fneg(rd: Reg, rn: Reg) -> u32 {
+    0x1E61_4000 | r(rn) << 5 | r(rd)
+}
+/// FCMP dn, dm (quiet compare; unordered sets NZCV to 0011).
+pub fn fcmp(rn: Reg, rm: Reg) -> u32 {
+    0x1E60_2000 | r(rm) << 16 | r(rn) << 5
+}
+/// SCVTF dd, wn / xn (signed integer to double, current rounding mode).
+pub fn scvtf(sf: bool, rd: Reg, rn: Reg) -> u32 {
+    0x1E62_0000 | (sf as u32) << 31 | r(rn) << 5 | r(rd)
+}
+/// UCVTF dd, wn / xn (unsigned integer to double).
+pub fn ucvtf(sf: bool, rd: Reg, rn: Reg) -> u32 {
+    0x1E63_0000 | (sf as u32) << 31 | r(rn) << 5 | r(rd)
+}
+/// FCVTZS wd / xd, dn (double to signed integer, toward zero, saturating).
+pub fn fcvtzs(sf: bool, rd: Reg, rn: Reg) -> u32 {
+    0x1E78_0000 | (sf as u32) << 31 | r(rn) << 5 | r(rd)
+}
+/// FCVTZU wd / xd, dn (double to unsigned integer, toward zero, saturating).
+pub fn fcvtzu(sf: bool, rd: Reg, rn: Reg) -> u32 {
+    0x1E79_0000 | (sf as u32) << 31 | r(rn) << 5 | r(rd)
+}
+/// STR dt, [xn, #imm] with imm a multiple of 8 in 0..32760. Xn 31 is SP.
+pub fn str_d(rt: Reg, rn: Reg, imm: u32) -> u32 {
+    debug_assert!(imm % 8 == 0 && imm / 8 < 4096);
+    0xFD00_0000 | (imm / 8) << 10 | r(rn) << 5 | r(rt)
+}
+/// LDR dt, [xn, #imm].
+pub fn ldr_d(rt: Reg, rn: Reg, imm: u32) -> u32 {
+    debug_assert!(imm % 8 == 0 && imm / 8 < 4096);
+    0xFD40_0000 | (imm / 8) << 10 | r(rn) << 5 | r(rt)
+}
+/// LDP dt1, dt2, [xn, #simm] (signed offset, multiple of 8 in -512..504).
+pub fn ldp_d(rt1: Reg, rt2: Reg, rn: Reg, simm: i32) -> u32 {
+    debug_assert!(simm % 8 == 0 && (-512..=504).contains(&simm));
+    0x6D40_0000 | ((simm / 8) as u32 & 0x7f) << 15 | r(rt2) << 10 | r(rn) << 5 | r(rt1)
+}
+
 // ------------------------------------------------------ sized load/store
 //
 // The general forms behind the memory lane. `size` is log2 of the access
@@ -620,6 +690,9 @@ pub fn disasm(w: u32, pc: usize) -> String {
     let rm = (w >> 16) & 31;
     let tgt = |off: i64| format!("{:#x}", pc as i64 + off * 4);
     let sext = |v: u32, bits: u32| ((v << (32 - bits)) as i32 >> (32 - bits)) as i64;
+    if let Some(t) = disasm_fp(w) {
+        return t;
+    }
     match w {
         0xD65F_03C0 => return "ret".into(),
         0xD503_201F => return "nop".into(),
@@ -871,6 +944,51 @@ pub fn disasm(w: u32, pc: usize) -> String {
         };
     }
     format!(".word {:#010x}", w)
+}
+
+/// The double-precision forms `disasm` knows, or None.
+fn disasm_fp(w: u32) -> Option<String> {
+    let rd = w & 31;
+    let rn = (w >> 5) & 31;
+    let rm = (w >> 16) & 31;
+    let g = |sf: bool, n: u32| xr(sf, n, false);
+    let sf = w >> 31 == 1;
+    let opcode = (w >> 10) & 0x3f;
+    Some(if w & 0xFFE0_0C00 == 0x1E60_0800 && matches!(opcode, 0x02 | 0x06 | 0x0A | 0x0E) {
+        // FP data processing, 2 source
+        let name = match opcode {
+            0x02 => "fmul",
+            0x06 => "fdiv",
+            0x0A => "fadd",
+            _ => "fsub",
+        };
+        format!("{} d{}, d{}, d{}", name, rd, rn, rm)
+    } else if w & 0xFFE0_FC1F == 0x1E60_2000 {
+        format!("fcmp d{}, d{}", rn, rm)
+    } else if w & 0xFFFF_FC00 == 0x1E61_4000 {
+        format!("fneg d{}, d{}", rd, rn)
+    } else if w & 0xFFFF_FC00 == 0x9E67_0000 {
+        format!("fmov d{}, {}", rd, g(true, rn))
+    } else if w & 0xFFFF_FC00 == 0x9E66_0000 {
+        format!("fmov x{}, d{}", rd, rn)
+    } else if w & 0x7FFF_FC00 == 0x1E62_0000 {
+        format!("scvtf d{}, {}", rd, g(sf, rn))
+    } else if w & 0x7FFF_FC00 == 0x1E63_0000 {
+        format!("ucvtf d{}, {}", rd, g(sf, rn))
+    } else if w & 0x7FFF_FC00 == 0x1E78_0000 {
+        format!("fcvtzs {}, d{}", g(sf, rd), rn)
+    } else if w & 0x7FFF_FC00 == 0x1E79_0000 {
+        format!("fcvtzu {}, d{}", g(sf, rd), rn)
+    } else if w & 0xFF80_0000 == 0xFD00_0000 {
+        let ld = (w >> 22) & 1 == 1;
+        let imm = ((w >> 10) & 0xfff) * 8;
+        format!("{} d{}, [{}, #{}]", if ld { "ldr" } else { "str" }, rd, xr(true, rn, true), imm)
+    } else if w & 0xFFC0_0000 == 0x6D40_0000 {
+        let imm = ((((w >> 15) & 0x7f) << 25) as i32) >> 25;
+        format!("ldp d{}, d{}, [{}, #{}]", rd, (w >> 10) & 31, xr(true, rn, true), imm * 8)
+    } else {
+        return None;
+    })
 }
 
 /// Decode (N, immr, imms) back to the bitmask value (for disassembly/tests).

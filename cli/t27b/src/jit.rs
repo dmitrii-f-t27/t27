@@ -20,7 +20,9 @@
 //! callee-saved registers and the stack pointer into a `TrapState`. A failing
 //! check anywhere below jumps to `trap_common`, which records the site and the
 //! assert_eq operands, resets sp to the saved value and returns 1 from
-//! `enter`; a normal return stores x0 and returns 0. No signals are involved.
+//! `enter`; a normal return stores x0 and d0 and returns 0. No signals are
+//! involved. `args` holds sixteen words: x0-x7, then the bit patterns of
+//! d0-d7 (AAPCS64 passes F64 arguments and results in d registers).
 
 use crate::a64::{self, SP};
 use crate::codegen::{self, FuncCode, Linked};
@@ -154,7 +156,7 @@ unsafe fn map_code(_image: &[u8], _len: usize) -> Result<*mut u8, String> {
 }
 
 /// Shared between generated code and Rust. Field offsets are hard-coded in
-/// the trampoline: saved_sp 0, ret 8, site 16, a 24, b 32.
+/// the trampoline: saved_sp 0, ret 8, site 16, a 24, b 32, fret 40.
 #[repr(C)]
 #[derive(Default, Clone, Copy)]
 struct TrapState {
@@ -163,6 +165,8 @@ struct TrapState {
     site: u64,
     a: u64,
     b: u64,
+    /// d0 on return (the bit pattern of an F64 result).
+    fret: u64,
 }
 
 /// A trap raised by generated code.
@@ -198,7 +202,7 @@ fn mov_addr(rd: u8, addr: u64, out: &mut Vec<u32>) {
 /// `trap_common`.
 fn prefix(state: u64) -> (Vec<u32>, usize) {
     let mut c = Vec::new();
-    // enter(x0 = target, x1 = pointer to 8 argument words)
+    // enter(x0 = target, x1 = pointer to 16 argument words: x0-x7, d0-d7)
     c.push(a64::stp_x_pre(29, 30, SP, -96));
     c.push(a64::mov_sp(29, SP));
     for (k, r) in [19u8, 21, 23, 25, 27].iter().enumerate() {
@@ -210,11 +214,15 @@ fn prefix(state: u64) -> (Vec<u32>, usize) {
     c.push(a64::mov(true, 16, 0));
     c.push(a64::mov(true, 17, 1));
     for k in 0..4u8 {
+        c.push(a64::ldp_d(2 * k, 2 * k + 1, 17, 64 + 16 * k as i32));
+    }
+    for k in 0..4u8 {
         c.push(a64::ldp_x(2 * k, 2 * k + 1, 17, 16 * k as i32));
     }
     c.push(a64::blr(16));
     mov_addr(9, state, &mut c);
     c.push(a64::str_x(0, 9, 8));
+    c.push(a64::str_d(0, 9, 40));
     c.push(a64::movz(true, 0, 0, 0));
     let restore = c.len();
     for (k, r) in [19u8, 21, 23, 25, 27].iter().enumerate() {
@@ -289,10 +297,18 @@ impl Jit {
     /// Call function `f` with up to eight raw argument words (canonical
     /// register images). Returns x0 or the trap.
     pub fn call(&mut self, f: FuncId, args: &[u64]) -> Result<u64, Trap> {
-        assert!(args.len() <= 8, "at most 8 arguments");
+        self.call_fp(f, args, &[]).map(|(x0, _)| x0)
+    }
+
+    /// Call `f` with up to eight words for x0-x7 and up to eight F64 bit
+    /// patterns for d0-d7 (AAPCS64 assigns the two classes separately).
+    /// Returns x0 and the bit pattern of d0, or the trap.
+    pub fn call_fp(&mut self, f: FuncId, xargs: &[u64], dargs: &[u64]) -> Result<(u64, u64), Trap> {
+        assert!(xargs.len() <= 8 && dargs.len() <= 8, "at most 8 arguments of each class");
         let off = self.offsets[f as usize].expect("function not in the JIT image");
-        let mut regs = [0u64; 8];
-        regs[..args.len()].copy_from_slice(args);
+        let mut regs = [0u64; 16];
+        regs[..xargs.len()].copy_from_slice(xargs);
+        regs[8..8 + dargs.len()].copy_from_slice(dargs);
         // SAFETY: `state` is a live allocation owned by `self`.
         unsafe { std::ptr::write_volatile(self.state, TrapState::default()) };
         // SAFETY: `base` is the start of our executable mapping, word 0 is
@@ -307,7 +323,7 @@ impl Jit {
         // SAFETY: as above; generated code has finished writing it.
         let st = unsafe { std::ptr::read_volatile(self.state) };
         if flag == 0 {
-            Ok(st.ret)
+            Ok((st.ret, st.fret))
         } else {
             Err(Trap {
                 site: st.site as SiteId,

@@ -85,6 +85,10 @@ type R<T> = Result<T, ()>;
 #[derive(Clone, Debug)]
 enum Val {
     Ct(i128),
+    /// A compile-time float (Zig's comptime_float) as its binary64 value,
+    /// and whether that value is exact (see `parse_float`). An inexact one
+    /// may only be coerced to f64 or compared with an unequal value.
+    Cf(f64, bool),
     E(Expr),
     P(Expr, LTy),
     M(Place),
@@ -640,6 +644,96 @@ fn parse_int(s: &str) -> Option<i128> {
     Some(v as i128)
 }
 
+/// A decimal float literal: its binary64 value (round to nearest, ties to
+/// even) and whether that value is the literal exactly. Zig keeps a
+/// comptime_float in f128, so only an exact value may take part in further
+/// compile-time arithmetic: the f128 and the f64 results agree only then.
+/// Exactness is decided for literals of at most 17 significant digits with
+/// a decimal exponent in -25..=23 (u128 arithmetic); others count as inexact.
+fn parse_float(s: &str) -> Result<(f64, bool), String> {
+    let t: String = s.chars().filter(|c| *c != '_').collect();
+    if t.starts_with("0x") || t.starts_with("0X") {
+        return Err("hexadecimal float literal".into());
+    }
+    let (mant, exp) = match t.find(['e', 'E']) {
+        Some(i) => (&t[..i], &t[i + 1..]),
+        None => (t.as_str(), "0"),
+    };
+    let (ip, fp) = mant.split_once('.').unwrap_or((mant, ""));
+    let digits_ok = |d: &str| d.bytes().all(|b| b.is_ascii_digit());
+    let exp_digits = exp.strip_prefix(['+', '-']).unwrap_or(exp);
+    if ip.is_empty() || !digits_ok(ip) || !digits_ok(fp) || exp_digits.is_empty() || !digits_ok(exp_digits) {
+        return Err("malformed float literal".into());
+    }
+    let v: f64 = t.parse().map_err(|_| "malformed float literal".to_string())?;
+    if !v.is_finite() {
+        return Err("float literal overflows f64".into());
+    }
+    let mut d: String = format!("{}{}", ip, fp).trim_start_matches('0').to_string();
+    if d.is_empty() {
+        return Ok((v, true));
+    }
+    let e10: i64 = match exp.parse::<i64>() {
+        Ok(e) => e - fp.len() as i64,
+        Err(_) => return Ok((v, false)),
+    };
+    let tz = d.len() - d.trim_end_matches('0').len();
+    d.truncate(d.len() - tz);
+    let e10 = e10 + tz as i64;
+    if d.len() > 17 || !(-25..=23).contains(&e10) || v == 0.0 {
+        return Ok((v, false));
+    }
+    let m10: u128 = d.parse().unwrap();
+    // v = m2 * 2^e2 with m2 odd.
+    let bits = v.to_bits();
+    let (be, bf) = ((bits >> 52) & 0x7ff, bits & ((1u64 << 52) - 1));
+    let (mut m2, mut e2) = if be == 0 { (bf as u128, -1074i64) } else { ((bf | (1 << 52)) as u128, be as i64 - 1075) };
+    let z = m2.trailing_zeros();
+    m2 >>= z;
+    e2 += z as i64;
+    let exact = if e10 >= 0 {
+        // m10 * 10^e10 = (m10 * 5^e10) * 2^e10.
+        let a = m10 * 5u128.pow(e10 as u32);
+        let t = a.trailing_zeros();
+        a >> t == m2 && e10 + t as i64 == e2
+    } else {
+        // m10 / 10^k = m2 * 2^e2  <=>  m10 = m2 * 5^k * 2^(e2 + k).
+        let k = -e10;
+        let t = m10.trailing_zeros();
+        m10 >> t == m2 * 5u128.pow(k as u32) && t as i64 == e2 + k
+    };
+    Ok((v, exact))
+}
+
+/// `a op b` in binary64, and whether that is the exact real result (so the
+/// f128 comptime_float result is the same value). Inexact also stands for
+/// "not proven exact": the underflow range is never claimed exact.
+fn cf_op(op: FOp, a: f64, b: f64) -> (f64, bool) {
+    let r = op.apply(a, b);
+    // 2^-969: below it an fma residual can itself underflow to zero.
+    let tiny = f64::from_bits(((1023 - 969) as u64) << 52);
+    let exact = match op {
+        FOp::Add | FOp::Sub => {
+            let b = if op == FOp::Sub { -b } else { b };
+            // TwoSum: the rounding error of a + b, exactly.
+            let bb = r - a;
+            let err = (a - (r - bb)) + (b - bb);
+            err == 0.0
+        }
+        FOp::Mul => a == 0.0 || b == 0.0 || (r.abs() >= tiny && a.mul_add(b, -r) == 0.0),
+        FOp::Div => a == 0.0 || (r.abs() >= tiny && a.abs() >= tiny && r.mul_add(b, -a) == 0.0),
+    };
+    (r, exact)
+}
+
+/// `n` is an integer literal that is a power of two above 1: what t27c's
+/// strength reduction rewrites `x * n` into `x << k` for, whatever x's type.
+fn pow2_literal(n: &Node) -> bool {
+    n.kind == NodeKind::ExprLiteral
+        && n.extra_kind != "string"
+        && parse_int(n.value.trim()).is_some_and(|v| v > 1 && (v & (v - 1)) == 0)
+}
+
 impl<'a> Lower<'a> {
     fn see(&mut self, n: &Node) {
         if n.line != 0 {
@@ -854,15 +948,15 @@ impl<'a> Lower<'a> {
         if let Some(t) = st {
             return self.rodata(init, t);
         }
-        let v = self.expr(init)?;
         let v = if node.extra_type.trim().is_empty() {
-            v
+            self.expr(init)?
         } else {
             let ty = self.ty(&node.extra_type)?;
+            let v = self.expr_as(init, &LTy::S(ty))?;
             Val::E(self.coerce(v, ty)?)
         };
         match &v {
-            Val::Ct(_) | Val::S(..) | Val::A(..) | Val::Poison => Ok(v),
+            Val::Ct(_) | Val::Cf(..) | Val::S(..) | Val::A(..) | Val::Poison => Ok(v),
             Val::E(e) if matches!(e.kind, ExprKind::Const(_)) => Ok(v),
             Val::P(e, LTy::Enum(..)) if matches!(e.kind, ExprKind::Const(_)) => Ok(v),
             // Another struct constant: the same read-only bytes.
@@ -1384,6 +1478,15 @@ impl<'a> Lower<'a> {
                 }
                 self.bind(&name, Binding::Const(Val::Ct(c)));
             }
+            Val::Cf(f, exact) => {
+                if mutable {
+                    return self.reject(
+                        "StmtLocal",
+                        format!("`var {}` initialised with an untyped float needs a type", name),
+                    );
+                }
+                self.bind(&name, Binding::Const(Val::Cf(f, exact)));
+            }
             v => self.bind_value(&name, v, mutable, out)?,
         }
         Ok(())
@@ -1393,7 +1496,7 @@ impl<'a> Lower<'a> {
     fn bind_value(&mut self, name: &str, v: Val, mutable: bool, out: &mut Vec<Stmt>) -> R<()> {
         let (t, value) = match v {
             Val::Poison => return Err(()),
-            Val::Ct(_) => return self.reject("StmtLocal", format!("`{}` needs a type", name)),
+            Val::Ct(_) | Val::Cf(..) => return self.reject("StmtLocal", format!("`{}` needs a type", name)),
             // A string literal stays a compile-time value, like Zig's
             // `const s = "abc";`.
             Val::S(..) if !mutable => {
@@ -1486,7 +1589,12 @@ impl<'a> Lower<'a> {
                     return self.reject("StmtAssign", format!("assignment to constant `{}`", name));
                 }
                 let ty = self.vars[id as usize].ty;
-                let rhs = self.expr(&n.children[1])?;
+                let conv = |c: &Node| c.kind == NodeKind::ExprCall && matches!(c.name.as_str(), "@floatFromInt" | "@intFromFloat");
+                let rhs = if (op.is_empty() || op == "=") && conv(&n.children[1]) {
+                    self.expr_as(&n.children[1], &LTy::S(ty))?
+                } else {
+                    self.expr(&n.children[1])?
+                };
                 let v = if op.is_empty() || op == "=" {
                     rhs
                 } else {
@@ -1520,10 +1628,10 @@ impl<'a> Lower<'a> {
                 let v = self.expr(&n.children[1])?;
                 match v {
                     Val::Poison => self.bind(&name, Binding::Const(Val::Poison)),
-                    Val::Ct(c) if assigned <= 1 => {
-                        self.bind(&name, Binding::Const(Val::Ct(c)));
+                    v @ (Val::Ct(_) | Val::Cf(..)) if assigned <= 1 => {
+                        self.bind(&name, Binding::Const(v));
                     }
-                    Val::Ct(_) => {
+                    Val::Ct(_) | Val::Cf(..) => {
                         return self.reject(
                             "StmtAssign",
                             format!("test binding `{}` reassigned but its type is unknown", name),
@@ -1690,6 +1798,7 @@ impl<'a> Lower<'a> {
             Val::E(e) if e.ty == Ty::Bool => Ok(e),
             Val::E(e) => self.reject("condition", format!("expected bool, found {}", e.ty.name())),
             Val::Ct(_) => self.reject("condition", "expected bool, found an integer literal".into()),
+            Val::Cf(..) => self.reject("condition", "expected bool, found a float literal".into()),
             Val::P(_, ref t @ LTy::Enum(..)) => {
                 let d = self.type_name(t);
                 self.reject("condition", format!("expected bool, found {}", d))
@@ -1705,6 +1814,22 @@ impl<'a> Lower<'a> {
     fn coerce(&mut self, v: Val, to: Ty) -> R<Expr> {
         match v {
             Val::Poison => Err(()),
+            // A comptime_int becomes an f64 only when it is one exactly.
+            Val::Ct(c) if to == Ty::F64 => {
+                let f = c as f64;
+                if f as i128 != c || f.abs() >= 1.0e30 {
+                    return self.reject(
+                        "literal out of range",
+                        format!("{} is not exactly an f64", c),
+                    );
+                }
+                Ok(Expr { ty: to, kind: ExprKind::Const(f64_bits(f)) })
+            }
+            Val::Cf(f, _) if to == Ty::F64 => Ok(Expr { ty: to, kind: ExprKind::Const(f64_bits(f)) }),
+            Val::Cf(..) => self.reject(
+                "type mismatch",
+                format!("expected {}, found a float literal", to.name()),
+            ),
             Val::Ct(c) => {
                 if !to.is_int() {
                     return self.reject("type mismatch", "integer literal where bool is expected".into());
@@ -1790,7 +1915,19 @@ impl<'a> Lower<'a> {
                     format!("`{}` on {} and {}", what, x.ty.name(), y.ty.name()),
                 )
             }
-            (Val::Ct(_), Val::Ct(_)) => self.reject("type mismatch", "internal: two literals".into()),
+            (Val::E(x), v @ Val::Cf(..)) => {
+                let t = x.ty;
+                let y = self.coerce(v, t)?;
+                Ok((x, y))
+            }
+            (v @ Val::Cf(..), Val::E(y)) => {
+                let t = y.ty;
+                let x = self.coerce(v, t)?;
+                Ok((x, y))
+            }
+            (Val::Ct(_) | Val::Cf(..), Val::Ct(_) | Val::Cf(..)) => {
+                self.reject("type mismatch", format!("`{}` on two untyped literals", what))
+            }
             (Val::Poison, _) | (_, Val::Poison) => Err(()),
             (Val::A(..), _) | (_, Val::A(..)) => self.reject("type mismatch", format!("`{}` on an array", what)),
             (Val::M(p), _) | (_, Val::M(p)) if matches!(p.ty, LTy::Arr(..)) => {
@@ -1871,6 +2008,15 @@ impl<'a> Lower<'a> {
                 if let Some(v) = self.enum_compare(&op, &a, &b, ordered)? {
                     return Ok(v);
                 }
+                // t27c's Zig backend rewrites `x * 2^k` as `x << k`, which
+                // does not compile for a float `x`: no reference to agree with
+                // (t27c issue #6284).
+                if op == "*" && pow2_literal(y) && matches!(a, Val::Cf(..) | Val::E(Expr { ty: Ty::F64, .. })) {
+                    return self.reject(
+                        "ExprBinary(f64 * 2^k)",
+                        format!("`* {}` on f64: t27c gen emits `<<` for it", y.value.trim()),
+                    );
+                }
                 self.binary(&op, a, b)
             }
             NodeKind::ExprEnumValue => {
@@ -1890,6 +2036,9 @@ impl<'a> Lower<'a> {
                 self.unary(&op, v)
             }
             NodeKind::ExprCall if n.name == "@intFromEnum" => self.int_from_enum(n, TagUse::Value),
+            NodeKind::ExprCall if n.name == "@floatFromInt" || n.name == "@intFromFloat" => {
+                self.reject(&format!("ExprCall({})", n.name), "with no result type".into())
+            }
             NodeKind::ExprCall if n.name == "@enumFromInt" => {
                 self.reject("ExprCall(@enumFromInt)", "with no enum result type".into())
             }
@@ -1984,8 +2133,17 @@ impl<'a> Lower<'a> {
     /// `@intCast`, and traps when the value is outside `to`. In Wrap mode every
     /// narrowing truncates, as a C cast does.
     fn cast(&mut self, v: Val, to: Ty) -> R<Val> {
+        if to == Ty::F64 || matches!(v, Val::Cf(..) | Val::E(Expr { ty: Ty::F64, .. })) {
+            if v.is_poison() {
+                return Err(());
+            }
+            return self.reject(
+                "ExprCast(f64)",
+                format!("`as` to or from f64 (to {}); use @floatFromInt / @intFromFloat", to.name()),
+            );
+        }
         let e = match v {
-            Val::Poison => return Err(()),
+            Val::Poison | Val::Cf(..) => return Err(()),
             Val::Ct(c) if to.is_int() => return Ok(Val::E(self.coerce(Val::Ct(c), to)?)),
             Val::Ct(_) => return self.reject("ExprCast(to bool)", "integer literal as bool".into()),
             Val::E(e) => e,
@@ -2080,7 +2238,17 @@ impl<'a> Lower<'a> {
                 } else if s.starts_with('\'') {
                     "char literal"
                 } else if s.contains('.') || (s.contains(['e', 'E']) && !s.starts_with("0x")) {
-                    "float literal"
+                    match parse_float(s) {
+                        Ok((f, exact)) => {
+                            let suffix = n.extra_type.trim();
+                            if suffix.is_empty() {
+                                return Ok(Val::Cf(f, exact));
+                            }
+                            let ty = self.ty(suffix)?;
+                            return Ok(Val::E(self.coerce(Val::Cf(f, exact), ty)?));
+                        }
+                        Err(why) => return self.reject("ExprLiteral(float literal)", format!("`{}`: {}", s, why)),
+                    }
                 } else if s.starts_with('-') && parse_int(&s[1..]).is_some() {
                     "negative literal"
                 } else {
@@ -2104,6 +2272,14 @@ impl<'a> Lower<'a> {
         }
         match (op, v) {
             ("-", Val::Ct(c)) => Ok(Val::Ct(-c)),
+            ("-", Val::Cf(f, exact)) => Ok(Val::Cf(-f, exact)),
+            // Float negation flips the sign bit (of a NaN and of 0 too).
+            ("-", Val::E(e)) if e.ty == Ty::F64 => {
+                if let ExprKind::Const(c) = e.kind {
+                    return Ok(Val::E(Expr { ty: Ty::F64, kind: ExprKind::Const(c ^ (1i128 << 63)) }));
+                }
+                Ok(Val::E(Expr { ty: Ty::F64, kind: ExprKind::FNeg(Box::new(e)) }))
+            }
             ("-", Val::E(e)) => {
                 if !e.ty.is_int() || !e.ty.signed() {
                     return self.reject(
@@ -2142,6 +2318,10 @@ impl<'a> Lower<'a> {
                 &format!("ExprUnary({})", op),
                 "on an untyped integer literal".into(),
             ),
+            (op, Val::Cf(..)) => self.reject(
+                &format!("ExprUnary({})", op),
+                "on an untyped float literal".into(),
+            ),
             (op, _) => self.reject(&format!("ExprUnary({})", op), "operand is a pointer, a struct or a string".into()),
         }
     }
@@ -2178,6 +2358,10 @@ impl<'a> Lower<'a> {
         };
         if let Some(c) = cmp {
             return self.compare(c, a, b);
+        }
+        let is_f = |v: &Val| matches!(v, Val::Cf(..) | Val::E(Expr { ty: Ty::F64, .. }));
+        if is_f(&a) || is_f(&b) {
+            return self.farith(op, a, b);
         }
         let trap = self.mode == OverflowMode::Trap;
         let aop = match op {
@@ -2318,11 +2502,83 @@ impl<'a> Lower<'a> {
         }
     }
 
+    /// A compile-time value as a comptime_float: a Cf, or a Ct that is an
+    /// f64 exactly. None for anything else.
+    fn as_cf(&mut self, v: &Val) -> R<Option<(f64, bool)>> {
+        match *v {
+            Val::Cf(f, exact) => Ok(Some((f, exact))),
+            Val::Ct(c) => {
+                let e = self.coerce(Val::Ct(c), Ty::F64)?;
+                let ExprKind::Const(bits) = e.kind else { unreachable!() };
+                Ok(Some((f64_of(bits), true)))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// `a op b` where either side is an f64 or a float literal: IEEE `+ - *
+    /// /` only. Two compile-time operands fold, but only when both are exact
+    /// (see `parse_float`), so the f64 result is the f128 one rounded.
+    fn farith(&mut self, op: &str, a: Val, b: Val) -> R<Val> {
+        let fop = match op {
+            "+" => FOp::Add,
+            "-" => FOp::Sub,
+            "*" => FOp::Mul,
+            "/" => FOp::Div,
+            _ => return self.reject(&format!("ExprBinary({})", op), "on f64".into()),
+        };
+        let ct = |v: &Val| matches!(v, Val::Ct(_) | Val::Cf(..));
+        if ct(&a) && ct(&b) {
+            let (Some((x, xe)), Some((y, ye))) = (self.as_cf(&a)?, self.as_cf(&b)?) else { unreachable!() };
+            if !(xe && ye) {
+                return self.reject(
+                    &format!("ExprBinary({})", op),
+                    "compile-time float arithmetic on an inexact literal (Zig folds it in f128)".into(),
+                );
+            }
+            if fop == FOp::Div && y == 0.0 {
+                return self.reject("ExprBinary", "constant division by zero".into());
+            }
+            let (r, exact) = cf_op(fop, x, y);
+            if !r.is_finite() {
+                return self.reject("ExprBinary", "constant float expression overflows f64".into());
+            }
+            return Ok(Val::Cf(r, exact));
+        }
+        let (x, y) = self.peer(a, b, op)?;
+        if x.ty != Ty::F64 {
+            return self.reject("type mismatch", format!("`{}` on {} and {}", op, x.ty.name(), y.ty.name()));
+        }
+        if let (ExprKind::Const(p), ExprKind::Const(q)) = (&x.kind, &y.kind) {
+            let r = fop.apply(f64_of(*p), f64_of(*q));
+            return Ok(Val::E(Expr { ty: Ty::F64, kind: ExprKind::Const(f64_bits(r)) }));
+        }
+        Ok(Val::E(Expr {
+            ty: Ty::F64,
+            kind: ExprKind::FArith { op: fop, lhs: Box::new(x), rhs: Box::new(y) },
+        }))
+    }
+
     fn compare(&mut self, op: CmpOp, a: Val, b: Val) -> R<Val> {
         if let (Val::Ct(x), Val::Ct(y)) = (&a, &b) {
             return Ok(Val::E(Expr {
                 ty: Ty::Bool,
                 kind: ExprKind::Const(op.holds(*x, *y) as i128),
+            }));
+        }
+        if matches!(a, Val::Ct(_) | Val::Cf(..)) && matches!(b, Val::Ct(_) | Val::Cf(..)) {
+            let (Some((x, xe)), Some((y, ye))) = (self.as_cf(&a)?, self.as_cf(&b)?) else { unreachable!() };
+            // Rounding is monotonic: unequal f64 values order their f128
+            // values the same way; equal ones say nothing unless exact.
+            if !(xe && ye) && x == y {
+                return self.reject(
+                    &format!("ExprBinary({})", op.symbol()),
+                    "comparison of compile-time floats that round to the same f64".into(),
+                );
+            }
+            return Ok(Val::E(Expr {
+                ty: Ty::Bool,
+                kind: ExprKind::Const(op.holds_f64(x, y) as i128),
             }));
         }
         let (x, y) = self.peer(a, b, op.symbol())?;
@@ -3011,6 +3267,9 @@ impl<'a> Lower<'a> {
         if let Some(v) = self.enum_literal(n, want)? {
             return Ok(v);
         }
+        if let (NodeKind::ExprCall, "@floatFromInt" | "@intFromFloat", LTy::S(ty)) = (&n.kind, n.name.as_str(), want) {
+            return self.convert(n, *ty);
+        }
         if let (NodeKind::ExprCall, "@intFromEnum", LTy::S(ty)) = (&n.kind, n.name.as_str(), want) {
             let v = self.int_from_enum(n, TagUse::Want(*ty))?;
             return self.coerce_to(v, want);
@@ -3048,6 +3307,64 @@ impl<'a> Lower<'a> {
         }
         let v = self.expr(n)?;
         self.coerce_to(v, want)
+    }
+
+    /// `@floatFromInt(x)` / `@intFromFloat(x)` with result type `ty`, Zig's
+    /// spelling: the type comes from the context (`@as`, a typed binding, a
+    /// parameter, a return), never from the call.
+    fn convert(&mut self, n: &Node, ty: Ty) -> R<Val> {
+        self.see(n);
+        let name = n.name.clone();
+        let what = format!("ExprCall({})", name);
+        if n.children.len() != 1 {
+            return self.reject(&what, format!("{} arguments", n.children.len()));
+        }
+        let to_float = name == "@floatFromInt";
+        if to_float && ty != Ty::F64 {
+            return self.reject(&what, format!("result type {}", ty.name()));
+        }
+        if !to_float && !ty.is_int() {
+            return self.reject(&what, format!("result type {}", ty.name()));
+        }
+        let v = self.expr(&n.children[0])?;
+        if v.is_poison() {
+            return Err(());
+        }
+        if to_float {
+            let e = match v {
+                Val::Ct(c) => return Ok(Val::E(self.coerce(Val::Ct(c), Ty::F64)?)),
+                Val::E(e) if e.ty.is_int() => e,
+                v => {
+                    let d = self.val_desc(&v);
+                    let d = match &v { Val::E(e) => e.ty.name().to_string(), _ => d };
+                    return self.reject(&what, format!("operand is {}, not an integer", d));
+                }
+            };
+            if let ExprKind::Const(c) = e.kind {
+                // i128 to f64 rounds to nearest, ties to even, as SCVTF does.
+                return Ok(Val::E(Expr { ty: Ty::F64, kind: ExprKind::Const(f64_bits(c as f64)) }));
+            }
+            return Ok(Val::E(Expr { ty: Ty::F64, kind: ExprKind::IntToFloat(Box::new(e)) }));
+        }
+        let e = match v {
+            v @ Val::Cf(_, true) => self.coerce(v, Ty::F64)?,
+            Val::Cf(..) => {
+                return self.reject(&what, "of an inexact float literal (Zig converts the f128 value)".into())
+            }
+            Val::E(e) if e.ty == Ty::F64 => e,
+            v => {
+                let d = match &v { Val::E(e) => e.ty.name().to_string(), _ => self.val_desc(&v) };
+                return self.reject(&what, format!("operand is {}, not an f64", d));
+            }
+        };
+        if let ExprKind::Const(c) = e.kind {
+            return match float_to_int(f64_of(c), ty) {
+                Some(r) => Ok(Val::E(Expr { ty, kind: ExprKind::Const(r) })),
+                None => self.reject(&what, format!("{} does not fit {} at compile time", f64_of(c), ty.name())),
+            };
+        }
+        let site = self.site(TrapKind::FloatToInt, format!("@intFromFloat to {}", ty.name()), ty);
+        Ok(Val::E(Expr { ty, kind: ExprKind::FloatToInt { arg: Box::new(e), site } }))
     }
 
     /// A slice of type `t` (a `Slice` or `Str`) of all `len` elements at
@@ -3191,6 +3508,7 @@ impl<'a> Lower<'a> {
             Val::E(e) | Val::P(e, _) => Ok(e),
             Val::Poison => Err(()),
             Val::Ct(_) => self.reject("type mismatch", "untyped integer literal".into()),
+            Val::Cf(..) => self.reject("type mismatch", "untyped float literal".into()),
             Val::M(_) | Val::A(..) => self.reject("type mismatch", "a struct or array where a scalar is expected".into()),
             Val::S(..) => self.reject("type mismatch", "a string where a scalar is expected".into()),
         }
@@ -3254,7 +3572,7 @@ impl<'a> Lower<'a> {
     /// What a value is, for a type error.
     fn val_desc(&self, v: &Val) -> String {
         match v {
-            Val::Ct(_) | Val::E(_) => "a scalar".into(),
+            Val::Ct(_) | Val::Cf(..) | Val::E(_) => "a scalar".into(),
             Val::P(_, t @ LTy::Enum(..)) => self.type_name(t),
             Val::P(..) => "a pointer".into(),
             Val::S(..) => "a string".into(),
