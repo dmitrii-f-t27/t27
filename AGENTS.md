@@ -92,6 +92,28 @@ The seven **Invariant Laws (L1–L8)** are defined in [`docs/T27-CONSTITUTION.md
 **Law Priority:** L1 > L2 > L3 > L4 > L5 > L6 > L7 > L8 (Asimov-style hierarchy)
 
 
+## t27b is written in t27
+
+Owner's rule, 2026-10-05: t27b -- the native backend -- and the tools that
+measure it are written in **t27**, not in Rust or Python by hand.
+
+- New t27b logic starts as a `.t27` spec with `test` blocks and reaches Rust
+  or Python only through `t27c gen-rust` / `gen-c` / `gen-js`. The generated
+  file is never hand-edited (L2).
+- What gen cannot express yet is a defect of the self-host work (#5980): file
+  it there. Do not work around it in a hand-written file.
+- A hand-written addition is debt, not the method. The PR that adds one names
+  the spec that will replace it and links the port epic #6198. A reviewer who
+  sees neither sends it back.
+- The debt only shrinks. On 2026-10-05 (master c532fcae5, `wc -l`) it is
+  `cli/t27b/src/*.rs` 8247 lines plus `cli/t27b/tests/*.rs` 2865 (Rust, and
+  it mounts `bootstrap/src/compiler.rs`), `scripts/tri_loop/t27b.py` 894
+  (Python, `tri t27b`), and `contrib/railway/t27b-lab/lab.py` 608 (Python, the
+  Railway lab). Update these numbers in the PR that moves them.
+
+This is the "Own language first" rule below, applied to code: a project whose
+claim is "here is a language worth writing" writes its own backend in it.
+
 ## Own language first
 
 When this project publishes something about itself, it publishes in **this
