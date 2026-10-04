@@ -465,6 +465,15 @@ def anomalies(d, args):
             add("LAB-OUTSIDE-REF", f"t27b passes {s['t27b_pass_where_reference_does_not']} spec(s) the reference fails",
                 "list them; a reference defect or a vacuous t27b pass, not coverage")
         errs = {k: s.get(k, 0) for k in ("reference_lab_error", "crash", "timeout", "t27b_fail") if s.get(k, 0)}
+        if isinstance(lab.get("results"), list):
+            # Per-spec records: a fail or timeout the reference shares is not an alarm (#6237).
+            alarms = [x for x in lab["results"]
+                      if rules().is_alarm(x.get("t27b") or "missing", x.get("reference") or "missing")]
+            errs = {k: v for k, v in errs.items() if k == "reference_lab_error"}
+            for k, want in (("crash", "crash"), ("timeout", "timeout"), ("t27b_fail", "fail")):
+                n = sum(1 for x in alarms if x.get("t27b") == want)
+                if n:
+                    errs[k] = n
         if errs:
             add("LAB-ERROR", ", ".join(f"{k} {v}" for k, v in errs.items()), "read runs/<sha>.log for each")
         for f in honest(lab)["frontend"]:
@@ -711,7 +720,7 @@ def ratchet(run, ledger):
     return found
 
 
-def bless(run, old):
+def bless(run, old, accept_new=False):
     """(new ledger, refusals). Reasons a human wrote are kept; the cap never rises.
 
     What is recorded, with which reason, and whether the cap may move is
@@ -743,8 +752,18 @@ def bless(run, old):
         counts["pass_vacuous"] = None
     old_cap = (old or {}).get("max_not_pass")
     if r.cap_rises(counts["not_pass"], old_cap):
-        refused.append(f"{counts['not_pass']} non-pass entries would exceed max_not_pass {old_cap}; the cap only "
-                       f"moves down. If the rise is deliberate, raise it by hand in the PR and say why")
+        # Accounting (#6237): specs the old ledger never named may raise the cap by exactly their
+        # count; a rise from specs it already named is a regression and still refused.
+        new_np = sum(1 for e in entries if e["t27b"] not in ("pass", "pass_vacuous") and e["path"] not in old_entries)
+        gone = sum(1 for p, e in old_entries.items()
+                   if p not in {x["path"] for x in entries} and not r.is_pass(e.get("t27b") or "missing"))
+        covered = r.cap_rise_is_new(counts["not_pass"], old_cap, new_np)
+        acct = (f"accounting: {counts['not_pass']} non-pass now = {counts['not_pass'] - new_np} already named "
+                f"+ {new_np} new to the ledger ({gone} named non-pass entries left the run); cap {old_cap}")
+        if not (accept_new and covered):
+            hint = ("the rise is covered by new specs: re-run with --accept-new" if covered
+                    else "the rise is larger than the new specs: an entry the ledger named regressed")
+            refused.append(f"{counts['not_pass']} non-pass entries would exceed max_not_pass {old_cap}; {acct}; {hint}")
     new = {
         "schema_version": 1,
         "generated_by": "tri t27b ratchet --bless (scripts/tri_loop/t27b.py), #6115",
@@ -774,6 +793,8 @@ def ratchet_main(argv):
     ap.add_argument("--run", default=LAB + "/latest.json", help="lab run JSON: a path or a URL")
     ap.add_argument("--ledger", default=LEDGER)
     ap.add_argument("--bless", action="store_true", help="rewrite the ledger from the run")
+    ap.add_argument("--accept-new", action="store_true",
+                    help="bless: let the cap rise by exactly the non-pass specs new to the ledger")
     ap.add_argument("--json", action="store_true")
     try:
         args = ap.parse_args(argv)
@@ -793,7 +814,7 @@ def ratchet_main(argv):
             print(f"tri t27b ratchet: UNREADABLE ledger {args.ledger}: {e}", file=sys.stderr)
             return 2
     if args.bless:
-        new, refused = bless(run, old)
+        new, refused = bless(run, old, args.accept_new)
         for r in refused:
             print(f"REFUSED  {r}", file=sys.stderr)
         if refused:

@@ -90,6 +90,10 @@ def _build():
     so.railway_old.restype = ctypes.c_bool
     so.checkout_code.argtypes = [ctypes.c_bool, ctypes.c_bool]
     so.checkout_code.restype = ctypes.c_uint8
+    so.cap_rise_is_new.argtypes = [ctypes.c_uint32] * 3
+    so.cap_rise_is_new.restype = ctypes.c_bool
+    so.is_alarm.argtypes = [ctypes.c_uint8, ctypes.c_uint8]
+    so.is_alarm.restype = ctypes.c_bool
     return so
 
 
@@ -185,3 +189,14 @@ def railway_old(major):
 
 def checkout(ok, recloned):
     return CHECKOUTS[lib().checkout_code(bool(ok), bool(recloned))]
+
+
+def cap_rise_is_new(not_pass, old_cap, new_not_pass):
+    """True when the rise over `old_cap` is no larger than the specs new to the ledger."""
+    return bool(lib().cap_rise_is_new(_minutes(not_pass), _minutes(old_cap), _minutes(new_not_pass)))
+
+
+def is_alarm(t27b, reference):
+    """True when a run record is a lab alarm: a mismatch or crash always, a fail or
+    timeout only where the reference passes."""
+    return bool(lib().is_alarm(verdict(t27b), verdict(reference)))
