@@ -56,6 +56,8 @@ pub struct FuncCode {
     pub data_refs: Vec<(usize, u32)>,
 }
 
+const GLOBAL_IN_OBJECT: &str = "module-level var in an object file";
+
 /// A function the generator cannot encode (frame or branch range limits).
 #[derive(Clone, Debug)]
 pub struct CodegenError {
@@ -290,7 +292,11 @@ pub fn compile_func(prog: &Program, id: FuncId, style: TrapStyle) -> Result<Func
         return Err(CodegenError {
             func: f.name.clone(),
             line: f.line,
-            construct: "FnDecl(frame or branch range)",
+            construct: if e.starts_with(GLOBAL_IN_OBJECT) {
+                "VarDecl(module, object file)"
+            } else {
+                "FnDecl(frame or branch range)"
+            },
             detail: e,
         });
     }
@@ -1197,6 +1203,24 @@ impl<'a> Gen<'a> {
                 self.emit(a64::add_imm(true, d, d, 0));
                 self.done(d, t)
             }
+            ExprKind::Global(k) => {
+                // The JIT appends one more blob after `Program::data`: a
+                // table of the absolute address of every global, which live
+                // in writable memory outside the executable image. An object
+                // file has no such table (no __DATA section yet).
+                if self.style != TrapStyle::Jit {
+                    self.fail(format!("{} (no writable data section)", GLOBAL_IN_OBJECT));
+                }
+                if *k >= 4096 {
+                    self.fail("more than 4096 module-level vars".into());
+                }
+                let (d, t) = self.dest(dst);
+                self.data_refs.push((self.code.len(), self.prog.data.len() as u32));
+                self.emit(a64::adrp(d, 0));
+                self.emit(a64::add_imm(true, d, d, 0));
+                self.emit(a64::ldr_x(d, d, (*k).min(4095) * 8));
+                self.done(d, t)
+            }
             ExprKind::Load { addr, off } => {
                 if let ExprKind::Slot(k) = addr.kind {
                     if let Some(disp) = self.fp_disp(k, *off) {
@@ -1786,7 +1810,7 @@ fn weigh_expr(e: &Expr, unit: u64, w: &mut [u64], has_call: &mut bool) {
                 weigh_expr(a, unit, w, has_call);
             }
         }
-        ExprKind::Slot(_) | ExprKind::Data(_) => {}
+        ExprKind::Slot(_) | ExprKind::Data(_) | ExprKind::Global(_) => {}
         ExprKind::Load { addr, .. } => weigh_expr(addr, unit, w, has_call),
         ExprKind::Offset { base: a, idx: b, .. } | ExprKind::Bounds { idx: a, len: b, .. } => {
             weigh_expr(a, unit, w, has_call);

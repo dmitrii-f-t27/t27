@@ -48,6 +48,9 @@ struct Mem {
     data: Vec<u8>,
     /// Read-only objects as (start offset, size), sorted.
     data_objects: Vec<(usize, usize)>,
+    /// Module-level vars: the first stack objects, never freed, with their
+    /// initial bytes (restored on every host entry, see `Interp::call`).
+    globals: Vec<(u64, Vec<u8>)>,
 }
 
 impl Mem {
@@ -61,7 +64,24 @@ impl Mem {
             data_objects.push((data.len(), blob.len()));
             data.extend_from_slice(blob);
         }
-        Mem { stack: Vec::new(), written: Vec::new(), objects: Vec::new(), data, data_objects }
+        let mut m = Mem { stack: Vec::new(), written: Vec::new(), objects: Vec::new(), data, data_objects, globals: Vec::new() };
+        for g in &prog.globals {
+            let a = m.alloc(&SlotInfo { size: g.len() as u32, align: 8 });
+            m.globals.push((a, g.clone()));
+        }
+        m.reset_globals();
+        m
+    }
+
+    /// Give every module-level var its initial bytes (all written).
+    fn reset_globals(&mut self) {
+        for (a, init) in &self.globals {
+            let off = (a - STACK_BASE) as usize;
+            self.stack[off..off + init.len()].copy_from_slice(init);
+            for w in &mut self.written[off..off + init.len()] {
+                *w = true;
+            }
+        }
     }
 
     /// Model address of data blob `k`.
@@ -253,6 +273,11 @@ impl<'p> Interp<'p> {
         let func = &self.prog.funcs[f];
         if self.depth >= self.max_depth {
             return Err(Stop::Depth);
+        }
+        if self.depth == 0 {
+            // Each host entry sees fresh module-level vars, as each test of
+            // the reference runs in its own process.
+            self.mem.reset_globals();
         }
         self.depth += 1;
         let mark = self.mem.objects.len();
@@ -504,6 +529,7 @@ impl<'p> Interp<'p> {
             }
             ExprKind::Slot(k) => Ok(env.slots[*k as usize] as i128),
             ExprKind::Data(k) => Ok(self.mem.data_addr(*k) as i128),
+            ExprKind::Global(k) => Ok(self.mem.globals[*k as usize].0 as i128),
             ExprKind::Load { addr, off } => {
                 let p = self.expr(addr, env)? as u64;
                 self.mem.load(p.wrapping_add(*off as u64), e.ty)

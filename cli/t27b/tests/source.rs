@@ -25,7 +25,7 @@ fn run(src: &str) -> Vec<(String, bool, Outcome)> {
     let prog = lower_src(src).unwrap_or_else(|e| panic!("lowering failed:\n{}", e.join("\n")));
     let mut jit = if JIT_SUPPORTED {
         let code = codegen::compile(&prog, TrapStyle::Jit, true).expect("codegen");
-        Some(Jit::load(&code, prog.funcs.len(), &prog.data).expect("jit load"))
+        Some(Jit::load(&code, prog.funcs.len(), &prog.data, &prog.globals).expect("jit load"))
     } else {
         None
     };
@@ -881,4 +881,124 @@ fn enum_rejections_are_precise() {
         assert!(m.starts_with(&format!("t27b: unsupported construct {} at line", construct)), "{}: {}", body, m);
         assert!(m.contains(detail), "{}: {}", body, m);
     }
+}
+
+// ------------------------------------------------------- module-level vars
+
+#[test]
+fn module_vars_are_fresh_per_test() {
+    // t27c test-report runs every test in its own process, so each test sees
+    // the initial values; the JIT and the interpreter reset them per entry.
+    let src = "module mv;
+
+const Mode = enum(u8) { idle, run, stop };
+const Pt = struct { x: i32, y: i32 };
+
+var counter: u32 = 14;
+var flag: bool = false;
+var small: u8 = 254;
+var buf: [4]u32 = [1, 2, 3, 4];
+var mode: Mode = .idle;
+var pos: Pt = Pt { .x = 1, .y = -2 };
+
+fn bump() {
+    counter += 1;
+    flag = !flag;
+    mode = .run;
+    pos.x = pos.x + 10;
+}
+
+fn poke(i: u32, v: u32) {
+    buf[i] = v;
+}
+
+fn sum() u32 {
+    var s: u32 = 0;
+    var i: u32 = 0;
+    while (i < 4) {
+        s = s + buf[i];
+        i = i + 1;
+    }
+    return s;
+}
+
+fn grow() u8 {
+    small = small + 3;
+    return small;
+}
+
+test first_bump {
+    assert(counter == 14);
+    bump();
+    assert(counter == 15);
+    assert(flag == true);
+    assert(mode == .run);
+    assert(pos.x == 11);
+    assert(pos.y == -2);
+}
+
+test second_sees_fresh {
+    assert(counter == 14);
+    assert(flag == false);
+    assert(mode == .idle);
+    assert(pos.x == 1);
+    var k: u32 = 0;
+    while (k < 3) {
+        counter = counter + 2;
+        k = k + 1;
+    }
+    assert(counter == 20);
+}
+
+test array_state {
+    assert(sum() == 10);
+    poke(2, 100);
+    assert(sum() == 107);
+}
+
+test array_fresh {
+    assert(sum() == 10);
+}
+
+test overflow_traps {
+    assert(grow() > 0);
+}
+";
+    let r = run(src);
+    assert_eq!(
+        names_ok(&r),
+        vec![
+            ("first_bump", false, true),
+            ("second_sees_fresh", false, true),
+            ("array_state", false, true),
+            ("array_fresh", false, true),
+            ("overflow_traps", false, false),
+        ]
+    );
+    assert!(matches!(r[4].2, Err((TrapKind::Overflow, _))), "{:?}", r[4].2);
+}
+
+#[test]
+fn module_var_rejections_are_precise() {
+    let head = "module a;\n\nvar g: u32 = 0;\n\n";
+    let cases: &[(&str, &str, &str)] = &[
+        // The reference reads the first top-level assignment in a test as a
+        // fresh `const g = ..`, which shadows the var: a Zig compile error.
+        ("test t { g = 5; assert(g == 5); }", "StmtAssign(module var in test)", "module-level var `g`"),
+        ("test t { var g: u32 = 1; assert(g == 1); }", "StmtLocal(shadows module var)", "`g` shadows"),
+        ("fn f(g: u32) u32 { g = g + 1; return g; }\ntest t { assert(f(1) == 2); }", "StmtLocal(shadows module var)", "`g` shadows"),
+        ("fn f(g: u32) u32 { return g; }\ntest t { assert(g == 0); }", "ExprIdentifier(renamed module var)", "`g_arg`"),
+        ("invariant i { assert(g == 0); }", "ExprIdentifier(var at comptime)", "module-level var `g`"),
+        ("var h = 3;\ntest t { assert(h == 3); }", "VarDecl(module, untyped)", "`h` has no type"),
+        ("const B: u32 = 2;\nvar h: u32 = B * 2;\ntest t { assert(h == 4); }", "VarDecl(module)", "not a compile-time integer"),
+    ];
+    for (body, construct, detail) in cases {
+        let m = rejected(&format!("{}{}\n", head, body));
+        assert!(m.starts_with(&format!("t27b: unsupported construct {} at line", construct)), "{}: {}", body, m);
+        assert!(m.contains(detail), "{}: {}", body, m);
+    }
+    // A parameter the body only reads is renamed by the reference, so it
+    // does not shadow; the following fn clears the rename.
+    let ok = "module b;\n\nvar g: u32 = 7;\n\nfn f(g: u32) u32 { return g + 1; }\nfn h() u32 { return g; }\n\ntest t {\n    assert(f(1) == 2);\n    assert(h() == 7);\n}\n";
+    assert_eq!(names_ok(&run(ok)), vec![("t", false, true)]);
 }

@@ -499,6 +499,10 @@ pub enum ExprKind {
     Slot(u32),
     /// Address of read-only blob `k` (`Program::data`).
     Data(u32),
+    /// Address of module-level `var` `k` (`Program::globals`): writable, and
+    /// back at its initial bytes whenever the host enters a function, as each
+    /// test of `t27c test-report` runs in a process of its own.
+    Global(u32),
     /// Load a `ty` (a scalar, `ty.bytes()` wide) from `addr + off`.
     Load { addr: Box<Expr>, off: u32 },
     /// `base + idx * scale`: `ty` and `base` are Ptr, `idx` is U64. Cannot
@@ -614,6 +618,9 @@ pub struct Program {
     /// Read-only data blobs (string bytes, constant aggregates), addressed by
     /// `ExprKind::Data`. Each is placed 8-byte aligned.
     pub data: Vec<Vec<u8>>,
+    /// Initial bytes of each module-level `var`, addressed by
+    /// `ExprKind::Global`. Each is placed 8-byte aligned in writable memory.
+    pub globals: Vec<Vec<u8>>,
     /// Functions that pass or return an aggregate. They use t27b's own
     /// convention (a pointer to the caller's copy; a hidden last pointer
     /// parameter for the result, which is also returned), not AAPCS64, so an

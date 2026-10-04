@@ -226,6 +226,21 @@ struct Lower<'a> {
     globals: HashMap<String, Val>,
     const_nodes: HashMap<String, &'a Node>,
     resolving: HashSet<String>,
+    /// Module-level `var` declarations, in source order.
+    var_nodes: Vec<&'a Node>,
+    /// Test, bench and invariant blocks (by address) that name a module-level
+    /// var the reference's Zig backend renames to `<name>_arg` there: its
+    /// parameter-rename map is only cleared at the next fn, so a block after
+    /// `fn f(x: T)` reads an undeclared `x_arg` when `x` is also a module var.
+    leaky: HashMap<usize, String>,
+    /// Each module-level `var` that lowered: its writable place.
+    mod_vars: HashMap<String, Place>,
+    /// Initial bytes of each module-level `var` (`Program::globals`).
+    globals_init: Vec<Vec<u8>>,
+    /// Lowering what t27c's Zig backend evaluates at compile time (an
+    /// `invariant`, which it emits as a `comptime` block, or a module-level
+    /// initializer): a module-level `var` is not visible there.
+    comptime: bool,
     struct_nodes: HashMap<String, &'a Node>,
     structs: Vec<StructDef<'a>>,
     struct_ids: HashMap<String, u32>,
@@ -331,6 +346,11 @@ fn lower_mode<'a>(
         globals: HashMap::new(),
         const_nodes: HashMap::new(),
         resolving: HashSet::new(),
+        var_nodes: Vec::new(),
+        leaky: HashMap::new(),
+        mod_vars: HashMap::new(),
+        globals_init: Vec::new(),
+        comptime: false,
         struct_nodes: HashMap::new(),
         structs: Vec::new(),
         struct_ids: HashMap::new(),
@@ -467,6 +487,7 @@ fn lower_mode<'a>(
                 );
                 l.poison_names.insert(item.name.clone());
             }
+            NodeKind::ConstDecl if item.extra_mutable => l.var_nodes.push(item),
             NodeKind::ConstDecl => {
                 l.const_nodes.insert(item.name.clone(), item);
             }
@@ -507,11 +528,36 @@ fn lower_mode<'a>(
     for name in const_names {
         let _ = l.global(&name);
     }
+    for node in std::mem::take(&mut l.var_nodes) {
+        if l.module_var(node).is_err() {
+            l.poison_names.insert(node.name.clone());
+        }
+    }
     let mut enum_names: Vec<String> = l.enum_nodes.keys().cloned().collect();
     enum_names.sort();
     for name in enum_names {
         if !l.enum_ids.contains_key(&name) && !l.enum_fail.contains_key(&name) {
             let _ = l.enum_id(&name);
+        }
+    }
+
+    let mut renamed: Vec<String> = Vec::new();
+    for item in &items {
+        match item.kind {
+            NodeKind::FnDecl => {
+                renamed = item
+                    .params
+                    .iter()
+                    .map(|(p, _)| p.trim().to_string())
+                    .filter(|p| l.mod_vars.contains_key(p))
+                    .collect();
+            }
+            NodeKind::TestBlock | NodeKind::BenchBlock | NodeKind::InvariantBlock => {
+                if let Some(name) = renamed.iter().find(|p| mentions(&item.children, p)) {
+                    l.leaky.insert(*item as *const Node as usize, name.clone());
+                }
+            }
+            _ => {}
         }
     }
 
@@ -568,6 +614,7 @@ fn lower_mode<'a>(
         mode,
         unchecked,
         data: l.data,
+        globals: l.globals_init,
         internal_abi: l.internal_abi,
     };
     // Bench bodies are compiled to machine code, so a body that lowers but
@@ -855,7 +902,100 @@ impl<'a> Lower<'a> {
                 return Some(b.clone());
             }
         }
-        None
+        if self.comptime {
+            return None;
+        }
+        self.mod_vars.get(name).map(|p| Binding::Mem(p.clone()))
+    }
+
+    /// A module-level `var`: writable memory holding its initial value. t27c
+    /// emits it as a Zig container-level `var`, whose initializer must be a
+    /// compile-time value, and `t27c test-report` runs every test in a fresh
+    /// process, so each test starts from that value (`ExprKind::Global`).
+    fn module_var(&mut self, node: &'a Node) -> R<()> {
+        self.see(node);
+        if node.line == 0 {
+            let at = self.src.and_then(|s| ["var", "pub var"].iter().filter_map(|k| header_line(s, k, &node.name)).min());
+            if let Some(l2) = at {
+                self.line = l2;
+            }
+        }
+        let name = node.name.clone();
+        let ann = node.extra_type.trim();
+        if ann.is_empty() {
+            return self.reject(
+                "VarDecl(module, untyped)",
+                format!("module-level var `{}` has no type; Zig refuses a comptime_int var", name),
+            );
+        }
+        let Some(init) = node.children.first() else {
+            return self.reject("VarDecl(module)", format!("module-level var `{}` has no value", name));
+        };
+        if is_undefined(init) {
+            return self.reject(
+                "VarDecl(module, undefined)",
+                format!("module-level var `{}` = undefined", name),
+            );
+        }
+        let t = self.lty(ann)?;
+        match &t {
+            LTy::S(_) | LTy::Enum(..) | LTy::Struct(_) | LTy::Arr(..) if !holds_str(&t) => {}
+            _ => {
+                let d = self.type_name(&t);
+                return self.reject(
+                    "VarDecl(module, pointer/str/slice)",
+                    format!("module-level var `{}` of type {}", name, d),
+                );
+            }
+        }
+        let (size, _) = self.size_align(&t)?;
+        let mut buf = vec![0u8; size as usize];
+        let saved_scopes = std::mem::take(&mut self.scopes);
+        let saved_ct = std::mem::replace(&mut self.comptime, true);
+        let r = match &t {
+            LTy::S(ty) => {
+                let ty = *ty;
+                let mut f = || -> R<()> {
+                    let v = self.expr_as(init, &t)?;
+                    let e = self.coerce(v, ty)?;
+                    let ExprKind::Const(c) = e.kind else {
+                        return self.reject(
+                            "VarDecl(module)",
+                            format!("module-level var `{}` is not a compile-time integer or bool", name),
+                        );
+                    };
+                    for i in 0..ty.bytes() as usize {
+                        buf[i] = ((c as u64) >> (8 * i)) as u8;
+                    }
+                    Ok(())
+                };
+                f()
+            }
+            _ => self.const_fill(init, &t, &mut buf, 0),
+        };
+        self.comptime = saved_ct;
+        self.scopes = saved_scopes;
+        r?;
+        self.globals_init.push(buf);
+        let k = (self.globals_init.len() - 1) as u32;
+        let addr = Expr { ty: Ty::Ptr, kind: ExprKind::Global(k) };
+        self.mod_vars.insert(name, Place { addr, off: 0, ty: t, mutable: true, temp: None });
+        Ok(())
+    }
+
+    /// A local, assigned parameter or capture with the name of a module-level
+    /// var. In a test the reference's Zig refuses it ("local variable shadows
+    /// declaration"); in a fn it renames the local to `<name>_lv` for every
+    /// mention in the fn, including the ones meant for the module var. Either
+    /// way there is no reference verdict to match, so t27b refuses it.
+    fn no_var_shadow(&mut self, name: &str) -> R<()> {
+        if self.mod_vars.contains_key(name) {
+            return self.reject(
+                "StmtLocal(shadows module var)",
+                format!("`{}` shadows a module-level var (a compile error in the reference)", name),
+            );
+        }
+        Ok(())
     }
 
     fn bind(&mut self, name: &str, b: Binding) {
@@ -897,8 +1037,10 @@ impl<'a> Lower<'a> {
         }
         let saved_line = self.line;
         let saved_scopes = std::mem::take(&mut self.scopes);
+        let saved_ct = std::mem::replace(&mut self.comptime, true);
         self.see(node);
         let r = self.global_value(node);
+        self.comptime = saved_ct;
         self.scopes = saved_scopes;
         self.line = saved_line;
         self.resolving.remove(name);
@@ -1018,6 +1160,14 @@ impl<'a> Lower<'a> {
         }
         let nparams = self.vars.len();
         let mut body = Vec::new();
+        for (pname, _) in n.params.iter() {
+            // The reference renames a parameter that shadows a module-level
+            // declaration (`x_arg`), except one the body assigns: that one
+            // is rebound as a local `var x = x_arg;`, which shadows.
+            if mutated(&n.children, pname) {
+                self.no_var_shadow(pname)?;
+            }
+        }
         for (i, (pname, _)) in n.params.iter().enumerate() {
             let var = Expr { ty: Ty::Ptr, kind: ExprKind::Var(ids[i]) };
             match &params[i] {
@@ -1119,14 +1269,26 @@ impl<'a> Lower<'a> {
                 format!("{} `{}` was only partially parsed by the front-end", what, n.name),
             );
         }
+        if let Some(name) = self.leaky.get(&(n as *const Node as usize)).cloned() {
+            return self.reject(
+                "ExprIdentifier(renamed module var)",
+                format!(
+                    "{} `{}` names module-level var `{}`, which the reference renames to the undeclared `{}_arg` after a fn with a parameter `{}`",
+                    what, n.name, name, name, name
+                ),
+            );
+        }
         self.begin_body(&n.children);
         self.in_test = true;
+        self.comptime = invariant;
         self.ret = None;
         self.ret_poison = false;
         self.test_assigns.clear();
         count_assigns(&n.children, &mut self.test_assigns);
-        let body = self.stmts(&n.children)?;
+        let body = self.stmts(&n.children);
         self.in_test = false;
+        self.comptime = false;
+        let body = body?;
         Ok(Func {
             name: n.name.clone(),
             nparams: 0,
@@ -1359,6 +1521,7 @@ impl<'a> Lower<'a> {
             }
         };
         let capture = n.params[0].0.trim().to_string();
+        self.no_var_shadow(&capture)?;
         if capture.starts_with('*') || capture.contains(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
             return self.reject("StmtFor", format!("capture `{}`", capture));
         }
@@ -1446,6 +1609,7 @@ impl<'a> Lower<'a> {
         if name.is_empty() || name.contains(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
             return self.reject("StmtLocal", format!("binding `{}`", name));
         }
+        self.no_var_shadow(&name)?;
         let ann = n.extra_type.trim().to_string();
         // The Zig backend's `zig_declared_int_type`: only these spellings
         // pin `1 << n` in the initializer (not an alias that resolves to one).
@@ -1606,6 +1770,20 @@ impl<'a> Lower<'a> {
             return self.reject(&k, "assignment target".into());
         }
         let name = target.name.clone();
+        if self.in_test
+            && self.scopes.len() == 1
+            && self.mod_vars.contains_key(&name)
+            && !self.scopes.iter().any(|s| s.contains_key(&name))
+        {
+            // The reference's Zig backend reads the first assignment to a
+            // name at the top of a test as a fresh binding (`const x = ..`),
+            // which shadows the module-level var: a compile error there.
+            let _ = self.expr(&n.children[1]);
+            return self.reject(
+                "StmtAssign(module var in test)",
+                format!("assignment to module-level var `{}` at the top of a test (the reference declares a shadowing local)", name),
+            );
+        }
         match self.lookup(&name) {
             Some(Binding::Mem(dst)) => self.store(dst, op, &n.children[1], out),
             Some(Binding::Var { id, mutable }) if !matches!(self.ltys[id as usize], LTy::S(_)) => {
@@ -1657,6 +1835,14 @@ impl<'a> Lower<'a> {
             }
             Some(Binding::Const(_)) => {
                 self.reject("StmtAssign", format!("assignment to constant `{}`", name))
+            }
+            None if self.mod_vars.contains_key(&name) => {
+                let _ = self.expr(&n.children[1]);
+                self.var_at_comptime(&name)
+            }
+            None if self.poison_names.contains(&name) => {
+                let _ = self.expr(&n.children[1]);
+                self.unknown_name(&name)
             }
             None if self.in_test && (op.is_empty() || op == "=") && self.scopes.len() == 1 => {
                 // Test-block binding form: the first plain assignment to a
@@ -2231,8 +2417,21 @@ impl<'a> Lower<'a> {
         Ok(Val::E(Expr { ty: to, kind: ExprKind::Cast { arg: Box::new(e), site } }))
     }
 
+    /// A module-level `var` named where t27c's Zig backend needs a
+    /// compile-time value: Zig cannot read or write a container-level `var`
+    /// in a `comptime` block or in a module-level initializer.
+    fn var_at_comptime<T>(&mut self, name: &str) -> R<T> {
+        self.reject(
+            "ExprIdentifier(var at comptime)",
+            format!("module-level var `{}` in an invariant or a module-level initializer", name),
+        )
+    }
+
     /// A name that is neither in scope nor a module-level constant.
     fn unknown_name<T>(&mut self, name: &str) -> R<T> {
+        if self.mod_vars.contains_key(name) {
+            return self.var_at_comptime(name);
+        }
         if self.poison_names.contains(name) {
             if self.recover {
                 return Err(());
@@ -4607,7 +4806,7 @@ fn field_place(p: &Place, f: &Field) -> Place {
 /// no effect.
 fn pure_addr(e: &Expr) -> bool {
     match &e.kind {
-        ExprKind::Slot(_) | ExprKind::Data(_) | ExprKind::Var(_) => true,
+        ExprKind::Slot(_) | ExprKind::Data(_) | ExprKind::Global(_) | ExprKind::Var(_) => true,
         ExprKind::Offset { base, idx, .. } => pure_addr(base) && matches!(idx.kind, ExprKind::Const(_)),
         _ => false,
     }
@@ -4632,6 +4831,30 @@ fn scan_addr_taken(ns: &[Node], out: &mut HashSet<String>) {
 }
 
 /// Count plain assignments per identifier in a test body (all nesting levels).
+/// Whether `name` occurs as an identifier anywhere under `ns`.
+fn mentions(ns: &[Node], name: &str) -> bool {
+    ns.iter().any(|n| (n.kind == NodeKind::ExprIdentifier && n.name == name) || mentions(&n.children, name))
+}
+
+/// The reference's `collect_mutable_names`: is `name` the target (or the base
+/// of an indexed or field target) of an assignment in `ns`?
+fn mutated(ns: &[Node], name: &str) -> bool {
+    ns.iter().any(|n| {
+        if n.kind == NodeKind::StmtAssign {
+            if let Some(t) = n.children.first() {
+                let base = match t.kind {
+                    NodeKind::ExprIndex | NodeKind::ExprFieldAccess => t.children.first(),
+                    _ => Some(t),
+                };
+                if base.is_some_and(|b| b.kind == NodeKind::ExprIdentifier && b.name == name) {
+                    return true;
+                }
+            }
+        }
+        mutated(&n.children, name)
+    })
+}
+
 fn count_assigns(ns: &[Node], counts: &mut HashMap<String, u32>) {
     for n in ns {
         if n.kind == NodeKind::StmtAssign {
