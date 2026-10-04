@@ -1066,7 +1066,7 @@ fn program(rng: &mut Rng, mode: OverflowMode) -> Program {
         funcs.push(f);
         g.sigs.pop();
     }
-    Program { module: "rnd".into(), funcs, sites: g.sites, mode, unchecked: Vec::new(), data, internal_abi: Vec::new() }
+    Program { module: "rnd".into(), funcs, sites: g.sites, mode, unchecked: Vec::new(), data, globals: Vec::new(), internal_abi: Vec::new() }
 }
 
 // ------------------------------------------------------- pretty printer
@@ -1114,6 +1114,7 @@ fn show_expr(p: &Program, f: &Func, e: &Expr) -> String {
         }
         ExprKind::Slot(k) => format!("&s{}", k),
         ExprKind::Data(k) => format!("&d{}", k),
+        ExprKind::Global(k) => format!("&g{}", k),
         ExprKind::Load { addr, off } => format!("{}[{} + {}]", e.ty.name(), show_expr(p, f, addr), off),
         ExprKind::Offset { base, idx, scale } => {
             format!("({} + {}*{})", show_expr(p, f, base), show_expr(p, f, idx), scale)
@@ -1252,7 +1253,7 @@ fn check_value(ty: Ty, want: i128, raw: u64) -> bool {
 fn compare(prog: &Program, rng: &mut Rng, calls_per_fn: usize, stats: &mut Stats) -> Result<(), String> {
     let code = codegen::compile(prog, TrapStyle::Jit, true)
         .map_err(|e| format!("codegen error in {}: {} {}", e.func, e.construct, e.detail))?;
-    let mut jit = Jit::load(&code, prog.funcs.len(), &prog.data)?;
+    let mut jit = Jit::load(&code, prog.funcs.len(), &prog.data, &prog.globals)?;
     stats.programs += 1;
     for (fi, f) in prog.funcs.iter().enumerate() {
         stats.functions += 1;
@@ -1543,7 +1544,7 @@ fn every_operator_at_edge_values() {
                     funcs.push(one_func("cr", &[at], ty, vec![Stmt::Return(Some(e))], 1));
                     lconst.push((funcs.len() - 1, c));
                 }
-                let prog = Program { module: "edge".into(), funcs, sites, mode: OverflowMode::Trap, unchecked: Vec::new(), data: Vec::new(), internal_abi: Vec::new() };
+                let prog = Program { module: "edge".into(), funcs, sites, mode: OverflowMode::Trap, unchecked: Vec::new(), data: Vec::new(), globals: Vec::new(), internal_abi: Vec::new() };
                 let mut calls: Vec<(usize, Vec<i128>)> = Vec::new();
                 for &a in &vals {
                     for &b in &rvals {
@@ -1612,7 +1613,7 @@ fn compare_unary_widen_at_edge_values() {
                 funcs.push(one_func("cb", &[ty], Ty::U32, as_branch(cmp(op, konst(ty, c), var(ty, 0))), 1));
                 single.push(funcs.len() - 1);
             }
-            let prog = Program { module: "cmp".into(), funcs, sites, mode: OverflowMode::Trap, unchecked: Vec::new(), data: Vec::new(), internal_abi: Vec::new() };
+            let prog = Program { module: "cmp".into(), funcs, sites, mode: OverflowMode::Trap, unchecked: Vec::new(), data: Vec::new(), globals: Vec::new(), internal_abi: Vec::new() };
             let mut calls = Vec::new();
             for &a in &vals {
                 for &b in &vals {
@@ -1640,7 +1641,7 @@ fn compare_unary_widen_at_edge_values() {
             }
         }
         let n = funcs.len();
-        let prog = Program { module: "unary".into(), funcs, sites, mode: OverflowMode::Trap, unchecked: Vec::new(), data: Vec::new(), internal_abi: Vec::new() };
+        let prog = Program { module: "unary".into(), funcs, sites, mode: OverflowMode::Trap, unchecked: Vec::new(), data: Vec::new(), globals: Vec::new(), internal_abi: Vec::new() };
         let calls: Vec<(usize, Vec<i128>)> =
             (0..n).flat_map(|f| vals.iter().map(move |&a| (f, vec![a]))).collect();
         if let Err(e) = compare_calls(&prog, &calls, &mut rng, &mut stats) {
@@ -1660,7 +1661,7 @@ fn compare_unary_widen_at_edge_values() {
                 one_func("wa", &[ty], to, vec![Stmt::Return(Some(arith(to, ArithOp::ShrW, use_, konst(Ty::U32, 1), 0)))], 1),
                 one_func("wc", &[ty], Ty::Bool, vec![Stmt::Return(Some(cmp(CmpOp::Lt, w, konst(to, 0))))], 1),
             ];
-            let prog = Program { module: "widen".into(), funcs, sites, mode: OverflowMode::Trap, unchecked: Vec::new(), data: Vec::new(), internal_abi: Vec::new() };
+            let prog = Program { module: "widen".into(), funcs, sites, mode: OverflowMode::Trap, unchecked: Vec::new(), data: Vec::new(), globals: Vec::new(), internal_abi: Vec::new() };
             let calls: Vec<(usize, Vec<i128>)> =
                 (0..3).flat_map(|f| vals.iter().map(move |&a| (f, vec![a]))).collect();
             if let Err(e) = compare_calls(&prog, &calls, &mut rng, &mut stats) {
@@ -1712,7 +1713,7 @@ fn casts_at_edge_values() {
                     funcs.push(one_func("k", &[from], to, vec![Stmt::Return(Some(cast(konst(from, k))))], 1));
                 }
                 let n = funcs.len();
-                let prog = Program { module: "cast".into(), funcs, sites, mode: OverflowMode::Trap, unchecked: Vec::new(), data: Vec::new(), internal_abi: Vec::new() };
+                let prog = Program { module: "cast".into(), funcs, sites, mode: OverflowMode::Trap, unchecked: Vec::new(), data: Vec::new(), globals: Vec::new(), internal_abi: Vec::new() };
                 let mut calls: Vec<(usize, Vec<i128>)> =
                     (0..3).flat_map(|f| vals.iter().map(move |&a| (f, vec![a]))).collect();
                 for f in 3..n {
@@ -1741,7 +1742,7 @@ fn compare_calls(
 ) -> Result<(), String> {
     let code = codegen::compile(prog, TrapStyle::Jit, true)
         .map_err(|e| format!("codegen error in {}: {} {}", e.func, e.construct, e.detail))?;
-    let mut jit = Jit::load(&code, prog.funcs.len(), &prog.data)?;
+    let mut jit = Jit::load(&code, prog.funcs.len(), &prog.data, &prog.globals)?;
     stats.programs += 1;
     let mut bad = Vec::new();
     for (fi, args) in calls {
@@ -1871,6 +1872,7 @@ fn f64_program(name: &str, funcs: Vec<Func>, sites: Vec<Site>) -> Program {
         mode: OverflowMode::Trap,
         unchecked: Vec::new(),
         data: Vec::new(),
+        globals: Vec::new(),
         internal_abi: Vec::new(),
     }
 }
@@ -2053,7 +2055,7 @@ fn f64_lower(src: &str) -> Result<Program, Vec<String>> {
 fn f64_run(src: &str) -> Vec<(String, Result<(), TrapKind>)> {
     let prog = f64_lower(src).unwrap_or_else(|e| panic!("lowering failed:\n{}", e.join("\n")));
     let code = codegen::compile(&prog, TrapStyle::Jit, true).expect("codegen");
-    let mut jit = Jit::load(&code, prog.funcs.len(), &prog.data).expect("jit load");
+    let mut jit = Jit::load(&code, prog.funcs.len(), &prog.data, &prog.globals).expect("jit load");
     let mut out = Vec::new();
     for (id, f) in prog.tests() {
         let want = Interp::new(&prog).call(id, &[]);
@@ -2100,7 +2102,7 @@ fn lower_text(src: &str) -> Result<Program, Vec<String>> {
 /// Every test of `prog` in the JIT and the interpreter: (name, trapped).
 fn run_both(prog: &Program) -> Vec<(String, bool)> {
     let code = codegen::compile(prog, TrapStyle::Jit, true).expect("codegen");
-    let mut jit = Jit::load(&code, prog.funcs.len(), &prog.data).expect("jit load");
+    let mut jit = Jit::load(&code, prog.funcs.len(), &prog.data, &prog.globals).expect("jit load");
     let mut out = Vec::new();
     for (id, f) in prog.tests() {
         let want = Interp::new(prog).call(id, &[]);

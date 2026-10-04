@@ -300,7 +300,7 @@ fn cmd_test(prog: &Program, ph: &mut Phases, o: &Opts) -> ExitCode {
         Ok(c) => c,
         Err(e) => return codegen_error(&e),
     };
-    let jit = ph.time("jit-map", || Jit::load(&code, prog.funcs.len(), &prog.data));
+    let jit = ph.time("jit-map", || Jit::load(&code, prog.funcs.len(), &prog.data, &prog.globals));
     let mut jit = match jit {
         Ok(j) => j,
         Err(e) => {
