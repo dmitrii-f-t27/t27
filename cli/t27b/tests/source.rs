@@ -367,3 +367,151 @@ fn string_rejections_are_precise() {
         assert!(m.contains(detail), "{}: {}", body, m);
     }
 }
+
+// ---------------------------------------------------------------- arrays
+
+#[test]
+fn arrays_literals_indexing_len_and_for() {
+    let src = "module a;
+
+const N: u32 = 3;
+const PRIMES: [4]u32 = [2, 3, 5, 7];
+const FLAGS: [2]bool = [true, false];
+pub const NAMES: [2]str = [\"in\", \"out\"];
+const NONE: [0]str = [];
+
+const Bus = struct { lanes: [N]u8, width: u16 };
+
+fn total(a: [4]u32) u32 {
+    var s: u32 = 0;
+    for (a) |x| {
+        s += x;
+    }
+    return s;
+}
+
+fn ramp(k: u8) [3]u8 {
+    return [k, k + 1, k + 2];
+}
+
+fn at(a: [4]u32, i: u32) u32 {
+    return a[i];
+}
+
+fn reset(a: [3]u8) [3]u8 {
+    var r: [3]u8 = [0, 0, 0];
+    r = a;
+    r[0] = 1;
+    return r;
+}
+
+fn fill(a: *[3]u8, v: u8) void {
+    a[0] = v;
+    a.*[2] = v;
+}
+
+test locals_and_indexing {
+    var a: [4]i32 = [10, -20, 30, -40];
+    a[1] = 5;
+    a[3] += 1;
+    var i: u32 = 2;
+    assert(a[i] == 30);
+    a[i] = a[0] + a[1];
+    assert(a[2] == 15 and a[3] == -39);
+    assert(a.len == 4 and PRIMES.len == 4);
+    const b: [N]bool = [true, false, true];
+    assert(b[0] and !b[1] and b[2]);
+}
+
+test consts_and_strings {
+    assert(PRIMES[3] == 7 and at(PRIMES, 2) == 5);
+    assert(FLAGS[0] and !FLAGS[1]);
+    assert(NAMES[1] == \"out\" and NAMES.len == 2 and NONE.len == 0);
+    var j: u32 = 0;
+    assert(NAMES[j] == \"in\");
+    var n: u64 = 0;
+    for (NAMES) |s| {
+        n += s.len;
+    }
+    assert(n == 5);
+}
+
+test copies_params_and_results {
+    var a: [3]u8 = [1, 2, 3];
+    const c = a;
+    a[0] = 9;
+    assert(c[0] == 1 and a[0] == 9);
+    var r = ramp(4);
+    assert(r[2] == 6 and ramp(1)[0] == 1);
+    fill(&r, 0);
+    assert(r[0] == 0 and r[1] == 5 and r[2] == 0);
+    const d = reset(c);
+    assert(d[0] == 1 and d[1] == 2 and c[0] == 1);
+    assert(total(PRIMES) == 17 and total([1, 1, 1, 1]) == 4);
+    var bus = Bus{ .lanes = [7, 8, 9], .width = 3 };
+    bus.lanes[1] = 0;
+    assert(bus.lanes[1] == 0 and bus.lanes.len == 3);
+}
+
+test for_with_break_and_continue {
+    const a: [5]u32 = [1, 2, 3, 4, 5];
+    var s: u32 = 0;
+    for (a) |x| {
+        if (x == 2) {
+            continue;
+        }
+        if (x == 5) {
+            break;
+        }
+        s += x;
+    }
+    assert(s == 8);
+    var count: u32 = 0;
+    for (a) |_| {
+        count += 1;
+    }
+    assert(count == 5);
+}
+
+test index_out_of_bounds {
+    const a: [3]u32 = [1, 2, 3];
+    var i: u32 = 3;
+    assert(a[i] == 0);
+}
+";
+    let r = run(src);
+    assert_eq!(
+        names_ok(&r),
+        vec![
+            ("locals_and_indexing", false, true),
+            ("consts_and_strings", false, true),
+            ("copies_params_and_results", false, true),
+            ("for_with_break_and_continue", false, true),
+            ("index_out_of_bounds", false, false),
+        ]
+    );
+    assert_eq!(r[4].2, Err((TrapKind::Bounds, 105)));
+}
+
+#[test]
+fn array_rejections_are_precise() {
+    let head = "module a;\n\nconst A: [3]u32 = [1, 2, 3];\n\n";
+    let cases: &[(&str, &str, &str)] = &[
+        ("test t { const b: [3]u32 = [1, 2]; _ = b; }", "ExprArrayLiteral", "2 elements for `[3]u32`"),
+        ("test t { const b = [1, 2]; _ = b; }", "ExprArrayLiteral", "array literal with no result type"),
+        ("test t { assert(A[3] == 0); }", "ExprIndex", "index 3 out of bounds for `[3]u32`"),
+        ("test t { var i: i32 = 0; assert(A[i] == 1); }", "type mismatch", "expected u64"),
+        ("test t { assert(A == A); }", "type mismatch", "on an array"),
+        ("test t { var b: [3]u32 = A; b.len = 2; }", "ExprFieldAccess(.len)", "not a place"),
+        ("test t { assert(A.ptr == 0); }", "ExprFieldAccess", "`.ptr` of an array"),
+        ("test t { const s: str = \"ab\"; assert(s[0] == 97); }", "ExprIndex(str)", "index of a string"),
+        ("test t { const b: [N]u32 = undefined; _ = b; }", "type [N]T", "not a compile-time integer"),
+        ("test t { A[0] = 2; }", "StmtAssign", "assignment through a constant"),
+        ("test t { assert(A); }", "condition", "expected bool, found an array"),
+    ];
+    for (body, construct, detail) in cases {
+        let m = rejected(&format!("{}{}\n", head, body));
+        assert!(m.starts_with(&format!("t27b: unsupported construct {} at line", construct)), "{}: {}", body, m);
+        assert!(m.contains(detail), "{}: {}", body, m);
+    }
+}
