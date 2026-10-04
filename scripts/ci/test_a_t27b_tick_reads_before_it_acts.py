@@ -31,6 +31,7 @@ same before and after.
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -168,6 +169,62 @@ with tempfile.TemporaryDirectory() as tmp:
     check(codes is not None and sorted(codes) == sorted(want), f"broken: nothing else ({codes})")
     check("processes inside: 4242" in out, "broken: the mid-merge worktree names the process inside it")
     check("no process inside" in out, "broken: the dirty worktree says nobody is inside")
+
+    # #6230: a lab stuck at checkout has no `finished`; it still ages, and says why it measured nothing
+    files = {k: open(os.path.join(healthy, k)).read() for k in os.listdir(healthy)}
+    stuck_lab = lab(finished=None, updated="2026-10-04T08:00:00Z",
+                    steps={"checkout": {"ok": False, "error": "fatal: could not fetch abc from promisor remote"}})
+    stuck_lab.pop("summary")
+    stuck = os.path.join(tmp, "fx-stuck")
+    write_fixture(stuck, {**files, "lab.json": stuck_lab})
+    code, codes, out = doctor(stuck)
+    check(code == 1 and codes == ["LAB-STALE", "LAB-CHECKOUT"],
+          f"stuck: LAB-STALE from `updated` and LAB-CHECKOUT, not a generic LAB-TESTS-RED (got {code} {codes})")
+    check("promisor remote" in out and "redeploy" in out, "stuck: the finding quotes the error and names the fix")
+    healed = os.path.join(tmp, "fx-healed")
+    write_fixture(healed, {**files, "lab.json": lab(steps={"checkout": {"ok": True, "clone": "recloned",
+                                                                         "first_error": "promisor remote"}})})
+    code, codes, out = doctor(healed)
+    check(code == 1 and codes == ["LAB-RECLONED"], f"healed: LAB-RECLONED alone (got {code} {codes})")
+    kept = os.path.join(tmp, "fx-kept")
+    write_fixture(kept, {**files, "lab.json": lab(steps={"checkout": {"ok": True, "clone": "kept"}})})
+    code, codes, out = doctor(kept)
+    check(code == 0 and codes == [], f"kept clone: no anomaly (got {code} {codes})")
+
+    # #6237: LAB-ERROR reads the per-spec records; a fail the reference shares (build_verify) is no alarm
+    shared = lab(t27b_fail=1, results=[{"file": "specs/fpga/verification/build_verify.t27",
+                                        "t27b": "fail", "reference": "fail"}])
+    fx = os.path.join(tmp, "fx-shared-fail")
+    write_fixture(fx, {**files, "lab.json": shared})
+    code, codes, out = doctor(fx)
+    check(code == 0 and codes == [], f"shared fail: no LAB-ERROR (got {code} {codes})")
+    own = lab(t27b_fail=1, results=[{"file": "specs/a.t27", "t27b": "fail", "reference": "pass"}])
+    fx = os.path.join(tmp, "fx-own-fail")
+    write_fixture(fx, {**files, "lab.json": own})
+    code, codes, out = doctor(fx)
+    check(code == 1 and codes == ["LAB-ERROR"] and "t27b_fail 1" in out,
+          f"own fail: LAB-ERROR t27b_fail 1 (got {code} {codes})")
+
+    # mutation control: the same tool over a generated C whose checkout rule never fires misses LAB-CHECKOUT,
+    # so the finding comes from the spec, not from a branch in t27b.py
+    gen_src = open(os.path.join(ROOT, "gen", "c", "tri", "t27b", "steward.c")).read()
+    needle = "uint8_t checkout_code(bool ok, bool recloned) {\n    if ((ok == false)) {"
+    check(gen_src.count(needle) == 1, "control: the generated checkout rule is where the control expects it")
+    tree = os.path.join(tmp, "mut", "scripts", "tri_loop")
+    os.makedirs(tree)
+    for name in ("t27b.py", "t27b_rules.py"):
+        shutil.copy(os.path.join(ROOT, "scripts", "tri_loop", name), tree)
+    gen = os.path.join(tmp, "mut", "gen", "c", "tri", "t27b")
+    os.makedirs(gen)
+    with open(os.path.join(gen, "steward.c"), "w") as f:
+        f.write(gen_src.replace(needle, needle.replace("(ok == false)", "(false)")))
+    p = subprocess.run([sys.executable, os.path.join(tree, "t27b.py"), "doctor", "--json", "--fixture", stuck],
+                       capture_output=True, text=True)
+    try:
+        mut_codes = [a["code"] for a in json.loads(p.stdout)]
+    except ValueError:
+        mut_codes = None
+    check(mut_codes == ["LAB-STALE"], f"control: a mutated checkout rule loses LAB-CHECKOUT ({mut_codes})")
 
     unread = os.path.join(tmp, "fx-unread")
     files = {k: open(os.path.join(broken, k)).read() for k in os.listdir(broken)}
