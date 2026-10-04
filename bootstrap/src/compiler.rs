@@ -20653,6 +20653,21 @@ long double: fabsl, default: llabs)(x)",
         self.write_line("");
     }
 
+    /// A by-value [T; N] is a struct whose array member owns the designator.
+    /// Plain [N]T arrays still use gen_c_expr without this wrapper.
+    fn gen_c_array_value(&mut self, node: &Node) {
+        let repeat = node.kind == NodeKind::ExprArrayLiteral
+            && node.children.is_empty()
+            && node.extra_size.contains(';');
+        if repeat {
+            self.write("{ .v = ");
+        }
+        self.gen_c_expr(node);
+        if repeat {
+            self.write(" }");
+        }
+    }
+
     fn gen_c_stmt(&mut self, node: &Node) {
         match node.kind {
             NodeKind::ExprReturn => {
@@ -20672,9 +20687,13 @@ long double: fabsl, default: llabs)(x)",
                     if node.children[0].kind == NodeKind::ExprArrayLiteral {
                         if let Some(name) = self.current_ret_array_type.clone() {
                             self.write(&format!("({})", name));
+                            self.gen_c_array_value(&node.children[0]);
+                        } else {
+                            self.gen_c_expr(&node.children[0]);
                         }
+                    } else {
+                        self.gen_c_expr(&node.children[0]);
                     }
-                    self.gen_c_expr(&node.children[0]);
                 }
                 self.c_in_return = outer_return;
                 self.write_line(";");
@@ -20802,7 +20821,7 @@ long double: fabsl, default: llabs)(x)",
                     self.write(&format!("{} {}", sname, node.name));
                     if !node.children.is_empty() {
                         self.write(" = ");
-                        self.gen_c_expr(&node.children[0]);
+                        self.gen_c_array_value(&node.children[0]);
                     }
                     self.write_line(";");
                     return;
@@ -22030,9 +22049,13 @@ long double: fabsl, default: llabs)(x)",
                     if node.children[0].kind == NodeKind::ExprArrayLiteral {
                         if let Some(name) = self.current_ret_array_type.clone() {
                             self.write(&format!("({})", name));
+                            self.gen_c_array_value(&node.children[0]);
+                        } else {
+                            self.gen_c_expr(&node.children[0]);
                         }
+                    } else {
+                        self.gen_c_expr(&node.children[0]);
                     }
-                    self.gen_c_expr(&node.children[0]);
                 }
                 self.c_in_return = outer_return;
             }
