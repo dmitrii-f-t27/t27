@@ -4379,9 +4379,10 @@ fn run_gen(input_path: &str) -> anyhow::Result<()> {
     // `use_resolve::imported_enums` -- enums only, no splicing.
     match compiler::Compiler::compile_verilog_at_reporting(&source, path) {
         Ok((verilog_code, entry_refusal)) => {
-            // #5904: the file says ENTRY POINT REFUSED only when the module is
-            // otherwise port-less; stderr says it whenever it happens. The exit
-            // status is unchanged -- the Verilog is still valid, just smaller.
+            // #5904: stderr says ENTRY POINT REFUSED whenever it happens, and
+            // so does the file -- for `on_clock` too since #5963
+            // (it used to be written only when the module was port-less). The
+            // exit status is unchanged -- the Verilog is still valid, smaller.
             if let Some(what) = &entry_refusal {
                 eprintln!("t27c gen-verilog: ENTRY POINT REFUSED -- {what}");
             }
