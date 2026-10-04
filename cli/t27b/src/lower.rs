@@ -130,6 +130,9 @@ enum LTy {
     /// `[]T` (true: elements writable) or `[]const T` (false): a (pointer,
     /// length) pair in memory. `[]const u8` is `Str`, never this.
     Slice(Box<LTy>, bool),
+    /// A plain enum (index into `Lower::enums`): its tag, an integer of
+    /// the register type given, in one register.
+    Enum(u32, Ty),
 }
 
 /// `ty` at `addr + off`. `addr` is evaluated exactly once by whatever
@@ -163,6 +166,44 @@ struct StructDef<'a> {
     fail: Option<Reject>,
 }
 
+/// A plain enum, lowered to its integer tag.
+struct EnumDef {
+    name: String,
+    /// The register type holding the tag.
+    tag: Ty,
+    /// The width of Zig's tag type: `tag`'s own width, or for an enum
+    /// declared with no tag type (Zig picks the smallest unsigned integer
+    /// that holds every tag) possibly fewer bits, which t27b has no type for.
+    bits: u32,
+    /// (name, tag value), in declaration order.
+    variants: Vec<(String, i128)>,
+}
+
+impl EnumDef {
+    /// `@intFromEnum` gives a value of a type t27b has.
+    fn exact(&self) -> bool {
+        self.bits == self.tag.bits()
+    }
+
+    fn value(&self, name: &str) -> Option<i128> {
+        self.variants.iter().find(|v| v.0 == name).map(|v| v.1)
+    }
+}
+
+/// Where a runtime `@intFromEnum` of an enum whose tag type t27b has no type
+/// for (`u2`, say) is used: only where its storage type gives the same answer.
+#[derive(Clone, Copy, PartialEq)]
+enum TagUse {
+    /// Nowhere special: refused, since arithmetic on it would overflow at a
+    /// different point.
+    Value,
+    /// An operand of `==`, `<`, ... or `assert_eq`: exact at any width.
+    Compare,
+    /// Coerced to this integer type, which Zig allows when it holds every
+    /// value of the tag type.
+    Want(Ty),
+}
+
 struct Sig {
     id: FuncId,
     params: Vec<LTy>,
@@ -183,6 +224,12 @@ struct Lower<'a> {
     struct_nodes: HashMap<String, &'a Node>,
     structs: Vec<StructDef<'a>>,
     struct_ids: HashMap<String, u32>,
+    /// Enum declarations, built on first use (all of them after pass 1).
+    enum_nodes: HashMap<String, &'a Node>,
+    enums: Vec<EnumDef>,
+    enum_ids: HashMap<String, u32>,
+    /// Why an enum declaration was refused, to report again at a later use.
+    enum_fail: HashMap<String, Reject>,
     data: Vec<Vec<u8>>,
     internal_abi: Vec<FuncId>,
     /// Blob of each string literal's bytes, so equal literals share one.
@@ -276,6 +323,10 @@ fn lower_mode<'a>(
         struct_nodes: HashMap::new(),
         structs: Vec::new(),
         struct_ids: HashMap::new(),
+        enum_nodes: HashMap::new(),
+        enums: Vec::new(),
+        enum_ids: HashMap::new(),
+        enum_fail: HashMap::new(),
         data: Vec::new(),
         internal_abi: Vec::new(),
         strings: HashMap::new(),
@@ -315,6 +366,9 @@ fn lower_mode<'a>(
         if item.kind == NodeKind::StructDecl {
             l.struct_nodes.insert(item.name.clone(), item);
         }
+        if item.kind == NodeKind::EnumDecl && !item.name.is_empty() {
+            l.enum_nodes.insert(item.name.clone(), item);
+        }
     }
 
     // Pass 1: signatures and constant declarations.
@@ -327,6 +381,9 @@ fn lower_mode<'a>(
             }
             NodeKind::EnumDecl => {
                 l.type_decls.insert(item.name.clone(), "enum");
+            }
+            NodeKind::ConstDecl if is_tagged_union(item) => {
+                l.type_decls.insert(item.name.clone(), "tagged union");
             }
             // A constant used where a type goes is a type alias.
             NodeKind::ConstDecl => {
@@ -384,6 +441,19 @@ fn lower_mode<'a>(
                 }
             }
             NodeKind::TestBlock | NodeKind::InvariantBlock | NodeKind::StructDecl => {}
+            // Built after pass 1, once every constant a tag may name is known.
+            NodeKind::EnumDecl if !item.name.is_empty() => {}
+            // `union(enum) { ... }`: t27c keeps only its text.
+            NodeKind::ConstDecl if is_tagged_union(item) => {
+                if let Some(l2) = l.src.and_then(|s| decl_line(s, &item.name)) {
+                    l.line = l2;
+                }
+                let _: R<()> = l.reject(
+                    "EnumDecl(union)",
+                    format!("tagged union `{}`; only plain enums are supported", item.name),
+                );
+                l.poison_names.insert(item.name.clone());
+            }
             NodeKind::ConstDecl => {
                 l.const_nodes.insert(item.name.clone(), item);
             }
@@ -423,6 +493,13 @@ fn lower_mode<'a>(
     const_names.sort();
     for name in const_names {
         let _ = l.global(&name);
+    }
+    let mut enum_names: Vec<String> = l.enum_nodes.keys().cloned().collect();
+    enum_names.sort();
+    for name in enum_names {
+        if !l.enum_ids.contains_key(&name) && !l.enum_fail.contains_key(&name) {
+            let _ = l.enum_id(&name);
+        }
     }
 
     // Pass 2: bodies.
@@ -490,6 +567,21 @@ fn header_line(src: &str, keyword: &str, name: &str) -> Option<u32> {
         }
     }
     None
+}
+
+/// Line (1-based) of the declaration of `name`: `const`, `pub const`,
+/// `enum` or `pub enum`.
+fn decl_line(src: &str, name: &str) -> Option<u32> {
+    ["const", "pub const", "enum", "pub enum"]
+        .iter()
+        .filter_map(|k| header_line(src, k, name))
+        .min()
+}
+
+/// t27c reads `const U = union(enum) { ... };` as a `ConstDecl` with no value
+/// and the declaration's tokens as text.
+fn is_tagged_union(n: &Node) -> bool {
+    n.kind == NodeKind::ConstDecl && n.children.is_empty() && n.value.replace(' ', "").starts_with("union(enum")
 }
 
 fn kind_name(n: &Node) -> String {
@@ -712,6 +804,16 @@ impl<'a> Lower<'a> {
                 LTy::Slice(..) => {
                     return self.reject("ConstDecl(slice)", format!("`{}` is a module-level slice", node.name))
                 }
+                t @ LTy::Enum(..) => {
+                    let v = self.expr_as(init, &t)?;
+                    return match v {
+                        Val::P(Expr { kind: ExprKind::Const(_), .. }, _) | Val::Poison => Ok(v),
+                        _ => self.reject(
+                            "ConstDecl",
+                            format!("`{}` is not a compile-time enum value", node.name),
+                        ),
+                    };
+                }
                 LTy::S(_) => None,
             }
         } else if init.kind == NodeKind::ExprStructLit && !init.name.is_empty() {
@@ -732,6 +834,7 @@ impl<'a> Lower<'a> {
         match &v {
             Val::Ct(_) | Val::S(..) | Val::A(..) | Val::Poison => Ok(v),
             Val::E(e) if matches!(e.kind, ExprKind::Const(_)) => Ok(v),
+            Val::P(e, LTy::Enum(..)) if matches!(e.kind, ExprKind::Const(_)) => Ok(v),
             // Another struct constant: the same read-only bytes.
             Val::M(p) if matches!(p.addr.kind, ExprKind::Data(_)) => Ok(v),
             _ => self.reject(
@@ -1323,7 +1426,8 @@ impl<'a> Lower<'a> {
                     return self.reject("StmtAssign", format!("assignment to constant `{}`", name));
                 }
                 if !(op.is_empty() || op == "=") {
-                    return self.reject("StmtAssign", format!("`{}` on a pointer", op));
+                    let d = if matches!(self.ltys[id as usize], LTy::Enum(..)) { "an enum" } else { "a pointer" };
+                    return self.reject("StmtAssign", format!("`{}` on {}", op, d));
                 }
                 let t = self.ltys[id as usize].clone();
                 let v = self.expr_as(&n.children[1], &t)?;
@@ -1406,12 +1510,16 @@ impl<'a> Lower<'a> {
                         format!("assert_eq with {} arguments", c.children.len()),
                     );
                 }
-                let a = self.expr(&c.children[0])?;
-                let b = self.expr(&c.children[1])?;
+                let (a, b) = self.operands(&c.children[0], &c.children[1])?;
                 if a.is_poison() || b.is_poison() {
                     return Err(());
                 }
                 let (lhs, rhs) = match (a, b) {
+                    (Val::P(x, LTy::Enum(i, _)), Val::P(y, LTy::Enum(j, _))) if i == j => (x, y),
+                    (a @ Val::P(_, LTy::Enum(..)), b) | (a, b @ Val::P(_, LTy::Enum(..))) => {
+                        let (x, y) = (self.val_desc(&a), self.val_desc(&b));
+                        return self.reject("type mismatch", format!("assert_eq on {} and {}", x, y));
+                    }
                     (Val::Ct(x), Val::Ct(y)) => {
                         let ty = if Ty::I64.fits(x) && Ty::I64.fits(y) {
                             Ty::I64
@@ -1536,6 +1644,10 @@ impl<'a> Lower<'a> {
             Val::E(e) if e.ty == Ty::Bool => Ok(e),
             Val::E(e) => self.reject("condition", format!("expected bool, found {}", e.ty.name())),
             Val::Ct(_) => self.reject("condition", "expected bool, found an integer literal".into()),
+            Val::P(_, ref t @ LTy::Enum(..)) => {
+                let d = self.type_name(t);
+                self.reject("condition", format!("expected bool, found {}", d))
+            }
             Val::P(..) => self.reject("condition", "expected bool, found a pointer".into()),
             Val::M(ref p) if matches!(p.ty, LTy::Arr(..)) => self.reject("condition", "expected bool, found an array".into()),
             Val::A(..) => self.reject("condition", "expected bool, found an array".into()),
@@ -1582,6 +1694,10 @@ impl<'a> Lower<'a> {
                     "type mismatch",
                     format!("expected {}, found {}", to.name(), e.ty.name()),
                 )
+            }
+            Val::P(_, ref t @ LTy::Enum(..)) => {
+                let d = self.type_name(t);
+                self.reject("type mismatch", format!("expected {}, found {}", to.name(), d))
             }
             Val::P(..) => self.reject("type mismatch", format!("expected {}, found a pointer", to.name())),
             Val::M(ref p) if matches!(p.ty, LTy::Arr(..)) => {
@@ -1636,6 +1752,10 @@ impl<'a> Lower<'a> {
             }
             (Val::M(_), _) | (_, Val::M(_)) => self.reject("type mismatch", format!("`{}` on a struct", what)),
             (Val::S(..), _) | (_, Val::S(..)) => self.reject("type mismatch", format!("`{}` on a string", what)),
+            (Val::P(_, t @ LTy::Enum(..)), _) | (_, Val::P(_, t @ LTy::Enum(..))) => {
+                let d = self.type_name(&t);
+                self.reject("type mismatch", format!("`{}` on {}", what, d))
+            }
             (Val::P(..), _) | (_, Val::P(..)) => self.reject("type mismatch", format!("`{}` on a pointer", what)),
         }
     }
@@ -1658,6 +1778,12 @@ impl<'a> Lower<'a> {
                         ty: Ty::Bool,
                         kind: ExprKind::Const((name == "true") as i128),
                     }));
+                }
+                if let Some((e, v)) = name.split_once("::") {
+                    if self.lookup(e).is_none() && self.enum_nodes.contains_key(e) {
+                        let Some(id) = self.enum_id(e)? else { unreachable!() };
+                        return self.enum_value(id, v);
+                    }
                 }
                 match self.lookup(name) {
                     Some(Binding::Var { id, .. }) => {
@@ -1692,9 +1818,17 @@ impl<'a> Lower<'a> {
                     };
                     return Ok(Val::E(Expr { ty: Ty::Bool, kind }));
                 }
-                let a = self.expr(&n.children[0])?;
-                let b = self.expr(&n.children[1])?;
+                let (x, y) = (&n.children[0], &n.children[1]);
+                let lit = |n: &Node| n.kind == NodeKind::ExprEnumValue;
+                let ordered = (self.names_variant(x) || self.names_variant(y)) && !lit(x) && !lit(y);
+                let (a, b) = self.operands(x, y)?;
+                if let Some(v) = self.enum_compare(&op, &a, &b, ordered)? {
+                    return Ok(v);
+                }
                 self.binary(&op, a, b)
+            }
+            NodeKind::ExprEnumValue => {
+                self.reject("ExprEnumValue", format!("enum literal `.{}` with no result type", n.name))
             }
             NodeKind::ExprUnary => {
                 if n.children.len() != 1 {
@@ -1708,6 +1842,15 @@ impl<'a> Lower<'a> {
                 }
                 let v = self.expr(&n.children[0])?;
                 self.unary(&op, v)
+            }
+            NodeKind::ExprCall if n.name == "@intFromEnum" => self.int_from_enum(n, TagUse::Value),
+            NodeKind::ExprCall if n.name == "@enumFromInt" => {
+                self.reject("ExprCall(@enumFromInt)", "with no enum result type".into())
+            }
+            // `@as(T, x)`: `x` coerced to `T`.
+            NodeKind::ExprCall if n.name == "@as" && n.children.len() == 2 && n.children[0].kind == NodeKind::ExprIdentifier => {
+                let t = self.lty(&n.children[0].name)?;
+                self.expr_as(&n.children[1], &t)
             }
             NodeKind::ExprCall => {
                 let (call, ret, temp) = self.call(n, None)?;
@@ -1800,6 +1943,10 @@ impl<'a> Lower<'a> {
             Val::Ct(c) if to.is_int() => return Ok(Val::E(self.coerce(Val::Ct(c), to)?)),
             Val::Ct(_) => return self.reject("ExprCast(to bool)", "integer literal as bool".into()),
             Val::E(e) => e,
+            Val::P(_, t @ LTy::Enum(..)) => {
+                let d = self.type_name(&t);
+                return self.reject("ExprCast", format!("enum `{}` as {}", d, to.name()));
+            }
             Val::P(..) => return self.reject("ExprCast", format!("pointer as {}", to.name())),
             Val::M(_) | Val::A(..) => return self.reject("ExprCast", format!("struct or array as {}", to.name())),
             Val::S(..) => return self.reject("ExprCast", format!("string as {}", to.name())),
@@ -2185,6 +2332,10 @@ impl<'a> Lower<'a> {
                 return Ok(LTy::Slice(Box::new(inner), mutable));
             }
         }
+        if self.enum_nodes.contains_key(t) {
+            let Some(id) = self.enum_id(t)? else { unreachable!() };
+            return Ok(LTy::Enum(id, self.enums[id as usize].tag));
+        }
         if self.struct_nodes.contains_key(t) {
             let id = self.struct_id(t);
             if by_value {
@@ -2239,6 +2390,455 @@ impl<'a> Lower<'a> {
         self.structs.push(StructDef { name: name.to_string(), fields: Vec::new(), size: None, align: 1, fail: None });
         self.struct_ids.insert(name.to_string(), id);
         id
+    }
+
+    /// The id of enum `name`, building it on first use; None when no enum
+    /// of that name is declared. A refused declaration is reported where it
+    /// is first built and, outside recovery mode, again at every later use.
+    fn enum_id(&mut self, name: &str) -> R<Option<u32>> {
+        if let Some(&id) = self.enum_ids.get(name) {
+            return Ok(Some(id));
+        }
+        if let Some(r) = self.enum_fail.get(name).cloned() {
+            if !self.recover {
+                self.errors.push(Reject { line: self.line, ..r });
+            }
+            return Err(());
+        }
+        let Some(&node) = self.enum_nodes.get(name) else { return Ok(None) };
+        let key = format!("enum {}", name);
+        if !self.resolving.insert(key.clone()) {
+            return self.reject("EnumDecl", format!("a tag of `{}` refers to `{}` itself", name, name));
+        }
+        let saved = self.line;
+        let saved_scopes = std::mem::take(&mut self.scopes);
+        self.line = 0;
+        self.see(node);
+        if node.line == 0 {
+            if let Some(l) = self.src.and_then(|s| decl_line(s, name)) {
+                self.line = l;
+            }
+        }
+        let nerr = self.errors.len();
+        let r = self.enum_build(node);
+        self.scopes = saved_scopes;
+        self.line = saved;
+        self.resolving.remove(&key);
+        match r {
+            Ok(def) => {
+                let id = self.enums.len() as u32;
+                self.enums.push(def);
+                self.enum_ids.insert(name.to_string(), id);
+                Ok(Some(id))
+            }
+            Err(()) => {
+                if let Some(e) = self.errors.get(nerr).cloned() {
+                    self.enum_fail.insert(name.to_string(), e);
+                }
+                Err(())
+            }
+        }
+    }
+
+    /// Tags as t27c's Zig backend declares them: `enum(T)` when a tag type
+    /// is written, `enum(i32)` when it is not but some variant has a value,
+    /// plain `enum` (Zig's smallest unsigned tag, values 0, 1, ...) otherwise.
+    fn enum_build(&mut self, node: &Node) -> R<EnumDef> {
+        let name = node.name.clone();
+        for v in &node.children {
+            if v.kind != NodeKind::EnumVariant {
+                return self.reject("EnumDecl", format!("`{}` member of kind {}", name, kind_name(v)));
+            }
+        }
+        // t27c reads every word in the braces as a variant, so a method or a
+        // declaration inside the enum shows up as variants named after its
+        // keywords.
+        if let Some(v) = node.children.iter().find(|v| matches!(v.name.as_str(), "fn" | "pub" | "const" | "var")) {
+            return self.reject(
+                "EnumDecl(method)",
+                format!("`{}` declares something inside it (`{}`); only plain enums are supported", name, v.name),
+            );
+        }
+        if node.children.iter().any(|v| v.name == "_") {
+            return self.reject(
+                "EnumDecl(non-exhaustive)",
+                format!("`{}` has a `_` variant; only exhaustive enums are supported", name),
+            );
+        }
+        if node.children.is_empty() {
+            return self.reject("EnumDecl", format!("`{}` has no variants", name));
+        }
+        if let Some(v) = node.children.iter().find(|v| v.name.starts_with(|c: char| c.is_ascii_digit())) {
+            return self.reject("EnumDecl", format!("`{}`: `{}` is not a variant name", name, v.name));
+        }
+        let n = node.children.len();
+        let ann = node.extra_type.trim();
+        let valued = node.children.iter().any(|v| !v.value.is_empty());
+        let (tag, bits) = if !ann.is_empty() {
+            match Ty::from_name(ann) {
+                Some(t) if t.is_int() => (t, t.bits()),
+                _ => {
+                    return self.reject(
+                        "EnumDecl(tag type)",
+                        format!("`{}` has tag type `{}`", name, ann),
+                    )
+                }
+            }
+        } else if valued {
+            (Ty::I32, 32)
+        } else {
+            let mut bits = 0u32;
+            while (1u128 << bits) < n as u128 {
+                bits += 1;
+            }
+            let tag = match bits {
+                0..=8 => Ty::U8,
+                9..=16 => Ty::U16,
+                17..=32 => Ty::U32,
+                _ => Ty::U64,
+            };
+            (tag, bits)
+        };
+        let mut variants: Vec<(String, i128)> = Vec::new();
+        let mut next: i128 = 0;
+        for v in &node.children {
+            let val = if v.value.is_empty() {
+                next
+            } else {
+                let (neg, digits) = match v.value.strip_prefix('-') {
+                    Some(d) => (true, d),
+                    None => (false, v.value.as_str()),
+                };
+                let c = if let Some(c) = parse_int(digits) {
+                    c
+                } else {
+                    match self.global(digits)? {
+                        Some(Val::Ct(c)) => c,
+                        Some(Val::E(Expr { kind: ExprKind::Const(c), ty })) if ty.is_int() => c,
+                        Some(Val::Poison) => return Err(()),
+                        _ => {
+                            return self.reject(
+                                "EnumDecl",
+                                format!("`{}.{}` = `{}` is not a compile-time integer", name, v.name, v.value),
+                            )
+                        }
+                    }
+                };
+                if neg { -c } else { c }
+            };
+            if !tag.fits(val) {
+                return self.reject(
+                    "EnumDecl",
+                    format!("`{}.{}` = {} does not fit the tag type {}", name, v.name, val, tag.name()),
+                );
+            }
+            if variants.iter().any(|w| w.0 == v.name) {
+                return self.reject("EnumDecl", format!("`{}` has two variants `{}`", name, v.name));
+            }
+            if let Some(w) = variants.iter().find(|w| w.1 == val) {
+                return self.reject(
+                    "EnumDecl",
+                    format!("`{}.{}` and `{}.{}` have the same tag {}", name, w.0, name, v.name, val),
+                );
+            }
+            variants.push((v.name.clone(), val));
+            next = val + 1;
+        }
+        Ok(EnumDef { name, tag, bits, variants })
+    }
+
+    /// `E.v` (also `E::v`, and `.v` where an `E` is expected).
+    fn enum_value(&mut self, id: u32, variant: &str) -> R<Val> {
+        let def = &self.enums[id as usize];
+        let tag = def.tag;
+        match def.value(variant) {
+            Some(c) => Ok(Val::P(Expr { ty: tag, kind: ExprKind::Const(c) }, LTy::Enum(id, tag))),
+            None => {
+                let e = def.name.clone();
+                self.reject("ExprFieldAccess(enum)", format!("`{}` has no variant `{}`", e, variant))
+            }
+        }
+    }
+
+    /// `n` as a value of enum type `want`, when it is one of the forms that
+    /// take their enum type from where they are used: `.v` and
+    /// `@enumFromInt(x)`. None for any other expression.
+    fn enum_literal(&mut self, n: &Node, want: &LTy) -> R<Option<Val>> {
+        let LTy::Enum(id, tag) = *want else { return Ok(None) };
+        if n.kind == NodeKind::ExprEnumValue {
+            self.see(n);
+            return self.enum_value(id, &n.name).map(Some);
+        }
+        if n.kind == NodeKind::ExprCall && n.name == "@enumFromInt" {
+            self.see(n);
+            if n.children.len() != 1 {
+                return self.reject("ExprCall(@enumFromInt)", format!("{} arguments", n.children.len()));
+            }
+            let v = self.expr(&n.children[0])?;
+            return self.enum_from_int(v, id, tag).map(Some);
+        }
+        Ok(None)
+    }
+
+    /// `@enumFromInt(v)` into enum `id`: a constant must be one of its tags
+    /// (Zig refuses any other at compile time); a runtime value is checked
+    /// and traps as `invalid enum value` when it is none of them.
+    fn enum_from_int(&mut self, v: Val, id: u32, tag: Ty) -> R<Val> {
+        let ename = self.enums[id as usize].name.clone();
+        let lty = LTy::Enum(id, tag);
+        let e = match v {
+            Val::Poison => return Err(()),
+            Val::Ct(c) => Expr { ty: tag, kind: ExprKind::Const(c) },
+            Val::E(e) if e.ty.is_int() => e,
+            v => {
+                let d = self.val_desc(&v);
+                return self.reject("ExprCall(@enumFromInt)", format!("{} into `{}`", d, ename));
+            }
+        };
+        if let ExprKind::Const(c) = e.kind {
+            if !self.enums[id as usize].variants.iter().any(|w| w.1 == c) {
+                return self.reject("ExprCall(@enumFromInt)", format!("{} is no tag of `{}`", c, ename));
+            }
+            return Ok(Val::P(Expr { ty: tag, kind: ExprKind::Const(c) }, lty));
+        }
+        let mut tags: Vec<i128> = self.enums[id as usize].variants.iter().map(|w| w.1).collect();
+        tags.sort();
+        let (lo, hi) = (tags[0], *tags.last().unwrap());
+        let n = tags.len() as i128;
+        if hi - lo + 1 != n {
+            return self.reject(
+                "ExprCall(@enumFromInt)",
+                format!("runtime value into `{}`, whose tags are not contiguous", ename),
+            );
+        }
+        // idx = (x - lo) mod 2^64, which is below n exactly when x is a tag.
+        let idx = if e.ty == Ty::U64 {
+            if lo < 0 {
+                return self.reject(
+                    "ExprCall(@enumFromInt)",
+                    format!("u64 value into `{}`, which has negative tags", ename),
+                );
+            }
+            Expr {
+                ty: Ty::U64,
+                kind: ExprKind::Arith {
+                    op: ArithOp::SubW,
+                    lhs: Box::new(e),
+                    rhs: Box::new(Expr { ty: Ty::U64, kind: ExprKind::Const(lo) }),
+                    site: 0,
+                },
+            }
+        } else {
+            if lo - i64::MIN as i128 > (1i128 << 64) - n {
+                return self.reject(
+                    "ExprCall(@enumFromInt)",
+                    format!("runtime value into `{}`, whose tags are too large", ename),
+                );
+            }
+            let x = if e.ty == Ty::I64 { e } else { Expr { ty: Ty::I64, kind: ExprKind::Widen(Box::new(e)) } };
+            let d = Expr {
+                ty: Ty::I64,
+                kind: ExprKind::Arith {
+                    op: ArithOp::SubW,
+                    lhs: Box::new(x),
+                    rhs: Box::new(Expr { ty: Ty::I64, kind: ExprKind::Const(lo) }),
+                    site: 0,
+                },
+            };
+            Expr { ty: Ty::U64, kind: ExprKind::Cast { arg: Box::new(d), site: 0 } }
+        };
+        let site = self.site(TrapKind::EnumTag, format!("@enumFromInt into {}", ename), Ty::U64);
+        let checked = Expr {
+            ty: Ty::U64,
+            kind: ExprKind::Bounds {
+                idx: Box::new(idx),
+                len: Box::new(Expr { ty: Ty::U64, kind: ExprKind::Const(n) }),
+                site,
+            },
+        };
+        let val = if lo == 0 {
+            checked
+        } else {
+            Expr {
+                ty: Ty::U64,
+                kind: ExprKind::Arith {
+                    op: ArithOp::AddW,
+                    lhs: Box::new(checked),
+                    rhs: Box::new(Expr { ty: Ty::U64, kind: ExprKind::Const(Ty::U64.wrap(lo)) }),
+                    site: 0,
+                },
+            }
+        };
+        let val = if tag == Ty::U64 { val } else { Expr { ty: tag, kind: ExprKind::Cast { arg: Box::new(val), site: 0 } } };
+        Ok(Val::P(val, lty))
+    }
+
+    /// `@intFromEnum(x)`: the tag. A constant one of a tag type t27b has no
+    /// type for is a compile-time integer; a runtime one is allowed only
+    /// where `use` says its storage type gives Zig's answer.
+    fn int_from_enum(&mut self, n: &Node, use_: TagUse) -> R<Val> {
+        self.see(n);
+        if n.children.len() != 1 {
+            return self.reject("ExprCall(@intFromEnum)", format!("{} arguments", n.children.len()));
+        }
+        if n.children[0].kind == NodeKind::ExprEnumValue {
+            return self.reject(
+                "ExprCall(@intFromEnum)",
+                format!("of `.{}`, which has no enum type here", n.children[0].name),
+            );
+        }
+        let (e, id) = match self.expr(&n.children[0])? {
+            Val::P(e, LTy::Enum(id, _)) => (e, id),
+            Val::Poison => return Err(()),
+            v => {
+                let d = self.val_desc(&v);
+                return self.reject("ExprCall(@intFromEnum)", format!("of {}, not an enum", d));
+            }
+        };
+        let def = &self.enums[id as usize];
+        let (exact, bits, ename) = (def.exact(), def.bits, def.name.clone());
+        if exact {
+            return Ok(Val::E(e));
+        }
+        if let ExprKind::Const(c) = e.kind {
+            return Ok(Val::Ct(c));
+        }
+        match use_ {
+            TagUse::Compare => Ok(Val::E(e)),
+            TagUse::Want(want) => {
+                let holds = want.is_int() && if want.signed() { want.bits() > bits } else { want.bits() >= bits };
+                if !holds {
+                    return self.reject(
+                        "type mismatch",
+                        format!("expected {}, found u{} (the tag of `{}`)", want.name(), bits, ename),
+                    );
+                }
+                if want == e.ty {
+                    Ok(Val::E(e))
+                } else if want.can_widen_from(e.ty) {
+                    Ok(Val::E(Expr { ty: want, kind: ExprKind::Widen(Box::new(e)) }))
+                } else {
+                    // The value is below 2^bits, so it fits `want`.
+                    Ok(Val::E(Expr { ty: want, kind: ExprKind::Cast { arg: Box::new(e), site: 0 } }))
+                }
+            }
+            TagUse::Value => self.reject(
+                "ExprCall(@intFromEnum auto-tag)",
+                format!(
+                    "the tag type of `{}` is u{}, which t27b has no type for; compare it or give it an integer result type",
+                    ename, bits
+                ),
+            ),
+        }
+    }
+
+    /// Two operands of a comparison: `.v` takes the enum type of the other
+    /// side, and `@intFromEnum` of any width may be compared.
+    fn operands(&mut self, x: &Node, y: &Node) -> R<(Val, Val)> {
+        let lit = |n: &Node| n.kind == NodeKind::ExprEnumValue;
+        let tag = |n: &Node| n.kind == NodeKind::ExprCall && n.name == "@intFromEnum";
+        let one = |l: &mut Self, n: &Node| -> R<Val> {
+            if tag(n) {
+                match l.int_from_enum(n, TagUse::Compare) {
+                    Err(()) if l.recover => Ok(Val::Poison),
+                    r => r,
+                }
+            } else {
+                l.expr(n)
+            }
+        };
+        if lit(x) && !lit(y) {
+            let b = one(self, y)?;
+            let a = self.enum_operand(x, &b)?;
+            return Ok((a, b));
+        }
+        if lit(y) && !lit(x) {
+            let a = one(self, x)?;
+            let b = self.enum_operand(y, &a)?;
+            return Ok((a, b));
+        }
+        let a = one(self, x)?;
+        let b = one(self, y)?;
+        Ok((a, b))
+    }
+
+    /// `.v` compared with `other`, which must be an enum.
+    fn enum_operand(&mut self, n: &Node, other: &Val) -> R<Val> {
+        match other {
+            Val::P(_, t @ LTy::Enum(..)) => {
+                let t = t.clone();
+                match self.enum_literal(n, &t) {
+                    Err(()) if self.recover => Ok(Val::Poison),
+                    r => r.map(|v| v.unwrap()),
+                }
+            }
+            Val::Poison => Ok(Val::Poison),
+            v => {
+                let d = self.val_desc(v);
+                self.see(n);
+                self.reject("type mismatch", format!("`.{}` compared with {}, not an enum", n.name, d))
+            }
+        }
+    }
+
+    /// A comparison with an enum operand, or None when neither is one.
+    /// `ordered`: one side is `E.v` or `E::v`, for which t27c's Zig backend
+    /// writes `@intFromEnum(a) < @intFromEnum(b)`; on two enum values Zig has
+    /// no `<`.
+    fn enum_compare(&mut self, op: &str, a: &Val, b: &Val, ordered: bool) -> R<Option<Val>> {
+        let (ea, ia) = match a {
+            Val::P(e, LTy::Enum(id, _)) => (Some(e), Some(*id)),
+            _ => (None, None),
+        };
+        let (eb, ib) = match b {
+            Val::P(e, LTy::Enum(id, _)) => (Some(e), Some(*id)),
+            _ => (None, None),
+        };
+        if ia.is_none() && ib.is_none() {
+            return Ok(None);
+        }
+        if a.is_poison() || b.is_poison() {
+            return Err(());
+        }
+        let cmp = match op {
+            "==" => CmpOp::Eq,
+            "!=" => CmpOp::Ne,
+            "<" => CmpOp::Lt,
+            "<=" => CmpOp::Le,
+            ">" => CmpOp::Gt,
+            ">=" => CmpOp::Ge,
+            _ => return self.reject(&format!("ExprBinary({}) on enum", op), "arithmetic on an enum".into()),
+        };
+        if ia != ib || ia.is_none() || ib.is_none() {
+            let (x, y) = (self.val_desc(a), self.val_desc(b));
+            return self.reject("type mismatch", format!("`{}` on {} and {}", op, x, y));
+        }
+        if !matches!(cmp, CmpOp::Eq | CmpOp::Ne) && !ordered {
+            let t = self.enums[ia.unwrap() as usize].name.clone();
+            return self.reject(
+                &format!("ExprBinary({}) on enum", op),
+                format!("`{}` on two `{}` values, which Zig does not order", op, t),
+            );
+        }
+        let (x, y) = (ea.unwrap().clone(), eb.unwrap().clone());
+        if let (ExprKind::Const(p), ExprKind::Const(q)) = (&x.kind, &y.kind) {
+            return Ok(Some(Val::E(Expr { ty: Ty::Bool, kind: ExprKind::Const(cmp.holds(*p, *q) as i128) })));
+        }
+        Ok(Some(Val::E(Expr { ty: Ty::Bool, kind: ExprKind::Cmp { op: cmp, lhs: Box::new(x), rhs: Box::new(y) } })))
+    }
+
+    /// `E.v` or `E::v` of a declared enum (what t27c's Zig backend orders by
+    /// tag).
+    fn names_variant(&self, n: &Node) -> bool {
+        match n.kind {
+            NodeKind::ExprFieldAccess => n.children.first().is_some_and(|b| {
+                b.kind == NodeKind::ExprIdentifier && self.enum_nodes.contains_key(&b.name)
+            }),
+            NodeKind::ExprIdentifier => {
+                n.name.split_once("::").is_some_and(|(e, _)| self.enum_nodes.contains_key(e))
+            }
+            _ => false,
+        }
     }
 
     /// Lay out struct `id` (C rules) if that has not been done.
@@ -2315,6 +2915,7 @@ impl<'a> Lower<'a> {
         match t {
             LTy::S(ty) => Ok((ty.bytes(), ty.bytes())),
             LTy::Ptr(..) => Ok((8, 8)),
+            LTy::Enum(_, ty) => Ok((ty.bytes(), ty.bytes())),
             LTy::Str | LTy::Slice(..) => Ok((16, 8)),
             LTy::Struct(id) => {
                 self.layout(*id)?;
@@ -2339,6 +2940,7 @@ impl<'a> Lower<'a> {
             LTy::S(ty) => ty.name().to_string(),
             LTy::Ptr(inner, m) => format!("*{}{}", if *m { "" } else { "const " }, self.type_name(inner)),
             LTy::Struct(id) => self.structs[*id as usize].name.clone(),
+            LTy::Enum(id, _) => self.enums[*id as usize].name.clone(),
             LTy::Str => "str".to_string(),
             LTy::Arr(inner, n) => format!("[{}]{}", n, self.type_name(inner)),
             LTy::Slice(inner, m) => format!("[]{}{}", if *m { "" } else { "const " }, self.type_name(inner)),
@@ -2360,6 +2962,13 @@ impl<'a> Lower<'a> {
     /// Evaluate `n` as a value of type `want`: a struct literal takes its
     /// type from here, so it may be anonymous (`.{ ... }`).
     fn expr_as(&mut self, n: &Node, want: &LTy) -> R<Val> {
+        if let Some(v) = self.enum_literal(n, want)? {
+            return Ok(v);
+        }
+        if let (NodeKind::ExprCall, "@intFromEnum", LTy::S(ty)) = (&n.kind, n.name.as_str(), want) {
+            let v = self.int_from_enum(n, TagUse::Want(*ty))?;
+            return self.coerce_to(v, want);
+        }
         if n.kind == NodeKind::ExprStructLit && matches!(want, LTy::Struct(_)) {
             self.see(n);
             self.lit_type(n, want)?;
@@ -2439,6 +3048,13 @@ impl<'a> Lower<'a> {
         }
         match want {
             LTy::S(ty) => Ok(Val::E(self.coerce(v, *ty)?)),
+            LTy::Enum(id, _) => match v {
+                Val::P(e, LTy::Enum(got, t)) if got == *id => Ok(Val::P(e, LTy::Enum(got, t))),
+                v => {
+                    let (a, b) = (self.type_name(want), self.val_desc(&v));
+                    self.reject("type mismatch", format!("expected {}, found {}", a, b))
+                }
+            },
             LTy::Ptr(inner, m) => match v {
                 // `*T` coerces to `*const T`.
                 Val::P(e, LTy::Ptr(got, gm)) if got == *inner && (gm || !*m) => Ok(Val::P(e, want.clone())),
@@ -2593,6 +3209,7 @@ impl<'a> Lower<'a> {
     fn val_desc(&self, v: &Val) -> String {
         match v {
             Val::Ct(_) | Val::E(_) => "a scalar".into(),
+            Val::P(_, t @ LTy::Enum(..)) => self.type_name(t),
             Val::P(..) => "a pointer".into(),
             Val::S(..) => "a string".into(),
             Val::M(p) => self.type_name(&p.ty),
@@ -2806,13 +3423,13 @@ impl<'a> Lower<'a> {
     /// when the place is read-only data), the place itself for a struct.
     fn place_value(&mut self, p: Place) -> R<Val> {
         let Some(ty) = reg_ty(&p.ty) else { return Ok(Val::M(p)) };
-        if let (ExprKind::Data(k), LTy::S(_)) = (&p.addr.kind, &p.ty) {
+        if let (ExprKind::Data(k), LTy::S(_) | LTy::Enum(..)) = (&p.addr.kind, &p.ty) {
             let blob = &self.data[*k as usize];
             let mut raw = 0u64;
             for i in (0..ty.bytes() as usize).rev() {
                 raw = (raw << 8) | blob[p.off as usize + i] as u64;
             }
-            return Ok(Val::E(Expr { ty, kind: ExprKind::Const(ty.from_raw(raw)) }));
+            return Ok(val_of(Expr { ty, kind: ExprKind::Const(ty.from_raw(raw)) }, &p.ty));
         }
         let e = Expr { ty, kind: ExprKind::Load { addr: Box::new(p.addr), off: p.off } };
         Ok(val_of(e, &p.ty))
@@ -3117,6 +3734,10 @@ impl<'a> Lower<'a> {
             && self.lookup(&base.name).is_none()
             && !self.const_nodes.contains_key(&base.name)
         {
+            if self.enum_nodes.contains_key(&base.name) {
+                let Some(id) = self.enum_id(&base.name)? else { unreachable!() };
+                return self.enum_value(id, &n.name).map(Err);
+            }
             if self.recover && self.poison_names.contains(&base.name) {
                 return Err(());
             }
@@ -3185,7 +3806,8 @@ impl<'a> Lower<'a> {
             return self.init(rhs, dst, false, out);
         }
         let LTy::S(ty) = dst.ty else {
-            return self.reject("StmtAssign", format!("`{}` on a pointer or a struct", op));
+            let d = if matches!(dst.ty, LTy::Enum(..)) { "an enum" } else { "a pointer or a struct" };
+            return self.reject("StmtAssign", format!("`{}` on {}", op, d));
         };
         let bin = match op.strip_suffix('=') {
             Some(b) if !b.is_empty() => b.to_string(),
@@ -3287,6 +3909,17 @@ impl<'a> Lower<'a> {
                 }
                 Ok(())
             }
+            LTy::Enum(_, ty) => {
+                let v = self.expr_as(n, t)?;
+                let Val::P(Expr { kind: ExprKind::Const(c), .. }, _) = v else {
+                    return self.reject("ConstDecl", "enum field is not a compile-time value".into());
+                };
+                let raw = c as u64;
+                for i in 0..ty.bytes() as usize {
+                    buf[off + i] = (raw >> (8 * i)) as u8;
+                }
+                Ok(())
+            }
             LTy::Ptr(..) => self.reject("ConstDecl", "pointer in a constant struct".into()),
             LTy::Str => self.reject("ConstDecl(str field)", "str field in a module-level struct constant".into()),
             LTy::Slice(..) => self.reject("ConstDecl(slice)", "slice in a module-level constant".into()),
@@ -3347,6 +3980,7 @@ fn reg_ty(t: &LTy) -> Option<Ty> {
     match t {
         LTy::S(ty) => Some(*ty),
         LTy::Ptr(..) => Some(Ty::Ptr),
+        LTy::Enum(_, ty) => Some(*ty),
         LTy::Struct(_) | LTy::Str | LTy::Arr(..) | LTy::Slice(..) => None,
     }
 }

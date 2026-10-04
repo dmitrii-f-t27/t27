@@ -662,3 +662,177 @@ fn slice_rejections_are_precise() {
         assert!(m.contains(detail), "{}: {}", body, m);
     }
 }
+
+// ------------------------------------------------------------------ enums
+
+#[test]
+fn plain_enums_as_integer_tags() {
+    let src = r#"module enums;
+
+const Op = enum(u8) {
+    add = 1,
+    sub,
+    mul = 7,
+};
+
+const Trit = enum(i8) {
+    neg = -1,
+    zero = 0,
+    pos = 1,
+};
+
+enum Dir {
+    north,
+    east,
+    south,
+    west,
+}
+
+const One = enum { only };
+
+const Cell = struct {
+    op: Op,
+    t: Trit,
+    n: u32,
+};
+
+const START: Dir = Dir.east;
+
+fn next(d: Dir) Dir {
+    if (d == .north) {
+        return .east;
+    }
+    if (d == Dir.east) {
+        return Dir::south;
+    }
+    if (d != .south) {
+        return .north;
+    }
+    return .west;
+}
+
+fn neg(t: Trit) Trit {
+    return @enumFromInt(-@intFromEnum(t));
+}
+
+fn code(o: Op) u8 {
+    return @intFromEnum(o);
+}
+
+fn dir_of(x: u32) Dir {
+    return @enumFromInt(x);
+}
+
+fn trit_of(x: i32) Trit {
+    return @enumFromInt(x);
+}
+
+fn wide(d: Dir) u32 {
+    return @intFromEnum(d);
+}
+
+fn step(d: Dir) Dir {
+    var cur: Dir = d;
+    cur = next(cur);
+    cur = next(cur);
+    return cur;
+}
+
+fn cell(o: Op) Cell {
+    return Cell{ .op = o, .t = .pos, .n = 3 };
+}
+
+test tags {
+    assert(@intFromEnum(Op.add) == 1);
+    assert(@intFromEnum(Op.sub) == 2);
+    assert(code(Op.mul) == 7);
+    assert(@intFromEnum(Trit.neg) == -1);
+    assert(@intFromEnum(Dir.west) == 3);
+    assert(wide(Dir.south) == 2);
+    assert(@intFromEnum(One.only) == 0);
+}
+
+test compare {
+    assert(next(Dir.north) == Dir.east);
+    assert(next(.east) == .south);
+    assert(next(Dir.south) == Dir.west);
+    assert(step(START) == Dir.west);
+    assert(Dir.north < Dir.west);
+    assert(Op.mul > Op.sub);
+    assert(next(.west) != Dir.west);
+    assert_eq(next(Dir.north), Dir.east);
+    assert_eq(neg(.pos), .neg);
+}
+
+test conversions {
+    assert(neg(Trit.neg) == Trit.pos);
+    assert(neg(.zero) == .zero);
+    assert(dir_of(3) == Dir.west);
+    assert(trit_of(-1) == Trit.neg);
+    assert(@as(Trit, .pos) == Trit.pos);
+    assert(@as(u8, @intFromEnum(Dir.east)) == 1);
+}
+
+test fields {
+    const c = cell(Op.sub);
+    assert(c.op == Op.sub);
+    assert(c.t == .pos);
+    assert(@intFromEnum(c.op) + c.n == 5);
+}
+
+test bad_dir {
+    assert(dir_of(4) == Dir.west);
+}
+
+test bad_trit {
+    assert(trit_of(2) == Trit.pos);
+}
+"#;
+    let r = run(src);
+    assert_eq!(
+        names_ok(&r),
+        vec![
+            ("tags", false, true),
+            ("compare", false, true),
+            ("conversions", false, true),
+            ("fields", false, true),
+            ("bad_dir", false, false),
+            ("bad_trit", false, false),
+        ]
+    );
+    // `@enumFromInt` of a value that is no tag traps, as Zig's safety check
+    // does ("invalid enum value").
+    assert_eq!(r[4].2, Err((TrapKind::EnumTag, line_of(src, "fn dir_of") + 1)));
+    assert_eq!(r[5].2, Err((TrapKind::EnumTag, line_of(src, "fn trit_of") + 1)));
+}
+
+#[test]
+fn enum_rejections_are_precise() {
+    let head = "module a;\n\nenum Dir { north, east, south, west, }\n\n";
+    let cases: &[(&str, &str, &str)] = &[
+        ("const E = enum { a, b, pub const x = 1; };\ntest t { assert(E.a == E.a); }", "EnumDecl(method)", "`E` declares something inside it"),
+        ("const E = enum(u8) { a, b, _ };\ntest t { assert(E.a == E.a); }", "EnumDecl(non-exhaustive)", "`E` has a `_` variant"),
+        ("const U = union(enum) { a: u8, b: u32 };\ntest t { assert(1 == 1); }", "EnumDecl(union)", "tagged union `U`"),
+        ("const E = enum(f32) { a, b };\ntest t { assert(E.a == E.a); }", "EnumDecl(tag type)", "`E` has tag type `f32`"),
+        ("const E = enum(u8) { a = 300, b };\ntest t { assert(E.a == E.a); }", "EnumDecl", "`E.a` = 300 does not fit the tag type u8"),
+        ("const E = enum(u8) { a = 1, b = 1 };\ntest t { assert(E.a == E.b); }", "EnumDecl", "`E.a` and `E.b` have the same tag 1"),
+        ("fn f(d: Dir) u8 {\n    return switch (d) {\n        .north => 1,\n        else => 2,\n    };\n}\ntest t { assert(f(.north) == 1); }", "ExprSwitch", ""),
+        ("fn f(a: Dir, b: Dir) bool { return a < b; }\ntest t { assert(f(.north, .east)); }", "ExprBinary(<) on enum", "two `Dir` values, which Zig does not order"),
+        ("fn f(d: Dir) bool { return d < .west; }\ntest t { assert(f(.north)); }", "ExprBinary(<) on enum", "which Zig does not order"),
+        ("test t { assert(Dir.north + 1 == 1); }", "ExprBinary(+) on enum", "arithmetic on an enum"),
+        ("test t { assert(Dir.north == 0); }", "type mismatch", "`==` on Dir and a scalar"),
+        ("test t { const x = .north; assert(x == Dir.north); }", "ExprEnumValue", "enum literal `.north` with no result type"),
+        ("test t { assert(Dir.up == Dir.north); }", "ExprFieldAccess(enum)", "`Dir` has no variant `up`"),
+        ("const D: Dir = @enumFromInt(9);\ntest t { assert(D == Dir.north); }", "ExprCall(@enumFromInt)", "9 is no tag of `Dir`"),
+        ("test t { assert(@enumFromInt(1) == Dir.east); }", "ExprCall(@enumFromInt)", "with no enum result type"),
+        ("const E = enum(u8) { a = 1, b = 5 };\nfn f(x: u8) E { return @enumFromInt(x); }\ntest t { assert(f(1) == E.a); }", "ExprCall(@enumFromInt)", "whose tags are not contiguous"),
+        ("fn f(d: Dir) u8 { const x = @intFromEnum(d); return x; }\ntest t { assert(f(.east) == 1); }", "ExprCall(@intFromEnum auto-tag)", "the tag type of `Dir` is u2"),
+        ("test t { assert(@intFromEnum(.north) == 0); }", "ExprCall(@intFromEnum)", "of `.north`, which has no enum type here"),
+        ("fn f(d: Dir) u32 { return d; }\ntest t { assert(f(.east) == 1); }", "type mismatch", "found Dir"),
+    ];
+    for (body, construct, detail) in cases {
+        let m = rejected(&format!("{}{}\n", head, body));
+        assert!(m.starts_with(&format!("t27b: unsupported construct {} at line", construct)), "{}: {}", body, m);
+        assert!(m.contains(detail), "{}: {}", body, m);
+    }
+}

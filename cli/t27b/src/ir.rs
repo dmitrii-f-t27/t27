@@ -294,6 +294,9 @@ pub enum TrapKind {
     NoReturn = 6,
     /// `x as T` whose value is outside `T` (Zig's checked `@intCast`).
     Cast = 7,
+    /// `@enumFromInt(x)` whose value is no tag of the enum (Zig's safety
+    /// check on the conversion).
+    EnumTag = 8,
     // Memory lane: numbered from 16 so the scalar lane can add kinds below.
     /// An index at or past the length of an array, slice or string.
     Bounds = 16,
@@ -309,6 +312,7 @@ impl TrapKind {
             TrapKind::AssertEq => "assert_eq failed",
             TrapKind::NoReturn => "reached the end of a non-void fn without return",
             TrapKind::Cast => "integer cast out of range",
+            TrapKind::EnumTag => "invalid enum value",
             TrapKind::Bounds => "index out of bounds",
         }
     }
