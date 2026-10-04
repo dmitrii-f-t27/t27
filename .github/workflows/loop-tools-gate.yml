@@ -28,6 +28,7 @@ on:
       - "gen/c/tri/t27b/**"
       - "docs/reports/t27b_expectations.json"
       - "contrib/railway/t27b-lab/lab.py"
+      - "scripts/ci/test_the_t27b_lab_heals_its_clone.py"
       - "scripts/ci/test_a_page_is_measured_at_both_widths.py"
       - ".github/workflows/loop-tools-gate.yml"
   push:
@@ -47,6 +48,7 @@ on:
       - "gen/c/tri/t27b/**"
       - "docs/reports/t27b_expectations.json"
       - "contrib/railway/t27b-lab/lab.py"
+      - "scripts/ci/test_the_t27b_lab_heals_its_clone.py"
       - "scripts/ci/test_a_page_is_measured_at_both_widths.py"
   # Without this the missing reading cannot be taken on purpose: a gate with
   # a `paths:` filter that nothing has matched in months is unmeasured, not
@@ -155,6 +157,13 @@ jobs:
         # names each. Fixtures for every source; the worktrees are real git
         # repositories. The healthy fixture is the negative control.
         run: python3 scripts/ci/test_a_t27b_tick_reads_before_it_acts.py
+
+      - name: The t27b lab heals a clone that cannot check out
+        # #6219. A redeploy killed a lab run mid-way and the next checkout
+        # failed on the partial clone ("could not fetch ... from promisor
+        # remote"); lab.checkout() had no second try. It now clones again,
+        # once, and the run records clone "recloned". Local file:// repos only.
+        run: python3 scripts/ci/test_the_t27b_lab_heals_its_clone.py
 
       - name: No t27b spec moves without being named
         # #6115. A total ("t27b N / reference M") hides a regression that lands
