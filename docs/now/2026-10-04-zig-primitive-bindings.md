@@ -8,6 +8,11 @@
 - Actual107 tri-net Zig modules and1209 tests PASS, including19 SHA256 tests. Native generation keeps102Rust,75C and113Verilog outputs byte-identical to the accepted C correction. Product PIN and budgets untouched.
 - Native804 sealed-spec audit: only7 Zig specs/13 aliases change. Save and verify without force;6 BLOCKED/1 PASS kept honest. Coverage1449/1325/124 and debt ledger unchanged.
 
+## CI execution
+
+- Original019e Linux bootstrap job recorded2828 passed/6 failed/2 ignored/124 targets. All six new tests failed spawning missing zig. Install actual Zig0.16 before the unchanged full ratchet; no test skip, ledger adjustment or compiler change.
+- Existing Icarus lowerability tests include missing gitignored witness skips. Their cargo count must not be presented as359 executed RTL simulations. Independent tri-net113 simulations and the new Zig controls have separate actual execution receipts.
+
 ## Limits and next
 
 - Separate upstream SHA256 source still BLOCKED on pointer errors; accepted-baseline source-only value rename reproduces all three. Temporal alias substitution in the existing optimizer is also unfixed. Broader keyword/dotted issue2631 remains open.
