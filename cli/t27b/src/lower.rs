@@ -274,6 +274,10 @@ struct Lower<'a> {
     type_decls: HashMap<String, &'static str>,
     /// The current fn's return type was rejected.
     ret_poison: bool,
+    /// The declared integer type of the local whose initializer is being
+    /// lowered (`var h : i32 = 1 << d;`). An untyped literal shifted by a
+    /// non-literal amount takes this width, as in the Zig backend.
+    decl_int: Option<Ty>,
 }
 
 /// Lower a parsed module. All rejected constructs are returned (at most one per
@@ -353,6 +357,7 @@ fn lower_mode<'a>(
         poison_names: HashSet::new(),
         type_decls: HashMap::new(),
         ret_poison: false,
+        decl_int: None,
     };
     let module = if ast.kind == NodeKind::Module {
         ast.name.clone()
@@ -1422,6 +1427,19 @@ impl<'a> Lower<'a> {
             return self.reject("StmtLocal", format!("binding `{}`", name));
         }
         let ann = n.extra_type.trim().to_string();
+        // The Zig backend's `zig_declared_int_type`: only these spellings
+        // pin `1 << n` in the initializer (not an alias that resolves to one).
+        let decl_int = match ann.as_str() {
+            "u8" | "u16" | "u32" | "u64" | "usize" | "i8" | "i16" | "i32" | "i64" | "isize" => Ty::from_name(&ann),
+            _ => None,
+        };
+        self.decl_int = decl_int;
+        let r = self.local_with(n, name, ann, out);
+        self.decl_int = None;
+        r
+    }
+
+    fn local_with(&mut self, n: &Node, name: String, ann: String, out: &mut Vec<Stmt>) -> R<()> {
         let mutable = n.extra_mutable;
         let init = n.children.first().filter(|i| !is_undefined(i));
         if !ann.is_empty() {
@@ -2017,6 +2035,14 @@ impl<'a> Lower<'a> {
                         format!("`* {}` on f64: t27c gen emits `<<` for it", y.value.trim()),
                     );
                 }
+                let a = if op == "<<" || op == ">>" {
+                    match self.pin_shifted_literal(x, y, a, &b, op == "<<")? {
+                        Ok(a) => a,
+                        Err(done) => return Ok(done),
+                    }
+                } else {
+                    a
+                };
                 self.binary(&op, a, b)
             }
             NodeKind::ExprEnumValue => {
@@ -2435,6 +2461,83 @@ impl<'a> Lower<'a> {
         }
     }
 
+    /// The left operand of `lhs << rhs` / `lhs >> rhs` when `lhs` is an
+    /// untyped integer literal and `rhs` is not a literal. t27c's Zig backend
+    /// emits `@as(T, lhs) << @intCast(rhs)` there (compiler.rs,
+    /// `shift_runtime_rhs`), so the literal gets a width even when `rhs` is a
+    /// named constant: `T` is the declared type of the local being
+    /// initialized when that names an integer type, otherwise `u32` when the
+    /// literal fits and `u64` when it does not. Anything else (`-1 << n`,
+    /// `(1 + 1) << n`, a literal past u64) has no width there either, stays a
+    /// comptime_int, and is refused by `shift` when the amount is runtime.
+    ///
+    /// t27c folds literal-only trees and propagates literal-initialized local
+    /// consts before it emits Zig, but only in some positions of a function
+    /// body. So when `rhs` is built only from literals and local names and
+    /// its value is constant here, the reference may see a literal (no pin,
+    /// comptime_int) or not (pinned to `T`). That is accepted only where both
+    /// readings give the same value, and refused by name otherwise.
+    ///
+    /// `Ok(lhs)` is the left operand to shift; `Err(v)` is the whole shift,
+    /// already evaluated.
+    fn pin_shifted_literal(&mut self, lhs: &Node, rhs: &Node, a: Val, b: &Val, left: bool) -> R<Result<Val, Val>> {
+        let Val::Ct(c) = a else { return Ok(Ok(a)) };
+        if lhs.kind != NodeKind::ExprLiteral || rhs.kind == NodeKind::ExprLiteral || !lhs.extra_type.trim().is_empty() {
+            return Ok(Ok(Val::Ct(c)));
+        }
+        let ty = match self.decl_int {
+            Some(t) => t,
+            None if (0..=u32::MAX as i128).contains(&c) => Ty::U32,
+            None if (0..=u64::MAX as i128).contains(&c) => Ty::U64,
+            None => return Ok(Ok(Val::Ct(c))),
+        };
+        let amt = match b {
+            Val::Ct(k) => Some(*k),
+            Val::E(Expr { kind: ExprKind::Const(k), ty: kt }) if kt.is_int() => Some(*k),
+            _ => None,
+        };
+        if let Some(k) = amt {
+            if self.may_fold_to_literal(rhs) {
+                let bits = ty.bits() as i128;
+                let r = if (0..bits).contains(&k) && ty.fits(c) {
+                    if left {
+                        let r = c << k;
+                        // Same value in the pinned type, in comptime_int,
+                        // and in t27c's i64 fold.
+                        Some(r).filter(|r| (r >> k) == c && *r <= i64::MAX as i128 && ty.wrap(*r) == *r)
+                    } else {
+                        Some(c >> k)
+                    }
+                } else {
+                    None
+                };
+                return match r {
+                    Some(r) => Ok(Err(Val::Ct(r))),
+                    None => self.reject(
+                        "ExprBinary(<< >>)",
+                        "untyped literal shift whose width depends on t27c constant folding".into(),
+                    ),
+                };
+            }
+        }
+        Ok(Ok(Val::E(self.coerce(Val::Ct(c), ty)?)))
+    }
+
+    /// Whether t27c's optimizer could turn `n` into a literal before codegen:
+    /// a tree of literals and local names (which `const_propagate` may
+    /// substitute) joined by unary and binary operators. A module-level
+    /// const is never substituted, so any such leaf rules folding out.
+    fn may_fold_to_literal(&self, n: &Node) -> bool {
+        match n.kind {
+            NodeKind::ExprLiteral => n.extra_type.trim().is_empty(),
+            NodeKind::ExprIdentifier => self.lookup(&n.name).is_some(),
+            NodeKind::ExprBinary | NodeKind::ExprUnary => {
+                !n.children.is_empty() && n.children.iter().all(|c| self.may_fold_to_literal(c))
+            }
+            _ => false,
+        }
+    }
+
     fn shift(&mut self, op: ArithOp, a: Val, b: Val) -> R<Val> {
         let left = matches!(op, ArithOp::Shl | ArithOp::ShlW);
         match (a, b) {
@@ -2462,6 +2565,13 @@ impl<'a> Lower<'a> {
                     return self.reject("ExprBinary(<< >>)", format!("shift of {}", ty.name()));
                 }
                 let bits = ty.bits() as i128;
+                // A typed constant amount is comptime-known in Zig too
+                // (`@intCast(K)`): out of range is a compile error there, so
+                // it is refused here, not trapped at run time.
+                let amt = match amt {
+                    Val::E(Expr { kind: ExprKind::Const(c), ty: aty }) if aty.is_int() => Val::Ct(c),
+                    a => a,
+                };
                 match amt {
                     Val::Ct(c) => {
                         let c = if (0..bits).contains(&c) {
@@ -2474,6 +2584,13 @@ impl<'a> Lower<'a> {
                                 format!("shift amount {} out of range for {}", c, ty.name()),
                             );
                         };
+                        // Comptime-known on both sides: Zig folds it in
+                        // the operand's type, and `<<` drops the bits that
+                        // leave it (no overflow check, unlike `@shlExact`).
+                        if let ExprKind::Const(v) = x.kind {
+                            let r = if left { ty.wrap(((v as u128) << c) as i128) } else { v >> c };
+                            return Ok(Val::E(Expr { ty, kind: ExprKind::Const(r) }));
+                        }
                         let wop = if left { ArithOp::ShlW } else { ArithOp::ShrW };
                         let amt = Expr { ty: Ty::U32, kind: ExprKind::Const(c) };
                         Ok(Val::E(Expr {
