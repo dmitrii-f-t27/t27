@@ -18,8 +18,9 @@
 //!   T27B_DIFF_SEED   base seed (default 0x7427)
 //!   T27B_DIFF_TRACE  print each case seed before running it (to find a crash)
 //!
-//! The JIT runs only on arm64 macOS, so this file is empty elsewhere.
-#![cfg(all(target_os = "macos", target_arch = "aarch64"))]
+//! The JIT runs only on arm64 macOS and arm64 Linux, so this file is empty
+//! elsewhere.
+#![cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux")))]
 
 use t27b::codegen::{self, canon, TrapStyle};
 use t27b::eval::{Interp, Stop};

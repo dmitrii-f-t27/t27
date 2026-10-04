@@ -5,11 +5,13 @@ call LLVM, zig, clang or rustc, at build time or at run time. It produces two
 outputs:
 
 * `t27b test`: an in-process JIT test runner. The code is written into one
-  `MAP_JIT` region and the module's `test` blocks run there.
+  executable region (`MAP_JIT` on macOS; `mmap` RW, then `mprotect` RX on
+  Linux) and the module's `test` blocks run there.
 * `t27b build -o out.o`: a Mach-O `MH_OBJECT` for arm64. It links with
   `cc driver.c out.o`.
 
-Only arm64 macOS is supported.
+The JIT runs on arm64 macOS and arm64 Linux. The Railway t27b lab
+(`contrib/railway/t27b-lab`) runs the Linux build under qemu-user on x86_64.
 
 The front-end is t27c's own, unmodified. `bootstrap/src/compiler.rs` and
 `bootstrap/src/use_resolve.rs` are mounted with `#[path]`, so
@@ -279,6 +281,7 @@ t27b test   <file.t27> [--overflow trap|wrap] [--time] [--quiet] [--check]
 t27b build  <file.t27> -o <out.o> [--overflow trap|wrap] [--time]
 t27b asm    <file.t27> [--overflow trap|wrap]
 t27b corpus <dir> [--timeout-ms N] [--jobs N] [--overflow trap|wrap] [--list]
+                  [--json <path>] [--runner "<cmd> [args]"]
 ```
 
 Options:
@@ -291,6 +294,15 @@ Options:
   process per file, with a timeout. It prints:
   * supported / rejected / front-end-error / failed / crash counts;
   * the 15 most common rejecting constructs.
+* `corpus --json <path>`: also writes the same totals, every rejecting
+  construct, and one record per file (`file`, `reference`, `t27b`: pass /
+  fail / blocked / frontend / mismatch / codegen / timeout / crash, `tests`,
+  `invariants`, `blockers`, `detail`). `corpus` itself does not run the
+  reference path, so `reference` is `skip`.
+* `corpus --runner "<cmd> [args]"`: starts each per-file `t27b test` as
+  `<cmd> [args] <t27b> test ...`. Under qemu-user without binfmt_misc the
+  driver cannot exec its own aarch64 binary; the lab passes
+  `--runner "qemu-aarch64 -L /usr/aarch64-linux-gnu"`.
 
 ```
 $ cargo build --release -p t27b
@@ -722,8 +734,10 @@ built on the same overloaded machine.
   * No `MH_SUBSECTIONS_VIA_SYMBOLS`, so the linker cannot dead-strip single
     functions.
   * No unwind info and no debug info.
-* **`mprotect`** is declared as required but unused: `MAP_JIT` plus
-  `pthread_jit_write_protect_np` is the whole W^X protocol.
+* **W^X.** On macOS, `MAP_JIT` plus `pthread_jit_write_protect_np` is the
+  whole protocol and `mprotect` is unused. On Linux the region is mapped RW,
+  written, flushed (`dc cvau` / `ic ivau`) and switched to RX with
+  `mprotect`; it is never writable and executable at once.
 * **Untyped shift.** `1 << n` with a runtime `n` is rejected until literals
   can be given a type with a cast.
 * **The front-end is mounted by path.** `src/lib.rs` uses
