@@ -22,6 +22,11 @@ bool is_bad(uint8_t v);
 uint8_t delta_code(uint8_t ref_a, uint8_t ref_b, uint8_t t_a, uint8_t t_b, uint32_t checks_a, uint32_t checks_b);
 bool delta_is_red(uint8_t code);
 uint32_t pct_tenths(uint32_t in_ref, uint32_t reference);
+bool is_pass(uint8_t v);
+uint8_t entry_code(uint8_t want, uint8_t reference, uint8_t got, bool counted, bool same_blocker);
+bool unlisted(uint8_t reference, bool listed);
+bool over_cap(uint32_t not_pass, uint32_t cap, bool has_cap);
+bool ratchet_is_red(uint8_t code);
 
 /* -------------------------------------------------------
    Function implementations
@@ -92,6 +97,94 @@ uint32_t pct_tenths(uint32_t in_ref, uint32_t reference) {
         return 0;
     }
     return (((in_ref * 1000) + (reference / 2)) / reference);
+}
+
+bool is_pass(uint8_t v) {
+    if ((v == 0)) {
+        return true;
+    }
+    if ((v == 1)) {
+        return true;
+    }
+    return false;
+}
+
+uint8_t entry_code(uint8_t want, uint8_t reference, uint8_t got, bool counted, bool same_blocker) {
+    if ((reference != 0)) {
+        if ((reference == 2)) {
+            return 5;
+        }
+        if ((reference == 5)) {
+            return 5;
+        }
+        return 6;
+    }
+    if ((want == 0)) {
+        if ((got == 1)) {
+            if ((counted == false)) {
+                return 1;
+            }
+        }
+        if ((got != 0)) {
+            return 2;
+        }
+        return 0;
+    }
+    if ((want == 1)) {
+        if ((is_pass(got) == false)) {
+            return 2;
+        }
+        if ((got == 0)) {
+            return 3;
+        }
+        return 0;
+    }
+    if (is_pass(got)) {
+        return 3;
+    }
+    if ((same_blocker == false)) {
+        return 4;
+    }
+    return 0;
+}
+
+bool unlisted(uint8_t reference, bool listed) {
+    if ((reference != 0)) {
+        return false;
+    }
+    if (listed) {
+        return false;
+    }
+    return true;
+}
+
+bool over_cap(uint32_t not_pass, uint32_t cap, bool has_cap) {
+    if ((has_cap == false)) {
+        return true;
+    }
+    return (not_pass > cap);
+}
+
+bool ratchet_is_red(uint8_t code) {
+    if ((code == 2)) {
+        return true;
+    }
+    if ((code == 3)) {
+        return true;
+    }
+    if ((code == 5)) {
+        return true;
+    }
+    if ((code == 7)) {
+        return true;
+    }
+    if ((code == 8)) {
+        return true;
+    }
+    if ((code == 9)) {
+        return true;
+    }
+    return false;
 }
 
 /* -------------------------------------------------------
@@ -166,6 +259,82 @@ void test_pct_empty_reference(void) {
     assert_eq(pct_tenths(0, 0), 0);
 }
 
+void test_ratchet_green(void) {
+    assert_eq(entry_code(0, 0, 0, true, true), 0);
+}
+
+void test_ratchet_unexpected_failure(void) {
+    assert_eq(entry_code(0, 0, 2, true, true), 2);
+}
+
+void test_ratchet_vacuous_counted_is_failure(void) {
+    assert_eq(entry_code(0, 0, 1, true, true), 2);
+}
+
+void test_ratchet_vacuity_measured(void) {
+    assert_eq(entry_code(0, 0, 1, false, true), 1);
+}
+
+void test_ratchet_vacuous_to_pass(void) {
+    assert_eq(entry_code(1, 0, 0, true, true), 3);
+}
+
+void test_ratchet_vacuous_lost(void) {
+    assert_eq(entry_code(1, 0, 3, true, true), 2);
+}
+
+void test_ratchet_vacuous_stays(void) {
+    assert_eq(entry_code(1, 0, 1, true, true), 0);
+}
+
+void test_ratchet_unexpected_pass(void) {
+    assert_eq(entry_code(2, 0, 0, true, false), 3);
+}
+
+void test_ratchet_moved(void) {
+    assert_eq(entry_code(2, 0, 3, true, false), 4);
+}
+
+void test_ratchet_same_blocker(void) {
+    assert_eq(entry_code(2, 0, 2, true, true), 0);
+}
+
+void test_ratchet_stale_blocked(void) {
+    assert_eq(entry_code(0, 2, 0, true, true), 5);
+}
+
+void test_ratchet_stale_fail(void) {
+    assert_eq(entry_code(0, 5, 0, true, true), 5);
+}
+
+void test_ratchet_unjudged(void) {
+    assert_eq(entry_code(0, 8, 0, true, true), 6);
+}
+
+void test_ratchet_lab_error_is_unjudged(void) {
+    assert_eq(entry_code(2, 11, 2, true, true), 6);
+}
+
+void test_ratchet_unlisted(void) {
+    assert(unlisted(0, false));
+    assert((unlisted(0, true) == false));
+    assert((unlisted(2, false) == false));
+}
+
+void test_ratchet_cap(void) {
+    assert(over_cap(583, 582, true));
+    assert((over_cap(582, 582, true) == false));
+    assert(over_cap(0, 0, false));
+}
+
+void test_ratchet_red_codes(void) {
+    assert(ratchet_is_red(2));
+    assert(ratchet_is_red(9));
+    assert((ratchet_is_red(1) == false));
+    assert((ratchet_is_red(4) == false));
+    assert((ratchet_is_red(6) == false));
+}
+
 
 /* -------------------------------------------------------
    Test runner (compile with -DT27_TEST_MAIN to execute)
@@ -188,7 +357,24 @@ int main(void) {
     test_pct_75_of_657();
     test_pct_rounds_to_nearest();
     test_pct_empty_reference();
-    printf("All %d tests passed.\n", 14);
+    test_ratchet_green();
+    test_ratchet_unexpected_failure();
+    test_ratchet_vacuous_counted_is_failure();
+    test_ratchet_vacuity_measured();
+    test_ratchet_vacuous_to_pass();
+    test_ratchet_vacuous_lost();
+    test_ratchet_vacuous_stays();
+    test_ratchet_unexpected_pass();
+    test_ratchet_moved();
+    test_ratchet_same_blocker();
+    test_ratchet_stale_blocked();
+    test_ratchet_stale_fail();
+    test_ratchet_unjudged();
+    test_ratchet_lab_error_is_unjudged();
+    test_ratchet_unlisted();
+    test_ratchet_cap();
+    test_ratchet_red_codes();
+    printf("All %d tests passed.\n", 31);
     return 0;
 }
 #endif /* T27_TEST_MAIN */

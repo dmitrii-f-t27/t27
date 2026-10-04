@@ -17,8 +17,10 @@ docs/reports/t27b_expectations.json, per spec. Every input here is a fixture
             with a known reason, counts that add up, a cap equal to reality.
   lab       lab.ratchet() of a fake clone: ok on green, ok=false with findings
             on red, skipped (ok None, never green) when the commit has no ledger.
-  mutation  a copy of the checker with the UNEXPECTED PASS branch removed
-            misses the case this test plants -- proof the red case can fail.
+  mutation  a copy of the checker whose generated rules (gen/c/tri/t27b/
+            steward.c, from specs/tri/t27b/steward.t27) lack the UNEXPECTED
+            PASS branch misses the case this test plants -- proof the red case
+            can fail, and that the decision is the spec's, not t27b.py's.
 """
 import importlib.util
 import json
@@ -31,6 +33,8 @@ import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 TOOL = os.path.join(ROOT, "scripts", "tri_loop", "t27b.py")
+RULES = os.path.join(ROOT, "scripts", "tri_loop", "t27b_rules.py")
+GEN = os.path.join(ROOT, "gen", "c", "tri", "t27b", "steward.c")
 LEDGER = os.path.join(ROOT, "docs", "reports", "t27b_expectations.json")
 LAB = os.path.join(ROOT, "contrib", "railway", "t27b-lab", "lab.py")
 fails = []
@@ -83,6 +87,17 @@ def ratchet(run, ledger, *extra, tool=TOOL):
     except ValueError:
         doc = None
     return p.returncode, doc, p.stdout + p.stderr
+
+
+def plant(tree, gen_src):
+    """A checker tree: t27b.py, its rules loader and the generated rules beside it."""
+    os.makedirs(os.path.join(tree, "scripts", "tri_loop"), exist_ok=True)
+    os.makedirs(os.path.join(tree, "gen", "c", "tri", "t27b"), exist_ok=True)
+    shutil.copy(TOOL, os.path.join(tree, "scripts", "tri_loop", "t27b.py"))
+    shutil.copy(RULES, os.path.join(tree, "scripts", "tri_loop", "t27b_rules.py"))
+    with open(os.path.join(tree, "gen", "c", "tri", "t27b", "steward.c"), "w") as f:
+        f.write(gen_src)
+    return os.path.join(tree, "scripts", "tri_loop", "t27b.py")
 
 
 def kinds(doc):
@@ -221,9 +236,8 @@ with tempfile.TemporaryDirectory() as tmp:
     # the lab half: lab.ratchet() runs the clone's own checker against its own ledger
     work = j("work")
     clone = os.path.join(work, "t27")
-    os.makedirs(os.path.join(clone, "scripts", "tri_loop"))
+    plant(clone, open(GEN).read())
     os.makedirs(os.path.join(clone, "docs", "reports"))
-    shutil.copy(TOOL, os.path.join(clone, "scripts", "tri_loop", "t27b.py"))
     os.environ.update(T27_WORK=work, T27_SRV=j("srv"))
     spec = importlib.util.spec_from_file_location("t27b_lab", LAB)
     lab = importlib.util.module_from_spec(spec)
@@ -240,13 +254,11 @@ with tempfile.TemporaryDirectory() as tmp:
           f"lab: red run -> steps.ratchet ok=false with its findings ({got.get('counts')})")
     log.close()
 
-    # mutation control: the checker without its UNEXPECTED PASS branch misses b.t27
-    src = open(TOOL).read()
-    needle = "elif want not in PASSES and got in PASSES:"
-    check(src.count(needle) == 1, "mutation: the branch to remove is present exactly once")
-    mutant = j("t27b_mutant.py")
-    with open(mutant, "w") as f:
-        f.write(src.replace(needle, "elif False:"))
+    # mutation control: rules generated without the UNEXPECTED PASS branch miss b.t27
+    src = open(GEN).read()
+    needle = "    if (is_pass(got)) {\n        return 3;\n    }\n"
+    check(src.count(needle) == 1, "mutation: the branch to remove is present exactly once in the generated rules")
+    mutant = plant(j("mutant"), src.replace(needle, "    if (false) {\n        return 3;\n    }\n"))
     code, doc, out = ratchet(j("red.json"), j("bad-ledger.json"), tool=mutant)
     check(doc is not None and ("UNEXPECTED PASS", "specs/b.t27") not in kinds(doc),
           "mutation: the mutant misses the planted UNEXPECTED PASS, so the red case above can fail")

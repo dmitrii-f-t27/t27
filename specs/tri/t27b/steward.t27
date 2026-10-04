@@ -6,11 +6,17 @@ module T27bSteward;
 //
 // Verdict codes of one spec in one lab run (t27b side and reference side).
 // PASS = 0, PASS_VACUOUS = 1, BLOCKED = 2, FRONTEND = 3, CODEGEN = 4,
-// FAIL = 5, MISMATCH = 6, CRASH = 7, TIMEOUT = 8, NOT_RUN = 9.
+// FAIL = 5, MISMATCH = 6, CRASH = 7, TIMEOUT = 8, NOT_RUN = 9, MISSING = 10,
+// LAB_ERROR = 11 (the lab could not run the reference: no verdict either way).
 //
 // Delta codes between two runs of one spec:
 // NONE = 0, REF_MOVED = 1, REGRESSED = 2, NEW_MISMATCH = 3, GAINED = 4,
 // CHECK_LOST = 5.
+//
+// Ratchet codes of one spec against docs/reports/t27b_expectations.json:
+// NONE = 0, VACUITY_MEASURED = 1, UNEXPECTED_FAILURE = 2, UNEXPECTED_PASS = 3,
+// MOVED = 4, STALE = 5, UNJUDGED = 6, UNLISTED = 7, OVER_CAP = 8,
+// BAD_REASON = 9.
 
 // fail, mismatch and crash are defects someone has to read, not blockers.
 pub fn is_bad(v: u8) -> bool {
@@ -59,6 +65,63 @@ pub fn pct_tenths(in_ref: u32, reference: u32) -> u32 {
     return (in_ref * 1000 + reference / 2) / reference;
 }
 
+pub fn is_pass(v: u8) -> bool {
+    if (v == 0) { return true; }
+    if (v == 1) { return true; }
+    return false;
+}
+
+// One ledger entry against one run record whose spec still exists.
+// `counted` is false when the ledger was blessed from a run that did not count
+// runtime asserts; `same_blocker` compares the first blocker text.
+pub fn entry_code(want: u8, reference: u8, got: u8, counted: bool, same_blocker: bool) -> u8 {
+    if (reference != 0) {
+        if (reference == 2) { return 5; }
+        if (reference == 5) { return 5; }
+        return 6;
+    }
+    if (want == 0) {
+        if (got == 1) {
+            if (counted == false) { return 1; }
+        }
+        if (got != 0) { return 2; }
+        return 0;
+    }
+    if (want == 1) {
+        if (is_pass(got) == false) { return 2; }
+        if (got == 0) { return 3; }
+        return 0;
+    }
+    if (is_pass(got)) { return 3; }
+    if (same_blocker == false) { return 4; }
+    return 0;
+}
+
+// A spec the reference passes must be named in the ledger.
+pub fn unlisted(reference: u8, listed: bool) -> bool {
+    if (reference != 0) { return false; }
+    if (listed) { return false; }
+    return true;
+}
+
+// The cap only moves down; a ledger without one is over it.
+pub fn over_cap(not_pass: u32, cap: u32, has_cap: bool) -> bool {
+    if (has_cap == false) { return true; }
+    return not_pass > cap;
+}
+
+// UNEXPECTED FAILURE / PASS, STALE, UNLISTED, OVER CAP and BAD REASON are red;
+// VACUITY MEASURED, MOVED and UNJUDGED are information.
+pub fn ratchet_is_red(code: u8) -> bool {
+    if (code == 2) { return true; }
+    if (code == 3) { return true; }
+    if (code == 5) { return true; }
+    if (code == 7) { return true; }
+    if (code == 8) { return true; }
+    if (code == 9) { return true; }
+    return false;
+}
+
 test delta_ref_moved { assert_eq(delta_code(2, 0, 2, 0, 0, 0), 1); }
 test delta_outside_reference_is_silent { assert_eq(delta_code(2, 2, 2, 0, 0, 0), 0); }
 test delta_regressed { assert_eq(delta_code(0, 0, 0, 3, 1, 0), 2); }
@@ -81,6 +144,37 @@ test pct_75_of_657 { assert_eq(pct_tenths(75, 657), 114); }
 // cannot tell the two apart (a mutation control found that).
 test pct_rounds_to_nearest { assert_eq(pct_tenths(2, 3), 667); }
 test pct_empty_reference { assert_eq(pct_tenths(0, 0), 0); }
+test ratchet_green { assert_eq(entry_code(0, 0, 0, true, true), 0); }
+test ratchet_unexpected_failure { assert_eq(entry_code(0, 0, 2, true, true), 2); }
+test ratchet_vacuous_counted_is_failure { assert_eq(entry_code(0, 0, 1, true, true), 2); }
+test ratchet_vacuity_measured { assert_eq(entry_code(0, 0, 1, false, true), 1); }
+test ratchet_vacuous_to_pass { assert_eq(entry_code(1, 0, 0, true, true), 3); }
+test ratchet_vacuous_lost { assert_eq(entry_code(1, 0, 3, true, true), 2); }
+test ratchet_vacuous_stays { assert_eq(entry_code(1, 0, 1, true, true), 0); }
+test ratchet_unexpected_pass { assert_eq(entry_code(2, 0, 0, true, false), 3); }
+test ratchet_moved { assert_eq(entry_code(2, 0, 3, true, false), 4); }
+test ratchet_same_blocker { assert_eq(entry_code(2, 0, 2, true, true), 0); }
+test ratchet_stale_blocked { assert_eq(entry_code(0, 2, 0, true, true), 5); }
+test ratchet_stale_fail { assert_eq(entry_code(0, 5, 0, true, true), 5); }
+test ratchet_unjudged { assert_eq(entry_code(0, 8, 0, true, true), 6); }
+test ratchet_lab_error_is_unjudged { assert_eq(entry_code(2, 11, 2, true, true), 6); }
+test ratchet_unlisted {
+    assert(unlisted(0, false));
+    assert(unlisted(0, true) == false);
+    assert(unlisted(2, false) == false);
+}
+test ratchet_cap {
+    assert(over_cap(583, 582, true));
+    assert(over_cap(582, 582, true) == false);
+    assert(over_cap(0, 0, false));
+}
+test ratchet_red_codes {
+    assert(ratchet_is_red(2));
+    assert(ratchet_is_red(9));
+    assert(ratchet_is_red(1) == false);
+    assert(ratchet_is_red(4) == false);
+    assert(ratchet_is_red(6) == false);
+}
 invariant gained_never_red {
     assert(delta_is_red(delta_code(0, 0, 2, 0, 0, 1)) == false);
 }

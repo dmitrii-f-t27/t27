@@ -1,7 +1,8 @@
 """The t27b steward's decisions, loaded from their t27 spec (#6198).
 
 `specs/tri/t27b/steward.t27` decides what a lab run means: which per-spec
-transition is a regression, and the honest percentage. This module holds no
+transition is a regression, the honest percentage, and what each ledger
+entry's ratchet finding is. This module holds no
 decision of its own. It compiles `gen/c/tri/t27b/steward.c` (written by
 `t27c gen-c` from that spec, never by hand -- L2) with the system C compiler
 into a cache and calls it through ctypes.
@@ -24,8 +25,10 @@ GEN = ROOT / "gen" / "c" / "tri" / "t27b" / "steward.c"
 
 # The lab's verdict strings, in the order of the spec's verdict codes.
 VERDICTS = ("pass", "pass_vacuous", "blocked", "frontend", "codegen",
-            "fail", "mismatch", "crash", "timeout", "not run")
+            "fail", "mismatch", "crash", "timeout", "not run", "missing", "lab_error")
 DELTAS = (None, "REF-MOVED", "REGRESSED", "NEW-MISMATCH", "GAINED", "CHECK-LOST")
+RATCHETS = (None, "VACUITY MEASURED", "UNEXPECTED FAILURE", "UNEXPECTED PASS", "MOVED",
+            "STALE", "UNJUDGED", "UNLISTED", "OVER CAP", "BAD REASON")
 
 
 class RulesUnavailable(RuntimeError):
@@ -61,6 +64,16 @@ def _build():
     so.delta_is_red.restype = ctypes.c_bool
     so.pct_tenths.argtypes = [ctypes.c_uint32, ctypes.c_uint32]
     so.pct_tenths.restype = ctypes.c_uint32
+    so.is_pass.argtypes = [ctypes.c_uint8]
+    so.is_pass.restype = ctypes.c_bool
+    so.entry_code.argtypes = [ctypes.c_uint8] * 3 + [ctypes.c_bool] * 2
+    so.entry_code.restype = ctypes.c_uint8
+    so.unlisted.argtypes = [ctypes.c_uint8, ctypes.c_bool]
+    so.unlisted.restype = ctypes.c_bool
+    so.over_cap.argtypes = [ctypes.c_uint32, ctypes.c_uint32, ctypes.c_bool]
+    so.over_cap.restype = ctypes.c_bool
+    so.ratchet_is_red.argtypes = [ctypes.c_uint8]
+    so.ratchet_is_red.restype = ctypes.c_bool
     return so
 
 
@@ -94,3 +107,27 @@ def pct(in_ref, reference):
     """The honest percentage as text, one decimal, as the spec rounds it."""
     t = lib().pct_tenths(in_ref, reference)
     return f"{t // 10}.{t % 10}"
+
+
+def is_pass(v):
+    return bool(lib().is_pass(verdict(v)))
+
+
+def entry(want, reference, got, counted, same_blocker):
+    """The spec's ratchet finding for one ledger entry against one run record, or None."""
+    return RATCHETS[lib().entry_code(verdict(want), verdict(reference), verdict(got),
+                                     bool(counted), bool(same_blocker))]
+
+
+def unlisted(reference, listed):
+    return bool(lib().unlisted(verdict(reference), bool(listed)))
+
+
+def over_cap(not_pass, cap):
+    """A cap that is not a whole number is no cap; the spec calls that over."""
+    has = isinstance(cap, int) and not isinstance(cap, bool) and cap >= 0
+    return bool(lib().over_cap(not_pass, cap if has else 0, has))
+
+
+def ratchet_is_red(kind):
+    return bool(lib().ratchet_is_red(RATCHETS.index(kind)))
