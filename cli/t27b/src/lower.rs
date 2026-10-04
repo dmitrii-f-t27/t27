@@ -10,6 +10,13 @@
 //! must agree up to lossless widening (same signedness and not narrower, or
 //! unsigned into a strictly wider signed type); `if`/`while` conditions are
 //! `bool`; `bool` and integers never mix.
+//!
+//! Memory: a struct value lives in memory, never in a register -- a frame
+//! slot for a local or a temporary, the caller's memory for a parameter (passed
+//! as a pointer, never written), read-only data for a module constant. A
+//! function returning a struct takes a hidden last pointer parameter to the
+//! caller's result slot, builds the value there and returns that pointer.
+//! Struct layout is C's: fields in order, each at its own alignment.
 
 use crate::compiler::{Node, NodeKind};
 use crate::ir::*;
@@ -39,12 +46,15 @@ impl Reject {
 
 type R<T> = Result<T, ()>;
 
-/// A lowered expression: either a comptime integer (exact, untyped) or a
-/// typed IR expression.
+/// A lowered expression: a comptime integer (exact, untyped), a typed
+/// scalar IR expression, a pointer (`Ty::Ptr` expression and its `LTy::Ptr`
+/// type), or a struct in memory.
 #[derive(Clone, Debug)]
 enum Val {
     Ct(i128),
     E(Expr),
+    P(Expr, LTy),
+    M(Place),
     /// Recovery mode only (`blockers`): the value of an expression that was
     /// already rejected. Anything built from it is dropped without a second
     /// report, so one unsupported construct is named once, not once per use.
@@ -61,12 +71,55 @@ impl Val {
 enum Binding {
     Var { id: VarId, mutable: bool },
     Const(Val),
+    /// A variable that lives in memory: a struct, or a scalar whose address
+    /// is taken.
+    Mem(Place),
+}
+
+/// A source type: a scalar or a pointer (one register), or a struct.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum LTy {
+    S(Ty),
+    /// `*T` (true: mutable) or `*const T` (false).
+    Ptr(Box<LTy>, bool),
+    Struct(u32),
+}
+
+/// `ty` at `addr + off`. `addr` is evaluated exactly once by whatever
+/// consumes the place, so it may be a call or a `Seq`.
+#[derive(Clone, Debug)]
+struct Place {
+    addr: Expr,
+    off: u32,
+    ty: LTy,
+    mutable: bool,
+    /// The frame slot this place is the whole of, when it is a temporary
+    /// nothing else refers to (a struct literal, a call's result).
+    temp: Option<u32>,
+}
+
+#[derive(Clone, Debug)]
+struct Field<'a> {
+    name: String,
+    ty: LTy,
+    off: u32,
+    default: Option<&'a Node>,
+}
+
+struct StructDef<'a> {
+    name: String,
+    fields: Vec<Field<'a>>,
+    /// None while the layout is being computed (or after it failed).
+    size: Option<u32>,
+    align: u32,
+    /// Why the layout failed, to report again at every later use.
+    fail: Option<Reject>,
 }
 
 struct Sig {
     id: FuncId,
-    params: Vec<Ty>,
-    ret: Option<Ty>,
+    params: Vec<LTy>,
+    ret: Option<LTy>,
     /// Recovery mode only: the signature named a type outside the subset.
     /// Calls to it are dropped silently; its body is still lowered.
     poisoned: bool,
@@ -80,14 +133,31 @@ struct Lower<'a> {
     globals: HashMap<String, Val>,
     const_nodes: HashMap<String, &'a Node>,
     resolving: HashSet<String>,
+    struct_nodes: HashMap<String, &'a Node>,
+    structs: Vec<StructDef<'a>>,
+    struct_ids: HashMap<String, u32>,
+    data: Vec<Vec<u8>>,
+    internal_abi: Vec<FuncId>,
     // Per-function state.
     vars: Vec<Var>,
+    /// The source type of each variable (parallel to `vars`).
+    ltys: Vec<LTy>,
+    slots: Vec<SlotInfo>,
+    /// Names whose address is taken somewhere in the body (`&x`): such a
+    /// scalar lives in a frame slot instead of a register.
+    addr_taken: HashSet<String>,
+    /// The hidden result pointer of a function returning a struct.
+    sret: Option<VarId>,
     scopes: Vec<HashMap<String, Binding>>,
     loop_depth: u32,
     line: u32,
-    ret: Option<Ty>,
+    ret: Option<LTy>,
     in_test: bool,
     test_assigns: HashMap<String, u32>,
+    /// The source text, when known: a clause-form `invariant` (and a
+    /// braceless `test`) reaches lowering with no line on any of its nodes, so
+    /// its header line is looked up here instead.
+    src: Option<&'a str>,
     // Recovery mode (`blockers`): keep lowering after a rejection so every
     // unsupported construct in the file is named, not only the first per item.
     recover: bool,
@@ -104,7 +174,12 @@ struct Lower<'a> {
 /// Lower a parsed module. All rejected constructs are returned (at most one per
 /// top-level item, since lowering of an item stops at its first rejection).
 pub fn lower(ast: &Node, mode: OverflowMode) -> Result<Program, Vec<Reject>> {
-    lower_mode(ast, mode, false)
+    lower_src(ast, mode, None)
+}
+
+/// `lower`, with the source text the AST was parsed from, for line numbers.
+pub fn lower_src<'a>(ast: &'a Node, mode: OverflowMode, src: Option<&'a str>) -> Result<Program, Vec<Reject>> {
+    lower_mode(ast, mode, src, false)
 }
 
 /// Every construct outside the subset in a module, not only the first per
@@ -115,13 +190,23 @@ pub fn lower(ast: &Node, mode: OverflowMode) -> Result<Program, Vec<Reject>> {
 /// A rejected top-level declaration (a `struct`, an `enum`) is still one
 /// entry: its members are not looked into, so a file's list is a lower bound.
 pub fn blockers(ast: &Node, mode: OverflowMode) -> Vec<Reject> {
-    match lower_mode(ast, mode, true) {
+    blockers_src(ast, mode, None)
+}
+
+/// `blockers`, with the source text the AST was parsed from, for line numbers.
+pub fn blockers_src<'a>(ast: &'a Node, mode: OverflowMode, src: Option<&'a str>) -> Vec<Reject> {
+    match lower_mode(ast, mode, src, true) {
         Ok(_) => Vec::new(),
         Err(r) => r,
     }
 }
 
-fn lower_mode(ast: &Node, mode: OverflowMode, recover: bool) -> Result<Program, Vec<Reject>> {
+fn lower_mode<'a>(
+    ast: &'a Node,
+    mode: OverflowMode,
+    src: Option<&'a str>,
+    recover: bool,
+) -> Result<Program, Vec<Reject>> {
     let mut l = Lower {
         mode,
         sites: vec![Site {
@@ -135,13 +220,23 @@ fn lower_mode(ast: &Node, mode: OverflowMode, recover: bool) -> Result<Program, 
         globals: HashMap::new(),
         const_nodes: HashMap::new(),
         resolving: HashSet::new(),
+        struct_nodes: HashMap::new(),
+        structs: Vec::new(),
+        struct_ids: HashMap::new(),
+        data: Vec::new(),
+        internal_abi: Vec::new(),
         vars: Vec::new(),
+        ltys: Vec::new(),
+        slots: Vec::new(),
+        addr_taken: HashSet::new(),
+        sret: None,
         scopes: Vec::new(),
         loop_depth: 0,
         line: ast.line,
         ret: None,
         in_test: false,
         test_assigns: HashMap::new(),
+        src,
         recover,
         poison_names: HashSet::new(),
         type_decls: HashMap::new(),
@@ -157,6 +252,14 @@ fn lower_mode(ast: &Node, mode: OverflowMode, recover: bool) -> Result<Program, 
     } else {
         vec![ast]
     };
+
+    // Struct declarations are laid out on first use, like Zig's lazy
+    // analysis: an unused struct with an unsupported member rejects nothing.
+    for item in &items {
+        if item.kind == NodeKind::StructDecl {
+            l.struct_nodes.insert(item.name.clone(), item);
+        }
+    }
 
     // Pass 1: signatures and constant declarations.
     let mut fn_nodes: Vec<&Node> = Vec::new();
@@ -189,6 +292,10 @@ fn lower_mode(ast: &Node, mode: OverflowMode, recover: bool) -> Result<Program, 
                 }
                 match l.signature(item) {
                     Ok((params, ret)) => {
+                        let agg = |t: &LTy| matches!(t, LTy::Struct(_));
+                        if params.iter().any(agg) || ret.as_ref().is_some_and(agg) {
+                            l.internal_abi.push(next_id);
+                        }
                         l.sigs.insert(
                             item.name.clone(),
                             Sig {
@@ -208,7 +315,7 @@ fn lower_mode(ast: &Node, mode: OverflowMode, recover: bool) -> Result<Program, 
                             item.name.clone(),
                             Sig {
                                 id: next_id,
-                                params: vec![Ty::Bool; n],
+                                params: vec![LTy::S(Ty::Bool); n],
                                 ret: None,
                                 poisoned: true,
                             },
@@ -221,7 +328,7 @@ fn lower_mode(ast: &Node, mode: OverflowMode, recover: bool) -> Result<Program, 
                     }
                 }
             }
-            NodeKind::TestBlock => {}
+            NodeKind::TestBlock | NodeKind::InvariantBlock | NodeKind::StructDecl => {}
             NodeKind::ConstDecl => {
                 l.const_nodes.insert(item.name.clone(), item);
             }
@@ -269,11 +376,27 @@ fn lower_mode(ast: &Node, mode: OverflowMode, recover: bool) -> Result<Program, 
             funcs.push(f);
         }
     }
+    let mut unchecked = Vec::new();
     for item in &items {
-        if item.kind == NodeKind::TestBlock {
-            if let Ok(f) = l.test(item) {
-                funcs.push(f);
+        match item.kind {
+            NodeKind::TestBlock => {
+                if let Ok(f) = l.test(item, false) {
+                    funcs.push(f);
+                }
             }
+            // An invariant with no lowered body is one whose clause the
+            // front-end discarded (t27c's Zig backend writes `NOT CHECKED`
+            // for exactly this case): there is nothing to run, and running
+            // nothing must not be reported as the invariant holding.
+            NodeKind::InvariantBlock if item.children.is_empty() && item.extra_field != "partial" => {
+                unchecked.push(item.name.clone());
+            }
+            NodeKind::InvariantBlock => {
+                if let Ok(f) = l.test(item, true) {
+                    funcs.push(f);
+                }
+            }
+            _ => {}
         }
     }
     if !l.errors.is_empty() {
@@ -284,7 +407,27 @@ fn lower_mode(ast: &Node, mode: OverflowMode, recover: bool) -> Result<Program, 
         funcs,
         sites: l.sites,
         mode,
+        unchecked,
+        data: l.data,
+        internal_abi: l.internal_abi,
     })
+}
+
+/// Line (1-based) of the first `<keyword> <name>` header in `src`, the name
+/// optionally quoted.
+fn header_line(src: &str, keyword: &str, name: &str) -> Option<u32> {
+    for (i, line) in src.lines().enumerate() {
+        let Some(rest) = line.trim_start().strip_prefix(keyword) else { continue };
+        let Some(rest) = rest.strip_prefix(|c: char| c == ' ' || c == '\t') else { continue };
+        let rest = rest.trim_start();
+        let rest = rest.strip_prefix('"').unwrap_or(rest);
+        if let Some(after) = rest.strip_prefix(name) {
+            if !after.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_') {
+                return Some(i as u32 + 1);
+            }
+        }
+    }
+    None
 }
 
 fn kind_name(n: &Node) -> String {
@@ -382,24 +525,14 @@ impl<'a> Lower<'a> {
         (shape, format!("`{}`", t))
     }
 
-    fn signature(&mut self, n: &Node) -> R<(Vec<Ty>, Option<Ty>)> {
+    fn signature(&mut self, n: &Node) -> R<(Vec<LTy>, Option<LTy>)> {
         let mut bad = false;
-        if n.params.len() > 8 {
-            let r: R<()> = self.reject(
-                "FnDecl",
-                format!("`{}` has {} parameters, at most 8 are supported", n.name, n.params.len()),
-            );
-            if !self.recover {
-                return r.map(|_| (Vec::new(), None));
-            }
-            bad = true;
-        }
         let mut params = Vec::new();
         for (pname, pty) in &n.params {
             let r = if pname.starts_with("comptime ") || pty.is_empty() {
                 self.reject("FnDecl", format!("parameter `{}` of `{}`", pname, n.name))
             } else {
-                self.ty(pty)
+                self.lty(pty)
             };
             match r {
                 Ok(t) => params.push(t),
@@ -412,8 +545,16 @@ impl<'a> Lower<'a> {
         let ret = if rt.is_empty() || rt == "void" {
             None
         } else {
-            Some(self.ty(rt)?)
+            Some(self.lty(rt)?)
         };
+        // A struct result is returned through a hidden pointer parameter.
+        let total = n.params.len() + matches!(ret, Some(LTy::Struct(_))) as usize;
+        if total > 8 {
+            return self.reject(
+                "FnDecl",
+                format!("`{}` has {} parameters, at most 8 are supported", n.name, total),
+            );
+        }
         if bad {
             return Err(());
         }
@@ -437,13 +578,22 @@ impl<'a> Lower<'a> {
         }
     }
 
-    fn new_var(&mut self, name: &str, ty: Ty, mutable: bool) -> VarId {
+    /// A register variable of a scalar or pointer type, bound to `name`.
+    fn new_lvar(&mut self, name: &str, t: LTy, mutable: bool) -> VarId {
+        let id = self.hidden_var(name, t);
+        self.bind(name, Binding::Var { id, mutable });
+        id
+    }
+
+    /// A register variable no source name refers to.
+    fn hidden_var(&mut self, name: &str, t: LTy) -> VarId {
         let id = self.vars.len() as VarId;
+        let ty = reg_ty(&t).unwrap_or(Ty::Ptr);
         self.vars.push(Var {
             name: name.to_string(),
             ty,
         });
-        self.bind(name, Binding::Var { id, mutable });
+        self.ltys.push(t);
         id
     }
 
@@ -479,6 +629,23 @@ impl<'a> Lower<'a> {
             Some(c) => c,
             None => return self.reject("ConstDecl", format!("`{}` has no value", node.name)),
         };
+        let ann = node.extra_type.trim();
+        let st = if !ann.is_empty() {
+            match self.lty(ann)? {
+                t @ LTy::Struct(_) => Some(t),
+                LTy::Ptr(..) => {
+                    return self.reject("ConstDecl", format!("`{}` is a module-level pointer", node.name))
+                }
+                LTy::S(_) => None,
+            }
+        } else if init.kind == NodeKind::ExprStructLit && !init.name.is_empty() {
+            Some(self.lty(&init.name)?)
+        } else {
+            None
+        };
+        if let Some(t) = st {
+            return self.rodata(init, t);
+        }
         let v = self.expr(init)?;
         let v = if node.extra_type.trim().is_empty() {
             v
@@ -489,6 +656,8 @@ impl<'a> Lower<'a> {
         match &v {
             Val::Ct(_) | Val::Poison => Ok(v),
             Val::E(e) if matches!(e.kind, ExprKind::Const(_)) => Ok(v),
+            // Another struct constant: the same read-only bytes.
+            Val::M(p) if matches!(p.addr.kind, ExprKind::Data(_)) => Ok(v),
             _ => self.reject(
                 "ConstDecl",
                 format!("`{}` is not a compile-time integer or bool", node.name),
@@ -498,8 +667,13 @@ impl<'a> Lower<'a> {
 
     // ------------------------------------------------------------- functions
 
-    fn begin_body(&mut self) {
+    fn begin_body(&mut self, body: &[Node]) {
         self.vars.clear();
+        self.ltys.clear();
+        self.slots.clear();
+        self.sret = None;
+        self.addr_taken.clear();
+        scan_addr_taken(body, &mut self.addr_taken);
         self.scopes.clear();
         self.scopes.push(HashMap::new());
         self.loop_depth = 0;
@@ -507,36 +681,53 @@ impl<'a> Lower<'a> {
 
     fn function(&mut self, n: &Node) -> R<Func> {
         self.see(n);
-        self.begin_body();
+        self.begin_body(&n.children);
         self.in_test = false;
         let (params, ret, poisoned) = {
             let s = &self.sigs[&n.name];
-            (s.params.clone(), s.ret, s.poisoned)
+            (s.params.clone(), s.ret.clone(), s.poisoned)
         };
-        self.ret = ret;
+        self.ret = ret.clone();
         self.ret_poison = false;
-        for (i, (pname, pty)) in n.params.iter().enumerate() {
-            if poisoned {
-                // Recovery mode: a parameter whose type is in the subset is a
-                // real variable; any other is poison, already reported.
-                match Ty::from_name(pty.trim()) {
-                    Some(t) if !pname.starts_with("comptime ") => {
-                        self.new_var(pname, t, true);
-                    }
-                    _ => self.bind(pname, Binding::Const(Val::Poison)),
-                }
-            } else {
-                self.new_var(pname, params[i], true);
-            }
-        }
         if poisoned {
-            let rt = n.extra_return_type.trim();
-            if !rt.is_empty() && rt != "void" {
-                self.ret = Ty::from_name(rt);
-                self.ret_poison = self.ret.is_none();
+            return self.poisoned_function(n);
+        }
+        // Parameters first (vars 0..), then the hidden result pointer, so
+        // that they are exactly the first `nparams` variables.
+        let mut ids = Vec::new();
+        for (i, (pname, _)) in n.params.iter().enumerate() {
+            let t = match &params[i] {
+                LTy::Struct(_) => LTy::Ptr(Box::new(params[i].clone()), false),
+                t => t.clone(),
+            };
+            ids.push(self.hidden_var(pname, t));
+        }
+        if matches!(ret, Some(LTy::Struct(_))) {
+            self.sret = Some(self.hidden_var("%sret", LTy::Ptr(Box::new(ret.clone().unwrap()), true)));
+        }
+        let nparams = self.vars.len();
+        let mut body = Vec::new();
+        for (i, (pname, _)) in n.params.iter().enumerate() {
+            let var = Expr { ty: Ty::Ptr, kind: ExprKind::Var(ids[i]) };
+            match &params[i] {
+                // A struct argument is the caller's memory, read-only.
+                LTy::Struct(_) => {
+                    let p = Place { addr: var, off: 0, ty: params[i].clone(), mutable: false, temp: None };
+                    self.bind(pname, Binding::Mem(p));
+                }
+                t if self.addr_taken.contains(pname) => {
+                    let ty = reg_ty(t).unwrap();
+                    let k = self.new_slot(t)?;
+                    let value = Expr { ty, kind: ExprKind::Var(ids[i]) };
+                    body.push(Stmt::Store { addr: slot_expr(k), off: 0, value });
+                    let p = Place { addr: slot_expr(k), off: 0, ty: t.clone(), mutable: false, temp: None };
+                    self.bind(pname, Binding::Mem(p));
+                }
+                _ => self.bind(pname, Binding::Var { id: ids[i], mutable: true }),
             }
         }
-        let body = self.stmts(&n.children)?;
+        body.extend(self.stmts(&n.children)?);
+        let ret = ret.map(|t| reg_ty(&t).unwrap_or(Ty::Ptr));
         let noreturn_site = if ret.is_some() {
             self.site(TrapKind::NoReturn, format!("end of fn {}", n.name), Ty::Bool)
         } else {
@@ -544,25 +735,56 @@ impl<'a> Lower<'a> {
         };
         Ok(Func {
             name: n.name.clone(),
-            nparams: params.len(),
+            nparams,
             ret,
             vars: std::mem::take(&mut self.vars),
+            slots: std::mem::take(&mut self.slots),
             body,
             line: n.line,
             is_test: false,
+            is_invariant: false,
             noreturn_site,
         })
     }
 
-    fn test(&mut self, n: &Node) -> R<Func> {
+    /// Recovery mode: the body of a fn whose signature was rejected, lowered
+    /// only for what it reports. A parameter whose type is a scalar of the
+    /// subset is a real variable; any other is poison, already reported.
+    fn poisoned_function(&mut self, n: &Node) -> R<Func> {
+        for (pname, pty) in &n.params {
+            match Ty::from_name(pty.trim()) {
+                Some(t) if !pname.starts_with("comptime ") => {
+                    self.new_lvar(pname, LTy::S(t), true);
+                }
+                _ => self.bind(pname, Binding::Const(Val::Poison)),
+            }
+        }
+        let rt = n.extra_return_type.trim();
+        if !rt.is_empty() && rt != "void" {
+            self.ret = Ty::from_name(rt).map(LTy::S);
+            self.ret_poison = self.ret.is_none();
+        }
+        let _ = self.stmts(&n.children)?;
+        Err(())
+    }
+
+    /// A `test` block, or an `invariant` block: both are a parameterless body
+    /// of statements run once, and both use the test binding rule.
+    fn test(&mut self, n: &Node, invariant: bool) -> R<Func> {
         self.see(n);
+        if n.line == 0 {
+            if let Some(l) = self.src.and_then(|s| header_line(s, if invariant { "invariant" } else { "test" }, &n.name)) {
+                self.line = l;
+            }
+        }
         if n.extra_field == "partial" {
+            let (k, what) = if invariant { ("InvariantBlock", "invariant") } else { ("TestBlock", "test") };
             return self.reject(
-                "TestBlock",
-                format!("test `{}` was only partially parsed by the front-end", n.name),
+                k,
+                format!("{} `{}` was only partially parsed by the front-end", what, n.name),
             );
         }
-        self.begin_body();
+        self.begin_body(&n.children);
         self.in_test = true;
         self.ret = None;
         self.ret_poison = false;
@@ -575,9 +797,11 @@ impl<'a> Lower<'a> {
             nparams: 0,
             ret: None,
             vars: std::mem::take(&mut self.vars),
+            slots: std::mem::take(&mut self.slots),
             body,
             line: n.line,
             is_test: true,
+            is_invariant: invariant,
             noreturn_site: 0,
         })
     }
@@ -704,11 +928,18 @@ impl<'a> Lower<'a> {
                     }
                     return Ok(());
                 }
-                match (self.ret, v) {
+                match (self.ret.clone(), v) {
                     (None, None) => out.push(Stmt::Return(None)),
+                    (Some(t @ LTy::Struct(_)), Some(c)) => {
+                        // Build the result in the caller's memory.
+                        let sret = Expr { ty: Ty::Ptr, kind: ExprKind::Var(self.sret.unwrap()) };
+                        let dst = Place { addr: sret.clone(), off: 0, ty: t, mutable: true, temp: None };
+                        self.init(c, dst, true, out)?;
+                        out.push(Stmt::Return(Some(sret)));
+                    }
                     (Some(t), Some(c)) => {
-                        let v = self.expr(c)?;
-                        let e = self.coerce(v, t)?;
+                        let v = self.expr_as(c, &t)?;
+                        let e = self.reg(v)?;
                         out.push(Stmt::Return(Some(e)));
                     }
                     (None, Some(_)) => {
@@ -754,28 +985,46 @@ impl<'a> Lower<'a> {
         }
         let ann = n.extra_type.trim().to_string();
         let mutable = n.extra_mutable;
+        let init = n.children.first().filter(|i| !is_undefined(i));
         if !ann.is_empty() {
-            let ty = self.ty(&ann)?;
-            let value = match n.children.first() {
+            let t = self.lty(&ann)?;
+            if matches!(t, LTy::Struct(_)) || self.addr_taken.contains(&name) {
+                // In memory; the name is bound only after its initializer.
+                let k = self.new_slot(&t)?;
+                let dst = Place { addr: slot_expr(k), off: 0, ty: t, mutable, temp: None };
+                match init {
+                    Some(i) => self.init(i, dst.clone(), true, out)?,
+                    // A scalar with no value reads as zero, like a register.
+                    None if !matches!(dst.ty, LTy::Struct(_)) => {
+                        let ty = reg_ty(&dst.ty).unwrap();
+                        out.push(Stmt::Store { addr: slot_expr(k), off: 0, value: Expr { ty, kind: ExprKind::Const(0) } });
+                    }
+                    None => {}
+                }
+                self.bind(&name, Binding::Mem(dst));
+                return Ok(());
+            }
+            let ty = reg_ty(&t).unwrap();
+            let value = match init {
                 Some(init) => {
-                    let v = self.expr(init)?;
+                    let v = self.expr_as(init, &t)?;
                     if v.is_poison() {
                         // Recovery mode: the type is known, so keep the name.
-                        self.new_var(&name, ty, mutable);
+                        self.new_lvar(&name, t, mutable);
                         return Err(());
                     }
-                    self.coerce(v, ty)?
+                    self.reg(v)?
                 }
                 None => Expr {
                     ty,
                     kind: ExprKind::Const(0),
                 },
             };
-            let id = self.new_var(&name, ty, mutable);
+            let id = self.new_lvar(&name, t, mutable);
             out.push(Stmt::Assign { var: id, value });
             return Ok(());
         }
-        let init = match n.children.first() {
+        let init = match init {
             Some(i) => i,
             None => return self.reject("StmtLocal", format!("`{}` has neither type nor value", name)),
         };
@@ -791,10 +1040,49 @@ impl<'a> Lower<'a> {
                 }
                 self.bind(&name, Binding::Const(Val::Ct(c)));
             }
-            Val::E(e) => {
-                let id = self.new_var(&name, e.ty, mutable);
-                out.push(Stmt::Assign { var: id, value: e });
+            v => self.bind_value(&name, v, mutable, out)?,
+        }
+        Ok(())
+    }
+
+    /// Bind `name` to a fresh variable holding `v` (not a comptime integer).
+    fn bind_value(&mut self, name: &str, v: Val, mutable: bool, out: &mut Vec<Stmt>) -> R<()> {
+        let (t, value) = match v {
+            Val::Poison => return Err(()),
+            Val::Ct(_) => return self.reject("StmtLocal", format!("`{}` needs a type", name)),
+            Val::E(e) => (LTy::S(e.ty), e),
+            Val::P(e, t) => (t, e),
+            Val::M(p) => {
+                let k = match p.temp {
+                    // A temporary nobody else sees becomes the variable.
+                    Some(k) => {
+                        match p.addr.kind {
+                            ExprKind::Slot(_) => {}
+                            ExprKind::Seq { stmts, .. } => out.extend(stmts),
+                            _ => out.push(Stmt::Eval(p.addr)),
+                        }
+                        k
+                    }
+                    None => {
+                        let k = self.new_slot(&p.ty)?;
+                        let dst = Place { addr: slot_expr(k), off: 0, ty: p.ty.clone(), mutable: true, temp: None };
+                        self.copy(&dst, p.clone(), out)?;
+                        k
+                    }
+                };
+                let dst = Place { addr: slot_expr(k), off: 0, ty: p.ty, mutable, temp: None };
+                self.bind(name, Binding::Mem(dst));
+                return Ok(());
             }
+        };
+        if self.addr_taken.contains(name) {
+            let k = self.new_slot(&t)?;
+            out.push(Stmt::Store { addr: slot_expr(k), off: 0, value });
+            let dst = Place { addr: slot_expr(k), off: 0, ty: t, mutable, temp: None };
+            self.bind(name, Binding::Mem(dst));
+        } else {
+            let id = self.new_lvar(name, t, mutable);
+            out.push(Stmt::Assign { var: id, value });
         }
         Ok(())
     }
@@ -804,13 +1092,31 @@ impl<'a> Lower<'a> {
             return self.reject("StmtAssign", "unexpected shape".into());
         }
         let target = &n.children[0];
+        let op = n.extra_op.as_str();
+        if target.kind == NodeKind::ExprFieldAccess {
+            let dst = self.lvalue(target)?;
+            return self.store(dst, op, &n.children[1], out);
+        }
         if target.kind != NodeKind::ExprIdentifier {
             let k = kind_name(target);
             return self.reject(&k, "assignment target".into());
         }
         let name = target.name.clone();
-        let op = n.extra_op.as_str();
         match self.lookup(&name) {
+            Some(Binding::Mem(dst)) => self.store(dst, op, &n.children[1], out),
+            Some(Binding::Var { id, mutable }) if !matches!(self.ltys[id as usize], LTy::S(_)) => {
+                if !mutable {
+                    return self.reject("StmtAssign", format!("assignment to constant `{}`", name));
+                }
+                if !(op.is_empty() || op == "=") {
+                    return self.reject("StmtAssign", format!("`{}` on a pointer", op));
+                }
+                let t = self.ltys[id as usize].clone();
+                let v = self.expr_as(&n.children[1], &t)?;
+                let value = self.reg(v)?;
+                out.push(Stmt::Assign { var: id, value });
+                Ok(())
+            }
             Some(Binding::Var { id, mutable }) => {
                 if !mutable {
                     return self.reject("StmtAssign", format!("assignment to constant `{}`", name));
@@ -859,10 +1165,7 @@ impl<'a> Lower<'a> {
                             format!("test binding `{}` reassigned but its type is unknown", name),
                         )
                     }
-                    Val::E(e) => {
-                        let id = self.new_var(&name, e.ty, assigned > 1);
-                        out.push(Stmt::Assign { var: id, value: e });
-                    }
+                    v => self.bind_value(&name, v, assigned > 1, out)?,
                 }
                 Ok(())
             }
@@ -915,17 +1218,17 @@ impl<'a> Lower<'a> {
                 Ok(())
             }
             _ => {
-                let (func, args, _ret) = self.call(c)?;
-                out.push(Stmt::Eval(Expr {
-                    ty: Ty::Bool,
-                    kind: ExprKind::Call { func, args },
-                }));
+                let (call, _, _) = self.call(c, None)?;
+                out.push(Stmt::Eval(call));
                 Ok(())
             }
         }
     }
 
-    fn call(&mut self, c: &Node) -> R<(FuncId, Vec<Expr>, Option<Ty>)> {
+    /// A call: the `Call` expression (typed `Bool` for a void fn), the
+    /// result type, and the temporary slot a struct result is built in when
+    /// no `sret` destination is given.
+    fn call(&mut self, c: &Node, sret: Option<Expr>) -> R<(Expr, Option<LTy>, Option<u32>)> {
         self.see(c);
         let (id, params, ret) = match self.sigs.get(&c.name) {
             Some(s) if s.poisoned => {
@@ -936,7 +1239,7 @@ impl<'a> Lower<'a> {
                 }
                 return Err(());
             }
-            Some(s) => (s.id, s.params.clone(), s.ret),
+            Some(s) => (s.id, s.params.clone(), s.ret.clone()),
             None if self.recover && self.poison_names.contains(&c.name) => {
                 for a in &c.children {
                     let _ = self.expr(a)?;
@@ -945,7 +1248,10 @@ impl<'a> Lower<'a> {
             }
             // Normal mode: the callee's own rejection is the real blocker.
             None if self.poison_names.contains(&c.name) => {
-                return self.reject("ExprCall(rejected fn)", format!("call to `{}`, whose declaration was rejected", c.name));
+                return self.reject(
+                    "ExprCall(rejected fn)",
+                    format!("call to `{}`, whose declaration was rejected", c.name),
+                );
             }
             None => {
                 let what = if c.name.starts_with('@') {
@@ -979,10 +1285,31 @@ impl<'a> Lower<'a> {
         }
         let mut args = Vec::new();
         for (i, a) in c.children.iter().enumerate() {
-            let v = self.expr(a)?;
-            args.push(self.coerce(v, params[i])?);
+            let v = self.expr_as(a, &params[i])?;
+            args.push(match v {
+                // By reference; the callee never writes it.
+                Val::M(p) => addr_of(&p),
+                v => self.reg(v)?,
+            });
         }
-        Ok((id, args, ret))
+        let mut temp = None;
+        let ty = match &ret {
+            None => Ty::Bool,
+            Some(LTy::Struct(_)) => {
+                let dst = match sret {
+                    Some(d) => d,
+                    None => {
+                        let k = self.new_slot(ret.as_ref().unwrap())?;
+                        temp = Some(k);
+                        slot_expr(k)
+                    }
+                };
+                args.push(dst);
+                Ty::Ptr
+            }
+            Some(t) => reg_ty(t).unwrap(),
+        };
+        Ok((Expr { ty, kind: ExprKind::Call { func: id, args } }, ret, temp))
     }
 
     // ----------------------------------------------------------- expressions
@@ -995,6 +1322,8 @@ impl<'a> Lower<'a> {
             Val::E(e) if e.ty == Ty::Bool => Ok(e),
             Val::E(e) => self.reject("condition", format!("expected bool, found {}", e.ty.name())),
             Val::Ct(_) => self.reject("condition", "expected bool, found an integer literal".into()),
+            Val::P(..) => self.reject("condition", "expected bool, found a pointer".into()),
+            Val::M(_) => self.reject("condition", "expected bool, found a struct".into()),
         }
     }
 
@@ -1037,6 +1366,8 @@ impl<'a> Lower<'a> {
                     format!("expected {}, found {}", to.name(), e.ty.name()),
                 )
             }
+            Val::P(..) => self.reject("type mismatch", format!("expected {}, found a pointer", to.name())),
+            Val::M(_) => self.reject("type mismatch", format!("expected {}, found a struct", to.name())),
         }
     }
 
@@ -1077,6 +1408,8 @@ impl<'a> Lower<'a> {
             }
             (Val::Ct(_), Val::Ct(_)) => self.reject("type mismatch", "internal: two literals".into()),
             (Val::Poison, _) | (_, Val::Poison) => Err(()),
+            (Val::M(_), _) | (_, Val::M(_)) => self.reject("type mismatch", format!("`{}` on a struct", what)),
+            (Val::P(..), _) | (_, Val::P(..)) => self.reject("type mismatch", format!("`{}` on a pointer", what)),
         }
     }
 
@@ -1100,39 +1433,15 @@ impl<'a> Lower<'a> {
                     }));
                 }
                 match self.lookup(name) {
-                    Some(Binding::Var { id, .. }) => Ok(Val::E(Expr {
-                        ty: self.vars[id as usize].ty,
-                        kind: ExprKind::Var(id),
-                    })),
+                    Some(Binding::Var { id, .. }) => {
+                        let e = Expr { ty: self.vars[id as usize].ty, kind: ExprKind::Var(id) };
+                        Ok(val_of(e, &self.ltys[id as usize]))
+                    }
                     Some(Binding::Const(v)) => Ok(v),
+                    Some(Binding::Mem(p)) => self.place_value(p),
                     None => match self.global(name)? {
                         Some(v) => Ok(v),
-                        None if self.recover && self.poison_names.contains(name) => Err(()),
-                        None if self.poison_names.contains(name) => self.reject(
-                            "ExprIdentifier(rejected decl)",
-                            format!("`{}`, whose declaration was rejected", name),
-                        ),
-                        // `E::V` of an enum this file rejected: its cascade.
-                        None if self.recover
-                            && name.split_once("::").map_or(false, |(e, _)| self.poison_names.contains(e)) =>
-                        {
-                            Err(())
-                        }
-                        None => {
-                            let what = if name == "null" {
-                                "ExprLiteral(null)"
-                            } else if name.contains("::") {
-                                "ExprIdentifier(E::V)"
-                            } else if Ty::from_name(name).is_some()
-                                || name.starts_with('[')
-                                || matches!(name, "f32" | "f64" | "usize" | "isize" | "type")
-                            {
-                                "ExprIdentifier(type as value)"
-                            } else {
-                                "ExprIdentifier(undeclared)"
-                            };
-                            self.reject(what, format!("unknown name `{}`", name))
-                        }
+                        None => self.unknown_name(name),
                     },
                 }
             }
@@ -1165,24 +1474,70 @@ impl<'a> Lower<'a> {
                     return self.reject("ExprUnary", "unexpected shape".into());
                 }
                 let op = n.extra_op.clone();
+                if op == "&" {
+                    let p = self.lvalue(&n.children[0])?;
+                    let t = LTy::Ptr(Box::new(p.ty.clone()), p.mutable);
+                    return Ok(Val::P(addr_of(&p), t));
+                }
                 let v = self.expr(&n.children[0])?;
                 self.unary(&op, v)
             }
             NodeKind::ExprCall => {
-                let (func, args, ret) = self.call(n)?;
+                let (call, ret, temp) = self.call(n, None)?;
                 match ret {
-                    Some(ty) => Ok(Val::E(Expr {
-                        ty,
-                        kind: ExprKind::Call { func, args },
-                    })),
+                    Some(t @ LTy::Struct(_)) => {
+                        Ok(Val::M(Place { addr: call, off: 0, ty: t, mutable: false, temp }))
+                    }
+                    Some(t) => Ok(val_of(call, &t)),
                     None => self.reject("ExprCall", format!("void fn `{}` used as a value", n.name)),
                 }
+            }
+            NodeKind::ExprFieldAccess => {
+                let p = self.lvalue(n)?;
+                self.place_value(p)
+            }
+            NodeKind::ExprStructLit => {
+                if n.name.is_empty() {
+                    return self.reject("ExprStructLit", "anonymous `.{}` literal with no result type".into());
+                }
+                let t = self.lty(&n.name)?;
+                self.struct_temp(n, t)
             }
             _ => {
                 let k = kind_name(n);
                 self.reject(&k, String::new())
             }
         }
+    }
+
+    /// A name that is neither in scope nor a module-level constant.
+    fn unknown_name<T>(&mut self, name: &str) -> R<T> {
+        if self.poison_names.contains(name) {
+            if self.recover {
+                return Err(());
+            }
+            return self.reject(
+                "ExprIdentifier(rejected decl)",
+                format!("`{}`, whose declaration was rejected", name),
+            );
+        }
+        // `E::V` of an enum this file rejected: its cascade.
+        if self.recover && name.split_once("::").map_or(false, |(e, _)| self.poison_names.contains(e)) {
+            return Err(());
+        }
+        let what = if name == "null" {
+            "ExprLiteral(null)"
+        } else if name.contains("::") {
+            "ExprIdentifier(E::V)"
+        } else if Ty::from_name(name).is_some()
+            || name.starts_with('[')
+            || matches!(name, "f32" | "f64" | "usize" | "isize" | "type")
+        {
+            "ExprIdentifier(type as value)"
+        } else {
+            "ExprIdentifier(undeclared)"
+        };
+        self.reject(what, format!("unknown name `{}`", name))
     }
 
     fn literal(&mut self, n: &Node) -> R<Val> {
@@ -1265,13 +1620,17 @@ impl<'a> Lower<'a> {
                 &format!("ExprUnary({})", op),
                 "on an untyped integer literal".into(),
             ),
-            (_, Val::Poison) => Err(()),
+            (op, _) => self.reject(&format!("ExprUnary({})", op), "operand is a pointer or a struct".into()),
         }
     }
 
     fn binary(&mut self, op: &str, a: Val, b: Val) -> R<Val> {
         if a.is_poison() || b.is_poison() {
             return Err(());
+        }
+        if matches!(a, Val::P(..) | Val::M(_)) || matches!(b, Val::P(..) | Val::M(_)) {
+            let what = if matches!(a, Val::M(_)) || matches!(b, Val::M(_)) { "a struct" } else { "a pointer" };
+            return self.reject("type mismatch", format!("`{}` on {}", op, what));
         }
         let cmp = match op {
             "==" => Some(CmpOp::Eq),
@@ -1374,11 +1733,10 @@ impl<'a> Lower<'a> {
                     Ok(Val::Ct(x >> y))
                 }
             }
-            (Val::Ct(_), Val::E(_)) => self.reject(
+            (Val::Ct(_), _) => self.reject(
                 "ExprBinary(<< >>)",
                 "untyped literal shifted by a runtime amount".into(),
             ),
-            (Val::Poison, _) | (_, Val::Poison) => Err(()),
             (Val::E(x), amt) => {
                 let ty = x.ty;
                 if !ty.is_int() {
@@ -1404,7 +1762,6 @@ impl<'a> Lower<'a> {
                             kind: ExprKind::Arith { op: wop, lhs: Box::new(x), rhs: Box::new(amt), site: 0 },
                         }))
                     }
-                    Val::Poison => Err(()),
                     Val::E(y) => {
                         if !y.ty.is_int() {
                             return self.reject("ExprBinary(<< >>)", "bool shift amount".into());
@@ -1419,8 +1776,10 @@ impl<'a> Lower<'a> {
                             kind: ExprKind::Arith { op, lhs: Box::new(x), rhs: Box::new(y), site },
                         }))
                     }
+                    _ => self.reject("ExprBinary(<< >>)", "shift amount is a pointer or a struct".into()),
                 }
             }
+            _ => self.reject("ExprBinary(<< >>)", "shift of a pointer or a struct".into()),
         }
     }
 
@@ -1439,6 +1798,581 @@ impl<'a> Lower<'a> {
             ty: Ty::Bool,
             kind: ExprKind::Cmp { op, lhs: Box::new(x), rhs: Box::new(y) },
         }))
+    }
+
+    // ---------------------------------------------------------------- memory
+
+    /// A source type: `*T`, `*const T`, a scalar, or a struct (laid out).
+    fn lty(&mut self, name: &str) -> R<LTy> {
+        self.lty_in(name, true)
+    }
+
+    /// `by_value`: whether a struct's layout is needed now. The pointee of a
+    /// pointer is only named, so a struct may point to itself.
+    fn lty_in(&mut self, name: &str, by_value: bool) -> R<LTy> {
+        let t = name.trim();
+        if let Some(rest) = t.strip_prefix('*') {
+            let rest = rest.trim_start();
+            let (inner, mutable) = match rest.strip_prefix("const ") {
+                Some(r) => (r, false),
+                None => (rest, true),
+            };
+            let inner = self.lty_in(inner, false)?;
+            return Ok(LTy::Ptr(Box::new(inner), mutable));
+        }
+        if let Some(ty) = Ty::from_name(t) {
+            return Ok(LTy::S(ty));
+        }
+        if self.struct_nodes.contains_key(t) {
+            let id = self.struct_id(t);
+            if by_value {
+                self.layout(id)?;
+            }
+            return Ok(LTy::Struct(id));
+        }
+        let (construct, detail) = self.type_construct(t);
+        self.reject(&construct, detail)
+    }
+
+    fn struct_id(&mut self, name: &str) -> u32 {
+        if let Some(&id) = self.struct_ids.get(name) {
+            return id;
+        }
+        let id = self.structs.len() as u32;
+        self.structs.push(StructDef { name: name.to_string(), fields: Vec::new(), size: None, align: 1, fail: None });
+        self.struct_ids.insert(name.to_string(), id);
+        id
+    }
+
+    /// Lay out struct `id` (C rules) if that has not been done.
+    fn layout(&mut self, id: u32) -> R<()> {
+        let sd = &self.structs[id as usize];
+        if sd.size.is_some() {
+            return Ok(());
+        }
+        if let Some(r) = sd.fail.clone() {
+            // Reported where it was first used; every later use says so too,
+            // except in recovery mode, where a construct is named once.
+            if !self.recover {
+                self.errors.push(Reject { line: self.line, ..r });
+            }
+            return Err(());
+        }
+        let name = sd.name.clone();
+        let key = format!("struct {}", name);
+        if !self.resolving.insert(key.clone()) {
+            return self.reject("StructDecl", format!("`{}` contains itself", name));
+        }
+        let node = self.struct_nodes[&name];
+        let saved = self.line;
+        let src = self.src;
+        if let Some(l) = src.and_then(|s| header_line(s, "const", &name).or_else(|| header_line(s, "pub const", &name))) {
+            self.line = l;
+        }
+        let nerr = self.errors.len();
+        let r = self.layout_fields(node);
+        self.line = saved;
+        self.resolving.remove(&key);
+        match r {
+            Ok((fields, size, align)) => {
+                let sd = &mut self.structs[id as usize];
+                sd.fields = fields;
+                sd.size = Some(size);
+                sd.align = align;
+                Ok(())
+            }
+            Err(()) => {
+                if let Some(e) = self.errors.get(nerr).cloned() {
+                    self.structs[id as usize].fail = Some(e);
+                }
+                Err(())
+            }
+        }
+    }
+
+    fn layout_fields(&mut self, node: &'a Node) -> R<(Vec<Field<'a>>, u32, u32)> {
+        if !node.params.is_empty() {
+            return self.reject("StructDecl", format!("generic struct `{}`", node.name));
+        }
+        let mut fields: Vec<Field<'a>> = Vec::new();
+        let (mut size, mut align) = (0u32, 1u32);
+        for f in &node.children {
+            if f.kind != NodeKind::ExprIdentifier || f.extra_type.trim().is_empty() || f.children.len() > 1 {
+                let k = kind_name(f);
+                return self.reject("StructDecl", format!("`{}` member of kind {}", node.name, k));
+            }
+            if fields.iter().any(|g| g.name == f.name) {
+                return self.reject("StructDecl", format!("`{}` has two fields `{}`", node.name, f.name));
+            }
+            let ty = self.lty(&f.extra_type)?;
+            let (fs, fa) = self.size_align(&ty)?;
+            let off = size.div_ceil(fa) * fa;
+            size = off + fs;
+            align = align.max(fa);
+            fields.push(Field { name: f.name.clone(), ty, off, default: f.children.first() });
+        }
+        Ok((fields, size.div_ceil(align) * align, align))
+    }
+
+    fn size_align(&mut self, t: &LTy) -> R<(u32, u32)> {
+        match t {
+            LTy::S(ty) => Ok((ty.bytes(), ty.bytes())),
+            LTy::Ptr(..) => Ok((8, 8)),
+            LTy::Struct(id) => {
+                self.layout(*id)?;
+                let sd = &self.structs[*id as usize];
+                Ok((sd.size.unwrap(), sd.align))
+            }
+        }
+    }
+
+    fn type_name(&self, t: &LTy) -> String {
+        match t {
+            LTy::S(ty) => ty.name().to_string(),
+            LTy::Ptr(inner, m) => format!("*{}{}", if *m { "" } else { "const " }, self.type_name(inner)),
+            LTy::Struct(id) => self.structs[*id as usize].name.clone(),
+        }
+    }
+
+    /// A new frame slot for one value of type `t`.
+    fn new_slot(&mut self, t: &LTy) -> R<u32> {
+        let (size, align) = self.size_align(t)?;
+        self.slots.push(SlotInfo { size: size.max(1), align: align.max(1) });
+        Ok((self.slots.len() - 1) as u32)
+    }
+
+    fn fields(&mut self, id: u32) -> R<Vec<Field<'a>>> {
+        self.layout(id)?;
+        Ok(self.structs[id as usize].fields.clone())
+    }
+
+    /// Evaluate `n` as a value of type `want`: a struct literal takes its
+    /// type from here, so it may be anonymous (`.{ ... }`).
+    fn expr_as(&mut self, n: &Node, want: &LTy) -> R<Val> {
+        if n.kind == NodeKind::ExprStructLit && matches!(want, LTy::Struct(_)) {
+            self.see(n);
+            self.lit_type(n, want)?;
+            return self.struct_temp(n, want.clone());
+        }
+        let v = self.expr(n)?;
+        self.coerce_to(v, want)
+    }
+
+    /// Check a struct literal's own name, if it has one, against `want`.
+    fn lit_type(&mut self, n: &Node, want: &LTy) -> R<()> {
+        if n.name.is_empty() {
+            return Ok(());
+        }
+        let t = self.lty(&n.name)?;
+        if &t != want {
+            let (a, b) = (self.type_name(want), self.type_name(&t));
+            return self.reject("type mismatch", format!("expected {}, found {}", a, b));
+        }
+        Ok(())
+    }
+
+    fn coerce_to(&mut self, v: Val, want: &LTy) -> R<Val> {
+        if v.is_poison() {
+            // Recovery mode: the caller decides what an unknown value costs.
+            return Ok(v);
+        }
+        match want {
+            LTy::S(ty) => Ok(Val::E(self.coerce(v, *ty)?)),
+            LTy::Ptr(inner, m) => match v {
+                // `*T` coerces to `*const T`.
+                Val::P(e, LTy::Ptr(got, gm)) if got == *inner && (gm || !*m) => Ok(Val::P(e, want.clone())),
+                Val::P(_, t) => {
+                    let (a, b) = (self.type_name(want), self.type_name(&t));
+                    self.reject("type mismatch", format!("expected {}, found {}", a, b))
+                }
+                _ => {
+                    let a = self.type_name(want);
+                    self.reject("type mismatch", format!("expected {}, found a value", a))
+                }
+            },
+            LTy::Struct(_) => match v {
+                Val::M(p) if &p.ty == want => Ok(Val::M(p)),
+                Val::M(p) => {
+                    let (a, b) = (self.type_name(want), self.type_name(&p.ty));
+                    self.reject("type mismatch", format!("expected {}, found {}", a, b))
+                }
+                _ => {
+                    let a = self.type_name(want);
+                    self.reject("type mismatch", format!("expected {}, found a scalar", a))
+                }
+            },
+        }
+    }
+
+    /// The register expression of a scalar or pointer value.
+    fn reg(&mut self, v: Val) -> R<Expr> {
+        match v {
+            Val::E(e) | Val::P(e, _) => Ok(e),
+            Val::Poison => Err(()),
+            Val::Ct(_) => self.reject("type mismatch", "untyped integer literal".into()),
+            Val::M(_) => self.reject("type mismatch", "a struct where a scalar is expected".into()),
+        }
+    }
+
+    /// A struct literal built in a fresh temporary slot, at the point the
+    /// value is evaluated.
+    fn struct_temp(&mut self, n: &Node, t: LTy) -> R<Val> {
+        let k = self.new_slot(&t)?;
+        let dst = Place { addr: slot_expr(k), off: 0, ty: t, mutable: true, temp: None };
+        let mut stmts = Vec::new();
+        self.init(n, dst.clone(), true, &mut stmts)?;
+        let addr = if stmts.is_empty() {
+            slot_expr(k)
+        } else {
+            Expr { ty: Ty::Ptr, kind: ExprKind::Seq { stmts, value: Box::new(slot_expr(k)) } }
+        };
+        Ok(Val::M(Place { addr, off: 0, ty: dst.ty, mutable: false, temp: Some(k) }))
+    }
+
+    /// Write the value of `n` into `dst`. `fresh`: nothing can read `dst`
+    /// while it is being written (a new variable, a temporary, a result), so
+    /// a struct literal or a struct-returning call may build in place.
+    fn init(&mut self, n: &Node, dst: Place, fresh: bool, out: &mut Vec<Stmt>) -> R<()> {
+        self.see(n);
+        if is_undefined(n) {
+            return Ok(());
+        }
+        let t = dst.ty.clone();
+        let LTy::Struct(id) = t else {
+            let v = self.expr_as(n, &t)?;
+            let value = self.reg(v)?;
+            out.push(Stmt::Store { addr: dst.addr, off: dst.off, value });
+            return Ok(());
+        };
+        if n.kind == NodeKind::ExprStructLit {
+            self.lit_type(n, &t)?;
+            if fresh && pure_addr(&dst.addr) {
+                return self.init_struct(n, id, &dst, out);
+            }
+            let k = self.new_slot(&t)?;
+            let tmp = Place { addr: slot_expr(k), off: 0, ty: t, mutable: true, temp: None };
+            self.init_struct(n, id, &tmp, out)?;
+            return self.copy(&dst, tmp, out);
+        }
+        if n.kind == NodeKind::ExprCall && fresh && self.sigs.get(&n.name).is_some_and(|s| s.ret == Some(t.clone())) {
+            let (call, _, _) = self.call(n, Some(addr_of(&dst)))?;
+            out.push(Stmt::Eval(call));
+            return Ok(());
+        }
+        let v = self.expr_as(n, &t)?;
+        match v {
+            Val::M(src) => self.copy(&dst, src, out),
+            Val::Poison => Err(()),
+            _ => self.reject("type mismatch", "internal: struct value not in memory".into()),
+        }
+    }
+
+    /// The fields of a struct literal, into `dst` (whose address is pure).
+    fn init_struct(&mut self, n: &Node, id: u32, dst: &Place, out: &mut Vec<Stmt>) -> R<()> {
+        let fields = self.fields(id)?;
+        let sname = self.structs[id as usize].name.clone();
+        let mut seen = vec![false; fields.len()];
+        for c in &n.children {
+            self.see(c);
+            if c.kind != NodeKind::ExprFieldAccess || c.children.len() != 1 {
+                return self.reject("ExprStructLit", format!("positional initializer in a `{}` literal", sname));
+            }
+            let Some(i) = fields.iter().position(|f| f.name == c.name) else {
+                return self.reject("ExprStructLit", format!("`{}` has no field `{}`", sname, c.name));
+            };
+            if seen[i] {
+                return self.reject("ExprStructLit", format!("field `{}` initialised twice", c.name));
+            }
+            seen[i] = true;
+            let sub = field_place(dst, &fields[i]);
+            self.init(&c.children[0], sub, true, out)?;
+        }
+        for (i, f) in fields.iter().enumerate() {
+            if seen[i] {
+                continue;
+            }
+            let Some(d) = f.default else {
+                return self.reject("ExprStructLit", format!("missing field `{}` of `{}`", f.name, sname));
+            };
+            // A default sees module scope only.
+            let saved = std::mem::replace(&mut self.scopes, vec![HashMap::new()]);
+            let r = self.init(d, field_place(dst, f), true, out);
+            self.scopes = saved;
+            r?;
+        }
+        Ok(())
+    }
+
+    /// `dst = src` for a struct: one copy. Both addresses are evaluated, dst
+    /// first, even when there is nothing to copy.
+    fn copy(&mut self, dst: &Place, src: Place, out: &mut Vec<Stmt>) -> R<()> {
+        let (size, _) = self.size_align(&dst.ty)?;
+        if size == 0 {
+            for p in [dst, &src] {
+                if !pure_addr(&p.addr) {
+                    out.push(Stmt::Eval(p.addr.clone()));
+                }
+            }
+            return Ok(());
+        }
+        out.push(Stmt::Copy { dst: addr_of(dst), src: addr_of(&src), size });
+        Ok(())
+    }
+
+    /// The value stored at a place: a load for a scalar or pointer (folded
+    /// when the place is read-only data), the place itself for a struct.
+    fn place_value(&mut self, p: Place) -> R<Val> {
+        let Some(ty) = reg_ty(&p.ty) else { return Ok(Val::M(p)) };
+        if let (ExprKind::Data(k), LTy::S(_)) = (&p.addr.kind, &p.ty) {
+            let blob = &self.data[*k as usize];
+            let mut raw = 0u64;
+            for i in (0..ty.bytes() as usize).rev() {
+                raw = (raw << 8) | blob[p.off as usize + i] as u64;
+            }
+            return Ok(Val::E(Expr { ty, kind: ExprKind::Const(ty.from_raw(raw)) }));
+        }
+        let e = Expr { ty, kind: ExprKind::Load { addr: Box::new(p.addr), off: p.off } };
+        Ok(val_of(e, &p.ty))
+    }
+
+    /// The memory an expression names: a variable in memory, a field, or
+    /// `p.*`.
+    fn lvalue(&mut self, n: &Node) -> R<Place> {
+        self.see(n);
+        match n.kind {
+            NodeKind::ExprIdentifier => match self.lookup(&n.name) {
+                Some(Binding::Mem(p)) => Ok(p),
+                Some(Binding::Const(Val::Poison)) => Err(()),
+                Some(_) => self.reject("ExprUnary(&)", format!("`{}` is not in memory", n.name)),
+                None => match self.global(&n.name)? {
+                    Some(Val::M(p)) => Ok(p),
+                    Some(Val::Poison) => Err(()),
+                    Some(_) => self.reject("ExprUnary(&)", format!("address of constant `{}`", n.name)),
+                    None => self.unknown_name(&n.name),
+                },
+            },
+            NodeKind::ExprFieldAccess if n.children.len() == 1 => {
+                let base = &n.children[0];
+                if n.name == "*" {
+                    return match self.expr(base)? {
+                        Val::P(e, LTy::Ptr(inner, m)) => {
+                            if let LTy::Struct(id) = *inner {
+                                self.layout(id)?;
+                            }
+                            Ok(Place { addr: e, off: 0, ty: *inner, mutable: m, temp: None })
+                        }
+                        Val::Poison => Err(()),
+                        _ => self.reject("ExprFieldAccess(.*)", "dereference of a non-pointer".into()),
+                    };
+                }
+                // `Color.red`, `std.math`: the base is not a value.
+                if base.kind == NodeKind::ExprIdentifier
+                    && self.lookup(&base.name).is_none()
+                    && !self.const_nodes.contains_key(&base.name)
+                {
+                    if self.recover && self.poison_names.contains(&base.name) {
+                        return Err(());
+                    }
+                    return self.reject("ExprFieldAccess", format!("`{}.{}`", base.name, n.name));
+                }
+                let p = match self.expr(base)? {
+                    Val::M(p) => p,
+                    Val::Poison => return Err(()),
+                    // Field access through a pointer dereferences it.
+                    Val::P(e, LTy::Ptr(inner, m)) if matches!(*inner, LTy::Struct(_)) => {
+                        Place { addr: e, off: 0, ty: *inner, mutable: m, temp: None }
+                    }
+                    _ => return self.reject("ExprFieldAccess", format!("`.{}` on a value that is not a struct", n.name)),
+                };
+                let LTy::Struct(id) = p.ty else { unreachable!() };
+                let fields = self.fields(id)?;
+                match fields.iter().find(|f| f.name == n.name) {
+                    Some(f) => {
+                        // A field of a temporary is read from it only once.
+                        let mut q = field_place(&p, f);
+                        q.mutable = p.mutable && p.temp.is_none();
+                        Ok(q)
+                    }
+                    None => {
+                        let s = self.structs[id as usize].name.clone();
+                        self.reject("ExprFieldAccess", format!("`{}` has no field `{}`", s, n.name))
+                    }
+                }
+            }
+            _ => {
+                let k = kind_name(n);
+                self.reject(&k, "not addressable".into())
+            }
+        }
+    }
+
+    /// `dst op= rhs` for any place.
+    fn store(&mut self, mut dst: Place, op: &str, rhs: &Node, out: &mut Vec<Stmt>) -> R<()> {
+        if !dst.mutable {
+            return self.reject("StmtAssign", "assignment through a constant".into());
+        }
+        let plain = op.is_empty() || op == "=";
+        if plain {
+            return self.init(rhs, dst, false, out);
+        }
+        let LTy::S(ty) = dst.ty else {
+            return self.reject("StmtAssign", format!("`{}` on a pointer or a struct", op));
+        };
+        let bin = match op.strip_suffix('=') {
+            Some(b) if !b.is_empty() => b.to_string(),
+            _ => return self.reject("StmtAssign", format!("operator `{}`", op)),
+        };
+        // The address is computed once, for both the load and the store.
+        if !pure_addr(&dst.addr) {
+            let h = self.hidden_var("%addr", LTy::Ptr(Box::new(dst.ty.clone()), true));
+            out.push(Stmt::Assign { var: h, value: dst.addr });
+            dst.addr = Expr { ty: Ty::Ptr, kind: ExprKind::Var(h) };
+        }
+        let cur = self.place_value(dst.clone())?;
+        let r = self.expr(rhs)?;
+        let v = self.binary(&bin, cur, r)?;
+        let value = self.coerce(v, ty)?;
+        out.push(Stmt::Store { addr: dst.addr, off: dst.off, value });
+        Ok(())
+    }
+
+    /// A module-level struct constant: its bytes in read-only data.
+    fn rodata(&mut self, n: &Node, t: LTy) -> R<Val> {
+        if n.kind != NodeKind::ExprStructLit {
+            let v = self.expr_as(n, &t)?;
+            return match v {
+                Val::M(p) if matches!(p.addr.kind, ExprKind::Data(_)) => Ok(Val::M(p)),
+                _ => self.reject("ConstDecl", "struct constant is not a compile-time value".into()),
+            };
+        }
+        let (size, _) = self.size_align(&t)?;
+        let mut buf = vec![0u8; size as usize];
+        self.const_fill(n, &t, &mut buf, 0)?;
+        self.data.push(buf);
+        let k = (self.data.len() - 1) as u32;
+        Ok(Val::M(Place { addr: Expr { ty: Ty::Ptr, kind: ExprKind::Data(k) }, off: 0, ty: t, mutable: false, temp: None }))
+    }
+
+    fn const_fill(&mut self, n: &Node, t: &LTy, buf: &mut [u8], off: usize) -> R<()> {
+        self.see(n);
+        if is_undefined(n) {
+            return Ok(());
+        }
+        match t {
+            LTy::S(ty) => {
+                let v = self.expr(n)?;
+                let e = self.coerce(v, *ty)?;
+                let ExprKind::Const(c) = e.kind else {
+                    return self.reject("ConstDecl", "struct field is not a compile-time value".into());
+                };
+                let raw = c as u64;
+                for i in 0..ty.bytes() as usize {
+                    buf[off + i] = (raw >> (8 * i)) as u8;
+                }
+                Ok(())
+            }
+            LTy::Ptr(..) => self.reject("ConstDecl", "pointer in a constant struct".into()),
+            LTy::Struct(id) if n.kind == NodeKind::ExprStructLit => {
+                self.lit_type(n, t)?;
+                let fields = self.fields(*id)?;
+                let sname = self.structs[*id as usize].name.clone();
+                let mut seen = vec![false; fields.len()];
+                for c in &n.children {
+                    if c.kind != NodeKind::ExprFieldAccess || c.children.len() != 1 {
+                        return self.reject("ExprStructLit", format!("positional initializer in a `{}` literal", sname));
+                    }
+                    let Some(i) = fields.iter().position(|f| f.name == c.name) else {
+                        return self.reject("ExprStructLit", format!("`{}` has no field `{}`", sname, c.name));
+                    };
+                    if seen[i] {
+                        return self.reject("ExprStructLit", format!("field `{}` initialised twice", c.name));
+                    }
+                    seen[i] = true;
+                    self.const_fill(&c.children[0], &fields[i].ty, buf, off + fields[i].off as usize)?;
+                }
+                for (i, f) in fields.iter().enumerate() {
+                    if seen[i] {
+                        continue;
+                    }
+                    let Some(d) = f.default else {
+                        return self.reject("ExprStructLit", format!("missing field `{}` of `{}`", f.name, sname));
+                    };
+                    self.const_fill(d, &f.ty, buf, off + f.off as usize)?;
+                }
+                Ok(())
+            }
+            LTy::Struct(_) => {
+                let v = self.expr_as(n, t)?;
+                let Val::M(p) = v else { unreachable!() };
+                let ExprKind::Data(k) = p.addr.kind else {
+                    return self.reject("ConstDecl", "struct field is not a compile-time value".into());
+                };
+                let (size, _) = self.size_align(t)?;
+                let src = &self.data[k as usize][p.off as usize..(p.off + size) as usize];
+                buf[off..off + size as usize].copy_from_slice(src);
+                Ok(())
+            }
+        }
+    }
+}
+
+/// The register type of a scalar or pointer; None for a struct.
+fn reg_ty(t: &LTy) -> Option<Ty> {
+    match t {
+        LTy::S(ty) => Some(*ty),
+        LTy::Ptr(..) => Some(Ty::Ptr),
+        LTy::Struct(_) => None,
+    }
+}
+
+fn val_of(e: Expr, t: &LTy) -> Val {
+    match t {
+        LTy::S(_) => Val::E(e),
+        _ => Val::P(e, t.clone()),
+    }
+}
+
+fn slot_expr(k: u32) -> Expr {
+    Expr { ty: Ty::Ptr, kind: ExprKind::Slot(k) }
+}
+
+fn addr_of(p: &Place) -> Expr {
+    if p.off == 0 {
+        return p.addr.clone();
+    }
+    let idx = Expr { ty: Ty::U64, kind: ExprKind::Const(p.off as i128) };
+    Expr { ty: Ty::Ptr, kind: ExprKind::Offset { base: Box::new(p.addr.clone()), idx: Box::new(idx), scale: 1 } }
+}
+
+fn field_place(p: &Place, f: &Field) -> Place {
+    Place { addr: p.addr.clone(), off: p.off + f.off, ty: f.ty.clone(), mutable: p.mutable, temp: None }
+}
+
+/// An address that may be evaluated more than once with the same result and
+/// no effect.
+fn pure_addr(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Slot(_) | ExprKind::Data(_) | ExprKind::Var(_) => true,
+        ExprKind::Offset { base, idx, .. } => pure_addr(base) && matches!(idx.kind, ExprKind::Const(_)),
+        _ => false,
+    }
+}
+
+fn is_undefined(n: &Node) -> bool {
+    n.kind == NodeKind::ExprIdentifier && n.name == "undefined"
+}
+
+/// Names whose address is taken (`&name`) anywhere in a body.
+fn scan_addr_taken(ns: &[Node], out: &mut HashSet<String>) {
+    for n in ns {
+        if n.kind == NodeKind::ExprUnary && n.extra_op == "&" {
+            if let Some(c) = n.children.first() {
+                if c.kind == NodeKind::ExprIdentifier {
+                    out.insert(c.name.clone());
+                }
+            }
+        }
+        scan_addr_taken(&n.children, out);
     }
 }
 
