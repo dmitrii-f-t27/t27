@@ -199,7 +199,10 @@ fn count_getters(src: &str) -> usize {
 /// The generator is pure-stdlib Python, deterministic, and takes an output
 /// directory. Run it into a temp dir and compare against that. A generator that
 /// cannot be run is a FINDING, not a shrug.
-fn generate_emitted(catalog: &Path) -> Result<std::path::PathBuf, String> {
+///
+/// The temp dir is private to this call (see `Scratch`) and is removed when
+/// the returned value is dropped, so the caller holds it until it has read.
+fn generate_emitted(catalog: &Path) -> Result<Scratch, String> {
     // Walk UP looking for the generator rather than counting directory levels:
     // `specs/numeric/x.t27`.parent().parent() is `specs`, and the first version
     // of this looked for `specs/tools/...` and reported a missing generator that
@@ -224,13 +227,11 @@ fn generate_emitted(catalog: &Path) -> Result<std::path::PathBuf, String> {
             ))
         }
     };
-    let out = std::env::temp_dir().join("t27-catalog-emitted");
-    let _ = std::fs::remove_dir_all(&out);
-    std::fs::create_dir_all(&out).map_err(|e| format!("cannot create {}: {e}", out.display()))?;
+    let out = Scratch::new("catalog-emitted")?;
     let st = std::process::Command::new("python3")
         .arg(&script)
         .arg(catalog)
-        .arg(&out)
+        .arg(out.path())
         .output()
         .map_err(|e| format!("cannot run python3 {}: {e}", script.display()))?;
     if !st.status.success() {
@@ -244,6 +245,57 @@ fn generate_emitted(catalog: &Path) -> Result<std::path::PathBuf, String> {
     Ok(out)
 }
 
+/// A directory only this call writes, removed when dropped.
+///
+/// The first version regenerated into the fixed `$TMPDIR/t27-catalog-emitted`
+/// and cleared it with `remove_dir_all` first. Every run on the machine shares
+/// `$TMPDIR`, so two runs at once (two worktrees, two agents, a `cargo test`
+/// beside a manual `t27c suite`) removed each other's output. Measured
+/// 2026-10-04: two `t27c suite` runs started together from two worktrees, and
+/// one of them failed Phase 7 with `emitted-unreadable ... formats_catalog.json
+/// cannot be read (No such file or directory)`; `t27c catalog-gate` alone on
+/// either tree reported no such finding. A gate that fails because a neighbour
+/// ran is a false red.
+///
+/// The pid separates processes; the counter separates calls inside one process,
+/// because a test binary runs its tests on threads under a single pid (the
+/// `scratch()` helper in `service.rs` tests says the same). `create_dir`, not
+/// `create_dir_all`: it fails on a name that already exists, so this never
+/// adopts, and never removes, a directory it did not create -- a name left by a
+/// dead process whose pid was reused is skipped, not cleared.
+struct Scratch(std::path::PathBuf);
+
+impl Scratch {
+    fn new(tag: &str) -> Result<Scratch, String> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let base = std::env::temp_dir();
+        let mut last = String::new();
+        for _ in 0..64 {
+            let n = N.fetch_add(1, Ordering::Relaxed);
+            let p = base.join(format!("t27-{tag}-{}-{n}", std::process::id()));
+            match std::fs::create_dir(&p) {
+                Ok(()) => return Ok(Scratch(p)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    last = format!("{} already exists", p.display());
+                }
+                Err(e) => return Err(format!("cannot create {}: {e}", p.display())),
+            }
+        }
+        Err(format!("no free scratch directory under {} ({last})", base.display()))
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 fn check_emitted(emitted: &Path, records: &[Record], r: &mut Report) {
     check_emitted_at(emitted, records, r, None)
 }
@@ -255,14 +307,14 @@ fn check_emitted_at(
     catalog: Option<&Path>,
 ) {
     let mut json = emitted.join("formats_catalog.json");
+    // Held to the end of this function: dropping it removes the regenerated
+    // directory, and every read below is from it.
+    let mut scratch = None;
     if !json.is_file() {
         match catalog.map(generate_emitted) {
             Some(Ok(dir)) => {
-                r.emitted = Some(format!(
-                    "generated into {} (gen/ is gitignored; aa01dd4f1 untracked it)",
-                    dir.display()
-                ));
-                json = dir.join("formats_catalog.json");
+                json = dir.path().join("formats_catalog.json");
+                scratch = Some(dir);
             }
             Some(Err(why)) => {
                 r.findings.push(Finding {
@@ -389,10 +441,23 @@ fn check_emitted_at(
         }
     }
     *r.checked.entry("emitted-agrees").or_insert(0) += compared;
+    // Say where the compared JSON came from. Regeneration used to set
+    // `generated into <dir>` above, and this line overwrote it on every path,
+    // so no report ever said the artifact had been regenerated. The dir is
+    // also gone once `scratch` drops, so the line says that too.
+    let origin = match &scratch {
+        Some(s) => format!(
+            ", regenerated into {} (gen/ is gitignored; aa01dd4f1 untracked it) \
+             and removed after the comparison",
+            s.path().display()
+        ),
+        None => String::new(),
+    };
     r.emitted = Some(format!(
-        "{} records, {} numeric fields compared",
+        "{} records, {} numeric fields compared{}",
         arr.len(),
-        compared
+        compared,
+        origin
     ));
 }
 
@@ -776,6 +841,23 @@ mod tests {
             broken.len(),
             RUNS * ROUNDS,
             broken
+        );
+    }
+
+    /// Each regeneration gets its own directory, and dropping one removes that
+    /// one only.
+    #[test]
+    fn a_regenerated_directory_is_private_and_removed_by_its_owner() {
+        let a = generate_emitted(&repo_catalog()).expect("the generator runs");
+        let b = generate_emitted(&repo_catalog()).expect("the generator runs");
+        assert_ne!(a.path(), b.path());
+        assert!(a.path().join("formats_catalog.json").is_file());
+        let gone = a.path().to_path_buf();
+        drop(a);
+        assert!(!gone.exists(), "{} outlived its owner", gone.display());
+        assert!(
+            b.path().join("formats_catalog.json").is_file(),
+            "dropping one scratch dir removed the other's output"
         );
     }
 
