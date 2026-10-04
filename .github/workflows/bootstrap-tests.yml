@@ -82,6 +82,12 @@ jobs:
           echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
           "$RUNNER_TEMP/zig/zig" version
 
+      - name: Install Icarus for native corpus controls
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y iverilog
+          iverilog -V
+
       # The suite has 383 known failures, so cargo exits non-zero on a healthy run.
       # The exit code is recorded rather than obeyed, and the RATCHET is the verdict.
       # This is not `|| true`: a build failure produces a log with zero targets, which

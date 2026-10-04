@@ -17,6 +17,10 @@
 
 - Merge upstream c107 history unchanged; its loop-tools workflow adds three shell steps. Combined native census is268 run steps/247 runner-selected shell steps (master267/246 plus one Zig install). Own compiler f668 and upstream CLI source/manifest/lock are preserved; preserve genuine upstream authors and all events.
 
+## Corpus prerequisites
+
+- Exact474673 Linux runs all six native Zig controls PASS. Its three existing corpus_zig_bodies tests now execute and refuse the absent iverilog prerequisite; cargo reports2831 passed/3 failed/2 ignored/124 targets. Install actual Icarus before unchanged tests; final native census269 run steps/248 runner-selected shell steps. No test skips or failing-set changes.
+
 ## Limits and next
 
 - Separate upstream SHA256 source still BLOCKED on pointer errors; accepted-baseline source-only value rename reproduces all three. Temporal alias substitution in the existing optimizer is also unfixed. Broader keyword/dotted issue2631 remains open.
