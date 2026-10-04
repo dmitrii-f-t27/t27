@@ -148,6 +148,14 @@ import subprocess
 import sys
 import urllib.request
 
+
+def rules():
+    """The steward's decisions, compiled from specs/tri/t27b/steward.t27 (#6198).
+    Loaded on first use: `status --json`, `doctor` and `ratchet` do not need it."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import t27b_rules
+    return t27b_rules
+
 LAB = "https://t27b-lab-production.up.railway.app"
 REPO = "gHashTag/t27"
 STATE = os.path.expanduser("~/.local/state/t27b-queen")
@@ -520,7 +528,7 @@ def lab_card(lab):
         return [f"lab        UNREADABLE: {lab}"]
     s = lab.get("summary") or {}
     h = honest(lab)
-    pct = f" ({100.0 * h['in_ref'] / h['reference']:.1f}%)" if h["in_ref"] is not None and h["reference"] else ""
+    pct = f" ({rules().pct(h['in_ref'], h['reference'])}%)" if h["in_ref"] is not None and h["reference"] else ""
     lines = [f"lab        ref {lab.get('ref')} @ {str(lab.get('commit', ''))[:9]}, finished {lab.get('finished')}",
              f"           t27b passes {h['in_ref']} of the {h['reference']} specs the reference passes{pct}, "
              f"mismatch {h['mismatch']}  ({s.get('files')} files)"]
@@ -783,25 +791,21 @@ def delta(src, frm, to):
     out = []
     add = lambda code, f, what: out.append({"code": code, "file": f, "what": what})  # noqa: E731
     checks = lambda x: (x.get("tests") or 0) + (x.get("invariants") or 0)  # noqa: E731
-    bad = ("fail", "mismatch", "crash")
     for f in sorted(set(ra) | set(rb)):
         x, y = ra.get(f), rb.get(f)
         if x is None or y is None:
             continue
-        if x.get("reference") != y.get("reference"):
-            add("REF-MOVED", f, f"reference {x.get('reference')} -> {y.get('reference')}")
-            continue
-        if y.get("reference") != "pass":
-            continue
         tx, ty = x.get("t27b"), y.get("t27b")
-        if tx == "pass" and ty != "pass":
-            add("REGRESSED", f, f"t27b pass -> {ty}: {(y.get('detail') or '')[:100]}")
-        elif ty in bad and tx not in bad:
-            add("NEW-MISMATCH", f, f"t27b {tx} -> {ty}: {(y.get('detail') or '')[:100]}")
-        elif tx != "pass" and ty == "pass":
-            add("GAINED", f, f"t27b {tx} -> pass" + ("" if checks(y) else " (compile-only)"))
-        elif tx == ty == "pass" and checks(x) and not checks(y):
-            add("CHECK-LOST", f, f"tests+invariants {checks(x)} -> 0")
+        # The decision is the spec's (specs/tri/t27b/steward.t27), not this file's.
+        code = rules().delta(x.get("reference"), y.get("reference"), tx, ty, checks(x), checks(y))
+        if code == "REF-MOVED":
+            add(code, f, f"reference {x.get('reference')} -> {y.get('reference')}")
+        elif code in ("REGRESSED", "NEW-MISMATCH"):
+            add(code, f, f"t27b {tx} -> {ty}: {(y.get('detail') or '')[:100]}")
+        elif code == "GAINED":
+            add(code, f, f"t27b {tx} -> pass" + ("" if checks(y) else " (compile-only)"))
+        elif code == "CHECK-LOST":
+            add(code, f, f"tests+invariants {checks(x)} -> 0")
     ha, hb = honest(a), honest(b)
     head = (f"from {str(a.get('commit', ''))[:9]} ({a.get('ref')}, {a.get('finished')})  "
             f"to {str(b.get('commit', ''))[:9]} ({b.get('ref')}, {b.get('finished')})\n"
@@ -826,7 +830,6 @@ def previous_run(src, to):
     return best[1]
 
 
-DELTA_RED = ("REGRESSED", "NEW-MISMATCH", "CHECK-LOST")
 
 
 def main_delta(args):
@@ -843,10 +846,10 @@ def main_delta(args):
         print(head)
         for f in found:
             print(f"{f['code']:<13} {f['file']}  {f['what']}")
-        red = sum(1 for f in found if f["code"] in DELTA_RED)
+        red = sum(1 for f in found if rules().is_red(f["code"]))
         print(f"tri t27b delta: {red} regression(s), {sum(1 for f in found if f['code'] == 'GAINED')} gained, "
               f"{sum(1 for f in found if f['code'] == 'REF-MOVED')} reference move(s)")
-    return 1 if any(f["code"] in DELTA_RED for f in found) else 0
+    return 1 if any(rules().is_red(f["code"]) for f in found) else 0
 
 
 def main(argv):
