@@ -75,11 +75,20 @@ struct Lower<'a> {
     ret: Option<Ty>,
     in_test: bool,
     test_assigns: HashMap<String, u32>,
+    /// The source text, when known: a clause-form `invariant` (and a
+    /// braceless `test`) reaches lowering with no line on any of its nodes, so
+    /// its header line is looked up here instead.
+    src: Option<&'a str>,
 }
 
 /// Lower a parsed module. All rejected constructs are returned (at most one per
 /// top-level item, since lowering of an item stops at its first rejection).
 pub fn lower(ast: &Node, mode: OverflowMode) -> Result<Program, Vec<Reject>> {
+    lower_src(ast, mode, None)
+}
+
+/// `lower`, with the source text the AST was parsed from, for line numbers.
+pub fn lower_src<'a>(ast: &'a Node, mode: OverflowMode, src: Option<&'a str>) -> Result<Program, Vec<Reject>> {
     let mut l = Lower {
         mode,
         sites: vec![Site {
@@ -100,6 +109,7 @@ pub fn lower(ast: &Node, mode: OverflowMode) -> Result<Program, Vec<Reject>> {
         ret: None,
         in_test: false,
         test_assigns: HashMap::new(),
+        src,
     };
     let module = if ast.kind == NodeKind::Module {
         ast.name.clone()
@@ -142,7 +152,7 @@ pub fn lower(ast: &Node, mode: OverflowMode) -> Result<Program, Vec<Reject>> {
                     Err(()) => {}
                 }
             }
-            NodeKind::TestBlock => {}
+            NodeKind::TestBlock | NodeKind::InvariantBlock => {}
             NodeKind::ConstDecl => {
                 l.const_nodes.insert(item.name.clone(), item);
             }
@@ -187,11 +197,27 @@ pub fn lower(ast: &Node, mode: OverflowMode) -> Result<Program, Vec<Reject>> {
             funcs.push(f);
         }
     }
+    let mut unchecked = Vec::new();
     for item in &items {
-        if item.kind == NodeKind::TestBlock {
-            if let Ok(f) = l.test(item) {
-                funcs.push(f);
+        match item.kind {
+            NodeKind::TestBlock => {
+                if let Ok(f) = l.test(item, false) {
+                    funcs.push(f);
+                }
             }
+            // An invariant with no lowered body is one whose clause the
+            // front-end discarded (t27c's Zig backend writes `NOT CHECKED`
+            // for exactly this case): there is nothing to run, and running
+            // nothing must not be reported as the invariant holding.
+            NodeKind::InvariantBlock if item.children.is_empty() && item.extra_field != "partial" => {
+                unchecked.push(item.name.clone());
+            }
+            NodeKind::InvariantBlock => {
+                if let Ok(f) = l.test(item, true) {
+                    funcs.push(f);
+                }
+            }
+            _ => {}
         }
     }
     if !l.errors.is_empty() {
@@ -202,7 +228,25 @@ pub fn lower(ast: &Node, mode: OverflowMode) -> Result<Program, Vec<Reject>> {
         funcs,
         sites: l.sites,
         mode,
+        unchecked,
     })
+}
+
+/// Line (1-based) of the first `<keyword> <name>` header in `src`, the name
+/// optionally quoted.
+fn header_line(src: &str, keyword: &str, name: &str) -> Option<u32> {
+    for (i, line) in src.lines().enumerate() {
+        let Some(rest) = line.trim_start().strip_prefix(keyword) else { continue };
+        let Some(rest) = rest.strip_prefix(|c: char| c == ' ' || c == '\t') else { continue };
+        let rest = rest.trim_start();
+        let rest = rest.strip_prefix('"').unwrap_or(rest);
+        if let Some(after) = rest.strip_prefix(name) {
+            if !after.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_') {
+                return Some(i as u32 + 1);
+            }
+        }
+    }
+    None
 }
 
 fn kind_name(n: &Node) -> String {
@@ -396,16 +440,25 @@ impl<'a> Lower<'a> {
             body,
             line: n.line,
             is_test: false,
+            is_invariant: false,
             noreturn_site,
         })
     }
 
-    fn test(&mut self, n: &Node) -> R<Func> {
+    /// A `test` block, or an `invariant` block: both are a parameterless body
+    /// of statements run once, and both use the test binding rule.
+    fn test(&mut self, n: &Node, invariant: bool) -> R<Func> {
         self.see(n);
+        if n.line == 0 {
+            if let Some(l) = self.src.and_then(|s| header_line(s, if invariant { "invariant" } else { "test" }, &n.name)) {
+                self.line = l;
+            }
+        }
         if n.extra_field == "partial" {
+            let (k, what) = if invariant { ("InvariantBlock", "invariant") } else { ("TestBlock", "test") };
             return self.reject(
-                "TestBlock",
-                format!("test `{}` was only partially parsed by the front-end", n.name),
+                k,
+                format!("{} `{}` was only partially parsed by the front-end", what, n.name),
             );
         }
         self.begin_body();
@@ -423,6 +476,7 @@ impl<'a> Lower<'a> {
             body,
             line: n.line,
             is_test: true,
+            is_invariant: invariant,
             noreturn_site: 0,
         })
     }
