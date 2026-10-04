@@ -51,7 +51,7 @@ def runs_tests(src: Path) -> tuple[int, str]:
 
 
 code, out = runs_tests(GEN)
-check(code == 0 and "38 tests passed" in out, f"the generated C passes the spec's tests ({code}: {out})")
+check(code == 0 and "50 tests passed" in out, f"the generated C passes the spec's tests ({code}: {out})")
 
 text = GEN.read_text()
 needle = "return (((in_ref * 1000) + (reference / 2)) / reference);"
@@ -114,6 +114,17 @@ check((r.bless_reason("fail", "reference-bug"), r.bless_reason("frontend", None)
 check((r.cap_rises(6, 5), r.cap_rises(5, 5), r.cap_rises(9, None)) == (True, False, False),
       "bless: the cap may fall, never rise; a ledger without one sets it")
 
+check((r.lab_stale(361, 360), r.lab_stale(360, 360), r.lab_stale(-5, 0), r.ledger_quiet(181, 180),
+       r.ledger_quiet(180.9, 180)) == (True, False, False, True, False),
+      "doctor: stale and quiet are strictly past the limit, in whole minutes; clock skew is age 0")
+check((r.claim(False, 1, 100), r.claim(True, 101, 100), r.claim(True, 100, 100), r.claim(None, 999, 100),
+       r.claim(True, None, 100)) == ("CLAIM-DEAD", "CLAIM-OLD", None, None, None),
+      "doctor: a dead pid frees the claim at any age; an unknown pid says nothing")
+check((r.railway_old(4), r.railway_old(5)) == (True, False), "doctor: railway 4.x is old, 5.x is not")
+check((r.checkout(False, False), r.checkout(False, True), r.checkout(True, True), r.checkout(True, False))
+      == ("LAB-CHECKOUT", "LAB-CHECKOUT", "LAB-RECLONED", None),
+      "doctor: a failed checkout outranks a heal; a heal is reported")
+
 tool = TOOL.read_text()
 body = tool[tool.index("def delta("):tool.index("def previous_run(")]
 check('("fail", "mismatch", "crash")' not in body and "rules().delta(" in body,
@@ -124,6 +135,11 @@ check("r.entry(" in body and "got in PASSES" not in body and "want not in PASSES
 body = tool[tool.index("def bless("):tool.index("def dump_ledger(")]
 check("r.bless_reason(" in body and "r.cap_rises(" in body and "UNIMPLEMENTED" not in tool and "PASSES" not in tool,
       "t27b.py bless asks the spec and keeps no verdict tuple of its own")
+
+body = tool[tool.index("def anomalies("):tool.index("def lab_card(")]
+check(all(f"rules().{f}(" in body for f in ("lab_stale", "claim", "railway_old", "ledger_quiet", "checkout"))
+      and "< 5" not in body and "age > args" not in body and "hrs > args" not in body,
+      "t27b.py doctor asks the spec for every threshold it judges")
 
 t27c = os.environ.get("TRI_T27C") or next(
     (str(p) for p in (ROOT / "target/release/t27c", ROOT / "target/debug/t27c") if os.access(p, os.X_OK)), None)

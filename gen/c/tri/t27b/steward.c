@@ -30,6 +30,11 @@ bool ratchet_is_red(uint8_t code);
 bool is_unimplemented(uint8_t v);
 uint8_t bless_reason(uint8_t got, uint8_t kept);
 bool cap_rises(uint32_t not_pass, uint32_t old_cap, bool has_old);
+bool lab_stale(uint32_t age_min, uint32_t limit_min);
+uint8_t claim_code(uint8_t alive, uint32_t age_min, uint32_t limit_min);
+bool railway_old(uint32_t major);
+bool ledger_quiet(uint32_t age_min, uint32_t limit_min);
+uint8_t checkout_code(bool ok, bool recloned);
 
 /* -------------------------------------------------------
    Function implementations
@@ -220,6 +225,40 @@ bool cap_rises(uint32_t not_pass, uint32_t old_cap, bool has_old) {
     return (not_pass > old_cap);
 }
 
+bool lab_stale(uint32_t age_min, uint32_t limit_min) {
+    return (age_min > limit_min);
+}
+
+uint8_t claim_code(uint8_t alive, uint32_t age_min, uint32_t limit_min) {
+    if ((alive == 0)) {
+        return 1;
+    }
+    if ((alive == 1)) {
+        if ((age_min > limit_min)) {
+            return 2;
+        }
+    }
+    return 0;
+}
+
+bool railway_old(uint32_t major) {
+    return (major < 5);
+}
+
+bool ledger_quiet(uint32_t age_min, uint32_t limit_min) {
+    return (age_min > limit_min);
+}
+
+uint8_t checkout_code(bool ok, bool recloned) {
+    if ((ok == false)) {
+        return 1;
+    }
+    if (recloned) {
+        return 2;
+    }
+    return 0;
+}
+
 /* -------------------------------------------------------
    Invariants (compile-time assertions)
    ------------------------------------------------------- */
@@ -396,6 +435,57 @@ void test_bless_first_cap(void) {
     assert_eq(cap_rises(9, 0, false), false);
 }
 
+void test_doctor_stale(void) {
+    assert(lab_stale(361, 360));
+}
+
+void test_doctor_fresh_at_limit(void) {
+    assert((lab_stale(360, 360) == false));
+}
+
+void test_doctor_claim_dead_young(void) {
+    assert_eq(claim_code(0, 1, 100), 1);
+}
+
+void test_doctor_claim_old(void) {
+    assert_eq(claim_code(1, 101, 100), 2);
+}
+
+void test_doctor_claim_live_at_limit(void) {
+    assert_eq(claim_code(1, 100, 100), 0);
+}
+
+void test_doctor_claim_unknown_old(void) {
+    assert_eq(claim_code(2, 999, 100), 0);
+}
+
+void test_doctor_railway(void) {
+    assert(railway_old(4));
+    assert((railway_old(5) == false));
+    assert(railway_old(0));
+}
+
+void test_doctor_ledger_quiet(void) {
+    assert(ledger_quiet(181, 180));
+    assert((ledger_quiet(180, 180) == false));
+}
+
+void test_doctor_checkout_failed(void) {
+    assert_eq(checkout_code(false, false), 1);
+}
+
+void test_doctor_checkout_reclone_failed(void) {
+    assert_eq(checkout_code(false, true), 1);
+}
+
+void test_doctor_checkout_healed(void) {
+    assert_eq(checkout_code(true, true), 2);
+}
+
+void test_doctor_checkout_kept(void) {
+    assert_eq(checkout_code(true, false), 0);
+}
+
 
 /* -------------------------------------------------------
    Test runner (compile with -DT27_TEST_MAIN to execute)
@@ -442,7 +532,19 @@ int main(void) {
     test_bless_cap_rises();
     test_bless_cap_holds();
     test_bless_first_cap();
-    printf("All %d tests passed.\n", 38);
+    test_doctor_stale();
+    test_doctor_fresh_at_limit();
+    test_doctor_claim_dead_young();
+    test_doctor_claim_old();
+    test_doctor_claim_live_at_limit();
+    test_doctor_claim_unknown_old();
+    test_doctor_railway();
+    test_doctor_ledger_quiet();
+    test_doctor_checkout_failed();
+    test_doctor_checkout_reclone_failed();
+    test_doctor_checkout_healed();
+    test_doctor_checkout_kept();
+    printf("All %d tests passed.\n", 50);
     return 0;
 }
 #endif /* T27_TEST_MAIN */
