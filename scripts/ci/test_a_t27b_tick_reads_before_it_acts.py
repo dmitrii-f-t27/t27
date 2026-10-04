@@ -25,12 +25,17 @@ the worktrees are real git repositories, because "mid-merge" is a fact about a
   delta    per-spec transitions between two lab runs: REGRESSED, NEW-MISMATCH
            and CHECK-LOST exit 1; GAINED and REF-MOVED are reported; the
            default --from is chosen by `finished`, not by sha.
+  ready    (#6244) the merge gate: one PR per verdict (READY, WAIT, RED,
+           CONFLICT, RETARGET, BLOCKED, CLOSED); a red non-required check that
+           is red on master too does not block (Q16); loop-tools-tracked is
+           required once it reports; a cancelled master run is no verdict.
 
 And "never write": the worktrees' git state (HEAD, MERGE_HEAD, status) is the
 same before and after.
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -169,6 +174,62 @@ with tempfile.TemporaryDirectory() as tmp:
     check("processes inside: 4242" in out, "broken: the mid-merge worktree names the process inside it")
     check("no process inside" in out, "broken: the dirty worktree says nobody is inside")
 
+    # #6230: a lab stuck at checkout has no `finished`; it still ages, and says why it measured nothing
+    files = {k: open(os.path.join(healthy, k)).read() for k in os.listdir(healthy)}
+    stuck_lab = lab(finished=None, updated="2026-10-04T08:00:00Z",
+                    steps={"checkout": {"ok": False, "error": "fatal: could not fetch abc from promisor remote"}})
+    stuck_lab.pop("summary")
+    stuck = os.path.join(tmp, "fx-stuck")
+    write_fixture(stuck, {**files, "lab.json": stuck_lab})
+    code, codes, out = doctor(stuck)
+    check(code == 1 and codes == ["LAB-STALE", "LAB-CHECKOUT"],
+          f"stuck: LAB-STALE from `updated` and LAB-CHECKOUT, not a generic LAB-TESTS-RED (got {code} {codes})")
+    check("promisor remote" in out and "redeploy" in out, "stuck: the finding quotes the error and names the fix")
+    healed = os.path.join(tmp, "fx-healed")
+    write_fixture(healed, {**files, "lab.json": lab(steps={"checkout": {"ok": True, "clone": "recloned",
+                                                                         "first_error": "promisor remote"}})})
+    code, codes, out = doctor(healed)
+    check(code == 1 and codes == ["LAB-RECLONED"], f"healed: LAB-RECLONED alone (got {code} {codes})")
+    kept = os.path.join(tmp, "fx-kept")
+    write_fixture(kept, {**files, "lab.json": lab(steps={"checkout": {"ok": True, "clone": "kept"}})})
+    code, codes, out = doctor(kept)
+    check(code == 0 and codes == [], f"kept clone: no anomaly (got {code} {codes})")
+
+    # #6237: LAB-ERROR reads the per-spec records; a fail the reference shares (build_verify) is no alarm
+    shared = lab(t27b_fail=1, results=[{"file": "specs/fpga/verification/build_verify.t27",
+                                        "t27b": "fail", "reference": "fail"}])
+    fx = os.path.join(tmp, "fx-shared-fail")
+    write_fixture(fx, {**files, "lab.json": shared})
+    code, codes, out = doctor(fx)
+    check(code == 0 and codes == [], f"shared fail: no LAB-ERROR (got {code} {codes})")
+    own = lab(t27b_fail=1, results=[{"file": "specs/a.t27", "t27b": "fail", "reference": "pass"}])
+    fx = os.path.join(tmp, "fx-own-fail")
+    write_fixture(fx, {**files, "lab.json": own})
+    code, codes, out = doctor(fx)
+    check(code == 1 and codes == ["LAB-ERROR"] and "t27b_fail 1" in out,
+          f"own fail: LAB-ERROR t27b_fail 1 (got {code} {codes})")
+
+    # mutation control: the same tool over a generated C whose checkout rule never fires misses LAB-CHECKOUT,
+    # so the finding comes from the spec, not from a branch in t27b.py
+    gen_src = open(os.path.join(ROOT, "gen", "c", "tri", "t27b", "steward.c")).read()
+    needle = "uint8_t checkout_code(bool ok, bool recloned) {\n    if ((ok == false)) {"
+    check(gen_src.count(needle) == 1, "control: the generated checkout rule is where the control expects it")
+    tree = os.path.join(tmp, "mut", "scripts", "tri_loop")
+    os.makedirs(tree)
+    for name in ("t27b.py", "t27b_rules.py"):
+        shutil.copy(os.path.join(ROOT, "scripts", "tri_loop", name), tree)
+    gen = os.path.join(tmp, "mut", "gen", "c", "tri", "t27b")
+    os.makedirs(gen)
+    with open(os.path.join(gen, "steward.c"), "w") as f:
+        f.write(gen_src.replace(needle, needle.replace("(ok == false)", "(false)")))
+    p = subprocess.run([sys.executable, os.path.join(tree, "t27b.py"), "doctor", "--json", "--fixture", stuck],
+                       capture_output=True, text=True)
+    try:
+        mut_codes = [a["code"] for a in json.loads(p.stdout)]
+    except ValueError:
+        mut_codes = None
+    check(mut_codes == ["LAB-STALE"], f"control: a mutated checkout rule loses LAB-CHECKOUT ({mut_codes})")
+
     unread = os.path.join(tmp, "fx-unread")
     files = {k: open(os.path.join(broken, k)).read() for k in os.listdir(broken)}
     files.pop("lab.json")
@@ -254,6 +315,47 @@ with tempfile.TemporaryDirectory() as tmp:
     check(code == 0 and got == [("GAINED", "s6")], f"delta: gains only exit 0 ({code} {got})")
     code, j, out = run_delta("--from", "0" * 40)
     check(code == 2 and "could not read" in out, f"delta: an absent run is 'could not read', exit 2 ({code})")
+
+    # ready (#6244): the merge gate, one PR per verdict
+    def gate(n, mergeable="MERGEABLE", base="master", state="OPEN", **checks):
+        roll = {"validate": "SUCCESS", "check-linked-issue": "SUCCESS", "parse-ratchet": "SUCCESS"}
+        roll.update({k.replace("_", "-"): v for k, v in checks.items()})
+        return {"number": n, "title": f"t27b {n}", "state": state, "headRefName": f"claude/{n}",
+                "baseRefName": base, "mergeable": mergeable,
+                "statusCheckRollup": [{"name": k, "conclusion": v} for k, v in roll.items() if v != "ABSENT"]}
+    gate_prs = [gate(1), gate(2, parse_ratchet="IN_PROGRESS"), gate(3, validate="FAILURE"),
+                gate(4, mergeable="CONFLICTING"), gate(5, base="claude/x"), gate(6, coverage="FAILURE"),
+                gate(7, gate_topology="FAILURE"), gate(8, state="MERGED", mergeable="UNKNOWN"),
+                gate(9, loop_tools_tracked="FAILURE"), gate(10, check_linked_issue="ABSENT"),
+                gate(11, mergeable="UNKNOWN"), gate(12, brand_new="FAILURE")]
+    gx = os.path.join(tmp, "fx-gate")
+    write_fixture(gx, {"prs.json": gate_prs,
+                       "master_checks.json": {"coverage": "SUCCESS", "gate-topology": "FAILURE", "validate": "SUCCESS"}})
+    def run_ready(fx, *nums):
+        p = subprocess.run([sys.executable, TOOL, "ready", "--json", "--fixture", fx, *map(str, nums)],
+                           capture_output=True, text=True)
+        try:
+            return p.returncode, {o["number"]: o["verdict"] for o in json.loads(p.stdout)}, p.stdout + p.stderr
+        except ValueError:
+            return p.returncode, None, p.stdout + p.stderr
+    code, got, out = run_ready(gx, *range(1, 13))
+    want = {1: "READY", 2: "WAIT", 3: "RED", 4: "CONFLICT", 5: "RETARGET", 6: "BLOCKED", 7: "READY",
+            8: "CLOSED", 9: "RED", 10: "WAIT", 11: "WAIT", 12: "READY"}
+    check(code == 1 and got == want, f"ready: each verdict as planted, exit 1 ({code})\n        got  {got}\n        want {want}")
+    code, got, out = run_ready(gx, 1, 7, 12)
+    check(code == 0 and got == {1: "READY", 7: "READY", 12: "READY"},
+          f"ready: only READY PRs exit 0; red-on-master and absent-on-master checks do not block ({code} {got})")
+    write_fixture(gx, {"prs.json": [gate(1, validate="WEIRD")]})
+    code, got, out = run_ready(gx, 1)
+    check(code == 2 and "unknown check state" in out, f"ready: an unknown check state is unreadable, exit 2 ({code})")
+    sys.path.insert(0, os.path.dirname(TOOL))
+    import t27b as t27b_tool
+    check(t27b_tool.fold_master(["a\tcancelled\nb\tfailure\nc\tskipped\n", "a\tsuccess\nb\tsuccess\nc\tneutral\n"])
+          == {"a": "SUCCESS", "b": "FAILURE"},
+          "ready: master's newest verdict per check; cancelled, skipped and neutral runs are passed over")
+    check(t27b_tool.fold_master(["a\tin_progress\nb\tcancelled\n", "a\tsuccess\nb\tqueued\n", "b\tsuccess\n"])
+          == {"a": "PENDING", "b": "PENDING"},
+          "ready: a master run still going on a newer commit makes master PENDING, not the older verdict (Q29)")
 
     check(snapshot([clean, mid, dirty]) == before, "never write: the worktrees' git state is unchanged")
     # negative control for the snapshot: a change must show

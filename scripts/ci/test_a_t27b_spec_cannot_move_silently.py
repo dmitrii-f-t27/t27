@@ -11,7 +11,8 @@ docs/reports/t27b_expectations.json, per spec. Every input here is a fixture
   info      MOVED, UNJUDGED and VACUITY MEASURED only -> still exit 0.
   red       each red code at least once -> exit 1, and nothing else.
   bless     writes the ledger from a run; keeps a hand-written reason; refuses a
-            `fail` where the reference passes, and refuses to raise the cap.
+            `fail` where the reference passes, and refuses to raise the cap unless
+            --accept-new and the rise is exactly specs new to the ledger (#6237).
   unread    no run file, a run without reference verdicts, no ledger -> exit 2.
   ledger    the committed ledger: one entry per line, every non-pass entry
             with a known reason, counts that add up, a cap equal to reality.
@@ -104,8 +105,8 @@ def kinds(doc):
     return sorted((f["kind"], f["path"]) for f in doc["findings"]) if doc else None
 
 
-def bless(run, ledger):
-    p = subprocess.run([sys.executable, TOOL, "ratchet", "--run", run, "--ledger", ledger, "--bless"],
+def bless(run, ledger, *extra):
+    p = subprocess.run([sys.executable, TOOL, "ratchet", "--run", run, "--ledger", ledger, "--bless", *extra],
                        capture_output=True, text=True)
     return p.returncode, p.stdout + p.stderr
 
@@ -207,6 +208,22 @@ with tempfile.TemporaryDirectory() as tmp:
     code, out = bless(j("worse.json"), j("ledger-keep.json"))
     check(code == 1 and "max_not_pass 5" in out and open(j("ledger-keep.json")).read() == before,
           f"bless: the cap never rises on its own (exit {code})")
+    code, out = bless(j("worse.json"), j("ledger-keep.json"), "--accept-new")
+    check(code == 1 and "0 new to the ledger" in out and "regressed" in out
+          and open(j("ledger-keep.json")).read() == before,
+          f"bless --accept-new: a rise from a spec the ledger named is still refused (exit {code})")
+
+    # #6237: a rise covered by specs new to the ledger is accounted, and moves only with --accept-new
+    grown = [dict(r) for r in BASE] + [rec("specs/z.t27", t27b="blocked", blockers=["type str"])]
+    write(j("grown.json"), run_doc(grown))
+    code, out = bless(j("grown.json"), j("ledger-keep.json"))
+    check(code == 1 and "= 5 already named + 1 new to the ledger" in out and "--accept-new" in out
+          and open(j("ledger-keep.json")).read() == before,
+          f"bless: a covered rise prints its accounting and still needs --accept-new (exit {code})")
+    code, out = bless(j("grown.json"), j("ledger-keep.json"), "--accept-new")
+    grown_led = json.load(open(j("ledger-keep.json")))
+    check(code == 0 and grown_led["max_not_pass"] == 6 and "specs/z.t27" in {e["path"] for e in grown_led["entries"]},
+          f"bless --accept-new: the cap rises by exactly the new spec (exit {code}, cap {grown_led['max_not_pass']})")
 
     # unreadable inputs are exit 2, never a verdict
     code, doc, out = ratchet(j("absent.json"), j("ledger.json"))

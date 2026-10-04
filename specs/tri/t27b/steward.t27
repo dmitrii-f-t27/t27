@@ -20,6 +20,19 @@ module T27bSteward;
 //
 // Reason codes of a non-pass ledger entry: NONE = 0, UNIMPLEMENTED = 1,
 // REFERENCE_BUG = 2, NA = 3.
+//
+// Doctor codes (#6230). Claim: NONE = 0, CLAIM_DEAD = 1, CLAIM_OLD = 2;
+// liveness of the claim's pid: DEAD = 0, ALIVE = 1, UNKNOWN = 2.
+// Checkout of a lab run: NONE = 0, LAB_CHECKOUT = 1 (failed: the run measured
+// nothing), LAB_RECLONED = 2 (healed by a fresh clone: report it, #6220).
+//
+// Merge gate (#6244). Check state on a PR or on master: SUCCESS = 0,
+// PENDING = 1, RED = 2 (failure, error, cancelled, timed out), ABSENT = 3,
+// NEUTRAL = 4 (skipped, neutral). What one check does to a PR: NONE = 0,
+// WAIT = 1, BLOCK = 2. Mergeable: MERGEABLE = 0, CONFLICTING = 1, UNKNOWN = 2.
+// Verdict: READY = 0, WAIT = 1, RED = 2, CONFLICT = 3, RETARGET = 4,
+// BLOCKED = 5 (a non-required check is red here and green on master),
+// CLOSED = 6 (merged or closed: nothing to decide).
 
 // fail, mismatch and crash are defects someone has to read, not blockers.
 pub fn is_bad(v: u8) -> bool {
@@ -147,6 +160,91 @@ pub fn cap_rises(not_pass: u32, old_cap: u32, has_old: bool) -> bool {
     return not_pass > old_cap;
 }
 
+// The doctor's thresholds are minutes. A lab run that failed has no
+// `finished`; its age is read from `updated`, so a stuck lab ages too.
+pub fn lab_stale(age_min: u32, limit_min: u32) -> bool {
+    return age_min > limit_min;
+}
+
+// A dead pid frees the claim at any age; a live one is only reported past
+// the limit (a long tick is not a stuck tick). An unknown pid says nothing.
+pub fn claim_code(alive: u8, age_min: u32, limit_min: u32) -> u8 {
+    if (alive == 0) { return 1; }
+    if (alive == 1) {
+        if (age_min > limit_min) { return 2; }
+    }
+    return 0;
+}
+
+// railway 4.x cannot reach the lab's project; 5.x can.
+pub fn railway_old(major: u32) -> bool {
+    return major < 5;
+}
+
+pub fn ledger_quiet(age_min: u32, limit_min: u32) -> bool {
+    return age_min > limit_min;
+}
+
+// A failed checkout outranks a heal: the re-clone failed too.
+pub fn checkout_code(ok: bool, recloned: bool) -> u8 {
+    if (ok == false) { return 1; }
+    if (recloned) { return 2; }
+    return 0;
+}
+
+// A cap rise is covered when every new non-pass entry is a spec the old
+// ledger did not name: no entry already in it got worse (#6237).
+pub fn cap_rise_is_new(not_pass: u32, old_cap: u32, new_not_pass: u32) -> bool {
+    if (not_pass < new_not_pass) { return true; }
+    return not_pass - new_not_pass <= old_cap;
+}
+
+// An alarm someone has to read. A crash or a mismatch always is; a fail or a
+// timeout only where the reference passes -- one the reference shares is a
+// reference-path defect, outside the denominator (#6237).
+pub fn is_alarm(t: u8, reference: u8) -> bool {
+    if (t == 6) { return true; }
+    if (t == 7) { return true; }
+    if (reference != 0) { return false; }
+    if (t == 5) { return true; }
+    if (t == 8) { return true; }
+    return false;
+}
+
+// A required check must be SUCCESS; anything else waits or blocks. A
+// non-required check blocks only when it is red here and its latest
+// completed result on master is success (Q16): red on master too means
+// master broke it, not this PR.
+pub fn check_effect(state: u8, master: u8, required: bool) -> u8 {
+    if (required) {
+        if (state == 0) { return 0; }
+        if (state == 2) { return 2; }
+        return 1;
+    }
+    if (state == 2) {
+        if (master == 0) { return 2; }
+        if (master == 1) { return 1; }
+    }
+    return 0;
+}
+
+// The worse of two effects, so a list of checks folds to one.
+pub fn effect_fold(acc: u8, e: u8) -> u8 {
+    if (e > acc) { return e; }
+    return acc;
+}
+
+pub fn pr_ready(open: bool, mergeable: u8, base_master: bool, required: u8, other: u8) -> u8 {
+    if (open == false) { return 6; }
+    if (mergeable == 1) { return 3; }
+    if (base_master == false) { return 4; }
+    if (required == 2) { return 2; }
+    if (other == 2) { return 5; }
+    if (required == 1) { return 1; }
+    if (mergeable != 0) { return 1; }
+    return 0;
+}
+
 test delta_ref_moved { assert_eq(delta_code(2, 0, 2, 0, 0, 0), 1); }
 test delta_outside_reference_is_silent { assert_eq(delta_code(2, 2, 2, 0, 0, 0), 0); }
 test delta_regressed { assert_eq(delta_code(0, 0, 0, 3, 1, 0), 2); }
@@ -207,6 +305,62 @@ test bless_refuses_a_timeout { assert_eq(bless_reason(8, 0), 0); }
 test bless_cap_rises { assert_eq(cap_rises(6, 5, true), true); }
 test bless_cap_holds { assert_eq(cap_rises(5, 5, true), false); }
 test bless_first_cap { assert_eq(cap_rises(9, 0, false), false); }
+
+test doctor_stale { assert(lab_stale(361, 360)); }
+test doctor_fresh_at_limit { assert(lab_stale(360, 360) == false); }
+test doctor_claim_dead_young { assert_eq(claim_code(0, 1, 100), 1); }
+test doctor_claim_old { assert_eq(claim_code(1, 101, 100), 2); }
+test doctor_claim_live_at_limit { assert_eq(claim_code(1, 100, 100), 0); }
+test doctor_claim_unknown_old { assert_eq(claim_code(2, 999, 100), 0); }
+test doctor_railway {
+    assert(railway_old(4));
+    assert(railway_old(5) == false);
+    assert(railway_old(0));
+}
+test doctor_ledger_quiet {
+    assert(ledger_quiet(181, 180));
+    assert(ledger_quiet(180, 180) == false);
+}
+test doctor_checkout_failed { assert_eq(checkout_code(false, false), 1); }
+test doctor_checkout_reclone_failed { assert_eq(checkout_code(false, true), 1); }
+test doctor_checkout_healed { assert_eq(checkout_code(true, true), 2); }
+test doctor_checkout_kept { assert_eq(checkout_code(true, false), 0); }
+
+test bless_rise_all_new { assert(cap_rise_is_new(594, 582, 41)); }
+test bless_rise_old_entries_over_cap { assert(cap_rise_is_new(624, 582, 41) == false); }
+test bless_rise_at_old_cap { assert(cap_rise_is_new(623, 582, 41)); }
+test bless_rise_none_new { assert(cap_rise_is_new(583, 582, 0) == false); }
+test bless_rise_more_new_than_total { assert(cap_rise_is_new(3, 0, 5)); }
+test alarm_fail_where_reference_passes { assert(is_alarm(5, 0)); }
+test alarm_fail_reference_shares { assert(is_alarm(5, 5) == false); }
+test alarm_timeout_reference_shares { assert(is_alarm(8, 8) == false); }
+test alarm_timeout { assert(is_alarm(8, 0)); }
+test alarm_crash_always { assert(is_alarm(7, 5)); }
+test alarm_mismatch_always { assert(is_alarm(6, 2)); }
+test alarm_blocked_never { assert(is_alarm(2, 0) == false); }
+
+test gate_required_green { assert_eq(check_effect(0, 3, true), 0); }
+test gate_required_pending_waits { assert_eq(check_effect(1, 0, true), 1); }
+test gate_required_absent_waits { assert_eq(check_effect(3, 0, true), 1); }
+test gate_required_skipped_waits { assert_eq(check_effect(4, 0, true), 1); }
+test gate_required_red_blocks_even_if_master_red { assert_eq(check_effect(2, 2, true), 2); }
+test gate_other_red_green_on_master_blocks { assert_eq(check_effect(2, 0, false), 2); }
+test gate_other_red_red_on_master_passes { assert_eq(check_effect(2, 2, false), 0); }
+test gate_other_red_absent_on_master_passes { assert_eq(check_effect(2, 3, false), 0); }
+test gate_other_pending_never_waits { assert_eq(check_effect(1, 0, false), 0); }
+test gate_other_red_master_running_waits { assert_eq(check_effect(2, 1, false), 1); }
+test gate_fold {
+    assert_eq(effect_fold(effect_fold(effect_fold(0, 1), 0), 2), 2);
+    assert_eq(effect_fold(effect_fold(0, 0), 1), 1);
+}
+test gate_ready { assert_eq(pr_ready(true, 0, true, 0, 0), 0); }
+test gate_conflict_first { assert_eq(pr_ready(true, 1, false, 2, 2), 3); }
+test gate_retarget { assert_eq(pr_ready(true, 0, false, 0, 0), 4); }
+test gate_required_red { assert_eq(pr_ready(true, 0, true, 2, 2), 2); }
+test gate_blocked_by_other { assert_eq(pr_ready(true, 0, true, 1, 2), 5); }
+test gate_waits_on_required { assert_eq(pr_ready(true, 0, true, 1, 0), 1); }
+test gate_closed_first { assert_eq(pr_ready(false, 1, false, 2, 2), 6); }
+test gate_waits_on_mergeable_unknown { assert_eq(pr_ready(true, 2, true, 0, 0), 1); }
 
 invariant gained_never_red {
     assert(delta_is_red(delta_code(0, 0, 2, 0, 0, 1)) == false);
