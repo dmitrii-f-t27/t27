@@ -25,7 +25,7 @@ fn run(src: &str) -> Vec<(String, bool, Outcome)> {
     let prog = lower_src(src).unwrap_or_else(|e| panic!("lowering failed:\n{}", e.join("\n")));
     let mut jit = if JIT_SUPPORTED {
         let code = codegen::compile(&prog, TrapStyle::Jit, true).expect("codegen");
-        Some(Jit::load(&code, prog.funcs.len()).expect("jit load"))
+        Some(Jit::load(&code, prog.funcs.len(), &prog.data).expect("jit load"))
     } else {
         None
     };

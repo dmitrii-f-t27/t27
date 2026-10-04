@@ -229,6 +229,7 @@ pub fn lower_src<'a>(ast: &'a Node, mode: OverflowMode, src: Option<&'a str>) ->
         sites: l.sites,
         mode,
         unchecked,
+        data: Vec::new(),
     })
 }
 
@@ -437,6 +438,7 @@ impl<'a> Lower<'a> {
             nparams: params.len(),
             ret,
             vars: std::mem::take(&mut self.vars),
+            slots: Vec::new(),
             body,
             line: n.line,
             is_test: false,
@@ -473,6 +475,7 @@ impl<'a> Lower<'a> {
             nparams: 0,
             ret: None,
             vars: std::mem::take(&mut self.vars),
+            slots: Vec::new(),
             body,
             line: n.line,
             is_test: true,
