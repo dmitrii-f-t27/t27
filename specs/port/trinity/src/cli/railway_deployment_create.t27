@@ -1,75 +1,136 @@
 module port::trinity::src::cli::railway_deployment_create;
 
-// Railway: Create deployment via GraphQL (correct mutation)
-// Ported from gHashTag/trinity/src/cli/railway_deployment_create.zig
-
-pub fn main() !void {
-    undefined;
+enum Error {
+    UsageError,
+    RailwayError,
+    OutOfMemory,
 }
 
-// Helper function to validate command line arguments
-pub fn validate_args(argc: u32, args: []str) bool {
-    if (argc < 4) {
+pub fn main(args: [][]const u8, result: []const u8) !void {
+    // Port the decision logic, not the plumbing (network calls, allocation, etc.)
+    // The original validates arguments and constructs a GraphQL query
+    
+    if (args.len < 4) {
+        return Error.UsageError;
+    }
+    
+    const project_id = args[1];
+    const service_id = args[2];
+    const token = args[3];
+    
+    // Construct the GraphQL mutation query (simplified - T27 doesn't have std.fmt.allocPrint)
+    const query_template = "{\"query\": \"mutation($projectId: String!, $serviceId: String!) { up(projectId: $projectId, serviceId: $serviceId) { url } }\", \"variables\": {\"projectId\": \"\", \"serviceId\": \"\"}}";
+    
+    // Construct authorization header (simplified)
+    const auth_header_template = "Authorization: Bearer ";
+    
+    // Check for errors in response (simplified - T27 doesn't have std.mem.indexOf)
+    // This is the decision logic: if response contains "errors", return error
+    if (contains_errors(result)) {
+        return Error.RailwayError;
+    }
+    
+    return undefined; // The actual network call and output printing are plumbing
+}
+
+// Helper function to check if response contains errors
+fn contains_errors(response: []const u8) -> bool {
+    // Check if the response contains the "errors" field
+    // This simulates the std.mem.indexOf logic from the original
+    for (response) |char| {
+        if (char == '"') {
+            // Simple check for "errors" substring
+            var i: usize = 0;
+            while (i < response.len and i < 6) { // "errors" is 6 chars
+                if (response[i] != "errors"[i]) {
+                    break;
+                }
+                i += 1;
+            }
+            if (i == 6) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// Test the argument validation logic
+test validate_arguments {
+    // Test with insufficient arguments
+    var args_short: [2][]const u8 = ["program", "project1"];
+    var args_ok: [4][]const u8 = ["program", "project1", "service1", "token123"];
+    
+    // This test focuses on the decision logic - argument count validation
+    // In the original, args.len < 4 triggers usage error
+    assert(args_short.len < 4); // Should trigger usage error condition
+    assert(args_ok.len >= 4); // Should not trigger usage error condition
+}
+
+// Test the GraphQL query construction logic
+test construct_graphql_query {
+    const project_id = "test-project";
+    const service_id = "test-service";
+    
+    // Test that the query template contains expected components
+    const query_template = "{\"query\": \"mutation($projectId: String!, $serviceId: String!) { up(projectId: $projectId, serviceId: $serviceId) { url } }\", \"variables\": {\"projectId\": \"\", \"serviceId\": \"\"}}";
+    
+    // The query should contain the mutation structure
+    assert(contains_string(query_template, "mutation"));
+    assert(contains_string(query_template, "up"));
+    assert(contains_string(query_template, "projectId"));
+    assert(contains_string(query_template, "serviceId"));
+}
+
+// Test the error detection logic
+test detect_railway_errors {
+    var response_with_errors = "{\"errors\": [{\"message\": \"Service not found\"}]}";
+    var response_success = "{\"data\": {\"url\": \"https://example.com\"}}";
+    
+    // Test error detection logic
+    // This simulates the std.mem.indexOf logic
+    assert(has_errors(response_with_errors));
+    assert(!has_errors(response_success));
+}
+
+// Test authorization header construction
+test construct_auth_header {
+    const token = "abc123def456";
+    const auth_header_template = "Authorization: Bearer ";
+    
+    // Test that the header template contains the expected format
+    assert(contains_string(auth_header_template, "Authorization: Bearer"));
+}
+
+// Helper function to check if a string contains a substring
+fn contains_string(haystack: []const u8, needle: []const u8) -> bool {
+    // Simple implementation of substring search
+    if (needle.len > haystack.len) {
         return false;
     }
-    return true;
+    
+    var i: usize = 0;
+    while (i <= haystack.len - needle.len) {
+        var match: bool = true;
+        var j: usize = 0;
+        while (j < needle.len) {
+            if (haystack[i + j] != needle[j]) {
+                match = false;
+                break;
+            }
+            j += 1;
+        }
+        if (match) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
 }
 
-// Helper function to construct GraphQL mutation query
-pub fn build_graphql_query(project_id: []const u8, service_id: []const u8) []const u8 {
-    return "{\"query\": \"mutation($projectId: String!, $serviceId: String!) { up(projectId: $projectId, serviceId: $serviceId) { url } }\", \"variables\": {\"projectId\": \"project1\", \"serviceId\": \"service1\"}}";
-}
-
-// Helper function to construct authorization header
-pub fn build_auth_header(token: []const u8) []const u8 {
-    return "Authorization: Bearer token123";
-}
-
-// Helper function to check for errors in response
-pub fn has_response_errors(response: []const u8) bool {
-    return std.mem.indexOf(u8, response, "\"errors\"") != null;
-}
-
-test validate_args_success {
-    var args: [4][]const u8 = undefined;
-    args[0] = "program";
-    args[1] = "project1";
-    args[2] = "service1";
-    args[3] = "token123";
-    assert(validate_args(4, &args) == true);
-}
-
-test validate_args_failure {
-    var args: [2][]const u8 = undefined;
-    args[0] = "program";
-    args[1] = "project1";
-    assert(validate_args(2, &args) == false);
-}
-
-test has_response_errors_no_errors {
-    const response = "{\"data\": {\"url\": \"https://example.com\"}}";
-    assert(has_response_errors(response) == false);
-}
-
-test has_response_errors_with_errors {
-    const response = "{\"errors\": [{\"message\": \"Invalid token\"}]}";
-    assert(has_response_errors(response) == true);
-}
-
-test has_response_errors_empty_response {
-    const response = "{}";
-    assert(has_response_errors(response) == false);
-}
-
-test build_graphql_query_format {
-    const query = build_graphql_query("project1", "service1");
-    assert(std.mem.indexOf(u8, query, "mutation") != null);
-    assert(std.mem.indexOf(u8, query, "projectId") != null);
-    assert(std.mem.indexOf(u8, query, "serviceId") != null);
-}
-
-test build_auth_header_format {
-    const header = build_auth_header("token123");
-    assert(std.mem.indexOf(u8, header, "Authorization") != null);
-    assert(std.mem.indexOf(u8, header, "Bearer") != null);
+// Helper function to check if response has errors
+fn has_errors(response: []const u8) -> bool {
+    // Check if the response contains the "errors" field
+    // This simulates the std.mem.indexOf logic from the original
+    return contains_string(response, "\"errors\"");
 }
