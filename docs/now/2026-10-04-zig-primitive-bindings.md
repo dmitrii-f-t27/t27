@@ -1,0 +1,15 @@
+# NOW -- zig-primitive-bindings (2026-10-04)
+
+## Result
+
+- Quote declared primitive value bindings and their references in Zig, with fresh item and nested block scope. Preserve builtin type expressions, aliases and casts.
+- Source fixture and six real Zig tests cover typed/untyped locals, tuple bindings, parameters, mutable rebinding, unused discard, test/bench assignments, independent257 values and two source mutants rejected by executed assertion panics.
+- M1 release PASS. Final M3:2834 passed,0 failed,2 ignored,124 targets. M4 clean expected-failure ratchet:95 observed,cap126, no unexpected/expired/discard/gate drift. The whole corpus is still not green.
+- Actual107 tri-net Zig modules and1209 tests PASS, including19 SHA256 tests. Native generation keeps102Rust,75C and113Verilog outputs byte-identical to the accepted C correction. Product PIN and budgets untouched.
+- Native804 sealed-spec audit: only7 Zig specs/13 aliases change. Save and verify without force;6 BLOCKED/1 PASS kept honest. Coverage1449/1325/124 and debt ledger unchanged.
+
+## Limits and next
+
+- Separate upstream SHA256 source still BLOCKED on pointer errors; accepted-baseline source-only value rename reproduces all three. Temporal alias substitution in the existing optimizer is also unfixed. Broader keyword/dotted issue2631 remains open.
+- Publish issue6040 fix from dmitrii-f-t27, verify exact-head Linux CI, then ordinary canonical merge. No compiler PIN adoption until the remaining two Verilog and24 strict Rust module blockers are fixed.
+- No radio hardware or full model inference claimed.
