@@ -36,14 +36,16 @@ the issue (step 5).
    - A fix the Queen's bees cannot do (it needs `cargo`, or a file that is not on `master`, such as `reviewer.py` before #5777 merges) goes into a pull request whose CI proves it (a failing control commit first, then the fix), or into the report as the owner's item.
    - At most two new tasks per round.
 4. **Watch it land.** The issue appears under `claimed` in `/queen/status`; `/queen/public-activity` shows its `finished` and `review` events (`accept`, `sendBack`, `escalate`, `wait`); an accepted task becomes a `queen-<N>` branch, and the owner's board loop opens its pull request (do not open a second one). An `escalate` reason is the owner's (`/queen/needs-you`): check your own criteria first, then tell the owner. Read the bee's diff against the issue's criteria (`gh api repos/gHashTag/t27/compare/master...queen-<N>`) before calling it done.
-5. **Report.** When something moved or turned red, one comment on #5776: what moved (links), what is red, what needs the owner. Nothing changed: the ledger row only. Finish the round with three lines in Russian: what moved, what is red, what needs the owner.
+5. **Report.** When something moved or turned red, one comment on #5776: what moved (links), what is red, what needs the owner. Nothing changed: the ledger row only.
+   - On the Queen's board too, only if the owner has placed a token in `~/.config/review-warden/queen-report.token` (mode 600): one `POST /queen/report` per round with exactly `source` (`review-warden`), `headline` (at most 120 characters), `body` (the Russian report) and `needs_you` (true only when an owner's move is open). Read the token into a variable inside the one command that sends it, never echo it, and `unset` it after. 200 or 201 means filed; any other code goes into the ledger, with no retry this round. No file: skip, and say so in the ledger. Never fetch a token from Railway or anywhere else.
+   - Finish the round with three lines in Russian: what moved, what is red, what needs the owner.
 6. **Learn.** A slip this round (a wrong claim, a check misread, a task the Queen could not run) becomes a row in section 4 of the skill `reviewer-bee-loop` in the same round, and the ledger row names it.
 7. **Release** the claim.
 
 ## Never
 
 - Merge, approve, enable auto-merge, or post as the reviewer bot.
-- `POST /queen/report` or `PUT /queen/registry` (both need the Queen's token, which this agent does not hold), read a guarded Queen route, or forge an Origin header.
+- `PUT /queen/registry`, a `POST /queen/report` without the owner's token file (step 5), reading a token from Railway variables, reading a guarded Queen route, or forging an Origin header.
 - Print or commit a secret: z.ai keys by name only, never `~/.config/t27-bees/*.pem`, never Railway env.
 - Resume a job someone paused, kill another session's process, or delete another session's directory or worktree; commit into another session's worktree.
 - Compile or run a test suite on the workstation.
