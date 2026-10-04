@@ -1,4 +1,4 @@
-# NOW -- Slow-blink counter tests execute without discarded clauses (2026-10-03)
+# NOW -- Openxc7 counter and flip-flop tests execute without discarded clauses (2026-10-03)
 
 Closes #5850. Refs #5810 and #5812.
 
@@ -12,3 +12,11 @@ Verified with fresh t27c at master 6e3322918: 8 tests pass, 4 compile-time invar
 
 - Reproduce the host result with `t27c test-report specs/port/trinity/fpga/openxc7-synth/d_slow_blink.t27`; inspect the verdict, because this command also exits zero when tests fail.
 - Full corpus suite now reports 97 primary failures against 95 ledger entries, with only two unexpected identities: `d_simple_ff.t27 [parse-no-discard]` and `xilinx7/packets.t27 [parse]`. This file no longer appears in the primary failures. The missing pre-existing seal remains reported; no seal was minted because multiple openxc7 specs share the same module/seal path.
+
+## The flip-flop belongs to the same discarded-test family
+
+- `d_simple_ff.t27` no longer discards 165 tokens. The two tuple-sequence tests and two misspelled invariants are restored as real declarations; fourteen tests and four invariants execute, with all eight functions covered. Held-high and falling clock inputs do not re-toggle; the LED complements q, regardless of the incoming LED field.
+- Boolean inversions use logical `!` instead of bitwise `~`, preserving boolean behavior while allowing the generated Rust library to compile. No function signature or state layout changed; generated C still has the same pre-existing tuple-before-struct defect.
+- Flip-flop negative controls: a stuck toggle and inverted LED fail meaningful compile-time invariants; a level-triggered second cycle fails `single_cycle_toggle`. These are host model results, with no physical FPGA or latency claim.
+
+- The final full corpus run with both restored specs reports 96 primary failures against 95 ledger entries. Only `specs/xilinx7/packets.t27 [parse]` remains unexpected; neither repaired spec appears in the primary failures. The failure ledger and cap remain untouched.
