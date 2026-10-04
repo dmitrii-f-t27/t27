@@ -51,7 +51,34 @@ PORT = int(os.environ.get("PORT", "8080"))
 POLL = int(os.environ.get("T27_POLL_SECONDS", "1800"))
 SRV = Path(os.environ.get("T27_SRV", "/srv"))
 WORK = Path(os.environ.get("T27_WORK", "/work"))
-JOBS = int(os.environ.get("T27_JOBS", "0")) or (os.cpu_count() or 4)
+
+
+def cgroup_limits():
+    """The container's real limits. nproc reports the host's CPUs, not the
+    quota, and the pids limit counts threads: zig spawns one per CPU."""
+    lim = {"cpus": None, "pids": None}
+    try:
+        quota, period = Path("/sys/fs/cgroup/cpu.max").read_text().split()[:2]
+        if quota != "max":
+            lim["cpus"] = max(1, int(quota) // int(period))
+    except (OSError, ValueError):
+        pass
+    try:
+        pids = Path("/sys/fs/cgroup/pids.max").read_text().strip()
+        if pids != "max":
+            lim["pids"] = int(pids)
+    except (OSError, ValueError):
+        pass
+    return lim
+
+
+LIMITS = cgroup_limits()
+JOBS = int(os.environ.get("T27_JOBS", "0")) or LIMITS["cpus"] or os.cpu_count() or 4
+# One reference worker is t27c plus a zig process with about one thread per
+# visible CPU; keep the sum well under the pids limit (1000 on Railway).
+_per_ref = (os.cpu_count() or 4) + 16
+REF_JOBS = int(os.environ.get("T27_REFERENCE_JOBS", "0")) or max(
+    1, min(JOBS, ((LIMITS["pids"] or 10 ** 6) - 200) // _per_ref))
 CORPUS_DIR = os.environ.get("T27_CORPUS_DIR", "specs")
 T27B_TIMEOUT_MS = int(os.environ.get("T27B_TIMEOUT_MS", "60000"))
 REF_TIMEOUT_S = int(os.environ.get("T27_REFERENCE_TIMEOUT_S", "300"))
@@ -157,7 +184,10 @@ def toolchain():
         "python": sys.version.split()[0],
         "host": "%s %s" % (platform.system(), platform.machine()),
         "cpus": os.cpu_count(),
+        "cgroup_cpus": LIMITS["cpus"],
+        "cgroup_pids": LIMITS["pids"],
         "jobs": JOBS,
+        "reference_jobs": REF_JOBS,
     }
 
 
@@ -224,15 +254,23 @@ def reference_one(worker, file):
     env["ZIG_GLOBAL_CACHE_DIR"] = str(scratch / "zig-global")
     env["ZIG_LOCAL_CACHE_DIR"] = str(scratch / "zig-local")
     env["TMPDIR"] = str(tmp)
-    try:
-        out = subprocess.run(
-            [str(T27C), "test-report", file, "--specs-dir", CORPUS_DIR],
-            cwd=CLONE, env=env, capture_output=True, text=True, errors="replace",
-            timeout=REF_TIMEOUT_S,
-        )
-    except subprocess.TimeoutExpired:
-        shutil.rmtree(tmp, ignore_errors=True)
-        return "timeout", "over %d s" % REF_TIMEOUT_S
+    for attempt in range(3):
+        try:
+            out = subprocess.run(
+                [str(T27C), "test-report", file, "--specs-dir", CORPUS_DIR],
+                cwd=CLONE, env=env, capture_output=True, text=True, errors="replace",
+                timeout=REF_TIMEOUT_S,
+            )
+            break
+        except subprocess.TimeoutExpired:
+            shutil.rmtree(tmp, ignore_errors=True)
+            return "timeout", "over %d s" % REF_TIMEOUT_S
+        except OSError as e:  # EAGAIN from fork: the lab's limit, not a verdict
+            if attempt == 2:
+                return "lab_error", ("could not start t27c: %s" % e)[:300]
+            time.sleep(5)
+    if "Resource temporarily unavailable" in out.stderr or "SystemResources" in out.stderr:
+        return "lab_error", "zig ran out of threads/processes in the container"
     if out.returncode != 0:
         why = (out.stderr.strip().splitlines() or [""])[0]
         return "blocked", ("t27c test-report exited %d: %s" % (out.returncode, why))[:300]
@@ -260,7 +298,7 @@ def reference_all(files, log):
                 set_status(phase="reference", progress="%d/%d" % (done[0], len(files)))
         return r
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=JOBS) as ex:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=REF_JOBS) as ex:
         list(ex.map(job, files))
     return results
 
@@ -384,7 +422,7 @@ def lab_run(sha, log):
             tot[v] = tot.get(v, 0) + 1
         return {
             "source": "t27c test-report <file> --specs-dir %s (t27c gen + zig test), natively, %d workers, %d s timeout"
-            % (CORPUS_DIR, JOBS, REF_TIMEOUT_S),
+            % (CORPUS_DIR, REF_JOBS, REF_TIMEOUT_S),
             "totals": tot,
         }
 
@@ -419,6 +457,8 @@ def lab_run(sha, log):
         doc["summary"] = {
             "files": len(results),
             "reference_pass": len(ref_pass) if reference else None,
+            # Files the lab could not judge (fork/thread exhaustion): never folded into pass or fail.
+            "reference_lab_error": sum(1 for r in results if r["reference"] == "lab_error") if reference else None,
             "t27b_pass": sum(1 for r in results if r["t27b"] == "pass"),
             "t27b_pass_where_reference_passes": sum(1 for r in ref_pass if r["t27b"] == "pass") if reference else None,
             "t27b_pass_where_reference_does_not": sum(1 for r in results if r["t27b"] == "pass" and r["reference"] != "pass")
