@@ -258,6 +258,8 @@ struct Lower<'a> {
     line: u32,
     ret: Option<LTy>,
     in_test: bool,
+    /// Lowering a `bench` body (compiled, never run).
+    in_bench: bool,
     test_assigns: HashMap<String, u32>,
     /// The source text, when known: a clause-form `invariant` (and a
     /// braceless `test`) reaches lowering with no line on any of its nodes, so
@@ -351,6 +353,7 @@ fn lower_mode<'a>(
         line: ast.line,
         ret: None,
         in_test: false,
+        in_bench: false,
         test_assigns: HashMap::new(),
         src,
         recover,
@@ -1089,8 +1092,16 @@ impl<'a> Lower<'a> {
     /// binding rule (the one t27c's `gen_bench_block` uses) and compiled by the
     /// caller, but never run: a construct t27b cannot lower in it rejects the
     /// file under that construct's own name.
+    ///
+    /// A prose clause in it (`measure: nanoseconds to f(x)`, `target: < 100ns`)
+    /// reaches here as a childless StmtExpr named `<clause>:` holding the text;
+    /// t27c writes `// NOT LOWERED: empty statement` for it (gen_stmt, T43),
+    /// so it lowers to nothing here too.
     fn bench(&mut self, n: &Node) -> R<Func> {
-        let mut f = self.block_body(n, "BenchBlock", "bench", false)?;
+        self.in_bench = true;
+        let f = self.block_body(n, "BenchBlock", "bench", false);
+        self.in_bench = false;
+        let mut f = f?;
         f.is_test = false;
         Ok(f)
     }
@@ -1288,6 +1299,15 @@ impl<'a> Lower<'a> {
                     };
                     self.reject(&k, "expression statement".into())
                 }
+                // A bench's prose clause: nothing to run, and t27c emits a
+                // comment for it. Outside a bench the same node would be a
+                // test clause the front-end kept only as text, so it stays
+                // rejected rather than silently dropping a check.
+                None if self.in_bench && is_prose_clause(n) => Ok(()),
+                None if is_prose_clause(n) => self.reject(
+                    "StmtExpr",
+                    format!("prose clause `{}` outside a bench, kept only as text", n.name),
+                ),
                 None => self.reject("StmtExpr", "empty statement".into()),
             },
             NodeKind::ExprCall => self.call_stmt(n, out),
@@ -3756,8 +3776,12 @@ impl<'a> Lower<'a> {
             return Ok(());
         }
         let t = dst.ty.clone();
+        // Only an aggregate result has a hidden result pointer: a scalar
+        // field initialised from a call (`.x = f(a)`) is a plain store of the
+        // call's value.
         let in_place = n.kind == NodeKind::ExprCall
             && fresh
+            && is_agg(&t)
             && self.sigs.get(&n.name).is_some_and(|s| s.ret == Some(t.clone()));
         if matches!(t, LTy::Str | LTy::Slice(..)) && !in_place {
             let v = if t == LTy::Str && n.kind != NodeKind::ExprUnary { self.expr(n)? } else { self.expr_as(n, &t)? };
@@ -4619,4 +4643,14 @@ fn count_assigns(ns: &[Node], counts: &mut HashMap<String, u32>) {
         }
         count_assigns(&n.children, counts);
     }
+}
+
+/// A clause the front-end kept only as verbatim text: a childless StmtExpr
+/// named `<word>:` (`measure:`, `target:`), its text in `value`.
+fn is_prose_clause(n: &Node) -> bool {
+    n.kind == NodeKind::StmtExpr
+        && n.children.is_empty()
+        && n.name.len() > 1
+        && n.name.ends_with(':')
+        && n.name[..n.name.len() - 1].chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
