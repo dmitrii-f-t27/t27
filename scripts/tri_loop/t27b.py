@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""tri t27b -- the t27b steward's tick card (status), anomaly scan (doctor) and per-spec ratchet between lab runs (delta).
+"""tri t27b -- the t27b steward's tick card (status), anomaly scan (doctor), per-spec ratchet between lab runs (delta) and gen-c proof on the t27c lab (gen-check).
 
 WHY THIS EXISTS
 ---------------
@@ -100,6 +100,30 @@ WHAT THIS DOES NOT ESTABLISH
     tri t27b doctor                # anomalies, one per line, with the fix
     tri t27b doctor --json         # the same, machine-readable
     tri t27b delta                 # what moved per spec since the previous lab run
+    tri t27b gen-check             # is gen/c/tri/t27b/steward.c what master's t27c emits?
+
+GEN-CHECK (#6231): the committed gen-c output against the t27c lab
+-------------------------------------------------------------------
+gen/c/tri/t27b/steward.c is generated (L2) by `t27c gen-c
+specs/tri/t27b/steward.t27`, and t27c runs on the Railway lab t27c-lab, never
+on this machine. gen-check sends the LOCAL spec to the lab (base64 inside
+`railway ssh`, chunked under the 128 KiB per-argument cap), runs the lab's
+master t27c there in a scratch dir under /tmp that it removes, and compares
+the sha256 and length it gets back with the local gen file:
+
+  SAME <sha12>                        exit 0
+  DIFFERS lab <sha12> local <sha12>   exit 1
+  UNREACHABLE <reason>                exit 2 -- ssh failed, the lab answered
+                                      only in part, or gen-c itself failed
+
+and a second line with the lab binary's path, mtime and sha, and the commit
+of the lab's source checkout (STALE? when the binary is older than it).
+Overrides: T27C_LAB_RAILWAY (the railway 5.x CLI), T27C_LAB_DIR (a dir linked
+to the lab's Railway project), T27C_LAB_SERVICE, T27C_LAB_ENV, T27C_LAB_BIN,
+T27C_LAB_SRC; T27B_GEN_CHECK_FAKE (a JSON fixture standing in for the lab,
+tests only).
+
+    tri t27b gen-check [--spec specs/tri/t27b/steward.t27] [--gen gen/c/tri/t27b/steward.c] [--json]
 
 RATCHET (#6115): the per-spec ledger, so the t27b number cannot move silently
 ------------------------------------------------------------------------------
@@ -860,11 +884,193 @@ def main_delta(args):
     return 1 if any(rules().is_red(f["code"]) for f in found) else 0
 
 
+# --- gen-check (#6231): is the committed C what master's t27c emits? ---------
+# t27c runs on the Railway lab t27c-lab, never on this machine (owner's rule,
+# 2026-10-04). The spec text goes there as base64 inside the ssh command; one
+# argument is capped at 128 KiB by the kernel (MAX_ARG_STRLEN: a 133 KB command
+# came back "exec: Argument list too long", 80 KB went through), so a larger
+# spec is sent in GEN_CHECK_CHUNK pieces appended to one scratch file.
+
+GEN_CHECK_SPEC = "specs/tri/t27b/steward.t27"
+GEN_CHECK_GEN = "gen/c/tri/t27b/steward.c"
+GEN_CHECK_CHUNK = 64000
+GEN_CHECK_MARK = "T27B-GEN-CHECK"
+
+
+def gen_check_env():
+    e = os.environ
+    return {
+        "railway": e.get("T27C_LAB_RAILWAY") or os.path.expanduser("~/.nvm/versions/node/v22.22.0/bin/railway"),
+        "dir": e.get("T27C_LAB_DIR") or "/private/tmp/t27c-lab/infra/t27c-lab",
+        "service": e.get("T27C_LAB_SERVICE") or "t27c-lab",
+        "environment": e.get("T27C_LAB_ENV") or "production",
+        "bin": e.get("T27C_LAB_BIN") or "/data/target/release/t27c",
+        "src": e.get("T27C_LAB_SRC") or "/data/src",
+    }
+
+
+def railway_runner(env):
+    """A runner: one shell command on the lab -> (exit code, stdout, stderr).
+    Raises Unreadable when the lab cannot be asked at all."""
+    def runner(cmd):
+        argv = [env["railway"], "ssh", "-s", env["service"], "-e", env["environment"], cmd]
+        try:
+            p = subprocess.run(argv, cwd=env["dir"], capture_output=True, text=True, timeout=180)
+        except (OSError, subprocess.SubprocessError) as e:
+            raise Unreadable(f"railway ssh: {e}")
+        return p.returncode, p.stdout, p.stderr
+    return runner
+
+
+def fixture_runner(path):
+    """T27B_GEN_CHECK_FAKE: a JSON file {"rc", "stdout", "stderr"} answering the
+    final (gen-c) command, or {"unreachable": reason}. Chunk uploads answer 0."""
+    def runner(cmd):
+        try:
+            with open(path, encoding="utf-8") as f:
+                fx = json.load(f)
+        except (OSError, ValueError) as e:
+            raise Unreadable(f"fixture {path}: {e}")
+        if fx.get("unreachable"):
+            raise Unreadable(fx["unreachable"])
+        if GEN_CHECK_MARK not in cmd:
+            return 0, "", ""
+        return fx.get("rc", 0), fx.get("stdout", ""), fx.get("stderr", "")
+    return runner
+
+
+def gen_check_commands(spec_rel, spec_bytes, env, token, chunk=GEN_CHECK_CHUNK):
+    """The lab commands, in order: zero or more chunk uploads, then gen-c.
+    The last command removes the scratch dir whatever happens."""
+    import base64
+    import shlex
+    b64 = base64.b64encode(spec_bytes).decode("ascii")
+    parts = [b64[i:i + chunk] for i in range(0, len(b64), chunk)] or [""]
+    d = f"/tmp/t27b-gen-check-{token}"
+    q = shlex.quote
+    up = lambda p: f"mkdir -p {d} && printf %s {q(p)} >> {d}/spec.b64"  # noqa: E731
+    cmds = [up(p) for p in parts[:-1]]
+    m, binp, rel = GEN_CHECK_MARK, q(env["bin"]), q(spec_rel)
+    cmds.append(
+        f"trap 'rm -rf {d}' EXIT; {up(parts[-1])} && mkdir -p {d}/w/$(dirname {rel}) && "
+        f"base64 -d {d}/spec.b64 > {d}/w/{rel} && cd {d}/w && "
+        f"echo {m} bin {binp}; echo {m} mtime $(date -u -r {binp} +%Y-%m-%dT%H:%M:%SZ); "
+        f"echo {m} binsha $(sha256sum {binp} | cut -c1-64); "
+        f"echo {m} src $(git -C {q(env['src'])} log -1 --format='%H %cI' 2>/dev/null); "
+        f"{binp} gen-c {rel} > {d}/out.c 2> {d}/err.txt; echo {m} rc $?; "
+        f"echo {m} sha $(sha256sum < {d}/out.c | cut -c1-64); echo {m} bytes $(wc -c < {d}/out.c); "
+        f"echo {m} err $(head -c 300 {d}/err.txt | tr '\\n' ' ')")
+    return cmds, d
+
+
+def parse_gen_check(stdout):
+    got = {}
+    for line in stdout.splitlines():
+        if line.startswith(GEN_CHECK_MARK + " "):
+            parts = line.split(" ", 2)
+            if len(parts) > 1:
+                got.setdefault(parts[1], parts[2].strip() if len(parts) > 2 else "")
+    return got
+
+
+def gen_check(spec, gen, runner=None, env=None, token=None, chunk=GEN_CHECK_CHUNK):
+    """Returns a dict with verdict SAME | DIFFERS | UNREACHABLE. Never guesses:
+    anything the lab did not answer in full is UNREACHABLE."""
+    import hashlib
+    import uuid
+    env = env or gen_check_env()
+    out = {"verdict": "UNREACHABLE", "spec": spec, "gen": gen}
+    try:
+        with open(spec if os.path.isabs(spec) else os.path.join(ROOT, spec), "rb") as f:
+            spec_bytes = f.read()
+        with open(gen if os.path.isabs(gen) else os.path.join(ROOT, gen), "rb") as f:
+            local = f.read()
+    except OSError as e:
+        out["reason"] = f"local file: {e}"
+        return out
+    out["local_sha256"], out["local_bytes"] = hashlib.sha256(local).hexdigest(), len(local)
+    rel = os.path.relpath(os.path.abspath(spec if os.path.isabs(spec) else os.path.join(ROOT, spec)), ROOT)
+    if rel.startswith(".."):
+        rel = os.path.basename(spec)
+    if runner is None:
+        fake = os.environ.get("T27B_GEN_CHECK_FAKE")
+        runner = fixture_runner(fake) if fake else railway_runner(env)
+        out["runner"] = f"fixture {fake}" if fake else f"railway ssh -s {env['service']} -e {env['environment']}"
+    cmds, scratch = gen_check_commands(rel, spec_bytes, env, token or uuid.uuid4().hex[:12], chunk)
+    out["lab_scratch"], out["lab_commands"] = scratch, len(cmds)
+    try:
+        for c in cmds[:-1]:
+            rc, so, se = runner(c)
+            if rc != 0:
+                runner(f"rm -rf {scratch}")
+                raise Unreadable(f"chunk upload exit {rc}: {(se or so).strip()[:200]}")
+        rc, so, se = runner(cmds[-1])
+    except Unreadable as e:
+        out["reason"] = str(e)
+        return out
+    got = parse_gen_check(so)
+    src = got.get("src", "").split()
+    out["lab"] = {"bin": got.get("bin"), "mtime": got.get("mtime"), "bin_sha256": got.get("binsha"),
+                  "src_commit": src[0] if src else None, "src_committed": src[1] if len(src) > 1 else None}
+    # A binary older than the checkout it is meant to be built from may be stale.
+    def when(t):
+        try:
+            return parse_time(t) if t else None
+        except ValueError:
+            return None
+    m, c = when(got.get("mtime")), when(src[1] if len(src) > 1 else "")
+    out["lab"]["stale"] = bool(m and c and m < c)
+    if "rc" not in got or "sha" not in got or "bytes" not in got:
+        out["reason"] = f"lab answered without a result (ssh exit {rc}): {(se or so).strip()[-200:]}"
+        return out
+    if got["rc"] != "0":
+        out["reason"] = f"t27c gen-c exit {got['rc']} on the lab: {got.get('err', '')[:200]}"
+        return out
+    if not re.fullmatch(r"[0-9a-f]{64}", got["sha"]) or not got["bytes"].isdigit():
+        out["reason"] = f"lab answered an unreadable digest: {got['sha']!r} {got['bytes']!r}"
+        return out
+    out["lab_sha256"], out["lab_bytes"] = got["sha"], int(got["bytes"])
+    same = out["lab_sha256"] == out["local_sha256"] and out["lab_bytes"] == out["local_bytes"]
+    out["verdict"] = "SAME" if same else "DIFFERS"
+    return out
+
+
+def gen_check_main(argv, runner=None):
+    ap = argparse.ArgumentParser(prog="tri t27b gen-check",
+                                 description="is the committed gen-c output what master's t27c emits, on the t27c lab (#6231)")
+    ap.add_argument("--spec", default=GEN_CHECK_SPEC)
+    ap.add_argument("--gen", default=GEN_CHECK_GEN)
+    ap.add_argument("--json", action="store_true")
+    try:
+        args = ap.parse_args(argv)
+    except SystemExit as e:
+        return 2 if e.code else 0
+    r = gen_check(args.spec, args.gen, runner=runner)
+    if args.json:
+        print(json.dumps(r, indent=1))
+    else:
+        if r["verdict"] == "SAME":
+            print(f"SAME {r['lab_sha256'][:12]}")
+        elif r["verdict"] == "DIFFERS":
+            print(f"DIFFERS lab {r['lab_sha256'][:12]} local {r['local_sha256'][:12]}"
+                  f" ({r['lab_bytes']} vs {r['local_bytes']} bytes)")
+        else:
+            print(f"UNREACHABLE {r.get('reason')}")
+        lab = r.get("lab")
+        if lab:
+            print(f"lab t27c {lab['bin']} mtime {lab['mtime']} sha {str(lab['bin_sha256'])[:12]}; "
+                  f"lab source {str(lab['src_commit'])[:9]} ({lab['src_committed']})"
+                  + ("  STALE? the binary is older than the source checkout" if lab["stale"] else ""))
+    return {"SAME": 0, "DIFFERS": 1}.get(r["verdict"], 2)
+
+
 def main(argv):
     if argv[:1] == ["ratchet"]:
         return ratchet_main(argv[1:])
+    if argv[:1] == ["gen-check"]:
+        return gen_check_main(argv[1:])
     ap = argparse.ArgumentParser(prog="tri t27b", description=__doc__.split("\n")[0])
-    ap.add_argument("action", choices=("status", "doctor", "delta", "ratchet"))
+    ap.add_argument("action", choices=("status", "doctor", "delta", "ratchet", "gen-check"))
     ap.add_argument("--from", dest="from_", help="delta: the earlier lab run's sha (default: the run before --to)")
     ap.add_argument("--to", default="latest", help="delta: the later run's sha (default: latest.json)")
     ap.add_argument("--fixture", help="read every source from this directory (tests)")
