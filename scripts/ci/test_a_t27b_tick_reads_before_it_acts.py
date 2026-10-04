@@ -25,6 +25,10 @@ the worktrees are real git repositories, because "mid-merge" is a fact about a
   delta    per-spec transitions between two lab runs: REGRESSED, NEW-MISMATCH
            and CHECK-LOST exit 1; GAINED and REF-MOVED are reported; the
            default --from is chosen by `finished`, not by sha.
+  ready    (#6244) the merge gate: one PR per verdict (READY, WAIT, RED,
+           CONFLICT, RETARGET, BLOCKED, CLOSED); a red non-required check that
+           is red on master too does not block (Q16); loop-tools-tracked is
+           required once it reports; a cancelled master run is no verdict.
 
 And "never write": the worktrees' git state (HEAD, MERGE_HEAD, status) is the
 same before and after.
@@ -311,6 +315,44 @@ with tempfile.TemporaryDirectory() as tmp:
     check(code == 0 and got == [("GAINED", "s6")], f"delta: gains only exit 0 ({code} {got})")
     code, j, out = run_delta("--from", "0" * 40)
     check(code == 2 and "could not read" in out, f"delta: an absent run is 'could not read', exit 2 ({code})")
+
+    # ready (#6244): the merge gate, one PR per verdict
+    def gate(n, mergeable="MERGEABLE", base="master", state="OPEN", **checks):
+        roll = {"validate": "SUCCESS", "check-linked-issue": "SUCCESS", "parse-ratchet": "SUCCESS"}
+        roll.update({k.replace("_", "-"): v for k, v in checks.items()})
+        return {"number": n, "title": f"t27b {n}", "state": state, "headRefName": f"claude/{n}",
+                "baseRefName": base, "mergeable": mergeable,
+                "statusCheckRollup": [{"name": k, "conclusion": v} for k, v in roll.items() if v != "ABSENT"]}
+    gate_prs = [gate(1), gate(2, parse_ratchet="IN_PROGRESS"), gate(3, validate="FAILURE"),
+                gate(4, mergeable="CONFLICTING"), gate(5, base="claude/x"), gate(6, coverage="FAILURE"),
+                gate(7, gate_topology="FAILURE"), gate(8, state="MERGED", mergeable="UNKNOWN"),
+                gate(9, loop_tools_tracked="FAILURE"), gate(10, check_linked_issue="ABSENT"),
+                gate(11, mergeable="UNKNOWN"), gate(12, brand_new="FAILURE")]
+    gx = os.path.join(tmp, "fx-gate")
+    write_fixture(gx, {"prs.json": gate_prs,
+                       "master_checks.json": {"coverage": "SUCCESS", "gate-topology": "FAILURE", "validate": "SUCCESS"}})
+    def run_ready(fx, *nums):
+        p = subprocess.run([sys.executable, TOOL, "ready", "--json", "--fixture", fx, *map(str, nums)],
+                           capture_output=True, text=True)
+        try:
+            return p.returncode, {o["number"]: o["verdict"] for o in json.loads(p.stdout)}, p.stdout + p.stderr
+        except ValueError:
+            return p.returncode, None, p.stdout + p.stderr
+    code, got, out = run_ready(gx, *range(1, 13))
+    want = {1: "READY", 2: "WAIT", 3: "RED", 4: "CONFLICT", 5: "RETARGET", 6: "BLOCKED", 7: "READY",
+            8: "CLOSED", 9: "RED", 10: "WAIT", 11: "WAIT", 12: "READY"}
+    check(code == 1 and got == want, f"ready: each verdict as planted, exit 1 ({code})\n        got  {got}\n        want {want}")
+    code, got, out = run_ready(gx, 1, 7, 12)
+    check(code == 0 and got == {1: "READY", 7: "READY", 12: "READY"},
+          f"ready: only READY PRs exit 0; red-on-master and absent-on-master checks do not block ({code} {got})")
+    write_fixture(gx, {"prs.json": [gate(1, validate="WEIRD")]})
+    code, got, out = run_ready(gx, 1)
+    check(code == 2 and "unknown check state" in out, f"ready: an unknown check state is unreadable, exit 2 ({code})")
+    sys.path.insert(0, os.path.dirname(TOOL))
+    import t27b as t27b_tool
+    check(t27b_tool.fold_master(["a\tcancelled\nb\tfailure\nc\tskipped\n", "a\tsuccess\nb\tsuccess\nc\tneutral\n"])
+          == {"a": "SUCCESS", "b": "FAILURE"},
+          "ready: master's newest verdict per check; cancelled, skipped and neutral runs are passed over")
 
     check(snapshot([clean, mid, dirty]) == before, "never write: the worktrees' git state is unchanged")
     # negative control for the snapshot: a change must show
