@@ -279,6 +279,8 @@ pub enum TrapKind {
     Assert = 4,
     AssertEq = 5,
     NoReturn = 6,
+    /// `x as T` whose value is outside `T` (Zig's checked `@intCast`).
+    Cast = 7,
 }
 
 impl TrapKind {
@@ -290,6 +292,7 @@ impl TrapKind {
             TrapKind::Assert => "assert failed",
             TrapKind::AssertEq => "assert_eq failed",
             TrapKind::NoReturn => "reached the end of a non-void fn without return",
+            TrapKind::Cast => "integer cast out of range",
         }
     }
 }
@@ -349,8 +352,17 @@ pub enum ExprKind {
         func: FuncId,
         args: Vec<Expr>,
     },
-    /// Lossless conversion from the operand's narrower integer type to `ty`.
+    /// Lossless conversion from the operand's narrower integer type to `ty`
+    /// (or from bool, as 0 / 1).
     Widen(Box<Expr>),
+    /// `x as T` that can lose information: the operand (an integer type) is
+    /// converted to integer `ty`. `site` 0 truncates (two's complement, Zig's
+    /// `@truncate`); otherwise a value outside `ty` traps at `site` (Zig's
+    /// checked `@intCast`).
+    Cast {
+        arg: Box<Expr>,
+        site: SiteId,
+    },
 }
 
 #[derive(Clone, Debug)]

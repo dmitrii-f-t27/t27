@@ -263,6 +263,16 @@ impl<'p> Interp<'p> {
                 }
             }
             ExprKind::Widen(a) => self.expr(a, env),
+            ExprKind::Cast { arg, site } => {
+                let v = self.expr(arg, env)?;
+                if *site == 0 {
+                    Ok(e.ty.wrap(v))
+                } else if e.ty.fits(v) {
+                    Ok(v)
+                } else {
+                    Err(Stop::Trap { site: *site, a: 0, b: 0 })
+                }
+            }
         }
     }
 }

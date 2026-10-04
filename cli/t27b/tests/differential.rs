@@ -204,11 +204,24 @@ impl<'r> Gen<'r> {
             let inner = self.expr(t, depth - 1);
             return Expr { ty, kind: ExprKind::Widen(Box::new(inner)) };
         }
-        if r < 83 {
+        if r < 81 {
+            // `x as T` from any other type: a bool widens to 0 / 1; an
+            // integer either truncates (site 0) or traps when out of range.
+            if self.rng.chance(15) {
+                let inner = self.expr(Ty::Bool, depth - 1);
+                return Expr { ty, kind: ExprKind::Widen(Box::new(inner)) };
+            }
+            let from: Vec<Ty> = Ty::INTS.iter().copied().filter(|&t| t != ty).collect();
+            let t = self.rng.pick(&from);
+            let inner = self.expr(t, depth - 1);
+            let site = if self.rng.chance(50) { 0 } else { self.site(TrapKind::Cast, ty) };
+            return Expr { ty, kind: ExprKind::Cast { arg: Box::new(inner), site } };
+        }
+        if r < 86 {
             let inner = self.expr(ty, depth - 1);
             return Expr { ty, kind: ExprKind::BitNot(Box::new(inner)) };
         }
-        if r < 90 && ty.signed() {
+        if r < 91 && ty.signed() {
             // Unary minus lowers to `0 - x`.
             let inner = self.expr(ty, depth - 1);
             let (op, site) = if self.mode == OverflowMode::Trap {
@@ -218,7 +231,7 @@ impl<'r> Gen<'r> {
             };
             return arith(ty, op, konst(ty, 0), inner, site);
         }
-        if r < 95 {
+        if r < 96 {
             return self.chain(ty);
         }
         self.leaf(ty)
@@ -654,6 +667,10 @@ fn show_expr(p: &Program, f: &Func, e: &Expr) -> String {
             format!("{}({})", p.funcs[*func as usize].name, a.join(", "))
         }
         ExprKind::Widen(a) => format!("{}({})", e.ty.name(), show_expr(p, f, a)),
+        ExprKind::Cast { arg, site } => {
+            let how = if *site != 0 { format!("@{}", site) } else { "%".into() };
+            format!("({} as{} {})", show_expr(p, f, arg), how, e.ty.name())
+        }
     }
 }
 
@@ -728,7 +745,7 @@ struct Stats {
     functions: usize,
     calls: usize,
     returns: usize,
-    traps: [usize; 7],
+    traps: [usize; 8],
     skipped: usize,
 }
 
@@ -876,7 +893,7 @@ fn random_programs_jit_matches_interpreter() {
         }
         eprintln!(
             "differential {:?}: {} programs, {} functions, {} calls compared ({} returns, traps: \
-             overflow {}, div-zero {}, shift {}, assert {}, assert_eq {}, no-return {}), {} skipped (fuel)",
+             overflow {}, div-zero {}, shift {}, assert {}, assert_eq {}, no-return {}, cast {}), {} skipped (fuel)",
             mode,
             stats.programs,
             stats.functions,
@@ -888,6 +905,7 @@ fn random_programs_jit_matches_interpreter() {
             stats.traps[4],
             stats.traps[5],
             stats.traps[6],
+            stats.traps[7],
             stats.skipped
         );
     }
@@ -1161,6 +1179,63 @@ fn compare_unary_widen_at_edge_values() {
         "compare/unary/widen: {} programs, {} calls compared",
         stats.programs, stats.calls
     );
+    assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
+}
+
+/// `x as T` between every pair of types, truncating and checked, at every
+/// edge value of the source: the result returned, fed to 64-bit-sensitive
+/// arithmetic and compared, and the operand as a constant.
+#[test]
+fn casts_at_edge_values() {
+    let mut rng = Rng::new(27);
+    let mut stats = Stats::default();
+    let mut failures = Vec::new();
+    let mk = |kind, ty| Site { kind, line: 1, what: String::new(), ty };
+    for from in ALL {
+        let vals = edge_values(from);
+        for to in Ty::INTS {
+            if to == from {
+                continue;
+            }
+            for checked in [false, true] {
+                let sites = vec![mk(TrapKind::Overflow, to), mk(TrapKind::NoReturn, to), mk(TrapKind::Cast, to)];
+                let site = if checked { 2 } else { 0 };
+                let cast = |arg: Expr| {
+                    if from == Ty::Bool {
+                        Expr { ty: to, kind: ExprKind::Widen(Box::new(arg)) }
+                    } else {
+                        Expr { ty: to, kind: ExprKind::Cast { arg: Box::new(arg), site } }
+                    }
+                };
+                let c = cast(var(from, 0));
+                let use_ = arith(to, ArithOp::AddW, c.clone(), konst(to, 0), 0);
+                let mut funcs = vec![
+                    one_func("c", &[from], to, vec![Stmt::Return(Some(c.clone()))], 1),
+                    one_func("ca", &[from], to, vec![Stmt::Return(Some(arith(to, ArithOp::ShrW, use_, konst(Ty::U32, 1), 0)))], 1),
+                    one_func("cc", &[from], Ty::Bool, vec![Stmt::Return(Some(cmp(CmpOp::Lt, c, konst(to, 0))))], 1),
+                ];
+                // The operand as a constant (the generator never folds it).
+                for &k in &vals {
+                    funcs.push(one_func("k", &[from], to, vec![Stmt::Return(Some(cast(konst(from, k))))], 1));
+                }
+                let n = funcs.len();
+                let prog = Program { module: "cast".into(), funcs, sites, mode: OverflowMode::Trap };
+                let mut calls: Vec<(usize, Vec<i128>)> =
+                    (0..3).flat_map(|f| vals.iter().map(move |&a| (f, vec![a]))).collect();
+                for f in 3..n {
+                    calls.push((f, vec![0]));
+                }
+                if let Err(e) = compare_calls(&prog, &calls, &mut rng, &mut stats) {
+                    failures.push(format!("{} as {} ({}): {}", from.name(), to.name(), if checked { "checked" } else { "truncating" }, e));
+                }
+            }
+        }
+    }
+    eprintln!(
+        "casts: {} programs, {} calls compared ({} returns, {} cast traps)",
+        stats.programs, stats.calls, stats.returns, stats.traps[TrapKind::Cast as usize]
+    );
+    assert!(stats.traps[TrapKind::Cast as usize] > 0);
     assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
 }
 

@@ -104,7 +104,9 @@ reference interpreter (see Verification).
   multiplication, `smull`/`umull` with an extend-compare (`smulh`/`umulh` at
   64 bits). Narrow types use an extend-compare. Division gets
   `cbz` (divide by zero) and a MIN/-1 check. Shifts get an unsigned range
-  compare on the amount.
+  compare on the amount. A checked cast compares the operand with its own
+  low bits extended (`cmp x, w, sxtb` and the like) and, where only the
+  sign can be wrong, with zero.
 
   Each check branches to an out-of-line stub at the end of the function:
   * in the JIT, the stub records the site and jumps to `trap_common`, which
@@ -119,6 +121,7 @@ reference interpreter (see Verification).
   | 4 | assert |
   | 5 | assert_eq |
   | 6 | missing return |
+  | 7 | cast out of range |
 
 Example: `t27b asm` on one benchmark function. Left is trap mode (the
 default); right is `--overflow wrap`.
@@ -176,7 +179,8 @@ _k0:  ; line 3                          _k0:  ; line 3
   block declares it.
 
 Everything else is rejected by name. That includes structs, enums, floats,
-strings, slices and arrays, casts, `invariant` and `bench` blocks, builtins
+strings, slices and arrays, casts to or from a float or to `bool`,
+`invariant` and `bench` blocks, builtins
 (`@...`) and labelled loops. The corpus section lists what that rejects in
 practice.
 
@@ -220,6 +224,22 @@ code, and the differential test checks them trap for trap.
     masked in wrap mode.
   * An untyped literal shifted by a runtime amount (`1 << n`) is rejected,
     because its width would be a guess.
+* **Casts.** `x as T` converts an integer or `bool` to integer `T`.
+  * A lossless one is a plain widening, and `bool` becomes 0 or 1.
+  * Between two unsigned types, a narrowing keeps the low bits, like Zig's
+    `@truncate`: `300 as u8` from a `u32` is 44.
+  * Every other conversion is checked, like `@intCast`, and traps when the
+    value is outside `T` (`brk #7`): `-1 as u8`, `200 as i8`,
+    `0x8000_0000 as i32` from a `u32`.
+  * In wrap mode every narrowing keeps the low bits, as a C cast does.
+  * A literal must fit `T`. `x as bool` is rejected, as Zig rejects it.
+  * The Zig backend decides between `@truncate` and `@intCast` by the shape of
+    the operand: an expression it can prove unsigned, such as a typed
+    variable, a typed literal, a cast, or an arithmetic or shift of these.
+    t27b decides by the operand's type. They differ only for an unsigned
+    operand of another shape, such as a call result, that is out of range:
+    t27b truncates it and the Zig backend panics. It also emits `@intCast` on
+    a `bool`, which does not compile.
 * **Missing return.** A function with a result type that falls off its end
   traps (`brk #6`).
 
