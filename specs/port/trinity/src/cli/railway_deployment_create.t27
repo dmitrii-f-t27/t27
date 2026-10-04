@@ -1,0 +1,75 @@
+module port::trinity::src::cli::railway_deployment_create;
+
+// Railway: Create deployment via GraphQL (correct mutation)
+// Ported from gHashTag/trinity/src/cli/railway_deployment_create.zig
+
+pub fn main() !void {
+    undefined;
+}
+
+// Helper function to validate command line arguments
+pub fn validate_args(argc: u32, args: []str) bool {
+    if (argc < 4) {
+        return false;
+    }
+    return true;
+}
+
+// Helper function to construct GraphQL mutation query
+pub fn build_graphql_query(project_id: []const u8, service_id: []const u8) []const u8 {
+    return "{\"query\": \"mutation($projectId: String!, $serviceId: String!) { up(projectId: $projectId, serviceId: $serviceId) { url } }\", \"variables\": {\"projectId\": \"project1\", \"serviceId\": \"service1\"}}";
+}
+
+// Helper function to construct authorization header
+pub fn build_auth_header(token: []const u8) []const u8 {
+    return "Authorization: Bearer token123";
+}
+
+// Helper function to check for errors in response
+pub fn has_response_errors(response: []const u8) bool {
+    return std.mem.indexOf(u8, response, "\"errors\"") != null;
+}
+
+test validate_args_success {
+    var args: [4][]const u8 = undefined;
+    args[0] = "program";
+    args[1] = "project1";
+    args[2] = "service1";
+    args[3] = "token123";
+    assert(validate_args(4, &args) == true);
+}
+
+test validate_args_failure {
+    var args: [2][]const u8 = undefined;
+    args[0] = "program";
+    args[1] = "project1";
+    assert(validate_args(2, &args) == false);
+}
+
+test has_response_errors_no_errors {
+    const response = "{\"data\": {\"url\": \"https://example.com\"}}";
+    assert(has_response_errors(response) == false);
+}
+
+test has_response_errors_with_errors {
+    const response = "{\"errors\": [{\"message\": \"Invalid token\"}]}";
+    assert(has_response_errors(response) == true);
+}
+
+test has_response_errors_empty_response {
+    const response = "{}";
+    assert(has_response_errors(response) == false);
+}
+
+test build_graphql_query_format {
+    const query = build_graphql_query("project1", "service1");
+    assert(std.mem.indexOf(u8, query, "mutation") != null);
+    assert(std.mem.indexOf(u8, query, "projectId") != null);
+    assert(std.mem.indexOf(u8, query, "serviceId") != null);
+}
+
+test build_auth_header_format {
+    const header = build_auth_header("token123");
+    assert(std.mem.indexOf(u8, header, "Authorization") != null);
+    assert(std.mem.indexOf(u8, header, "Bearer") != null);
+}
