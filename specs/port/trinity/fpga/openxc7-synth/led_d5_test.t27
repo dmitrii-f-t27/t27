@@ -27,9 +27,17 @@ module trinity_top {
         return (counter >> LED_BIT) & 1 == 1;
     }
 
-    // The hardware boundary: every clock the counter takes its next value.
-    // t27c gen-verilog lowers this to an always @(posedge clk) block.
-    fn on_clock(clk: u32) -> u32 { return next_count(clk); }
+    // Module state gives the clocked backend real registers and output ports.
+    // u32 carries the masked 24-bit value; rst_n/en are backend control ports.
+    var blink_counter: u32 = 0;
+    pub var led: bool = false;
+
+    // Both RTL assignments sample the old count. Evaluate the LED first so
+    // sequential host execution observes the same next count as nonblocking RTL.
+    fn on_clock() -> void {
+        led = led_value(next_count(blink_counter));
+        blink_counter = next_count(blink_counter);
+    }
 
     test next_count_increments {
         assert(next_count(0) == 1);
@@ -47,5 +55,16 @@ module trinity_top {
         assert(led_value(0x800000));
         assert(!led_value(0x7FFFFF));
         assert(led_value(0xFFFFFF));
+    }
+
+    test on_clock_advances_registered_state {
+        assert(blink_counter == 0);
+        assert(!led);
+        on_clock();
+        assert(blink_counter == 1);
+        assert(!led);
+        on_clock();
+        assert(blink_counter == 2);
+        assert(!led);
     }
 }
