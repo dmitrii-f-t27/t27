@@ -38,6 +38,17 @@
 //! module constant array of strings cannot live in read-only data (it holds
 //! addresses), so it stays a compile-time value (`Val::A`) and is written into
 //! a frame temporary only where memory is needed.
+//!
+//! Slices: `[]T` and `[]const T` are Zig's slices, laid out like `str` (which
+//! is exactly `[]const u8`): a 16-byte aggregate, the address of the first
+//! element at offset 0 and the length (u64) at offset 8. Whether the elements
+//! may be written is part of the type, not of the place holding the slice.
+//! `a[i..j]` (and the open `a[i..]`) slices an array, a pointer to an array, a
+//! slice or a string: the end is checked against the length and the start
+//! against the end, both as `index out of bounds`. Indexing a slice or a
+//! string is checked against its runtime length. `*[N]T` coerces to `[]T` and
+//! `[]const T`, `[]T` to `[]const T`, and `&[_]T{ ... }` to `[]const T`.
+//! `for (s) |x|` reads the slice's address and length once, before the loop.
 
 use crate::compiler::{Node, NodeKind};
 use crate::ir::*;
@@ -116,6 +127,9 @@ enum LTy {
     Str,
     /// `[N]T`: N elements of T, back to back, in memory.
     Arr(Box<LTy>, u32),
+    /// `[]T` (true: elements writable) or `[]const T` (false): a (pointer,
+    /// length) pair in memory. `[]const u8` is `Str`, never this.
+    Slice(Box<LTy>, bool),
 }
 
 /// `ty` at `addr + off`. `addr` is evaluated exactly once by whatever
@@ -695,6 +709,9 @@ impl<'a> Lower<'a> {
                 LTy::Ptr(..) => {
                     return self.reject("ConstDecl", format!("`{}` is a module-level pointer", node.name))
                 }
+                LTy::Slice(..) => {
+                    return self.reject("ConstDecl(slice)", format!("`{}` is a module-level slice", node.name))
+                }
                 LTy::S(_) => None,
             }
         } else if init.kind == NodeKind::ExprStructLit && !init.name.is_empty() {
@@ -1063,6 +1080,11 @@ impl<'a> Lower<'a> {
             Val::P(e, LTy::Ptr(inner, m)) if matches!(*inner, LTy::Arr(..)) => {
                 Place { addr: e, off: 0, ty: *inner, mutable: m, temp: None }
             }
+            Val::M(p) if matches!(p.ty, LTy::Str | LTy::Slice(..)) => p,
+            v @ Val::S(..) => match self.coerce_to(v, &LTy::Str)? {
+                Val::M(p) => p,
+                _ => return Err(()),
+            },
             v => {
                 let d = self.val_desc(&v);
                 return self.reject("StmtFor", format!("`for` over {}", d));
@@ -1072,15 +1094,36 @@ impl<'a> Lower<'a> {
         if capture.starts_with('*') || capture.contains(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
             return self.reject("StmtFor", format!("capture `{}`", capture));
         }
-        let LTy::Arr(elem, len) = p.ty.clone() else { unreachable!() };
-        let elem = *elem;
+        // The base address and the length: constants and the array for an
+        // array; for a slice, both read from its header before the loop.
+        let (elem, base, len) = match p.ty.clone() {
+            LTy::Arr(elem, len) => {
+                let mut base = addr_of(&p);
+                if !pure_addr(&base) {
+                    let h = self.hidden_var("%for_base", LTy::Ptr(Box::new(p.ty.clone()), false));
+                    out.push(Stmt::Assign { var: h, value: base });
+                    base = Expr { ty: Ty::Ptr, kind: ExprKind::Var(h) };
+                }
+                (*elem, base, Expr { ty: Ty::U64, kind: ExprKind::Const(len as i128) })
+            }
+            t => {
+                let elem = match t {
+                    LTy::Slice(elem, _) => *elem,
+                    _ => LTy::S(Ty::U8),
+                };
+                let mut pin = Vec::new();
+                let (hdr, off) = self.pin_header(&p, &mut pin)?;
+                out.extend(pin);
+                let hb = self.hidden_var("%for_base", LTy::Ptr(Box::new(elem.clone()), false));
+                let hl = self.hidden_var("%for_len", LTy::S(Ty::U64));
+                let ptr = Expr { ty: Ty::Ptr, kind: ExprKind::Load { addr: Box::new(hdr.clone()), off } };
+                let n = Expr { ty: Ty::U64, kind: ExprKind::Load { addr: Box::new(hdr), off: off + 8 } };
+                out.push(Stmt::Assign { var: hb, value: ptr });
+                out.push(Stmt::Assign { var: hl, value: n });
+                (elem, Expr { ty: Ty::Ptr, kind: ExprKind::Var(hb) }, Expr { ty: Ty::U64, kind: ExprKind::Var(hl) })
+            }
+        };
         let (esize, _) = self.size_align(&elem)?;
-        let mut base = addr_of(&p);
-        if !pure_addr(&base) {
-            let h = self.hidden_var("%for_base", LTy::Ptr(Box::new(p.ty.clone()), false));
-            out.push(Stmt::Assign { var: h, value: base });
-            base = Expr { ty: Ty::Ptr, kind: ExprKind::Var(h) };
-        }
         let i = self.hidden_var("%for_i", LTy::S(Ty::U64));
         let var_i = Expr { ty: Ty::U64, kind: ExprKind::Var(i) };
         out.push(Stmt::Assign { var: i, value: Expr { ty: Ty::U64, kind: ExprKind::Const(0) } });
@@ -1113,10 +1156,10 @@ impl<'a> Lower<'a> {
             kind: ExprKind::Cmp {
                 op: CmpOp::Lt,
                 lhs: Box::new(var_i.clone()),
-                rhs: Box::new(Expr { ty: Ty::U64, kind: ExprKind::Const(len as i128) }),
+                rhs: Box::new(len),
             },
         };
-        // i < len <= 2^32, so i + 1 cannot wrap.
+        // i < len < 2^64, so i + 1 cannot wrap.
         let next = Expr {
             ty: Ty::U64,
             kind: ExprKind::Arith {
@@ -2126,6 +2169,22 @@ impl<'a> Lower<'a> {
         if matches!(t, "str" | "&str" | "string" | "[]const u8") {
             return Ok(LTy::Str);
         }
+        // `[]T`, `[]const T`. The elements are only pointed to, so a struct
+        // may hold a slice of itself.
+        if let Some(rest) = t.strip_prefix("[]") {
+            let rest = rest.trim_start();
+            let (inner, mutable) = match rest.strip_prefix("const ") {
+                Some(r) => (r.trim(), false),
+                None => (rest, true),
+            };
+            if !inner.is_empty() {
+                let inner = self.lty_in(inner, false)?;
+                if inner == LTy::S(Ty::U8) && !mutable {
+                    return Ok(LTy::Str);
+                }
+                return Ok(LTy::Slice(Box::new(inner), mutable));
+            }
+        }
         if self.struct_nodes.contains_key(t) {
             let id = self.struct_id(t);
             if by_value {
@@ -2256,7 +2315,7 @@ impl<'a> Lower<'a> {
         match t {
             LTy::S(ty) => Ok((ty.bytes(), ty.bytes())),
             LTy::Ptr(..) => Ok((8, 8)),
-            LTy::Str => Ok((16, 8)),
+            LTy::Str | LTy::Slice(..) => Ok((16, 8)),
             LTy::Struct(id) => {
                 self.layout(*id)?;
                 let sd = &self.structs[*id as usize];
@@ -2282,6 +2341,7 @@ impl<'a> Lower<'a> {
             LTy::Struct(id) => self.structs[*id as usize].name.clone(),
             LTy::Str => "str".to_string(),
             LTy::Arr(inner, n) => format!("[{}]{}", n, self.type_name(inner)),
+            LTy::Slice(inner, m) => format!("[]{}{}", if *m { "" } else { "const " }, self.type_name(inner)),
         }
     }
 
@@ -2309,8 +2369,54 @@ impl<'a> Lower<'a> {
             self.see(n);
             return self.struct_temp(n, want.clone());
         }
+        // `&[_]T{ ... }` where a `[]const T` is wanted: the literal in a
+        // temporary, and a slice of all of it.
+        if n.kind == NodeKind::ExprUnary
+            && n.extra_op == "&"
+            && n.children.len() == 1
+            && n.children[0].kind == NodeKind::ExprArrayLiteral
+        {
+            let elem = match want {
+                LTy::Str => Some(LTy::S(Ty::U8)),
+                LTy::Slice(t, false) => Some((**t).clone()),
+                _ => None,
+            };
+            if let Some(elem) = elem {
+                self.see(n);
+                self.see(&n.children[0]);
+                let len = n.children[0].children.len() as u32;
+                let Val::M(arr) = self.struct_temp(&n.children[0], LTy::Arr(Box::new(elem), len))? else {
+                    return Err(());
+                };
+                return self.slice_of(addr_of(&arr), len, want.clone());
+            }
+        }
         let v = self.expr(n)?;
         self.coerce_to(v, want)
+    }
+
+    /// A slice of type `t` (a `Slice` or `Str`) of all `len` elements at
+    /// `ptr`, as a fresh temporary.
+    fn slice_of(&mut self, ptr: Expr, len: u32, t: LTy) -> R<Val> {
+        let k = self.new_slot(&t)?;
+        let n = Expr { ty: Ty::U64, kind: ExprKind::Const(len as i128) };
+        let stmts = vec![
+            Stmt::Store { addr: slot_expr(k), off: 0, value: ptr },
+            Stmt::Store { addr: slot_expr(k), off: 8, value: n },
+        ];
+        let addr = Expr { ty: Ty::Ptr, kind: ExprKind::Seq { stmts, value: Box::new(slot_expr(k)) } };
+        Ok(Val::M(Place { addr, off: 0, ty: t, mutable: false, temp: Some(k) }))
+    }
+
+    /// The header of slice place `p`, at a pure address: `p` itself, or a
+    /// copy of it made by `pin` (which runs first, once).
+    fn pin_header(&mut self, p: &Place, pin: &mut Vec<Stmt>) -> R<(Expr, u32)> {
+        if pure_addr(&p.addr) {
+            return Ok((p.addr.clone(), p.off));
+        }
+        let k = self.new_slot(&p.ty)?;
+        pin.push(Stmt::Copy { dst: slot_expr(k), src: addr_of(p), size: 16 });
+        Ok((slot_expr(k), 0))
     }
 
     /// Check a struct literal's own name, if it has one, against `want`.
@@ -2357,11 +2463,43 @@ impl<'a> Lower<'a> {
                     Ok(Val::M(Place { addr, off: 0, ty: LTy::Str, mutable: false, temp: Some(slot) }))
                 }
                 Val::M(p) if p.ty == LTy::Str => Ok(Val::M(p)),
+                // `[]u8` coerces to `[]const u8`.
+                Val::M(mut p) if p.ty == LTy::Slice(Box::new(LTy::S(Ty::U8)), true) => {
+                    p.ty = LTy::Str;
+                    Ok(Val::M(p))
+                }
                 Val::M(p) => {
                     let b = self.type_name(&p.ty);
                     self.reject("type mismatch", format!("expected str, found {}", b))
                 }
+                // `*[N]u8` (or `*const [N]u8`) coerces to `[]const u8`.
+                Val::P(e, LTy::Ptr(inner, _)) if matches!(&*inner, LTy::Arr(t, _) if **t == LTy::S(Ty::U8)) => {
+                    let LTy::Arr(_, n) = *inner else { unreachable!() };
+                    self.slice_of(e, n, LTy::Str)
+                }
+                Val::P(_, t) => {
+                    let b = self.type_name(&t);
+                    self.reject("type mismatch", format!("expected str, found {}", b))
+                }
                 _ => self.reject("type mismatch", "expected str, found a scalar".into()),
+            },
+            LTy::Slice(inner, m) => match v {
+                // `[]T` coerces to `[]const T`.
+                Val::M(mut p) if matches!(&p.ty, LTy::Slice(t, pm) if t == inner && (*pm || !*m)) => {
+                    p.ty = want.clone();
+                    Ok(Val::M(p))
+                }
+                // `*[N]T` coerces to `[]T`, `*const [N]T` only to `[]const T`.
+                Val::P(e, LTy::Ptr(pt, pm))
+                    if (pm || !*m) && matches!(&*pt, LTy::Arr(t, _) if t == inner) =>
+                {
+                    let LTy::Arr(_, n) = *pt else { unreachable!() };
+                    self.slice_of(e, n, want.clone())
+                }
+                v => {
+                    let (a, b) = (self.type_name(want), self.val_desc(&v));
+                    self.reject("type mismatch", format!("expected {}, found {}", a, b))
+                }
             },
             LTy::Arr(..) => match v {
                 Val::M(p) if &p.ty == want => Ok(Val::M(p)),
@@ -2523,8 +2661,8 @@ impl<'a> Lower<'a> {
         let in_place = n.kind == NodeKind::ExprCall
             && fresh
             && self.sigs.get(&n.name).is_some_and(|s| s.ret == Some(t.clone()));
-        if t == LTy::Str && !in_place {
-            let v = self.expr(n)?;
+        if matches!(t, LTy::Str | LTy::Slice(..)) && !in_place {
+            let v = if t == LTy::Str && n.kind != NodeKind::ExprUnary { self.expr(n)? } else { self.expr_as(n, &t)? };
             return match v {
                 Val::S(k, len) if pure_addr(&dst.addr) => {
                     self.store_str(&dst, k, len, out);
@@ -2719,16 +2857,54 @@ impl<'a> Lower<'a> {
     /// index is checked when it is evaluated and traps out of range, as
     /// Zig's safety check does.
     fn index(&mut self, n: &Node) -> R<Result<Place, Val>> {
-        if !n.extra_op.is_empty() {
-            return self.reject(&format!("ExprIndex({})", n.extra_op), "slice of an array or string".into());
+        // `x[a..b]` parses as an index whose index is the range `a..b`;
+        // `x[a:b]` and `x[a..]` as their own slice node.
+        if n.extra_op.is_empty()
+            && n.children.len() == 2
+            && n.children[1].kind == NodeKind::ExprBinary
+            && n.children[1].extra_op == ".."
+            && n.children[1].children.len() == 2
+        {
+            self.see(&n.children[1]);
+            let r = &n.children[1];
+            return self.slicing(&n.children[0], &r.children[0], Some(&r.children[1])).map(Err);
         }
-        if n.children.len() != 2 {
-            return self.reject("ExprIndex", "unexpected shape".into());
+        match (n.extra_op.as_str(), n.children.len()) {
+            ("slice", 3) => return self.slicing(&n.children[0], &n.children[1], Some(&n.children[2])).map(Err),
+            ("slice_open", 2) => return self.slicing(&n.children[0], &n.children[1], None).map(Err),
+            ("", 2) => {}
+            ("", _) => return self.reject("ExprIndex", "unexpected shape".into()),
+            (op, _) => return self.reject(&format!("ExprIndex({})", op), "unexpected shape".into()),
         }
         let base = self.expr(&n.children[0])?;
         let idx = self.expr(&n.children[1])?;
         if base.is_poison() || idx.is_poison() {
             return Err(());
+        }
+        // A string literal at a constant index is a constant.
+        if let Val::S(k, len) = base {
+            let c = match &idx {
+                Val::Ct(c) => Some(*c),
+                Val::E(Expr { kind: ExprKind::Const(c), ty }) if ty.is_int() && !ty.signed() => Some(*c),
+                _ => None,
+            };
+            if let Some(c) = c {
+                if !(0..len as i128).contains(&c) {
+                    return self.reject("ExprIndex", format!("index {} out of bounds for a string of length {}", c, len));
+                }
+                let b = self.data[k as usize][c as usize];
+                return Ok(Err(Val::E(Expr { ty: Ty::U8, kind: ExprKind::Const(b as i128) })));
+            }
+        }
+        let base = match base {
+            v @ Val::S(..) => self.coerce_to(v, &LTy::Str)?,
+            v => v,
+        };
+        if let Val::M(p) = &base {
+            if matches!(p.ty, LTy::Str | LTy::Slice(..)) {
+                let Val::M(p) = base else { unreachable!() };
+                return self.slice_index(p, idx).map(Ok);
+            }
         }
         let p = match base {
             Val::A(t, elems) => {
@@ -2748,8 +2924,6 @@ impl<'a> Lower<'a> {
             Val::P(e, LTy::Ptr(inner, m)) if matches!(*inner, LTy::Arr(..)) => {
                 Place { addr: e, off: 0, ty: *inner, mutable: m, temp: None }
             }
-            Val::S(..) => return self.reject("ExprIndex(str)", "index of a string".into()),
-            Val::M(p) if p.ty == LTy::Str => return self.reject("ExprIndex(str)", "index of a string".into()),
             v => {
                 let d = self.val_desc(&v);
                 return self.reject("ExprIndex", format!("index of {}", d));
@@ -2778,6 +2952,145 @@ impl<'a> Lower<'a> {
             kind: ExprKind::Offset { base: Box::new(addr_of(&p)), idx: Box::new(checked), scale: esize },
         };
         Ok(Ok(Place { addr, off: 0, ty: *elem, mutable, temp: None }))
+    }
+
+    /// The element type of a slice type and whether its elements may be
+    /// written.
+    fn slice_elem(t: &LTy) -> (LTy, bool) {
+        match t {
+            LTy::Slice(elem, m) => ((**elem).clone(), *m),
+            _ => (LTy::S(Ty::U8), false),
+        }
+    }
+
+    /// `s[i]` for a slice or str `s`: the header is read once, the index is
+    /// checked against its length when evaluated, and traps out of range.
+    fn slice_index(&mut self, p: Place, idx: Val) -> R<Place> {
+        let (elem, m) = Self::slice_elem(&p.ty);
+        let (esize, _) = self.size_align(&elem)?;
+        let mut pin = Vec::new();
+        let (hdr, off) = self.pin_header(&p, &mut pin)?;
+        let e = self.coerce(idx, Ty::U64)?;
+        let t = self.type_name(&p.ty);
+        let site = self.site(TrapKind::Bounds, format!("index of {}", t), Ty::U64);
+        let mut ptr = Expr { ty: Ty::Ptr, kind: ExprKind::Load { addr: Box::new(hdr.clone()), off } };
+        if !pin.is_empty() {
+            ptr = Expr { ty: Ty::Ptr, kind: ExprKind::Seq { stmts: pin, value: Box::new(ptr) } };
+        }
+        let len = Expr { ty: Ty::U64, kind: ExprKind::Load { addr: Box::new(hdr), off: off + 8 } };
+        let checked = Expr { ty: Ty::U64, kind: ExprKind::Bounds { idx: Box::new(e), len: Box::new(len), site } };
+        let addr = Expr { ty: Ty::Ptr, kind: ExprKind::Offset { base: Box::new(ptr), idx: Box::new(checked), scale: esize } };
+        Ok(Place { addr, off: 0, ty: elem, mutable: m, temp: None })
+    }
+
+    /// `x[i..j]` (or `x[i..]`, to the end) of an array, a pointer to an
+    /// array, a slice or a string: a new slice, built in a temporary. As in
+    /// Zig, `i <= j <= len` is checked when the slice is evaluated (at
+    /// compile time where all three are constants) and traps otherwise.
+    fn slicing(&mut self, base: &Node, start: &Node, end: Option<&Node>) -> R<Val> {
+        let construct = if end.is_some() { "ExprIndex(slice)" } else { "ExprIndex(slice_open)" };
+        let base = self.expr(base)?;
+        if base.is_poison() {
+            return Err(());
+        }
+        let base = match base {
+            v @ Val::S(..) => self.coerce_to(v, &LTy::Str)?,
+            Val::A(t, elems) => Val::M(self.materialize(t, elems)?),
+            v => v,
+        };
+        // The source: an array place or a slice place.
+        let (p, mutable) = match base {
+            Val::M(p) if matches!(p.ty, LTy::Arr(..)) => {
+                let m = p.mutable && p.temp.is_none();
+                (p, m)
+            }
+            Val::P(e, LTy::Ptr(inner, m)) if matches!(*inner, LTy::Arr(..)) => {
+                (Place { addr: e, off: 0, ty: *inner, mutable: m, temp: None }, m)
+            }
+            Val::M(p) if matches!(p.ty, LTy::Str | LTy::Slice(..)) => {
+                let m = Self::slice_elem(&p.ty).1;
+                (p, m)
+            }
+            v => {
+                let d = self.val_desc(&v);
+                return self.reject(construct, format!("slice of {}", d));
+            }
+        };
+        let elem = match &p.ty {
+            LTy::Arr(elem, _) => (**elem).clone(),
+            t => Self::slice_elem(t).0,
+        };
+        let (esize, _) = self.size_align(&elem)?;
+        let rt = if elem == LTy::S(Ty::U8) && !mutable { LTy::Str } else { LTy::Slice(Box::new(elem), mutable) };
+        let tname = self.type_name(&p.ty);
+        let hdr = self.new_slot(&rt)?;
+        let scr = self.new_slot(&LTy::S(Ty::U64))?;
+        let at = |k: u32, off: u32, ty: Ty| Expr { ty, kind: ExprKind::Load { addr: Box::new(slot_expr(k)), off } };
+        let mut stmts = Vec::new();
+        // S0: the header of the whole source.
+        let alen = if let LTy::Arr(_, len) = p.ty {
+            stmts.push(Stmt::Store { addr: slot_expr(hdr), off: 0, value: addr_of(&p) });
+            let c = Expr { ty: Ty::U64, kind: ExprKind::Const(len as i128) };
+            stmts.push(Stmt::Store { addr: slot_expr(hdr), off: 8, value: c });
+            Some(len)
+        } else {
+            stmts.push(Stmt::Copy { dst: slot_expr(hdr), src: addr_of(&p), size: 16 });
+            None
+        };
+        // S1: the start.
+        let i = self.expr(start)?;
+        let i = self.coerce(i, Ty::U64)?;
+        let ci = if let ExprKind::Const(c) = i.kind { Some(c) } else { None };
+        stmts.push(Stmt::Store { addr: slot_expr(scr), off: 0, value: i });
+        let one = Expr { ty: Ty::U64, kind: ExprKind::Const(1) };
+        let len_plus_1 = |l: Expr| Expr {
+            ty: Ty::U64,
+            kind: ExprKind::Arith { op: ArithOp::AddW, lhs: Box::new(l), rhs: Box::new(one.clone()), site: 0 },
+        };
+        // S2: the end, checked against the length, becomes the length.
+        let mut cj = alen.map(|l| l as i128);
+        if let Some(end) = end {
+            let j = self.expr(end)?;
+            let j = self.coerce(j, Ty::U64)?;
+            cj = if let ExprKind::Const(c) = j.kind { Some(c) } else { None };
+            if let (Some(c), Some(l)) = (cj, alen) {
+                if c > l as i128 {
+                    return self.reject(construct, format!("end {} out of bounds for `{}`", c, tname));
+                }
+            }
+            let site = self.site(TrapKind::Bounds, format!("end of a slice of {}", tname), Ty::U64);
+            let len = len_plus_1(at(hdr, 8, Ty::U64));
+            let checked = Expr { ty: Ty::U64, kind: ExprKind::Bounds { idx: Box::new(j), len: Box::new(len), site } };
+            stmts.push(Stmt::Store { addr: slot_expr(hdr), off: 8, value: checked });
+        }
+        if let (Some(a), Some(b)) = (ci, cj) {
+            if a > b {
+                return self.reject(construct, format!("start {} is past end {} in a slice of `{}`", a, b, tname));
+            }
+        }
+        // S3: start <= end.
+        let site = self.site(TrapKind::Bounds, format!("start of a slice of {}", tname), Ty::U64);
+        let len = len_plus_1(at(hdr, 8, Ty::U64));
+        let checked = Expr { ty: Ty::U64, kind: ExprKind::Bounds { idx: Box::new(at(scr, 0, Ty::U64)), len: Box::new(len), site } };
+        stmts.push(Stmt::Eval(checked));
+        // S4, S5: advance the pointer, shorten the length.
+        let ptr = Expr {
+            ty: Ty::Ptr,
+            kind: ExprKind::Offset { base: Box::new(at(hdr, 0, Ty::Ptr)), idx: Box::new(at(scr, 0, Ty::U64)), scale: esize },
+        };
+        stmts.push(Stmt::Store { addr: slot_expr(hdr), off: 0, value: ptr });
+        let rest = Expr {
+            ty: Ty::U64,
+            kind: ExprKind::Arith {
+                op: ArithOp::SubW,
+                lhs: Box::new(at(hdr, 8, Ty::U64)),
+                rhs: Box::new(at(scr, 0, Ty::U64)),
+                site: 0,
+            },
+        };
+        stmts.push(Stmt::Store { addr: slot_expr(hdr), off: 8, value: rest });
+        let addr = Expr { ty: Ty::Ptr, kind: ExprKind::Seq { stmts, value: Box::new(slot_expr(hdr)) } };
+        Ok(Val::M(Place { addr, off: 0, ty: rt, mutable: false, temp: Some(hdr) }))
     }
 
     /// `base.name`: the place of a field (or of `p.*`), or, for `.len` of
@@ -2826,9 +3139,10 @@ impl<'a> Lower<'a> {
             },
             _ => return self.reject("ExprFieldAccess", format!("`.{}` on a value that is not a struct", n.name)),
         };
-        if p.ty == LTy::Str {
+        if matches!(p.ty, LTy::Str | LTy::Slice(..)) {
             if n.name != "len" {
-                return self.reject("ExprFieldAccess(str)", format!("`.{}` of a str", n.name));
+                let (c, t) = if p.ty == LTy::Str { ("ExprFieldAccess(str)", "str".to_string()) } else { ("ExprFieldAccess(slice)", self.type_name(&p.ty)) };
+                return self.reject(c, format!("`.{}` of a {}", n.name, t));
             }
             // `.len` is read-only here: a str is never resized in place.
             return Ok(Ok(Place { addr: p.addr, off: p.off + 8, ty: LTy::S(Ty::U64), mutable: false, temp: None }));
@@ -2975,6 +3289,7 @@ impl<'a> Lower<'a> {
             }
             LTy::Ptr(..) => self.reject("ConstDecl", "pointer in a constant struct".into()),
             LTy::Str => self.reject("ConstDecl(str field)", "str field in a module-level struct constant".into()),
+            LTy::Slice(..) => self.reject("ConstDecl(slice)", "slice in a module-level constant".into()),
             LTy::Struct(id) if n.kind == NodeKind::ExprStructLit => {
                 self.lit_type(n, t)?;
                 let fields = self.fields(*id)?;
@@ -3032,14 +3347,14 @@ fn reg_ty(t: &LTy) -> Option<Ty> {
     match t {
         LTy::S(ty) => Some(*ty),
         LTy::Ptr(..) => Some(Ty::Ptr),
-        LTy::Struct(_) | LTy::Str | LTy::Arr(..) => None,
+        LTy::Struct(_) | LTy::Str | LTy::Arr(..) | LTy::Slice(..) => None,
     }
 }
 
-/// Lives in memory and is passed by reference: a struct, a `str` or an
-/// array.
+/// Lives in memory and is passed by reference: a struct, a `str`, an
+/// array or a slice.
 fn is_agg(t: &LTy) -> bool {
-    matches!(t, LTy::Struct(_) | LTy::Str | LTy::Arr(..))
+    matches!(t, LTy::Struct(_) | LTy::Str | LTy::Arr(..) | LTy::Slice(..))
 }
 
 /// An array type with strings at its leaves: no read-only image of it can

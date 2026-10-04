@@ -504,10 +504,157 @@ fn array_rejections_are_precise() {
         ("test t { assert(A == A); }", "type mismatch", "on an array"),
         ("test t { var b: [3]u32 = A; b.len = 2; }", "ExprFieldAccess(.len)", "not a place"),
         ("test t { assert(A.ptr == 0); }", "ExprFieldAccess", "`.ptr` of an array"),
-        ("test t { const s: str = \"ab\"; assert(s[0] == 97); }", "ExprIndex(str)", "index of a string"),
+        ("test t { const s: str = \"ab\"; assert(s.ptr == 0); }", "ExprFieldAccess(str)", "`.ptr` of a str"),
         ("test t { const b: [N]u32 = undefined; _ = b; }", "type [N]T", "not a compile-time integer"),
         ("test t { A[0] = 2; }", "StmtAssign", "assignment through a constant"),
         ("test t { assert(A); }", "condition", "expected bool, found an array"),
+    ];
+    for (body, construct, detail) in cases {
+        let m = rejected(&format!("{}{}\n", head, body));
+        assert!(m.starts_with(&format!("t27b: unsupported construct {} at line", construct)), "{}: {}", body, m);
+        assert!(m.contains(detail), "{}: {}", body, m);
+    }
+}
+
+// ---------------------------------------------------------------- slices
+
+/// The 1-based line of the first line of `src` containing `needle`.
+fn line_of(src: &str, needle: &str) -> u32 {
+    src.lines().position(|l| l.contains(needle)).expect("needle") as u32 + 1
+}
+
+#[test]
+fn slices_params_slicing_len_index_and_for() {
+    let src = "module a;
+
+const Pair = struct { xs: []const u32, tag: u8 };
+
+fn sum(xs: []const u32) u32 {
+    var t: u32 = 0;
+    for (xs) |x| {
+        t += x;
+    }
+    return t;
+}
+
+fn fill(xs: []u32, v: u32) void {
+    var i: u64 = 0;
+    while (i < xs.len) {
+        xs[i] = v;
+        i += 1;
+    }
+}
+
+fn tail(xs: []const u32) []const u32 {
+    return xs[1..];
+}
+
+fn first(s: []const u8) u8 {
+    return s[0];
+}
+
+test slice_of_array {
+    var a: [5]u32 = [1, 2, 3, 4, 5];
+    assert(sum(&a) == 15);
+    assert(sum(a[1..3]) == 5);
+    assert(sum(a[2..]) == 12);
+    assert(sum(a[5..]) == 0 and sum(a[2..2]) == 0);
+    const t = a[1..4];
+    assert(t.len == 3 and t[0] == 2 and t[2] == 4);
+    const u = t[1..];
+    assert(u.len == 2 and u[1] == 4);
+    assert(sum(tail(&a)) == 14);
+    var lo: u64 = 1;
+    var hi: u64 = 4;
+    assert(sum(a[lo..hi]) == 9);
+}
+
+test writes_through_a_slice {
+    var a: [4]u32 = [1, 2, 3, 4];
+    fill(a[1..3], 7);
+    assert(a[0] == 1 and a[1] == 7 and a[2] == 7 and a[3] == 4);
+    const s: []u32 = a[0..2];
+    s[1] = 9;
+    assert(a[1] == 9);
+    fill(&a, 0);
+    assert(sum(&a) == 0);
+}
+
+test strings_index_and_slice {
+    const s: []const u8 = \"hello\";
+    assert(s.len == 5 and s[1] == 101);
+    var i: u64 = 4;
+    assert(s[i] == 111);
+    assert(\"abc\"[2] == 99);
+    assert(first(s[3..]) == 108);
+    assert(s[1..3] == \"el\");
+    var n: u32 = 0;
+    for (s[0..2]) |c| {
+        n += c;
+    }
+    assert(n == 104 + 101);
+    var buf: [3]u8 = [120, 121, 122];
+    assert(first(&buf) == 120 and buf[0..2] == \"xy\");
+}
+
+test slice_literals_and_fields {
+    assert(sum(&[_]u32{ 10, 20 }) == 30);
+    assert(sum(&[_]u32{}) == 0);
+    const p = Pair{ .xs = &[_]u32{ 3, 4 }, .tag = 1 };
+    assert(p.xs.len == 2 and p.xs[1] == 4 and sum(p.xs) == 7);
+}
+
+test index_past_the_end {
+    var a: [3]u32 = [1, 2, 3];
+    const s = a[0..2];
+    var i: u64 = 2;
+    assert(s[i] == 3);
+}
+
+test slice_end_past_the_length {
+    var a: [3]u32 = [1, 2, 3];
+    var j: u64 = 4;
+    assert(sum(a[0..j]) == 0);
+}
+
+test slice_start_past_the_end {
+    const s: []const u8 = \"abc\";
+    var i: u64 = 2;
+    assert(s[i..1].len == 0);
+}
+";
+    let r = run(src);
+    assert_eq!(
+        names_ok(&r),
+        vec![
+            ("slice_of_array", false, true),
+            ("writes_through_a_slice", false, true),
+            ("strings_index_and_slice", false, true),
+            ("slice_literals_and_fields", false, true),
+            ("index_past_the_end", false, false),
+            ("slice_end_past_the_length", false, false),
+            ("slice_start_past_the_end", false, false),
+        ]
+    );
+    assert_eq!(r[4].2, Err((TrapKind::Bounds, line_of(src, "assert(s[i] == 3)"))));
+    assert_eq!(r[5].2, Err((TrapKind::Bounds, line_of(src, "a[0..j]"))));
+    assert_eq!(r[6].2, Err((TrapKind::Bounds, line_of(src, "s[i..1]"))));
+}
+
+#[test]
+fn slice_rejections_are_precise() {
+    let head = "module a;\n\nconst A: [3]u32 = [1, 2, 3];\n\n";
+    let cases: &[(&str, &str, &str)] = &[
+        ("fn f(xs: []u32) u64 { return xs.len; }\ntest t { assert(f(&A) == 3); }", "type mismatch", "expected []u32, found a pointer"),
+        ("fn f(xs: []const u32) u64 { return xs.len; }\ntest t { var b: [3]u32 = A; assert(f(b) == 3); }", "type mismatch", "expected []const u32, found [3]u32"),
+        ("fn f(xs: []u8) u64 { return xs.len; }\ntest t { assert(f(\"ab\") == 2); }", "type mismatch", "expected []u8, found a string"),
+        ("test t { assert(A[1..4].len == 3); }", "ExprIndex(slice)", "end 4 out of bounds for `[3]u32`"),
+        ("test t { assert(A[2..1].len == 0); }", "ExprIndex(slice)", "start 2 is past end 1"),
+        ("test t { assert(\"ab\"[2] == 0); }", "ExprIndex", "index 2 out of bounds for a string of length 2"),
+        ("fn f(xs: []u32) void { xs.len = 0; }\ntest t { }", "StmtAssign", "assignment through a constant"),
+        ("fn f(xs: []const u32) void { xs[0] = 1; }\ntest t { }", "StmtAssign", "assignment through a constant"),
+        ("const S: []const u32 = A[0..];\ntest t { assert(S.len == 3); }", "ConstDecl(slice)", "module-level slice"),
+        ("fn f(xs: []u32) u32 { return xs.ptr; }\ntest t { }", "ExprFieldAccess(slice)", "`.ptr` of a []u32"),
     ];
     for (body, construct, detail) in cases {
         let m = rejected(&format!("{}{}\n", head, body));
