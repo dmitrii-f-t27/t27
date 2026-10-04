@@ -26181,6 +26181,13 @@ fn types_compatible(target: &TypeInfo, value: &TypeInfo) -> bool {
     if target == value {
         return true;
     }
+    // `?T` accepts a `T` (and a `?T`), as Zig coerces T to ?T (#6186).
+    if let TypeInfo::Optional(inner) = target {
+        return match value {
+            TypeInfo::Optional(v) => types_compatible(inner, v),
+            v => types_compatible(inner, v),
+        };
+    }
     // Reject narrowing f64 -> f32 (precision loss). Widening f32 -> f64 is still
     // permitted by the rank check below. Fixes #920 (typechecker unsoundness, bug 1).
     if *target == TypeInfo::GF16 && (*value == TypeInfo::F32 || *value == TypeInfo::F64) {
@@ -26210,8 +26217,11 @@ fn is_signed_int(t: &TypeInfo) -> bool {
 }
 
 fn resolve_type_str(s: &str) -> TypeInfo {
-    let t = s.trim().trim_end_matches('?');
-    let is_opt = s.trim().ends_with('?');
+    // Both spellings of an optional: `i32?` and Zig's `?i32`. The prefix form fell
+    // through to Custom("?i32") and rejected `opt = value` (#6186).
+    let trimmed = s.trim();
+    let is_opt = trimmed.ends_with('?') || trimmed.starts_with('?');
+    let t = trimmed.trim_end_matches('?').trim_start_matches('?').trim();
     let base = match t {
         "void" => TypeInfo::Void,
         "bool" => TypeInfo::Bool,
@@ -44320,6 +44330,25 @@ mod tests_typecheck_soundness_920 {
         // widening within same sign still allowed (rank check)
         assert!(types_compatible(&TypeInfo::I64, &TypeInfo::I32));
         assert!(types_compatible(&TypeInfo::U64, &TypeInfo::U32));
+    }
+
+    // #6186: `?i32` (Zig's prefix spelling) is an optional, and an optional
+    // accepts its payload type. The prefix form resolved to Custom("?i32") and
+    // `wave = wave_num` was rejected while zig accepts it.
+    #[test]
+    fn optional_accepts_its_payload_6186() {
+        let opt = TypeInfo::Optional(Box::new(TypeInfo::I32));
+        assert_eq!(resolve_type_str("?i32"), opt);
+        assert_eq!(resolve_type_str("i32?"), opt);
+        assert_eq!(resolve_type_str("i32"), TypeInfo::I32);
+        assert!(types_compatible(&opt, &TypeInfo::I32), "i32 -> ?i32 must be allowed");
+        assert!(types_compatible(&opt, &opt));
+        assert!(types_compatible(&opt, &TypeInfo::I16), "widening into the payload is allowed");
+        // the payload rules still apply: no cross-sign, no narrowing
+        assert!(!types_compatible(&opt, &TypeInfo::U32), "u32 -> ?i32 must still be rejected");
+        assert!(!types_compatible(&opt, &TypeInfo::I64), "i64 -> ?i32 must still be rejected");
+        let optf = TypeInfo::Optional(Box::new(TypeInfo::F32));
+        assert!(!types_compatible(&optf, &TypeInfo::F64), "f64 -> ?f32 must still be rejected");
     }
 }
 
