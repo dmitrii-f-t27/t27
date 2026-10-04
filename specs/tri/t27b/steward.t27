@@ -20,6 +20,11 @@ module T27bSteward;
 //
 // Reason codes of a non-pass ledger entry: NONE = 0, UNIMPLEMENTED = 1,
 // REFERENCE_BUG = 2, NA = 3.
+//
+// Doctor codes (#6230). Claim: NONE = 0, CLAIM_DEAD = 1, CLAIM_OLD = 2;
+// liveness of the claim's pid: DEAD = 0, ALIVE = 1, UNKNOWN = 2.
+// Checkout of a lab run: NONE = 0, LAB_CHECKOUT = 1 (failed: the run measured
+// nothing), LAB_RECLONED = 2 (healed by a fresh clone: report it, #6220).
 
 // fail, mismatch and crash are defects someone has to read, not blockers.
 pub fn is_bad(v: u8) -> bool {
@@ -147,6 +152,38 @@ pub fn cap_rises(not_pass: u32, old_cap: u32, has_old: bool) -> bool {
     return not_pass > old_cap;
 }
 
+// The doctor's thresholds are minutes. A lab run that failed has no
+// `finished`; its age is read from `updated`, so a stuck lab ages too.
+pub fn lab_stale(age_min: u32, limit_min: u32) -> bool {
+    return age_min > limit_min;
+}
+
+// A dead pid frees the claim at any age; a live one is only reported past
+// the limit (a long tick is not a stuck tick). An unknown pid says nothing.
+pub fn claim_code(alive: u8, age_min: u32, limit_min: u32) -> u8 {
+    if (alive == 0) { return 1; }
+    if (alive == 1) {
+        if (age_min > limit_min) { return 2; }
+    }
+    return 0;
+}
+
+// railway 4.x cannot reach the lab's project; 5.x can.
+pub fn railway_old(major: u32) -> bool {
+    return major < 5;
+}
+
+pub fn ledger_quiet(age_min: u32, limit_min: u32) -> bool {
+    return age_min > limit_min;
+}
+
+// A failed checkout outranks a heal: the re-clone failed too.
+pub fn checkout_code(ok: bool, recloned: bool) -> u8 {
+    if (ok == false) { return 1; }
+    if (recloned) { return 2; }
+    return 0;
+}
+
 test delta_ref_moved { assert_eq(delta_code(2, 0, 2, 0, 0, 0), 1); }
 test delta_outside_reference_is_silent { assert_eq(delta_code(2, 2, 2, 0, 0, 0), 0); }
 test delta_regressed { assert_eq(delta_code(0, 0, 0, 3, 1, 0), 2); }
@@ -207,6 +244,26 @@ test bless_refuses_a_timeout { assert_eq(bless_reason(8, 0), 0); }
 test bless_cap_rises { assert_eq(cap_rises(6, 5, true), true); }
 test bless_cap_holds { assert_eq(cap_rises(5, 5, true), false); }
 test bless_first_cap { assert_eq(cap_rises(9, 0, false), false); }
+
+test doctor_stale { assert(lab_stale(361, 360)); }
+test doctor_fresh_at_limit { assert(lab_stale(360, 360) == false); }
+test doctor_claim_dead_young { assert_eq(claim_code(0, 1, 100), 1); }
+test doctor_claim_old { assert_eq(claim_code(1, 101, 100), 2); }
+test doctor_claim_live_at_limit { assert_eq(claim_code(1, 100, 100), 0); }
+test doctor_claim_unknown_old { assert_eq(claim_code(2, 999, 100), 0); }
+test doctor_railway {
+    assert(railway_old(4));
+    assert(railway_old(5) == false);
+    assert(railway_old(0));
+}
+test doctor_ledger_quiet {
+    assert(ledger_quiet(181, 180));
+    assert(ledger_quiet(180, 180) == false);
+}
+test doctor_checkout_failed { assert_eq(checkout_code(false, false), 1); }
+test doctor_checkout_reclone_failed { assert_eq(checkout_code(false, true), 1); }
+test doctor_checkout_healed { assert_eq(checkout_code(true, true), 2); }
+test doctor_checkout_kept { assert_eq(checkout_code(true, false), 0); }
 
 invariant gained_never_red {
     assert(delta_is_red(delta_code(0, 0, 2, 0, 0, 1)) == false);

@@ -51,12 +51,19 @@ ANOMALY CODES (doctor exits 1 when any is printed, 0 when none, 2 on usage)
   LAB-UNREADABLE      latest.json could not be read or parsed
   LAB-NOT-MASTER      the lab built a ref other than master
   LAB-BEHIND          the lab's commit is not the master tip
-  LAB-STALE           the lab's run finished more than --stale-hours ago
+  LAB-STALE           the lab's run finished (or, failed, was last updated)
+                      more than --stale-hours ago
+  LAB-CHECKOUT        the lab could not check out its commit: the run measured
+                      nothing; the lab re-clones once (#6220), so a repeat
+                      means the deploy predates #6220 or the remote is broken
+  LAB-RECLONED        the lab healed a broken clone with a fresh one: the run
+                      counts, but say so in the report (skill rule Q18)
   LAB-MISMATCH        mismatch > 0: a stop and a report, never a skip
   LAB-OUTSIDE-REF     t27b passes where the reference does not: a reference
                       defect or a vacuous pass; either way not in the number
   LAB-ERROR           lab_error, crash, timeout or t27b fail > 0
-  LAB-TESTS-RED       a lab step reported ok=false, or cargo test failed
+  LAB-TESTS-RED       a lab step other than checkout reported ok=false, or
+                      cargo test failed
   LAB-RATCHET         the lab's ratchet step is red: a spec moved against
                       docs/reports/t27b_expectations.json (see RATCHET below)
   PR-CONFLICTING      an open t27b PR cannot merge into its base
@@ -421,11 +428,12 @@ def anomalies(d, args):
         master = d["master"]
         if isinstance(master, str) and master and commit and commit != master:
             add("LAB-BEHIND", f"lab commit {commit[:9]}, master {master[:9]}", "wait for the lab's next run before quoting master numbers")
-        fin = lab.get("finished")
+        fin = lab.get("finished") or lab.get("updated")
         if fin:
-            age = (now - parse_time(fin)).total_seconds() / 3600
-            if age > args.stale_hours:
-                add("LAB-STALE", f"last run finished {age:.1f} h ago", "check /status.json and the Railway deploy logs")
+            age = (now - parse_time(fin)).total_seconds() / 60
+            if rules().lab_stale(age, args.stale_hours * 60):
+                word = "finished" if lab.get("finished") else "updated (no finished run)"
+                add("LAB-STALE", f"last run {word} {age / 60:.1f} h ago", "check /status.json and the Railway deploy logs")
         s = lab.get("summary") or {}
         if s.get("mismatch", 0):
             add("LAB-MISMATCH", f"mismatch {s['mismatch']}", "stop the lanes; reduce and report each mismatch (runs/<sha>.json)")
@@ -439,7 +447,18 @@ def anomalies(d, args):
             add("LAB-FRONTEND-DISAGREES", f"{f}: t27b's frontend rejects it, the reference passes it",
                 "a t27b parser/typecheck defect (or a reference that accepts too much): file it, not a blocker")
         steps = lab.get("steps") or {}
-        red = [k for k, v in steps.items() if isinstance(v, dict) and v.get("ok") is False and k != "ratchet"]
+        co = steps.get("checkout")
+        if isinstance(co, dict):
+            kind = rules().checkout(co.get("ok") is not False, co.get("clone") == "recloned")
+            if kind == "LAB-CHECKOUT":
+                add(kind, f"commit {commit[:9]}: {str(co.get('error') or co.get('first_error') or '')[:160]}",
+                    "the run measured nothing; a lab deploy older than #6220 never re-clones: "
+                    "ask the owner for a redeploy (railway 5.x: logs -s t27b-lab first)")
+            elif kind == "LAB-RECLONED":
+                add(kind, f"commit {commit[:9]}: first error {str(co.get('first_error') or '')[:140]}",
+                    "the run counts; name the heal in the report and watch the next run for a repeat")
+        red = [k for k, v in steps.items()
+               if isinstance(v, dict) and v.get("ok") is False and k not in ("ratchet", "checkout")]
         rat = steps.get("ratchet") or {}
         if rat.get("ok") is False:
             add("LAB-RATCHET", f"ratchet {rat.get('verdict')}: " + ", ".join(
@@ -472,11 +491,12 @@ def anomalies(d, args):
     if isinstance(claim, dict) and not claim.get("released"):
         since = claim.get("since")
         age = (now - parse_time(since)).total_seconds() / 60 if since else None
-        if alive is False:
-            add("CLAIM-DEAD", f"pid {claim.get('pid')} not running, claim since {since}",
+        kind = rules().claim(alive if alive in (True, False) else None, age, args.claim_minutes)
+        if kind == "CLAIM-DEAD":
+            add(kind, f"pid {claim.get('pid')} not running, claim since {since}",
                 "the claim is free; check the worktrees below before reusing any of them")
-        elif alive is True and age is not None and age > args.claim_minutes:
-            add("CLAIM-OLD", f"pid {claim.get('pid')} alive, claim {age:.0f} min old",
+        elif kind == "CLAIM-OLD":
+            add(kind, f"pid {claim.get('pid')} alive, claim {age:.0f} min old",
                 "a tick is running long; read uptime and its processes before calling it stuck")
 
     cwds = d["cwds"] if not isinstance(d["cwds"], Unreadable) else []
@@ -500,7 +520,7 @@ def anomalies(d, args):
     rw = d["railway"]
     if not isinstance(rw, Unreadable):
         m = re.search(r"(\d+)\.(\d+)\.(\d+)", rw)
-        if m and int(m.group(1)) < 5:
+        if m and rules().railway_old(int(m.group(1))):
             add("RAILWAY-OLD-CLI", f"first railway on PATH is {m.group(0)}",
                 "call ~/.nvm/versions/node/v22.22.0/bin/railway or ~/.bun/bin/railway (5.x)")
 
@@ -517,9 +537,9 @@ def anomalies(d, args):
         rows = [l for l in led.splitlines() if l.startswith("| 20")]
         if rows:
             last = parse_time(rows[-1].split("|")[1])
-            hrs = (now - last).total_seconds() / 3600
-            if hrs > args.quiet_hours:
-                add("LEDGER-QUIET", f"last ledger row {hrs:.1f} h old", "is the scheduled task t27b-queen-steward still enabled?")
+            mins = (now - last).total_seconds() / 60
+            if rules().ledger_quiet(mins, args.quiet_hours * 60):
+                add("LEDGER-QUIET", f"last ledger row {mins / 60:.1f} h old", "is the scheduled task t27b-queen-steward still enabled?")
     return out
 
 
