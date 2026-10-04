@@ -191,6 +191,20 @@ with tempfile.TemporaryDirectory() as tmp:
     code, codes, out = doctor(kept)
     check(code == 0 and codes == [], f"kept clone: no anomaly (got {code} {codes})")
 
+    # #6237: LAB-ERROR reads the per-spec records; a fail the reference shares (build_verify) is no alarm
+    shared = lab(t27b_fail=1, results=[{"file": "specs/fpga/verification/build_verify.t27",
+                                        "t27b": "fail", "reference": "fail"}])
+    fx = os.path.join(tmp, "fx-shared-fail")
+    write_fixture(fx, {**files, "lab.json": shared})
+    code, codes, out = doctor(fx)
+    check(code == 0 and codes == [], f"shared fail: no LAB-ERROR (got {code} {codes})")
+    own = lab(t27b_fail=1, results=[{"file": "specs/a.t27", "t27b": "fail", "reference": "pass"}])
+    fx = os.path.join(tmp, "fx-own-fail")
+    write_fixture(fx, {**files, "lab.json": own})
+    code, codes, out = doctor(fx)
+    check(code == 1 and codes == ["LAB-ERROR"] and "t27b_fail 1" in out,
+          f"own fail: LAB-ERROR t27b_fail 1 (got {code} {codes})")
+
     # mutation control: the same tool over a generated C whose checkout rule never fires misses LAB-CHECKOUT,
     # so the finding comes from the spec, not from a branch in t27b.py
     gen_src = open(os.path.join(ROOT, "gen", "c", "tri", "t27b", "steward.c")).read()
