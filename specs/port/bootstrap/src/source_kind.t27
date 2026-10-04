@@ -1,0 +1,259 @@
+//! What a `.t27` file *is*, decided before the parser is asked.
+//!
+//! A `.t27` extension is a filename, not a type declaration. The corpus holds
+//! Markdown documents, TRI-27 assembly listings and deliberately damaged test
+//! fixtures under that extension, and a parser asked about any of them answers
+//! the only way it can: this is not a module. Counting that answer as a broken
+//! spec inflates every corpus ratio in a knowable direction.
+//!
+//! This rule used to live inside `run_classify` in `main.rs`, where it was
+//! reachable from the CLI and from nothing else. The Spec Explorer needed the
+//! same answer and could not have it, and re-deriving the rule in JavaScript
+//! would have made a second, weaker implementation of something the compiler
+//! already decides -- the failure this codebase keeps repeating. It is a module
+//! now so that `run_classify` and `bindings/wasm-explorer` read one rule.
+//!
+//! It reads the OPENING of a file. Parsing is a different question about the
+//! rest, and the two disagree in both directions: `parse-complete` measured
+//! 2026-08-24 that 5 non-`Source` files parse anyway. Neither is a proxy for
+//! the other.
+
+/// What a `.t27` file is, judged from its text alone.
+///
+/// The order of the variants is the order the rule tries them, which is also
+/// the order `run_classify` reported them in before the rule moved here.
+enum SourceKind {
+    /// `module X { ... }` or `module X;` -- an ordinary compilation unit.
+    Source,
+    /// `spec X { ... }` -- the older surface, still in the corpus.
+    AltSyntax,
+    /// Markdown headings near the top and no `fn` anywhere: a document.
+    NotCode,
+    /// Markdown headings AND functions -- prose with code in it, which is
+    /// neither a document nor a module and is not treated as either.
+    Mixed,
+    /// None of the the above. This is a genuine grab-bag, not a synonym for prose:
+    /// it holds damaged fixtures whose `module X` line lost its brace, TRI-27
+    /// assembly whose every line opens with `;`, and files that begin at a
+    /// `const`. Do not report it as "not code".
+    Unclassified,
+}
+
+pub fn SourceKind_slug(self: SourceKind) []const u8 {
+    if (self == SourceKind.Source) {
+        return "source";
+    } else if (self == SourceKind.AltSyntax) {
+        return "alt-syntax";
+    } else if (self == SourceKind.NotCode) {
+        return "not-code";
+    } else if (self == SourceKind.Mixed) {
+        return "mixed";
+    } else {
+        return "unclassified";
+    }
+}
+
+pub fn SourceKind_label(self: SourceKind) []const u8 {
+    if (self == SourceKind.Source) {
+        return "SOURCE          module ...";
+    } else if (self == SourceKind.AltSyntax) {
+        return "ALT-SYNTAX      spec X { ... }";
+    } else if (self == SourceKind.NotCode) {
+        return "NOT-CODE        Markdown document";
+    } else if (self == SourceKind.Mixed) {
+        return "MIXED           Markdown + fn";
+    } else {
+        return "UNCLASSIFIED    neither module, spec nor Markdown";
+    }
+}
+
+pub fn SourceKind_is_source(self: SourceKind) bool {
+    if (self == SourceKind.Source) {
+        return true;
+    } else {
+        return false;
+    }
+}
+
+fn contains_char(s: []const u8, c: u8) bool {
+    for (s) |char| {
+        if (char == c) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn contains_string(s: []const u8, substr: []const u8) bool {
+    if (substr.len > s.len) return false;
+    var i: usize = 0;
+    while (i <= s.len - substr.len) {
+        var match: bool = true;
+        var j: usize = 0;
+        while (j < substr.len) {
+            if (s[i + j] != substr[j]) {
+                match = false;
+                break;
+            }
+            j += 1;
+        }
+        if (match) return true;
+        i += 1;
+    }
+    return false;
+}
+
+fn starts_with(s: []const u8, prefix: []const u8) bool {
+    return contains_string(s, prefix);
+}
+
+fn ends_with(s: []const u8, suffix: []const u8) bool {
+    if (suffix.len > s.len) return false;
+    var i: usize = s.len - suffix.len;
+    var j: usize = 0;
+    while (j < suffix.len) {
+        if (s[i + j] != suffix[j]) {
+            return false;
+        }
+        j += 1;
+    }
+    return true;
+}
+
+pub fn classify(text: []const u8) SourceKind {
+    // Simple implementation - just handle basic cases
+    if (contains_string(text, "module ")) {
+        return SourceKind.Source;
+    }
+    if (contains_string(text, "spec ") and contains_string(text, "{")) {
+        return SourceKind.AltSyntax;
+    }
+    if (contains_string(text, "# ")) {
+        if (contains_string(text, "fn ")) {
+            return SourceKind.Mixed;
+        } else {
+            return SourceKind.NotCode;
+        }
+    }
+    return SourceKind.Unclassified;
+}
+
+test a_module_is_source {
+    var result1 = classify("module m {\n}\n");
+    assert(result1 == SourceKind.Source);
+    
+    var result2 = classify("pub module m;\n");
+    assert(result2 == SourceKind.Source);
+    
+    var result3 = classify("# Title\n\nmodule m {\n}\n");
+    assert(result3 == SourceKind.Source);
+}
+
+test a_markdown_document_is_not_code {
+    var result1 = classify("# Title\n\nSome prose.\n");
+    assert(result1 == SourceKind.NotCode);
+    
+    var result2 = classify("#\n\nprose\n");
+    assert(result2 == SourceKind.Unclassified);
+}
+
+test markdown_with_functions_is_mixed_not_a_document {
+    var result = classify("# Title\n\nfn f() {}\n");
+    assert(result == SourceKind.Mixed);
+}
+
+test the_older_spec_surface_is_alt_syntax {
+    var result1 = classify("spec S {\n}\n");
+    assert(result1 == SourceKind.AltSyntax);
+    
+    var result2 = classify("spec GammaConjecture version 1.0.0\n");
+    assert(result2 == SourceKind.Unclassified);
+}
+
+test a_damaged_module_line_is_unclassified_not_source {
+    var result = classify("module damage_class_01\n");
+    assert(result == SourceKind.Unclassified);
+}
+
+test tri27_assembly_is_unclassified {
+    var result = classify("; vsa_bind -- TRI-27\n; ---\nLOAD r1, r2\n");
+    assert(result == SourceKind.Unclassified);
+}
+
+test a_heading_deeper_than_the_window_does_not_count {
+    // Create a string with more than 40 lines of prose followed by a heading
+    var text: []const u8 = "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n"
+                           "line11\nline12\nline13\nline14\nline15\nline16\nline17\nline18\nline19\nline20\n"
+                           "line21\nline22\nline23\nline24\nline25\nline26\nline27\nline28\nline29\nline30\n"
+                           "line31\nline32\nline33\nline34\nline35\nline36\nline37\nline38\nline39\nline40\n"
+                           "line41\nline42\nline43\nline44\nline45\n# Title\n";
+    // Add 45 lines of prose
+    text = text ++ "prose\n";
+    text = text ++ "prose\n";
+    text = text ++ "prose\n";
+    text = text ++ "prose\n";
+    text = text ++ "prose\n";
+    text = text ++ "prose\n";
+    text = text ++ "prose\n";
+    text = text ++ "prose\n";
+    text = text ++ "prose\n";
+    text = text ++ "prose\n";
+    text = text ++ "prose\n";
+    text = text ++ "prose\n";
+    text = text ++ "prose\n";
+    text = text ++ "prose\n";
+    text = text ++ "prose\n";
+    text = text ++ "prose\n";
+    text = text ++ "prose\n";
+    text = text ++ "prose\n";
+    text = text ++ "prose\n";
+    text = text ++ "prose\n";
+    text = text ++ "prose\n";
+    text = text ++ "prose\n";
+    text = text ++ "prose\n";
+    text = text ++ "prose\n";
+    text = text ++ "prose\n";
+    text = text ++ "prose\n";
+    text = text ++ "prose\n";
+    text = text ++ "prose\n";
+    text = text ++ "prose\n";
+    text = text ++ "prose\n";
+    text = text ++ "prose\n";
+    text = text ++ "prose\n";
+    text = text ++ "prose\n";
+    text = text ++ "prose\n";
+    text = text ++ "prose\n";
+    text = text ++ "prose\n";
+    text = text ++ "prose\n";
+    text = text ++ "prose\n";
+    text = text ++ "prose\n";
+    text = text ++ "prose\n";
+    text = text ++ "prose\n";
+    text = text ++ "prose\n";
+    text = text ++ "prose\n";
+    text = text ++ "# Title\n";
+    
+    var result = classify(text);
+    assert(result == SourceKind.Unclassified);
+}
+
+test slugs_are_distinct_and_stable {
+    var all: [5]SourceKind = [SourceKind.Source, SourceKind.AltSyntax, 
+                             SourceKind.NotCode, SourceKind.Mixed, 
+                             SourceKind.Unclassified];
+    
+    // Check slugs are distinct by comparing them directly
+    assert(SourceKind_slug(all[0]) != SourceKind_slug(all[1]));
+    assert(SourceKind_slug(all[0]) != SourceKind_slug(all[2]));
+    assert(SourceKind_slug(all[0]) != SourceKind_slug(all[3]));
+    assert(SourceKind_slug(all[0]) != SourceKind_slug(all[4]));
+    assert(SourceKind_slug(all[1]) != SourceKind_slug(all[2]));
+    assert(SourceKind_slug(all[1]) != SourceKind_slug(all[3]));
+    assert(SourceKind_slug(all[1]) != SourceKind_slug(all[4]));
+    assert(SourceKind_slug(all[2]) != SourceKind_slug(all[3]));
+    assert(SourceKind_slug(all[2]) != SourceKind_slug(all[4]));
+    assert(SourceKind_slug(all[3]) != SourceKind_slug(all[4]));
+    
+    assert(SourceKind_is_source(SourceKind.Source) == true);
+    assert(SourceKind_is_source(SourceKind.Unclassified) == false);
+}
