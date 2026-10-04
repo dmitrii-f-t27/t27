@@ -51,7 +51,7 @@ def runs_tests(src: Path) -> tuple[int, str]:
 
 
 code, out = runs_tests(GEN)
-check(code == 0 and "31 tests passed" in out, f"the generated C passes the spec's tests ({code}: {out})")
+check(code == 0 and "38 tests passed" in out, f"the generated C passes the spec's tests ({code}: {out})")
 
 text = GEN.read_text()
 needle = "return (((in_ref * 1000) + (reference / 2)) / reference);"
@@ -108,6 +108,12 @@ check((r.unlisted("pass", False), r.unlisted("pass", True), r.unlisted("fail", F
 check((r.over_cap(5, 5), r.over_cap(6, 5), r.over_cap(0, None), r.over_cap(0, "7"), r.over_cap(0, True))
       == (False, True, True, True, True), "over_cap: the cap only moves down; no whole-number cap is over")
 
+check((r.bless_reason("fail", "reference-bug"), r.bless_reason("frontend", None), r.bless_reason("mismatch", None),
+       r.bless_reason("timeout", "bogus")) == ("reference-bug", "unimplemented", None, None),
+      "bless: a written reason is kept, a rejected construct is unimplemented, a defect is refused")
+check((r.cap_rises(6, 5), r.cap_rises(5, 5), r.cap_rises(9, None)) == (True, False, False),
+      "bless: the cap may fall, never rise; a ledger without one sets it")
+
 tool = TOOL.read_text()
 body = tool[tool.index("def delta("):tool.index("def previous_run(")]
 check('("fail", "mismatch", "crash")' not in body and "rules().delta(" in body,
@@ -115,6 +121,9 @@ check('("fail", "mismatch", "crash")' not in body and "rules().delta(" in body,
 body = tool[tool.index("def ratchet("):tool.index("def bless(")]
 check("r.entry(" in body and "got in PASSES" not in body and "want not in PASSES" not in body,
       "t27b.py ratchet asks the spec and keeps no branch of its own")
+body = tool[tool.index("def bless("):tool.index("def dump_ledger(")]
+check("r.bless_reason(" in body and "r.cap_rises(" in body and "UNIMPLEMENTED" not in tool and "PASSES" not in tool,
+      "t27b.py bless asks the spec and keeps no verdict tuple of its own")
 
 t27c = os.environ.get("TRI_T27C") or next(
     (str(p) for p in (ROOT / "target/release/t27c", ROOT / "target/debug/t27c") if os.access(p, os.X_OK)), None)

@@ -29,6 +29,7 @@ VERDICTS = ("pass", "pass_vacuous", "blocked", "frontend", "codegen",
 DELTAS = (None, "REF-MOVED", "REGRESSED", "NEW-MISMATCH", "GAINED", "CHECK-LOST")
 RATCHETS = (None, "VACUITY MEASURED", "UNEXPECTED FAILURE", "UNEXPECTED PASS", "MOVED",
             "STALE", "UNJUDGED", "UNLISTED", "OVER CAP", "BAD REASON")
+REASONS = (None, "unimplemented", "reference-bug", "n/a")
 
 
 class RulesUnavailable(RuntimeError):
@@ -74,6 +75,10 @@ def _build():
     so.over_cap.restype = ctypes.c_bool
     so.ratchet_is_red.argtypes = [ctypes.c_uint8]
     so.ratchet_is_red.restype = ctypes.c_bool
+    so.bless_reason.argtypes = [ctypes.c_uint8, ctypes.c_uint8]
+    so.bless_reason.restype = ctypes.c_uint8
+    so.cap_rises.argtypes = [ctypes.c_uint32, ctypes.c_uint32, ctypes.c_bool]
+    so.cap_rises.restype = ctypes.c_bool
     return so
 
 
@@ -131,3 +136,14 @@ def over_cap(not_pass, cap):
 
 def ratchet_is_red(kind):
     return bool(lib().ratchet_is_red(RATCHETS.index(kind)))
+
+
+def bless_reason(got, kept):
+    """The reason bless writes for a non-pass entry, or None: bless refuses it.
+    `kept` is the reason already in the ledger; one that is not a known reason is no reason."""
+    return REASONS[lib().bless_reason(verdict(got), REASONS.index(kept) if kept in REASONS else 0)]
+
+
+def cap_rises(not_pass, old_cap):
+    has = isinstance(old_cap, int) and not isinstance(old_cap, bool) and old_cap >= 0
+    return bool(lib().cap_rises(not_pass, old_cap if has else 0, has))
