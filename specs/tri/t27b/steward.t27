@@ -245,6 +245,24 @@ pub fn pr_ready(open: bool, mergeable: u8, base_master: bool, required: u8, othe
     return 0;
 }
 
+// What `tri t27b watch` does with one PR now (#6285). `verdict` is
+// pr_ready's. `parent` is the PR the base branch belongs to: 0 none (the
+// base is master), 1 merged, 2 still open, 3 closed unmerged or not found.
+// 0 wait, 1 merge, 2 retarget to master and bring master in, 3 stop and
+// report, 4 done. A stacked PR is retargeted only once its parent merged
+// (Q33: from the parent's state, never from a read that failed).
+pub fn watch_action(verdict: u8, parent: u8) -> u8 {
+    if (verdict == 6) { return 4; }
+    if (verdict == 0) { return 1; }
+    if (verdict == 1) { return 0; }
+    if (verdict == 4) {
+        if (parent == 1) { return 2; }
+        if (parent == 2) { return 0; }
+        return 3;
+    }
+    return 3;
+}
+
 test delta_ref_moved { assert_eq(delta_code(2, 0, 2, 0, 0, 0), 1); }
 test delta_outside_reference_is_silent { assert_eq(delta_code(2, 2, 2, 0, 0, 0), 0); }
 test delta_regressed { assert_eq(delta_code(0, 0, 0, 3, 1, 0), 2); }
@@ -361,6 +379,16 @@ test gate_blocked_by_other { assert_eq(pr_ready(true, 0, true, 1, 2), 5); }
 test gate_waits_on_required { assert_eq(pr_ready(true, 0, true, 1, 0), 1); }
 test gate_closed_first { assert_eq(pr_ready(false, 1, false, 2, 2), 6); }
 test gate_waits_on_mergeable_unknown { assert_eq(pr_ready(true, 2, true, 0, 0), 1); }
+test watch_merges_ready { assert_eq(watch_action(0, 0), 1); }
+test watch_waits { assert_eq(watch_action(1, 0), 0); }
+test watch_stops_on_red { assert_eq(watch_action(2, 0), 3); }
+test watch_stops_on_conflict { assert_eq(watch_action(3, 0), 3); }
+test watch_stops_on_blocked { assert_eq(watch_action(5, 0), 3); }
+test watch_done_when_closed { assert_eq(watch_action(6, 2), 4); }
+test watch_retargets_after_parent_merged { assert_eq(watch_action(4, 1), 2); }
+test watch_stacked_waits_for_parent { assert_eq(watch_action(4, 2), 0); }
+test watch_orphan_stack_stops { assert_eq(watch_action(4, 3), 3); }
+test watch_unknown_base_stops { assert_eq(watch_action(4, 0), 3); }
 
 invariant gained_never_red {
     assert(delta_is_red(delta_code(0, 0, 2, 0, 0, 1)) == false);

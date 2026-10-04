@@ -51,7 +51,7 @@ def runs_tests(src: Path) -> tuple[int, str]:
 
 
 code, out = runs_tests(GEN)
-check(code == 0 and "81 tests passed" in out, f"the generated C passes the spec's tests ({code}: {out})")
+check(code == 0 and "91 tests passed" in out, f"the generated C passes the spec's tests ({code}: {out})")
 
 text = GEN.read_text()
 needle = "return (((in_ref * 1000) + (reference / 2)) / reference);"
@@ -143,6 +143,12 @@ check((r.pr_ready(True, "MERGEABLE", True, [None, None], [None]), r.pr_ready(Tru
        r.pr_ready(True, "CONFLICTING", True, ["BLOCK"], []), r.pr_ready(False, "MERGEABLE", True, [], []))
       == ("READY", "BLOCKED", "CONFLICT", "CLOSED"), "ready: the spec folds the effects into one verdict")
 
+check(tuple(r.watch_action(v, "NONE") for v in r.READINESS)
+      == ("MERGE", "WAIT", "STOP", "STOP", "STOP", "STOP", "DONE"),
+      "watch: READY merges, WAIT waits, CLOSED is done, every red verdict stops the chain (#6285)")
+check(tuple(r.watch_action("RETARGET", p) for p in r.PARENTS) == ("STOP", "RETARGET", "WAIT", "STOP"),
+      "watch: a stacked PR is retargeted only once its parent merged (Q33)")
+
 tool = TOOL.read_text()
 body = tool[tool.index("def delta("):tool.index("def previous_run(")]
 check('("fail", "mismatch", "crash")' not in body and "rules().delta(" in body,
@@ -157,6 +163,10 @@ check("r.bless_reason(" in body and "r.cap_rises(" in body and "r.cap_rise_is_ne
 body = tool[tool.index("def ready("):tool.index("def ready_main(")]
 check("r.check_effect(" in body and "r.pr_ready(" in body and '"SUCCESS"' not in body and '"FAILURE"' not in body,
       "t27b.py ready asks the spec and keeps no check-state branch of its own")
+
+body = tool[tool.index("def watch_step("):tool.index("def watch_act(")]
+check("rules().watch_action(" in body and '"RETARGET"' not in body and '"MERGED"' not in body,
+      "t27b.py watch asks the spec what to do and keeps no verdict branch of its own")
 
 body = tool[tool.index("def anomalies("):tool.index("def lab_card(")]
 check(all(f"rules().{f}(" in body for f in ("lab_stale", "claim", "railway_old", "ledger_quiet", "checkout",

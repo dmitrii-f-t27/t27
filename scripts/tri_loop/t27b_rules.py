@@ -43,6 +43,9 @@ CHECK_STATES = {"SUCCESS": 0,
 MERGEABLES = {"MERGEABLE": 0, "CONFLICTING": 1, "UNKNOWN": 2}
 EFFECTS = (None, "WAIT", "BLOCK")
 READINESS = ("READY", "WAIT", "RED", "CONFLICT", "RETARGET", "BLOCKED", "CLOSED")
+# `tri t27b watch` (#6285): the stacked parent's state, and what to do.
+PARENTS = ("NONE", "MERGED", "OPEN", "GONE")
+WATCH_ACTIONS = ("WAIT", "MERGE", "RETARGET", "STOP", "DONE")
 
 
 class RulesUnavailable(RuntimeError):
@@ -111,6 +114,8 @@ def _build():
     so.effect_fold.restype = ctypes.c_uint8
     so.pr_ready.argtypes = [ctypes.c_bool, ctypes.c_uint8, ctypes.c_bool, ctypes.c_uint8, ctypes.c_uint8]
     so.pr_ready.restype = ctypes.c_uint8
+    so.watch_action.argtypes = [ctypes.c_uint8, ctypes.c_uint8]
+    so.watch_action.restype = ctypes.c_uint8
     return so
 
 
@@ -237,3 +242,11 @@ def pr_ready(is_open, mergeable, base_master, effects_required, effects_other):
     fold = lambda xs: functools.reduce(lambda a, e: lib().effect_fold(a, EFFECTS.index(e)), xs, 0)  # noqa: E731
     m = MERGEABLES.get((mergeable or "UNKNOWN").upper(), 2)
     return READINESS[lib().pr_ready(bool(is_open), m, bool(base_master), fold(effects_required), fold(effects_other))]
+
+
+def watch_action(verdict, parent):
+    """WAIT | MERGE | RETARGET | STOP | DONE for one PR: `verdict` is pr_ready's
+    string, `parent` one of PARENTS. An unknown string is an error."""
+    if verdict not in READINESS or parent not in PARENTS:
+        raise ValueError(f"unknown verdict/parent {verdict!r}/{parent!r}")
+    return WATCH_ACTIONS[lib().watch_action(READINESS.index(verdict), PARENTS.index(parent))]

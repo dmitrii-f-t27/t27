@@ -40,6 +40,7 @@ bool is_alarm(uint8_t t, uint8_t reference);
 uint8_t check_effect(uint8_t state, uint8_t master, bool required);
 uint8_t effect_fold(uint8_t acc, uint8_t e);
 uint8_t pr_ready(bool open, uint8_t mergeable, bool base_master, uint8_t required, uint8_t other);
+uint8_t watch_action(uint8_t verdict, uint8_t parent);
 
 /* -------------------------------------------------------
    Function implementations
@@ -341,6 +342,28 @@ uint8_t pr_ready(bool open, uint8_t mergeable, bool base_master, uint8_t require
         return 1;
     }
     return 0;
+}
+
+uint8_t watch_action(uint8_t verdict, uint8_t parent) {
+    if ((verdict == 6)) {
+        return 4;
+    }
+    if ((verdict == 0)) {
+        return 1;
+    }
+    if ((verdict == 1)) {
+        return 0;
+    }
+    if ((verdict == 4)) {
+        if ((parent == 1)) {
+            return 2;
+        }
+        if ((parent == 2)) {
+            return 0;
+        }
+        return 3;
+    }
+    return 3;
 }
 
 /* -------------------------------------------------------
@@ -695,6 +718,46 @@ void test_gate_waits_on_mergeable_unknown(void) {
     assert_eq(pr_ready(true, 2, true, 0, 0), 1);
 }
 
+void test_watch_merges_ready(void) {
+    assert_eq(watch_action(0, 0), 1);
+}
+
+void test_watch_waits(void) {
+    assert_eq(watch_action(1, 0), 0);
+}
+
+void test_watch_stops_on_red(void) {
+    assert_eq(watch_action(2, 0), 3);
+}
+
+void test_watch_stops_on_conflict(void) {
+    assert_eq(watch_action(3, 0), 3);
+}
+
+void test_watch_stops_on_blocked(void) {
+    assert_eq(watch_action(5, 0), 3);
+}
+
+void test_watch_done_when_closed(void) {
+    assert_eq(watch_action(6, 2), 4);
+}
+
+void test_watch_retargets_after_parent_merged(void) {
+    assert_eq(watch_action(4, 1), 2);
+}
+
+void test_watch_stacked_waits_for_parent(void) {
+    assert_eq(watch_action(4, 2), 0);
+}
+
+void test_watch_orphan_stack_stops(void) {
+    assert_eq(watch_action(4, 3), 3);
+}
+
+void test_watch_unknown_base_stops(void) {
+    assert_eq(watch_action(4, 0), 3);
+}
+
 
 /* -------------------------------------------------------
    Test runner (compile with -DT27_TEST_MAIN to execute)
@@ -784,7 +847,17 @@ int main(void) {
     test_gate_waits_on_required();
     test_gate_closed_first();
     test_gate_waits_on_mergeable_unknown();
-    printf("All %d tests passed.\n", 81);
+    test_watch_merges_ready();
+    test_watch_waits();
+    test_watch_stops_on_red();
+    test_watch_stops_on_conflict();
+    test_watch_stops_on_blocked();
+    test_watch_done_when_closed();
+    test_watch_retargets_after_parent_merged();
+    test_watch_stacked_waits_for_parent();
+    test_watch_orphan_stack_stops();
+    test_watch_unknown_base_stops();
+    printf("All %d tests passed.\n", 91);
     return 0;
 }
 #endif /* T27_TEST_MAIN */
