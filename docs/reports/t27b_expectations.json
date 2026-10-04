@@ -14,7 +14,7 @@
  },
  "max_not_pass": 582,
  "counts": {
-  "pass": 75,
+  "pass": 76,
   "pass_vacuous": null,
   "not_pass": 582
  },
@@ -609,6 +609,7 @@
   {"path": "specs/tri/pipeline/workflow_executor.t27", "t27b": "pass"},
   {"path": "specs/tri/pipeline/workflow_parser.t27", "t27b": "pass"},
   {"path": "specs/tri/sort/selection_sort.t27", "t27b": "blocked", "blocker": "type []T", "reason": "unimplemented"},
+  {"path": "specs/tri/t27b/steward.t27", "t27b": "pass"},
   {"path": "specs/tri/utils/args.t27", "t27b": "blocked", "blocker": "type (alias)", "reason": "unimplemented"},
   {"path": "specs/tri/utils/arrow_time.t27", "t27b": "pass"},
   {"path": "specs/tri/utils/colors.t27", "t27b": "pass"},
