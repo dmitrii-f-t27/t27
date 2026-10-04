@@ -2,7 +2,7 @@
   "schema_version": 1,
   "generated_by": "t27c suite --bless-expectations",
   "max_gate_failures": 2,
-  "max_entries": 135,
+  "max_entries": 126,
   "entries": [
     {
       "path": "specs/api/sdk_contract.t27",
@@ -100,46 +100,6 @@
       "expires": "2026-11-30"
     },
     {
-      "path": "specs/demos/jones_topology_decision_gate.t27",
-      "phase": "parse-no-discard",
-      "reason": "top-level drop-recovery discards tokens; parser reaches EOF so `parse` reports success (T42)",
-      "issue": 1959,
-      "expires": "2026-11-30",
-      "discard_tokens": 62,
-      "discard_by_channel": {
-        "top-level-resync": 62
-      }
-    },
-    {
-      "path": "specs/demos/jones_topology_filter.t27",
-      "phase": "parse-no-discard",
-      "reason": "top-level drop-recovery discards tokens; parser reaches EOF so `parse` reports success (T42)",
-      "issue": 1959,
-      "expires": "2026-11-30",
-      "discard_tokens": 16,
-      "discard_by_channel": {
-        "top-level-resync": 16
-      }
-    },
-    {
-      "path": "specs/fpga/bridge.t27",
-      "phase": "typecheck",
-      "reason": "typecheck already failed here; #2854 made the exit code carry the printed verdict, so the ratchet can see it. `cannot assign to immutable array element` -- the spec assigns into an array bound immutably. Not new, newly visible.",
-      "issue": 2852,
-      "expires": "2026-11-30"
-    },
-    {
-      "path": "specs/fpga/power_analysis.t27",
-      "phase": "parse-no-discard",
-      "reason": "parses now, but the parse discards tokens (parse-no-discard)",
-      "issue": 1959,
-      "expires": "2026-11-30",
-      "discard_tokens": 3,
-      "discard_by_channel": {
-        "bdd-block-fallback": 3
-      }
-    },
-    {
       "path": "specs/fpga/spi.t27",
       "phase": "parse-no-discard",
       "reason": "unclassified: blessed by --bless-expectations",
@@ -182,17 +142,6 @@
       "discard_tokens": 11,
       "discard_by_channel": {
         "bdd-block-fallback": 11
-      }
-    },
-    {
-      "path": "specs/fpga/vcd_conformance_compare.t27",
-      "phase": "parse-no-discard",
-      "reason": "parses now, but the parse discards tokens (parse-no-discard)",
-      "issue": 1959,
-      "expires": "2026-11-30",
-      "discard_tokens": 38,
-      "discard_by_channel": {
-        "bdd-block-fallback": 38
       }
     },
     {
@@ -725,18 +674,6 @@
       }
     },
     {
-      "path": "specs/math/sacred_physics.t27",
-      "phase": "parse-no-discard",
-      "reason": "top-level drop-recovery discards tokens; parser reaches EOF so `parse` reports success (T42)",
-      "issue": 1959,
-      "expires": "2026-11-30",
-      "discard_tokens": 48,
-      "discard_by_channel": {
-        "bdd-block-fallback": 34,
-        "brace-body/in-fallback": 14
-      }
-    },
-    {
       "path": "specs/memory/notebooklm.t27",
       "phase": "parse-no-discard",
       "reason": "top-level drop-recovery discards tokens; parser reaches EOF so `parse` reports success (T42)",
@@ -750,17 +687,6 @@
       }
     },
     {
-      "path": "specs/ml/optimizer/race_config.t27",
-      "phase": "parse-no-discard",
-      "reason": "top-level drop-recovery discards tokens; parser reaches EOF so `parse` reports success (T42)",
-      "issue": 1959,
-      "expires": "2026-11-30",
-      "discard_tokens": 4,
-      "discard_by_channel": {
-        "clause-junk": 4
-      }
-    },
-    {
       "path": "specs/ml/transformer/feed_forward.t27",
       "phase": "parse-no-discard",
       "reason": "top-level drop-recovery discards tokens; parser reaches EOF so `parse` reports success (T42). Reached this phase for the first time when the generic-application parse landed -- previously this spec failed `parse` outright.",
@@ -771,13 +697,6 @@
         "brace-body": 4,
         "top-level-resync": 58
       }
-    },
-    {
-      "path": "specs/ml/transformer/mha_block.t27",
-      "phase": "typecheck",
-      "reason": "a qualified call `module::f(...)` is typechecked against the LOCAL `f` of the same name (family of #4610); the fix is in the frozen compiler core and needs the M5 ceremony. Until #5572 and #5575 the spec discarded tokens at parse, which masked this.",
-      "issue": 5574,
-      "expires": "2026-11-30"
     },
     {
       "path": "specs/ml/transformer/multi_head_attn.t27",
@@ -838,62 +757,6 @@
       "discard_by_channel": {
         "bdd-block-fallback": 143,
         "brace-body/in-fallback": 10
-      }
-    },
-    {
-      "path": "specs/numeric/gf12.t27",
-      "phase": "parse-no-discard",
-      "reason": "parser reaches EOF but DISCARDS top-level tokens; newly visible now that the parenthesised range for parses",
-      "issue": 2474,
-      "expires": "2026-11-30",
-      "discard_tokens": 31,
-      "discard_by_channel": {
-        "bdd-block-fallback": 31
-      }
-    },
-    {
-      "path": "specs/numeric/gf20.t27",
-      "phase": "parse-no-discard",
-      "reason": "parser reaches EOF but DISCARDS top-level tokens; newly visible now that the parenthesised range for parses",
-      "issue": 2474,
-      "expires": "2026-11-30",
-      "discard_tokens": 31,
-      "discard_by_channel": {
-        "bdd-block-fallback": 31
-      }
-    },
-    {
-      "path": "specs/numeric/gf24.t27",
-      "phase": "parse-no-discard",
-      "reason": "parser reaches EOF but DISCARDS top-level tokens; newly visible now that the parenthesised range for parses",
-      "issue": 2474,
-      "expires": "2026-11-30",
-      "discard_tokens": 31,
-      "discard_by_channel": {
-        "bdd-block-fallback": 31
-      }
-    },
-    {
-      "path": "specs/numeric/gf32.t27",
-      "phase": "parse-no-discard",
-      "reason": "parser reaches EOF but DISCARDS top-level tokens; newly visible now that the parenthesised range for parses",
-      "issue": 2474,
-      "expires": "2026-11-30",
-      "discard_tokens": 31,
-      "discard_by_channel": {
-        "bdd-block-fallback": 31
-      }
-    },
-    {
-      "path": "specs/numeric/gf8.t27",
-      "phase": "parse-no-discard",
-      "reason": "parser reaches EOF but DISCARDS top-level tokens; newly visible now that the parenthesised range for parses",
-      "issue": 2474,
-      "expires": "2026-11-30",
-      "discard_tokens": 37,
-      "discard_by_channel": {
-        "bdd-block-fallback": 31,
-        "top-level-resync": 6
       }
     },
     {
@@ -986,39 +849,6 @@
       "expires": "2026-11-30"
     },
     {
-      "path": "specs/port/browseros/trios/agent-server/apps/server/src/api/services/queen-ci-verdict.t27",
-      "phase": "parse",
-      "reason": "ported spec merged while the gate was red; the port is to be redone (#5549). parse fails on master 769f3252.",
-      "issue": 5549,
-      "expires": "2026-11-30"
-    },
-    {
-      "path": "specs/port/conformance/witness/gf48_fp64/gf_decode_param_fp64.t27",
-      "phase": "parse",
-      "reason": "ported spec merged while the gate was red; the port is to be redone (#5549). parse fails on master 769f3252.",
-      "issue": 5549,
-      "expires": "2026-11-30"
-    },
-    {
-      "path": "specs/port/fpga/verilog/dsp_probe.t27",
-      "phase": "parse",
-      "reason": "ported spec merged while the gate was red; the port is to be redone (#5549). parse fails on master 769f3252.",
-      "issue": 5549,
-      "expires": "2026-11-30"
-    },
-    {
-      "path": "specs/port/fpga/verilog/e8m0_jtag.t27",
-      "phase": "parse-no-discard",
-      "reason": "ported spec merged while the gate was red; the port is to be redone (#5549). parse-no-discard fails on master 769f3252.",
-      "issue": 5549,
-      "expires": "2026-11-30",
-      "discard_tokens": 312,
-      "discard_by_channel": {
-        "brace-body": 52,
-        "top-level-resync": 260
-      }
-    },
-    {
       "path": "specs/port/fpga/verilog/gft_dup2_jtag.t27",
       "phase": "parse-no-discard",
       "reason": "ported spec merged while the gate was red; the port is to be redone (#5549). parse-no-discard fails on master 769f3252.",
@@ -1031,69 +861,9 @@
       }
     },
     {
-      "path": "specs/port/fpga/verilog/link_node.t27",
-      "phase": "parse-no-discard",
-      "reason": "ported spec merged while the gate was red; the port is to be redone (#5549). parse-no-discard fails on master 769f3252.",
-      "issue": 5549,
-      "expires": "2026-11-30",
-      "discard_tokens": 219,
-      "discard_by_channel": {
-        "bdd-block-fallback": 219
-      }
-    },
-    {
-      "path": "specs/port/fpga/verilog/ternary_mac_demo_top.t27",
-      "phase": "parse-no-discard",
-      "reason": "ported spec merged while the gate was red; the port is to be redone (#5549). parse-no-discard fails on master 769f3252.",
-      "issue": 5549,
-      "expires": "2026-11-30",
-      "discard_tokens": 435,
-      "discard_by_channel": {
-        "brace-body": 53,
-        "top-level-resync": 382
-      }
-    },
-    {
-      "path": "specs/port/fpga/vivado/gf16_matmul_top.t27",
-      "phase": "parse-no-discard",
-      "reason": "ported spec merged while the gate was red; the port is to be redone (#5549). parse-no-discard fails on master 769f3252.",
-      "issue": 5549,
-      "expires": "2026-11-30",
-      "discard_tokens": 5,
-      "discard_by_channel": {
-        "bdd-block-fallback": 5
-      }
-    },
-    {
-      "path": "specs/port/fpga/vivado/matmul_serial_hw.t27",
-      "phase": "typecheck",
-      "reason": "ported spec merged while the gate was red; the port is to be redone (#5549). typecheck fails on master 769f3252.",
-      "issue": 5549,
-      "expires": "2026-11-30"
-    },
-    {
-      "path": "specs/port/fpga/vivado/uart_echo_top.t27",
-      "phase": "parse-no-discard",
-      "reason": "ported spec merged while the gate was red; the port is to be redone (#5549). parse-no-discard fails on master 769f3252.",
-      "issue": 5549,
-      "expires": "2026-11-30",
-      "discard_tokens": 422,
-      "discard_by_channel": {
-        "brace-body": 96,
-        "top-level-resync": 326
-      }
-    },
-    {
       "path": "specs/port/scripts/gen_w312.t27",
       "phase": "gen-verilog",
       "reason": "ported spec merged while the gate was red; the port is to be redone (#5549). gen-verilog fails on master 769f3252.",
-      "issue": 5549,
-      "expires": "2026-11-30"
-    },
-    {
-      "path": "specs/port/scripts/gen_w366.t27",
-      "phase": "parse",
-      "reason": "ported spec merged while the gate was red; the port is to be redone (#5549). parse fails on master 769f3252.",
       "issue": 5549,
       "expires": "2026-11-30"
     },
@@ -1105,13 +875,6 @@
       "expires": "2026-11-30"
     },
     {
-      "path": "specs/port/scripts/gen_w390.t27",
-      "phase": "parse",
-      "reason": "ported spec merged while the gate was red; the port is to be redone (#5549). parse fails on master 769f3252.",
-      "issue": 5549,
-      "expires": "2026-11-30"
-    },
-    {
       "path": "specs/port/scripts/run_v51_multiple.t27",
       "phase": "gen-verilog",
       "reason": "ported spec merged while the gate was red; the port is to be redone (#5549). gen-verilog fails on master 769f3252.",
@@ -1119,101 +882,9 @@
       "expires": "2026-11-30"
     },
     {
-      "path": "specs/port/tools/check_assertionless_spec_tests.t27",
-      "phase": "parse",
-      "reason": "ported spec merged while the gate was red; the port is to be redone (#5549). parse fails on master 769f3252.",
-      "issue": 5549,
-      "expires": "2026-11-30"
-    },
-    {
       "path": "specs/port/tools/check_conflict_markers.t27",
-      "phase": "parse-no-discard",
-      "reason": "ported spec merged while the gate was red; the port is to be redone (#5549). parse-no-discard fails on master 769f3252.",
-      "issue": 5549,
-      "expires": "2026-11-30",
-      "discard_tokens": 15,
-      "discard_by_channel": {
-        "brace-body": 13,
-        "clause-junk": 2
-      }
-    },
-    {
-      "path": "specs/port/tools/check_duplicate_agreement.t27",
-      "phase": "parse",
-      "reason": "ported spec merged while the gate was red; the port is to be redone (#5549). parse fails on master 769f3252.",
-      "issue": 5549,
-      "expires": "2026-11-30"
-    },
-    {
-      "path": "specs/port/tools/check_duplicate_declarations.t27",
-      "phase": "parse",
-      "reason": "ported spec merged while the gate was red; the port is to be redone (#5549). parse fails on master 769f3252.",
-      "issue": 5549,
-      "expires": "2026-11-30"
-    },
-    {
-      "path": "specs/port/tools/check_json_parses.t27",
-      "phase": "parse",
-      "reason": "ported spec merged while the gate was red; the port is to be redone (#5549). parse fails on master 769f3252.",
-      "issue": 5549,
-      "expires": "2026-11-30"
-    },
-    {
-      "path": "specs/port/tools/gft_generalize_demo.t27",
-      "phase": "parse",
-      "reason": "ported spec merged while the gate was red; the port is to be redone (#5549). parse fails on master 769f3252.",
-      "issue": 5549,
-      "expires": "2026-11-30"
-    },
-    {
-      "path": "specs/port/tools/jtag/read_user1.t27",
-      "phase": "parse-no-discard",
-      "reason": "ported spec merged while the gate was red; the port is to be redone (#5549). parse-no-discard fails on master 769f3252.",
-      "issue": 5549,
-      "expires": "2026-11-30",
-      "discard_tokens": 25,
-      "discard_by_channel": {
-        "top-level-resync": 25
-      }
-    },
-    {
-      "path": "specs/port/tools/jtag/read_verdict.t27",
-      "phase": "parse-no-discard",
-      "reason": "ported spec merged while the gate was red; the port is to be redone (#5549). parse-no-discard fails on master 769f3252.",
-      "issue": 5549,
-      "expires": "2026-11-30",
-      "discard_tokens": 55,
-      "discard_by_channel": {
-        "brace-body": 15,
-        "clause-junk": 1,
-        "top-level-resync": 39
-      }
-    },
-    {
-      "path": "specs/port/tools/queen/feed_untested.t27",
-      "phase": "parse",
-      "reason": "ported spec merged while the gate was red; the port is to be redone (#5549). parse fails on master 769f3252.",
-      "issue": 5549,
-      "expires": "2026-11-30"
-    },
-    {
-      "path": "specs/port/tools/ring_spec_differential.t27",
-      "phase": "parse",
-      "reason": "ported spec merged while the gate was red; the port is to be redone (#5549). parse fails on master 769f3252.",
-      "issue": 5549,
-      "expires": "2026-11-30"
-    },
-    {
-      "path": "specs/port/tools/trinity_fpga_adapter.t27",
-      "phase": "parse",
-      "reason": "ported spec merged while the gate was red; the port is to be redone (#5549). parse fails on master 769f3252.",
-      "issue": 5549,
-      "expires": "2026-11-30"
-    },
-    {
-      "path": "specs/port/tools/verify_multitarget.t27",
-      "phase": "parse",
-      "reason": "ported spec merged while the gate was red; the port is to be redone (#5549). parse fails on master 769f3252.",
+      "phase": "typecheck",
+      "reason": "parses whole now; the parse-no-discard failure (SKIP_SUFFIX written as a Zig array) hid a typecheck failure that was always there: staged_files calls the fixed-arity stub _git(root, arg1, arg2, binary) with seven arguments, where the Python original takes *args. Re-keyed, not newly broken; the port is to be redone (#5549).",
       "issue": 5549,
       "expires": "2026-11-30"
     },
@@ -1235,13 +906,6 @@
       "path": "specs/port/trinity/src/tri/gen_mock.t27",
       "phase": "gen-verilog",
       "reason": "ported spec merged while the gate was red; the port is to be redone (#5549). gen-verilog fails on master 769f3252.",
-      "issue": 5549,
-      "expires": "2026-11-30"
-    },
-    {
-      "path": "specs/port/trinity/src/vsa_simple/vsa.t27",
-      "phase": "parse",
-      "reason": "ported spec merged while the gate was red; the port is to be redone (#5549). parse fails on master 769f3252.",
       "issue": 5549,
       "expires": "2026-11-30"
     },
@@ -1276,17 +940,6 @@
         "brace-body": 14,
         "brace-body/in-fallback": 2,
         "top-level-resync": 15
-      }
-    },
-    {
-      "path": "specs/ternary/bigint.t27",
-      "phase": "parse-no-discard",
-      "reason": "top-level drop-recovery discards tokens; parser reaches EOF so `parse` reports success (T42). Reached this phase for the first time when the generic-application parse landed -- previously this spec failed `parse` outright.",
-      "issue": 1959,
-      "expires": "2026-11-30",
-      "discard_tokens": 6,
-      "discard_by_channel": {
-        "clause-junk": 6
       }
     },
     {
@@ -1326,13 +979,6 @@
       }
     },
     {
-      "path": "specs/tri/graph/disjoint_set.t27",
-      "phase": "typecheck",
-      "reason": "a module-level `var` array is registered as `const` by the typechecker, so W456's ROM rule rejects every write into it; one-line patch and two tests are in the issue, the fix is in the frozen compiler core and needs the M5 ceremony. Until #5572 the spec discarded tokens at parse, which masked this.",
-      "issue": 5573,
-      "expires": "2026-11-30"
-    },
-    {
       "path": "specs/vm/jit_semantics.t27",
       "phase": "parse-no-discard",
       "reason": "moved from `parse` to `parse-no-discard` (2026-10-02, #5497): the spec parses now and fails one phase later. Was: Expected LBrace, got Semicolon (';')",
@@ -1365,29 +1011,6 @@
       "discard_by_channel": {
         "bdd-block-fallback": 26,
         "brace-body/in-fallback": 14
-      }
-    },
-    {
-      "path": "specs/vsa/packed_vsa.t27",
-      "phase": "parse-no-discard",
-      "reason": "moved from `parse` to `parse-no-discard` (2026-10-02, #5497): the spec parses now and fails one phase later. Was: Expected LBrace, got Semicolon (';')",
-      "issue": 1959,
-      "expires": "2026-11-30",
-      "discard_tokens": 19,
-      "discard_by_channel": {
-        "bdd-block-fallback": 19
-      }
-    },
-    {
-      "path": "specs/vsa/sdk.t27",
-      "phase": "parse-no-discard",
-      "reason": "top-level drop-recovery discards tokens; parser reaches EOF so `parse` reports success (T42)",
-      "issue": 1959,
-      "expires": "2026-11-30",
-      "discard_tokens": 56,
-      "discard_by_channel": {
-        "bdd-block-fallback": 26,
-        "brace-body/in-fallback": 30
       }
     }
   ],

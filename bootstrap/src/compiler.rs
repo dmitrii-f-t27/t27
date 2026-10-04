@@ -1249,6 +1249,53 @@ impl Parser {
         self.peek = self.lexer.next_token();
     }
 
+    /// With `current` on a `(`, advance past its matching `)`. False if the
+    /// input ends first. Only for lookahead: callers restore a checkpoint.
+    fn skip_balanced_parens(&mut self) -> bool {
+        let mut depth = 0usize;
+        loop {
+            match self.current.kind {
+                TokenKind::LParen => depth += 1,
+                TokenKind::RParen => depth -= 1,
+                TokenKind::Eof => return false,
+                _ => {}
+            }
+            self.advance();
+            if depth == 0 {
+                return true;
+            }
+        }
+    }
+
+    /// Tokens that continue an expression as an infix operator.
+    fn is_binary_op(kind: TokenKind) -> bool {
+        matches!(
+            kind,
+            TokenKind::Plus
+                | TokenKind::Minus
+                | TokenKind::Star
+                | TokenKind::Slash
+                | TokenKind::Percent
+                | TokenKind::Amp
+                | TokenKind::Pipe
+                | TokenKind::Caret
+                | TokenKind::Lt
+                | TokenKind::Gt
+                | TokenKind::Lte
+                | TokenKind::Gte
+                | TokenKind::Eq
+                | TokenKind::Neq
+                | TokenKind::ShiftLeft
+                | TokenKind::ShiftRight
+                | TokenKind::Power
+                | TokenKind::KwOr
+                | TokenKind::KwAnd
+                | TokenKind::PlusPercent
+                | TokenKind::MinusPercent
+                | TokenKind::StarPercent
+        )
+    }
+
     fn check(&self, kind: TokenKind) -> bool {
         self.current.kind == kind
     }
@@ -3704,6 +3751,50 @@ impl Parser {
                 }
             } else {
                 self.restore_state(checkpoint);
+            }
+        }
+
+        // `assert (a & b) == c` -- the bare form whose condition opens with a
+        // parenthesis. The guard below sends every `assert (` to the call path,
+        // which parsed this as `assert(a & b)` and then `== c`: the condition
+        // became the call's argument and the comparison its operand, typecheck
+        // said ok, and the Zig backend emitted `if (!(a & b)) @panic(..) == c`.
+        // Only when a binary operator follows the matching `)` on the same line
+        // is it the bare form; `assert(x);` and `assert(x, "msg")` are untouched.
+        if self.current.kind == TokenKind::Ident
+            && self.current.lexeme == "assert"
+            && self.peek.kind == TokenKind::LParen
+        {
+            let line = self.current.line as u32;
+            let last_line = self.last_line;
+            let checkpoint = self.save_state();
+            self.advance(); // consume `assert`
+            let paren_follows_binary_op = self.skip_balanced_parens()
+                && self.current.line == self.last_line
+                && Self::is_binary_op(self.current.kind);
+            self.restore_state(checkpoint.clone());
+            self.last_line = last_line;
+            if paren_follows_binary_op {
+                self.advance(); // consume `assert`
+                match self.parse_expr() {
+                    Ok(cond) if cond.kind != NodeKind::ExprTuple => {
+                        if self.current.kind == TokenKind::Semicolon {
+                            self.advance();
+                        }
+                        let mut call = Node::new(NodeKind::ExprCall);
+                        call.name = "assert".to_string();
+                        call.line = line;
+                        call.children.push(cond);
+                        let mut stmt = Node::new(NodeKind::StmtExpr);
+                        stmt.line = line;
+                        stmt.children.push(call);
+                        return Ok(stmt);
+                    }
+                    _ => {
+                        self.restore_state(checkpoint);
+                        self.last_line = last_line;
+                    }
+                }
             }
         }
 
@@ -24634,11 +24725,16 @@ drop the parameter from the declaration and keep it at each use, where it is und
         match child.kind {
             NodeKind::ConstDecl => {
                 let t = resolve_type_str(&child.extra_type);
+                // A module-level `var` parses to ConstDecl as well, with extra_mutable
+                // set (parse_var_decl). Registered as const, every write into a module
+                // var array was rejected by W456 as a write into ROM -- the rule for
+                // `const`, not for `var` (specs/tri/graph/disjoint_set.t27's backing
+                // buffers, 2026-10-02).
                 symbols.push(SymbolEntry {
                     name: child.name.clone(),
                     type_info: t,
-                    is_mutable: false,
-                    is_const: true,
+                    is_mutable: child.extra_mutable,
+                    is_const: !child.extra_mutable,
                 });
             }
             NodeKind::StructDecl | NodeKind::EnumDecl => {
@@ -43382,6 +43478,28 @@ mod tests_w456_rom_readonly {
             "writing to a const ROM array element must be rejected; errors: {:?}",
             r.errors
         );
+    }
+
+    #[test]
+    fn module_var_array_element_assign_is_allowed() {
+        let src = "module M { var buf : [4]usize = undefined pub fn put(i: usize) -> void { buf[i] = i } }";
+        let r = Compiler::typecheck(src).expect("typecheck should parse");
+        let rejected = r
+            .errors
+            .iter()
+            .any(|e| e.contains("cannot assign to immutable"));
+        assert!(!rejected, "a module-level var array is writable; errors: {:?}", r.errors);
+    }
+
+    #[test]
+    fn module_const_array_element_assign_is_still_rejected() {
+        let src = "module M { const rom : [4]usize = [4]usize{1,2,3,4} pub fn put(i: usize) -> void { rom[i] = i } }";
+        let r = Compiler::typecheck(src).expect("typecheck should parse");
+        let caught = r
+            .errors
+            .iter()
+            .any(|e| e.contains("cannot assign to immutable array element"));
+        assert!(caught, "a module-level const array stays ROM; errors: {:?}", r.errors);
     }
 
     #[test]
