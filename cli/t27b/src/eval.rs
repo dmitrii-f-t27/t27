@@ -355,7 +355,9 @@ impl<'p> Interp<'p> {
                 }
                 let a = self.expr(lhs, env)?;
                 let b = self.expr(rhs, env)?;
-                if a != b {
+                // Floats compare as IEEE values: NaN never equals, -0.0 == 0.0.
+                let differ = if lhs.ty == Ty::F64 { f64_of(a) != f64_of(b) } else { a != b };
+                if differ {
                     return Err(Stop::Trap { site: *site, a, b });
                 }
                 Ok(Flow::Next)
@@ -433,7 +435,32 @@ impl<'p> Interp<'p> {
             ExprKind::Cmp { op, lhs, rhs } => {
                 let a = self.expr(lhs, env)?;
                 let b = self.expr(rhs, env)?;
+                if lhs.ty == Ty::F64 {
+                    return Ok(op.holds_f64(f64_of(a), f64_of(b)) as i128);
+                }
                 Ok(op.holds(a, b) as i128)
+            }
+            ExprKind::FArith { op, lhs, rhs } => {
+                let a = self.expr(lhs, env)?;
+                let b = self.expr(rhs, env)?;
+                Ok(f64_bits(op.apply(f64_of(a), f64_of(b))))
+            }
+            ExprKind::FNeg(a) => {
+                let v = self.expr(a, env)?;
+                Ok(f64_bits(-f64_of(v)))
+            }
+            ExprKind::IntToFloat(a) => {
+                // i128 to f64 rounds to nearest, ties to even; every integer
+                // operand is below 2^64, so this is the one rounding.
+                let v = self.expr(a, env)?;
+                Ok(f64_bits(v as f64))
+            }
+            ExprKind::FloatToInt { arg, site } => {
+                let v = self.expr(arg, env)?;
+                match float_to_int(f64_of(v), e.ty) {
+                    Some(r) => Ok(r),
+                    None => Err(Stop::Trap { site: *site, a: 0, b: 0 }),
+                }
             }
             ExprKind::And(a, b) => {
                 if self.expr(a, env)? == 0 {

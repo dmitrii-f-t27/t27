@@ -5,8 +5,8 @@
 //! carries a `site`, an index into `Program::sites`, so the interpreter and
 //! the generated code can be compared trap-for-trap, not only value-for-value.
 
-/// Integer and boolean types of the supported subset. `usize` lowers to `U64`,
-/// `isize` to `I64`.
+/// Integer, boolean and float types of the supported subset. `usize` lowers
+/// to `U64`, `isize` to `I64`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Ty {
     Bool,
@@ -22,6 +22,11 @@ pub enum Ty {
     /// lane). Never a value of the language: lowering makes it for aggregates,
     /// passes it as a hidden parameter, and only ever offsets and loads it.
     Ptr,
+    /// IEEE-754 binary64. A value is carried as its 64-bit pattern (a
+    /// non-negative `i128` below 2^64 in the IR and the interpreter, the whole
+    /// X register in generated code); arithmetic happens in D registers, and
+    /// AAPCS64 passes and returns it in d0-d7.
+    F64,
 }
 
 impl Ty {
@@ -47,6 +52,7 @@ impl Ty {
             "i16" => Ty::I16,
             "i32" => Ty::I32,
             "i64" | "isize" => Ty::I64,
+            "f64" => Ty::F64,
             _ => return None,
         })
     }
@@ -63,11 +69,16 @@ impl Ty {
             Ty::I32 => "i32",
             Ty::I64 => "i64",
             Ty::Ptr => "ptr",
+            Ty::F64 => "f64",
         }
     }
 
     pub fn is_int(self) -> bool {
-        !matches!(self, Ty::Bool | Ty::Ptr)
+        !matches!(self, Ty::Bool | Ty::Ptr | Ty::F64)
+    }
+
+    pub fn is_float(self) -> bool {
+        self == Ty::F64
     }
 
     /// Size in memory: a load or store of this type moves this many bytes.
@@ -84,7 +95,7 @@ impl Ty {
             Ty::Bool | Ty::U8 | Ty::I8 => 8,
             Ty::U16 | Ty::I16 => 16,
             Ty::U32 | Ty::I32 => 32,
-            Ty::U64 | Ty::I64 | Ty::Ptr => 64,
+            Ty::U64 | Ty::I64 | Ty::Ptr | Ty::F64 => 64,
         }
     }
 
@@ -151,6 +162,36 @@ impl Ty {
         } else {
             self.signed() && self.bits() > from.bits()
         }
+    }
+}
+
+/// The binary64 value of an F64 IR value (its bit pattern).
+pub fn f64_of(v: i128) -> f64 {
+    f64::from_bits(v as u64)
+}
+
+/// The IR value (bit pattern, as a non-negative i128) of a binary64.
+pub fn f64_bits(x: f64) -> i128 {
+    x.to_bits() as i128
+}
+
+/// `@intFromFloat(x)` to integer `ty`: `x` truncated toward zero, or None
+/// when that is outside `ty` (the infinities included). A NaN gives 0, as
+/// Zig 0.16 Debug does (it panics on infinities, not on NaN).
+pub fn float_to_int(x: f64, ty: Ty) -> Option<i128> {
+    if x.is_nan() {
+        return Some(0);
+    }
+    let t = x.trunc();
+    // |t| < 2^100 is finite, not NaN, and converts to i128 exactly.
+    if !(t.abs() < 1.0e30) {
+        return None;
+    }
+    let v = t as i128;
+    if ty.fits(v) {
+        Some(v)
+    } else {
+        None
     }
 }
 
@@ -227,6 +268,36 @@ impl ArithOp {
     }
 }
 
+/// IEEE-754 binary operations on F64.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum FOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+}
+
+impl FOp {
+    pub fn symbol(self) -> &'static str {
+        match self {
+            FOp::Add => "+",
+            FOp::Sub => "-",
+            FOp::Mul => "*",
+            FOp::Div => "/",
+        }
+    }
+
+    /// The operation on host binary64 values (round to nearest, ties to even).
+    pub fn apply(self, a: f64, b: f64) -> f64 {
+        match self {
+            FOp::Add => a + b,
+            FOp::Sub => a - b,
+            FOp::Mul => a * b,
+            FOp::Div => a / b,
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum CmpOp {
     Eq,
@@ -271,6 +342,19 @@ impl CmpOp {
         }
     }
 
+    /// The comparison on two binary64 values: false for every op but `!=`
+    /// when either is NaN.
+    pub fn holds_f64(self, a: f64, b: f64) -> bool {
+        match self {
+            CmpOp::Eq => a == b,
+            CmpOp::Ne => a != b,
+            CmpOp::Lt => a < b,
+            CmpOp::Le => a <= b,
+            CmpOp::Gt => a > b,
+            CmpOp::Ge => a >= b,
+        }
+    }
+
     /// The comparison with operands exchanged: `a op b` == `b op.swap() a`.
     pub fn swap(self) -> CmpOp {
         match self {
@@ -297,6 +381,9 @@ pub enum TrapKind {
     /// `@enumFromInt(x)` whose value is no tag of the enum (Zig's safety
     /// check on the conversion).
     EnumTag = 8,
+    /// `@intFromFloat(x)` whose integer part is outside the result type, or
+    /// x is NaN or infinite (Zig's safety check on the conversion).
+    FloatToInt = 9,
     // Memory lane: numbered from 16 so the scalar lane can add kinds below.
     /// An index at or past the length of an array, slice or string.
     Bounds = 16,
@@ -313,6 +400,7 @@ impl TrapKind {
             TrapKind::NoReturn => "reached the end of a non-void fn without return",
             TrapKind::Cast => "integer cast out of range",
             TrapKind::EnumTag => "invalid enum value",
+            TrapKind::FloatToInt => "integer part of floating point value out of bounds",
             TrapKind::Bounds => "index out of bounds",
         }
     }
@@ -358,8 +446,9 @@ pub enum ExprKind {
         rhs: Box<Expr>,
         site: SiteId,
     },
-    /// `ty` is Bool; both operands share one type (an integer type, or Bool
-    /// for `==` and `!=`).
+    /// `ty` is Bool; both operands share one type (an integer type, Bool
+    /// for `==` and `!=`, or F64, compared as IEEE values: NaN is unordered,
+    /// so only `!=` holds for it, and `-0.0 == 0.0`).
     Cmp {
         op: CmpOp,
         lhs: Box<Expr>,
@@ -372,6 +461,25 @@ pub enum ExprKind {
     Call {
         func: FuncId,
         args: Vec<Expr>,
+    },
+    /// IEEE-754 `+ - * /` of two `ty` (F64) operands, rounding to nearest,
+    /// ties to even. Never traps: overflow gives an infinity, 0/0 a NaN.
+    FArith {
+        op: FOp,
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+    },
+    /// Float negation: flips the sign bit (so `-0.0` and NaNs too).
+    FNeg(Box<Expr>),
+    /// `@floatFromInt`: the integer operand converted to F64, rounding to
+    /// nearest, ties to even.
+    IntToFloat(Box<Expr>),
+    /// `@intFromFloat`: the F64 operand truncated toward zero to integer
+    /// `ty`; traps at `site` when that does not fit `ty` (NaN and the
+    /// infinities never fit).
+    FloatToInt {
+        arg: Box<Expr>,
+        site: SiteId,
     },
     /// Lossless conversion from the operand's narrower integer type to `ty`
     /// (or from bool, as 0 / 1).
@@ -516,6 +624,25 @@ pub struct Program {
 impl Program {
     pub fn func_index(&self, name: &str) -> Option<usize> {
         self.funcs.iter().position(|f| !f.is_test && f.name == name)
+    }
+
+    /// AAPCS64 argument locations of `f`'s parameters: for each, true when
+    /// it is an F64 (passed in the next of d0-d7) and its index among the
+    /// parameters of its own class (x registers or d registers).
+    pub fn arg_regs(f: &Func) -> Vec<(bool, usize)> {
+        let (mut xi, mut di) = (0, 0);
+        f.vars[..f.nparams]
+            .iter()
+            .map(|v| {
+                if v.ty == Ty::F64 {
+                    di += 1;
+                    (true, di - 1)
+                } else {
+                    xi += 1;
+                    (false, xi - 1)
+                }
+            })
+            .collect()
     }
 
     pub fn tests(&self) -> impl Iterator<Item = (usize, &Func)> {

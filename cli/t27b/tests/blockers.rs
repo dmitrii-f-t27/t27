@@ -7,10 +7,10 @@ use t27b::blockers::{greedy, parse_test_report, replay, Reference};
 use t27b::ir::OverflowMode;
 use t27b::{front, lower};
 
-/// Four unsupported constructs in four places, one of them (`f64`) repeated,
+/// Four unsupported constructs in four places, one of them (`f32`) repeated,
 /// and a fn whose parameter type is outside the subset called from a test.
 const SRC: &str = r#"module blockers_fixture;
-fn half(x: f64) -> f64 {
+fn half(x: f32) -> f32 {
     return x;
 }
 fn flag(x: u8) -> bool {
@@ -24,7 +24,7 @@ fn ok(x: u32) -> u32 {
     return x + 1;
 }
 fn calls_half(x: u32) -> u32 {
-    var h : f64 = half(1);
+    var h : f32 = half(1);
     return ok(x);
 }
 test uses_all {
@@ -43,10 +43,10 @@ fn blockers_lists_every_construct() {
     let parsed = front::parse(Path::new("blockers_fixture.t27"), SRC).expect("fixture parses");
     let all = lower::blockers(&parsed.ast, OverflowMode::Trap);
     let got = constructs(&all);
-    let want: BTreeSet<String> = ["type f64", "ExprCast(to bool)", "ExprLiteral(char literal)"].iter().map(|s| s.to_string()).collect();
+    let want: BTreeSet<String> = ["type f32", "ExprCast(to bool)", "ExprLiteral(char literal)"].iter().map(|s| s.to_string()).collect();
     assert_eq!(got, want, "every construct, once each kind: {:#?}", all);
     // Cascades are suppressed: the calls to `half` (whose signature was
-    // rejected) and the `f64` local do not add rejections of their own beyond
+    // rejected) and the `f32` local do not add rejections of their own beyond
     // the type itself.
     assert!(all.iter().all(|r| !r.construct.starts_with("ExprCall")), "{:#?}", all);
     assert!(all.iter().all(|r| !r.construct.starts_with("ExprIdentifier")), "{:#?}", all);

@@ -126,6 +126,9 @@ fn narrow_ext(ty: Ty) -> Option<Ext> {
 }
 
 fn cond_for(op: CmpOp, ty: Ty) -> Cond {
+    if ty == Ty::F64 {
+        return fcond_for(op);
+    }
     let s = ty.signed();
     match op {
         CmpOp::Eq => Cond::Eq,
@@ -160,6 +163,26 @@ fn cond_for(op: CmpOp, ty: Ty) -> Cond {
         }
     }
 }
+
+/// The condition that holds after `fcmp dn, dm` when `dn op dm` is true.
+/// An unordered compare (a NaN operand) sets NZCV to 0011: none of these
+/// but NE holds then, and `Cond::invert` of each is its exact negation.
+fn fcond_for(op: CmpOp) -> Cond {
+    match op {
+        CmpOp::Eq => Cond::Eq,
+        CmpOp::Ne => Cond::Ne,
+        CmpOp::Lt => Cond::Mi,
+        CmpOp::Le => Cond::Ls,
+        CmpOp::Gt => Cond::Gt,
+        CmpOp::Ge => Cond::Ge,
+    }
+}
+
+/// d registers used as scratch for one floating point operation. Values
+/// live in X registers as bit patterns between operations; d8-d15 (callee
+/// saved) are never touched.
+const D16: Reg = 16;
+const D17: Reg = 17;
 
 struct Gen<'a> {
     prog: &'a Program,
@@ -371,13 +394,19 @@ impl<'a> Gen<'a> {
         if !has_call {
             // Leaf: parameters stay in their argument registers; the free
             // argument registers are homes too.
-            let mut caller: Vec<Reg> = ((f.nparams as Reg)..8).collect();
+            // An F64 parameter arrives in a d register; it gets a home like
+            // any other variable and the prologue moves it there.
+            let regs = Program::arg_regs(f);
+            let nint = regs.iter().filter(|r| !r.0).count();
+            let mut caller: Vec<Reg> = ((nint as Reg)..8).collect();
             caller.reverse();
-            for p in 0..f.nparams {
-                self.homes[p] = Home::Reg(p as Reg);
+            for (p, &(fp, k)) in regs.iter().enumerate() {
+                if !fp {
+                    self.homes[p] = Home::Reg(k as Reg);
+                }
             }
             for &v in &order {
-                if v < f.nparams || w[v] == 0 {
+                if (v < f.nparams && !regs[v].0) || w[v] == 0 {
                     continue;
                 }
                 self.homes[v] = if let Some(r) = caller.pop() {
@@ -558,9 +587,20 @@ impl<'a> Gen<'a> {
             }
         }
         // Parameters: normalise narrow ones and move them to their homes.
+        let regs = Program::arg_regs(f);
         for p in 0..f.nparams {
             let ty = f.vars[p].ty;
-            let src = p as Reg;
+            let (fp, k) = regs[p];
+            if fp {
+                // AAPCS64: the k-th F64 argument is in d_k.
+                match self.homes[p] {
+                    Home::None => {}
+                    Home::Reg(h) => pro.push(a64::fmov_x_d(h, k as Reg)),
+                    Home::Slot(off) => pro.push(a64::str_d(k as Reg, SP, off)),
+                }
+                continue;
+            }
+            let src = k as Reg;
             let ext = narrow_ext(ty);
             match self.homes[p] {
                 Home::None => {}
@@ -728,6 +768,10 @@ impl<'a> Gen<'a> {
             Stmt::Return(e) => {
                 if let Some(e) = e {
                     self.eval_into(e, X0);
+                    if e.ty == Ty::F64 {
+                        // AAPCS64 returns an F64 in d0.
+                        self.emit(a64::fmov_d_x(0, X0));
+                    }
                 }
                 self.ret_jumps.push(self.code.len());
                 let l = self.ret_label;
@@ -751,7 +795,14 @@ impl<'a> Gen<'a> {
                 let b = self.eval(rhs);
                 let ra = self.use_(a, X16, ty);
                 let rb = self.use_(b, X17, ty);
-                self.emit(a64::cmp(ty.is64(), ra, rb));
+                if ty == Ty::F64 {
+                    // IEEE equality: NaN is unequal to itself, -0.0 == 0.0.
+                    self.emit(a64::fmov_d_x(D16, ra));
+                    self.emit(a64::fmov_d_x(D17, rb));
+                    self.emit(a64::fcmp(D16, D17));
+                } else {
+                    self.emit(a64::cmp(ty.is64(), ra, rb));
+                }
                 self.release(b);
                 self.release(a);
                 let l = match self.style {
@@ -975,6 +1026,86 @@ impl<'a> Gen<'a> {
                 self.done(d, t)
             }
             ExprKind::Call { func, args } => self.call(*func, args, dst, true),
+            ExprKind::FArith { op, lhs, rhs } => {
+                let a = self.eval(lhs);
+                let b = self.eval(rhs);
+                let ra = self.use_(a, X16, ty);
+                let rb = self.use_(b, X17, ty);
+                self.emit(a64::fmov_d_x(D16, ra));
+                self.emit(a64::fmov_d_x(D17, rb));
+                self.emit(match op {
+                    FOp::Add => a64::fadd(D16, D16, D17),
+                    FOp::Sub => a64::fsub(D16, D16, D17),
+                    FOp::Mul => a64::fmul(D16, D16, D17),
+                    FOp::Div => a64::fdiv(D16, D16, D17),
+                });
+                self.release(b);
+                self.release(a);
+                let (d, t) = self.dest(dst);
+                self.emit(a64::fmov_x_d(d, D16));
+                self.done(d, t)
+            }
+            ExprKind::FNeg(x) => {
+                let v = self.eval(x);
+                let ra = self.use_(v, X16, ty);
+                self.emit(a64::fmov_d_x(D16, ra));
+                self.emit(a64::fneg(D16, D16));
+                self.release(v);
+                let (d, t) = self.dest(dst);
+                self.emit(a64::fmov_x_d(d, D16));
+                self.done(d, t)
+            }
+            ExprKind::IntToFloat(x) => {
+                // A narrow integer is canonical in its W register (sign- or
+                // zero-extended to 32 bits), so the W form converts it.
+                let from = x.ty;
+                let v = self.eval(x);
+                let ra = self.use_(v, X16, from);
+                if from.signed() {
+                    self.emit(a64::scvtf(from.is64(), D16, ra));
+                } else {
+                    self.emit(a64::ucvtf(from.is64(), D16, ra));
+                }
+                self.release(v);
+                let (d, t) = self.dest(dst);
+                self.emit(a64::fmov_x_d(d, D16));
+                self.done(d, t)
+            }
+            ExprKind::FloatToInt { arg, site } => {
+                // Traps when x <= lo (x < lo for i64, whose lower bound
+                // -2^63 is itself a double) or x >= hi; both bounds are exact
+                // doubles. Each trap condition (MI, LS, GE) is false after an
+                // unordered FCMP (NZCV = 0011), so a NaN does not trap and
+                // FCVTZ* turns it into 0 -- what Zig 0.16 Debug does. FCVTZ*
+                // truncates toward zero, giving the canonical W form.
+                let v = self.eval(arg);
+                let ra = self.use_(v, X16, Ty::F64);
+                self.emit(a64::fmov_d_x(D16, ra));
+                self.release(v);
+                let l = self.stub_site(*site);
+                let (lo, lo_incl) = if ty == Ty::I64 {
+                    (-9223372036854775808.0f64, true)
+                } else {
+                    (ty.min() as f64 - 1.0, false)
+                };
+                let hi = (ty.max() + 1) as f64;
+                self.mov_imm(true, X17, lo.to_bits());
+                self.emit(a64::fmov_d_x(D17, X17));
+                self.emit(a64::fcmp(D16, D17));
+                let below = if lo_incl { Cond::Mi } else { Cond::Ls };
+                self.bcond(below, l);
+                self.mov_imm(true, X17, hi.to_bits());
+                self.emit(a64::fmov_d_x(D17, X17));
+                self.emit(a64::fcmp(D16, D17));
+                self.bcond(Cond::Ge, l);
+                let (d, t) = self.dest(dst);
+                if ty.signed() {
+                    self.emit(a64::fcvtzs(ty.is64(), d, D16));
+                } else {
+                    self.emit(a64::fcvtzu(ty.is64(), d, D16));
+                }
+                self.done(d, t)
+            }
             ExprKind::Widen(x) => {
                 let from = x.ty;
                 let v = self.eval(x);
@@ -1158,6 +1289,16 @@ impl<'a> Gen<'a> {
         let s = ty.is64();
         let a = self.eval(lhs);
         let b = self.eval(rhs);
+        if ty == Ty::F64 {
+            let rx = self.use_(a, X16, ty);
+            let ry = self.use_(b, X17, ty);
+            self.emit(a64::fmov_d_x(D16, rx));
+            self.emit(a64::fmov_d_x(D17, ry));
+            self.emit(a64::fcmp(D16, D17));
+            self.release(b);
+            self.release(a);
+            return fcond_for(op);
+        }
         let (mut x, mut y, mut op2) = (a, b, op);
         if matches!(x, V::Const(_)) && !matches!(y, V::Const(_)) {
             std::mem::swap(&mut x, &mut y);
@@ -1240,8 +1381,18 @@ impl<'a> Gen<'a> {
             let off = self.slot_of_temp(i);
             self.str_slot(9 + i as Reg, off);
         }
+        let callee = &self.prog.funcs[func as usize];
+        let regs = Program::arg_regs(callee);
+        let ret_f64 = callee.ret == Some(Ty::F64);
         for (j, &(v, ty)) in vals.iter().enumerate() {
-            let rj = j as Reg;
+            let (fp, k) = regs[j];
+            if fp {
+                // AAPCS64: the k-th F64 argument goes in d_k.
+                let r = self.use_(v, X16, ty);
+                self.emit(a64::fmov_d_x(k as Reg, r));
+                continue;
+            }
+            let rj = k as Reg;
             match v {
                 V::Temp(i) if i < TEMP_REGS => self.emit(a64::mov(true, rj, 9 + i as Reg)),
                 V::Temp(i) => {
@@ -1259,7 +1410,9 @@ impl<'a> Gen<'a> {
         self.emit(a64::bl(0));
         let out = if want {
             let (d, t) = self.dest(dst);
-            if d != X0 {
+            if ret_f64 {
+                self.emit(a64::fmov_x_d(d, 0));
+            } else if d != X0 {
                 self.emit(a64::mov(true, d, X0));
             }
             self.done(d, t)
@@ -1621,7 +1774,12 @@ fn weigh_expr(e: &Expr, unit: u64, w: &mut [u64], has_call: &mut bool) {
             weigh_expr(b, unit, w, has_call);
         }
         ExprKind::Not(a) | ExprKind::BitNot(a) | ExprKind::Widen(a) => weigh_expr(a, unit, w, has_call),
-        ExprKind::Cast { arg, .. } => weigh_expr(arg, unit, w, has_call),
+        ExprKind::FNeg(a) | ExprKind::IntToFloat(a) => weigh_expr(a, unit, w, has_call),
+        ExprKind::FArith { lhs, rhs, .. } => {
+            weigh_expr(lhs, unit, w, has_call);
+            weigh_expr(rhs, unit, w, has_call);
+        }
+        ExprKind::Cast { arg, .. } | ExprKind::FloatToInt { arg, .. } => weigh_expr(arg, unit, w, has_call),
         ExprKind::Call { args, .. } => {
             *has_call = true;
             for a in args {

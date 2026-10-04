@@ -26,6 +26,7 @@ use t27b::codegen::{self, canon, TrapStyle};
 use t27b::eval::{Interp, Stop};
 use t27b::ir::*;
 use t27b::jit::Jit;
+use t27b::{front, lower};
 
 // ------------------------------------------------------------------ rng
 
@@ -1103,6 +1104,14 @@ fn show_expr(p: &Program, f: &Func, e: &Expr) -> String {
             let how = if *site != 0 { format!("@{}", site) } else { "%".into() };
             format!("({} as{} {})", show_expr(p, f, arg), how, e.ty.name())
         }
+        ExprKind::FArith { op, lhs, rhs } => {
+            format!("({} f{} {})", show_expr(p, f, lhs), op.symbol(), show_expr(p, f, rhs))
+        }
+        ExprKind::FNeg(a) => format!("-f{}", show_expr(p, f, a)),
+        ExprKind::IntToFloat(a) => format!("@floatFromInt({})", show_expr(p, f, a)),
+        ExprKind::FloatToInt { arg, site } => {
+            format!("@intFromFloat@{}({}):{}", site, show_expr(p, f, arg), e.ty.name())
+        }
         ExprKind::Slot(k) => format!("&s{}", k),
         ExprKind::Data(k) => format!("&d{}", k),
         ExprKind::Load { addr, off } => format!("{}[{} + {}]", e.ty.name(), show_expr(p, f, addr), off),
@@ -1739,8 +1748,20 @@ fn compare_calls(
         let f = &prog.funcs[*fi];
         let ptys: Vec<Ty> = f.vars[..f.nparams].iter().map(|v| v.ty).collect();
         let want = Interp::new(prog).call(*fi, args);
-        let raw: Vec<u64> = args.iter().zip(&ptys).map(|(&v, &t)| raw_arg(rng, v, t)).collect();
-        let got = jit.call(*fi as FuncId, &raw);
+        // AAPCS64: integer arguments in x0-x7, F64 ones in d0-d7, each
+        // class numbered on its own; an F64 result comes back in d0.
+        let (mut xs, mut ds) = (Vec::new(), Vec::new());
+        for (&v, &t) in args.iter().zip(&ptys) {
+            if t == Ty::F64 {
+                ds.push(v as u64);
+            } else {
+                xs.push(raw_arg(rng, v, t));
+            }
+        }
+        let fp_ret = f.ret == Some(Ty::F64);
+        let got = jit
+            .call_fp(*fi as FuncId, &xs, &ds)
+            .map(|(x0, d0)| if fp_ret { d0 } else { x0 });
         stats.calls += 1;
         let ok = match (&want, &got) {
             (Ok(Some(v)), Ok(r)) => {
@@ -1768,4 +1789,383 @@ fn compare_calls(
     } else {
         Err(bad.join("; "))
     }
+}
+
+// ------------------------------------------------------------------ f64
+
+/// Binary64 edge values as IR values (bit patterns): signed zeros, the
+/// infinities, quiet and signalling NaNs with payloads, subnormals, the
+/// integer-exactness edge 2^53, and the bounds of every `@intFromFloat`.
+fn f64_edges() -> Vec<i128> {
+    let mut v: Vec<i128> = [
+        0.0,
+        -0.0,
+        1.0,
+        -1.0,
+        0.5,
+        -0.5,
+        1.5,
+        2.0,
+        3.0,
+        0.1,
+        1.0 / 3.0,
+        -2.5,
+        127.99,
+        128.0,
+        -128.5,
+        -129.0,
+        255.5,
+        256.0,
+        65535.75,
+        2147483647.5,
+        -2147483648.75,
+        -2147483649.0,
+        4294967295.9,
+        4294967296.0,
+        9007199254740992.0,  // 2^53
+        9007199254740994.0,  // 2^53 + 2
+        -9007199254740992.0,
+        9223372036854775807.0, // rounds to 2^63
+        -9223372036854775808.0,
+        -9223372036854777856.0, // the next f64 below -2^63
+        18446744073709551615.0, // rounds to 2^64
+        18446744073709549568.0, // the largest f64 below 2^64
+        1.0e300,
+        -1.0e300,
+        1.0e-300,
+        f64::MAX,
+        f64::MIN,
+        f64::MIN_POSITIVE,
+        f64::EPSILON,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+    ]
+    .iter()
+    .map(|&x: &f64| f64_bits(x))
+    .collect();
+    v.extend([
+        1,                       // smallest subnormal
+        0x8000_0000_0000_0001,   // its negation
+        0x000f_ffff_ffff_ffff,   // largest subnormal
+        0x7ff8_0000_0000_0000,   // the default quiet NaN
+        0xfff8_0000_0000_0000,   // negative quiet NaN
+        0x7ff8_0000_0000_beef,   // quiet NaN with a payload
+        0x7ff0_0000_0000_0001,   // signalling NaN
+    ]);
+    v
+}
+
+fn f64_konst(x: f64) -> Expr {
+    konst(Ty::F64, f64_bits(x))
+}
+
+fn farith(op: FOp, lhs: Expr, rhs: Expr) -> Expr {
+    Expr { ty: Ty::F64, kind: ExprKind::FArith { op, lhs: Box::new(lhs), rhs: Box::new(rhs) } }
+}
+
+fn f64_program(name: &str, funcs: Vec<Func>, sites: Vec<Site>) -> Program {
+    Program {
+        module: name.into(),
+        funcs,
+        sites,
+        mode: OverflowMode::Trap,
+        unchecked: Vec::new(),
+        data: Vec::new(),
+        internal_abi: Vec::new(),
+    }
+}
+
+/// `+ - * /`, negation and the six comparisons on every pair of edge
+/// values, operands in d registers and as constants: the JIT's d0 (or x0
+/// for a bool) must be the interpreter's bit pattern exactly.
+#[test]
+fn f64_arith_and_compare_match_interpreter() {
+    let mut rng = Rng::new(64);
+    let mut stats = Stats::default();
+    let mut failures = Vec::new();
+    let vals = f64_edges();
+    let nsite = |ty| vec![Site { kind: TrapKind::Overflow, line: 1, what: String::new(), ty }, Site { kind: TrapKind::NoReturn, line: 1, what: String::new(), ty }];
+    for op in [FOp::Add, FOp::Sub, FOp::Mul, FOp::Div] {
+        let (a, b) = (var(Ty::F64, 0), var(Ty::F64, 1));
+        let mut funcs = vec![
+            one_func("f", &[Ty::F64, Ty::F64], Ty::F64, vec![Stmt::Return(Some(farith(op, a.clone(), b.clone())))], 1),
+            // Both orders with a constant operand, and a nested tree.
+            one_func("fk", &[Ty::F64, Ty::F64], Ty::F64, vec![Stmt::Return(Some(farith(op, a.clone(), f64_konst(0.1))))], 1),
+            one_func("kf", &[Ty::F64, Ty::F64], Ty::F64, vec![Stmt::Return(Some(farith(op, f64_konst(-3.0), b.clone())))], 1),
+            one_func(
+                "tree",
+                &[Ty::F64, Ty::F64],
+                Ty::F64,
+                vec![Stmt::Return(Some(farith(
+                    op,
+                    farith(FOp::Mul, a.clone(), b.clone()),
+                    Expr { ty: Ty::F64, kind: ExprKind::FNeg(Box::new(farith(op, b.clone(), a.clone()))) },
+                )))],
+                1,
+            ),
+        ];
+        if op == FOp::Add {
+            funcs.push(one_func("neg", &[Ty::F64, Ty::F64], Ty::F64, vec![Stmt::Return(Some(Expr { ty: Ty::F64, kind: ExprKind::FNeg(Box::new(a.clone())) }))], 1));
+            for c in CMPS {
+                funcs.push(one_func("cmp", &[Ty::F64, Ty::F64], Ty::Bool, vec![Stmt::Return(Some(cmp(c, a.clone(), b.clone())))], 1));
+                // A comparison as a branch condition, not only as a value.
+                funcs.push(one_func(
+                    "br",
+                    &[Ty::F64, Ty::F64],
+                    Ty::I32,
+                    vec![
+                        Stmt::If { cond: cmp(c, a.clone(), b.clone()), then: vec![Stmt::Return(Some(konst(Ty::I32, 1)))], els: vec![] },
+                        Stmt::Return(Some(konst(Ty::I32, 2))),
+                    ],
+                    1,
+                ));
+            }
+        }
+        let n = funcs.len();
+        let prog = f64_program("f64", funcs, nsite(Ty::F64));
+        let mut calls = Vec::new();
+        for fi in 0..n {
+            for &x in &vals {
+                for &y in &vals {
+                    calls.push((fi, vec![x, y]));
+                }
+            }
+        }
+        if let Err(e) = compare_calls(&prog, &calls, &mut rng, &mut stats) {
+            failures.push(format!("f{}: {}", op.symbol(), e));
+        }
+    }
+    eprintln!("f64 arith: {} programs, {} calls compared ({} returns)", stats.programs, stats.calls, stats.returns);
+    assert!(stats.returns > 0);
+    assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
+}
+
+/// `@floatFromInt` from every integer type at its edge values, and
+/// `@intFromFloat` to every integer type at every f64 edge value: in range
+/// the same integer (0 for a NaN, as in Zig 0.16 Debug), out of range (the
+/// infinities included) the same trap site.
+#[test]
+fn f64_conversions_match_interpreter() {
+    let mut rng = Rng::new(65);
+    let mut stats = Stats::default();
+    let mut failures = Vec::new();
+    let mk = |kind, ty| Site { kind, line: 1, what: String::new(), ty };
+    for ty in Ty::INTS {
+        let sites = vec![mk(TrapKind::Overflow, ty), mk(TrapKind::NoReturn, ty), mk(TrapKind::FloatToInt, ty)];
+        let to_f = Expr { ty: Ty::F64, kind: ExprKind::IntToFloat(Box::new(var(ty, 0))) };
+        let to_i = Expr { ty, kind: ExprKind::FloatToInt { arg: Box::new(var(Ty::F64, 0)), site: 2 } };
+        // Round trip through f64 and back, mixed with integer arithmetic.
+        let back = Expr {
+            ty,
+            kind: ExprKind::FloatToInt { arg: Box::new(farith(FOp::Mul, to_f.clone(), f64_konst(0.5))), site: 2 },
+        };
+        let funcs = vec![
+            one_func("ff", &[ty], Ty::F64, vec![Stmt::Return(Some(to_f))], 1),
+            one_func("fi", &[Ty::F64], ty, vec![Stmt::Return(Some(to_i))], 1),
+            one_func("rt", &[ty], ty, vec![Stmt::Return(Some(back))], 1),
+        ];
+        let prog = f64_program("conv", funcs, sites);
+        let mut calls: Vec<(usize, Vec<i128>)> = Vec::new();
+        for &v in &edge_values(ty) {
+            calls.push((0, vec![v]));
+            calls.push((2, vec![v]));
+        }
+        for &x in &f64_edges() {
+            calls.push((1, vec![x]));
+        }
+        if let Err(e) = compare_calls(&prog, &calls, &mut rng, &mut stats) {
+            failures.push(format!("{}: {}", ty.name(), e));
+        }
+    }
+    eprintln!(
+        "f64 conversions: {} programs, {} calls compared ({} returns, {} @intFromFloat traps)",
+        stats.programs, stats.calls, stats.returns, stats.traps[TrapKind::FloatToInt as usize]
+    );
+    assert!(stats.traps[TrapKind::FloatToInt as usize] > 0);
+    assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
+}
+
+/// AAPCS64: F64 and integer parameters interleaved (the d and x registers
+/// are numbered per class), all eight d registers in use, and a non-leaf
+/// caller passing its arguments on in another order, with the F64 result
+/// crossing the call in d0.
+#[test]
+fn f64_mixed_arguments_and_calls_match_interpreter() {
+    let mut rng = Rng::new(66);
+    let mut stats = Stats::default();
+    let params = [Ty::F64, Ty::I32, Ty::F64, Ty::U8, Ty::F64, Ty::F64, Ty::I64, Ty::F64];
+    let v = |i: usize| var(params[i], i);
+    let fl = |i: usize| Expr { ty: Ty::F64, kind: ExprKind::IntToFloat(Box::new(v(i))) };
+    // callee: ((p0 - p2) * p4 + p5 / p7) + float(p1) - float(p3) * float(p6)
+    let body = farith(
+        FOp::Sub,
+        farith(FOp::Add, farith(FOp::Add, farith(FOp::Mul, farith(FOp::Sub, v(0), v(2)), v(4)), farith(FOp::Div, v(5), v(7))), fl(1)),
+        farith(FOp::Mul, fl(3), fl(6)),
+    );
+    let callee = one_func("callee", &params, Ty::F64, vec![Stmt::Return(Some(body))], 1);
+    // caller: callee with its F64 arguments rotated, then the result used
+    // after the call alongside a parameter that lives across it.
+    let call = Expr {
+        ty: Ty::F64,
+        kind: ExprKind::Call { func: 0, args: vec![v(7), v(1), v(0), v(3), v(2), v(4), v(6), v(5)] },
+    };
+    let caller = one_func("caller", &params, Ty::F64, vec![Stmt::Return(Some(farith(FOp::Add, call, v(5))))], 1);
+    // Only F64 parameters: all eight d registers.
+    let eight = [Ty::F64; 8];
+    let w = |i: usize| var(Ty::F64, i);
+    let mut sum = w(0);
+    for i in 1..8 {
+        sum = farith(if i % 2 == 1 { FOp::Sub } else { FOp::Div }, sum, w(i));
+    }
+    let all_d = one_func("all_d", &eight, Ty::F64, vec![Stmt::Return(Some(sum))], 1);
+    let sites = vec![
+        Site { kind: TrapKind::Overflow, line: 1, what: String::new(), ty: Ty::F64 },
+        Site { kind: TrapKind::NoReturn, line: 1, what: String::new(), ty: Ty::F64 },
+    ];
+    let prog = f64_program("mixed", vec![callee, caller, all_d], sites);
+    let edges = f64_edges();
+    let ints = |ty: Ty| edge_values(ty);
+    let mut calls = Vec::new();
+    for k in 0..400 {
+        let mut args = Vec::new();
+        for &t in &params {
+            args.push(if t == Ty::F64 { edges[rng.below(edges.len())] } else { rng.pick(&ints(t)) });
+        }
+        calls.push((k % 2, args));
+        let all: Vec<i128> = (0..8).map(|_| edges[rng.below(edges.len())]).collect();
+        calls.push((2, all));
+    }
+    let r = compare_calls(&prog, &calls, &mut rng, &mut stats);
+    eprintln!("f64 calls: {} calls compared ({} returns)", stats.calls, stats.returns);
+    assert!(r.is_ok(), "{}", r.unwrap_err());
+    assert_eq!(stats.returns, calls.len());
+}
+
+// ------------------------------------------------------------ f64 source
+
+fn f64_lower(src: &str) -> Result<Program, Vec<String>> {
+    let parsed = front::parse(std::path::Path::new("/nonexistent/f.t27"), src).map_err(|e| vec![format!("parse: {}", e)])?;
+    lower::lower_src(&parsed.ast, OverflowMode::Trap, Some(src)).map_err(|rs| rs.iter().map(|r| r.message()).collect())
+}
+
+/// Every test block of `src` in both engines: (name, passed). A block on
+/// which they disagree fails the test outright.
+fn f64_run(src: &str) -> Vec<(String, Result<(), TrapKind>)> {
+    let prog = f64_lower(src).unwrap_or_else(|e| panic!("lowering failed:\n{}", e.join("\n")));
+    let code = codegen::compile(&prog, TrapStyle::Jit, true).expect("codegen");
+    let mut jit = Jit::load(&code, prog.funcs.len(), &prog.data).expect("jit load");
+    let mut out = Vec::new();
+    for (id, f) in prog.tests() {
+        let want = Interp::new(&prog).call(id, &[]);
+        let got = jit.call(id as FuncId, &[]);
+        let o = match (&want, &got) {
+            (Ok(_), Ok(_)) => Ok(()),
+            (Err(Stop::Trap { site, .. }), Err(t)) if *site == t.site => Err(prog.sites[*site as usize].kind),
+            _ => panic!("{}: interpreter {:?}, jit {:?}", f.name, want, got),
+        };
+        out.push((f.name.clone(), o));
+    }
+    out
+}
+
+/// f64 from source: literals, `+ - * /`, negation, comparisons, f64
+/// parameters, results, locals and constants, and the two conversions in
+/// Zig's spelling with the result type from context. Every block's verdict
+/// is the one `t27c gen` + `zig test` gives for the same text.
+#[test]
+fn f64_source_programs_run_in_both_engines() {
+    let src = "module f64src;
+
+const PHI: f64 = 1.618033988749895;
+const THIRD: f64 = 1.0 / 3.0;
+const QUARTER = 0.25;
+
+fn half(x: f64) f64 {
+    return x / 2.0;
+}
+
+fn mix(n: i32, x: f64) i32 {
+    const y: f64 = @as(f64, @floatFromInt(n)) * x;
+    var z: f64 = -y + 0.5;
+    z = z * 2.0;
+    return @intFromFloat(z);
+}
+
+fn many(a: f64, b: i64, c: f64, d: u8, e: f64) f64 {
+    return a - c * e + @as(f64, @floatFromInt(b)) / @as(f64, @floatFromInt(d));
+}
+
+fn to_i8(x: f64) i8 {
+    return @intFromFloat(x);
+}
+
+fn nan() f64 {
+    const z: f64 = 0.0;
+    return z / z;
+}
+
+test half_works {
+    assert(half(3.0) == 1.5);
+    assert(mix(3, 1.5) == -8);
+    assert(PHI * PHI - PHI > 0.99);
+    assert(THIRD < 0.34);
+    assert(many(2.0, 3, 2.0, 4, 0.5) + QUARTER == 2.0);
+    const q: f64 = 0.5 * 3.0;
+    assert(q == 1.5);
+    assert(QUARTER * 4.0 == 1.0);
+    assert_eq(half(-0.0), 0.0);
+    assert(nan() != nan());
+    assert(to_i8(-128.9) == -128);
+}
+
+test out_of_range {
+    assert(to_i8(128.0) == 0);
+}
+
+test nan_to_int {
+    assert(to_i8(nan()) == 0);
+}
+";
+    let r = f64_run(src);
+    let got: Vec<(&str, Result<(), TrapKind>)> = r.iter().map(|(n, o)| (n.as_str(), *o)).collect();
+    assert_eq!(
+        got,
+        vec![
+            ("half_works", Ok(())),
+            ("out_of_range", Err(TrapKind::FloatToInt)),
+            ("nan_to_int", Ok(())),
+        ]
+    );
+}
+
+/// What stays refused, each named: `@sqrt` and `std.math.*`, a conversion
+/// with no result type, f32, `as` to or from f64, compile-time arithmetic
+/// on a literal that is not exactly an f64 (Zig folds it in f128), and
+/// `x * 2^k` on f64 (t27c gen rewrites it into a shift that cannot compile).
+#[test]
+fn f64_refusals_name_the_construct() {
+    let first = |body: &str| -> String {
+        let src = format!("module f64rej;\nfn f(x: f64, n: i32) f64 {{\n{}\n}}\n", body);
+        match f64_lower(&src) {
+            Ok(_) => panic!("expected a rejection for {}", body),
+            Err(e) => e[0].clone(),
+        }
+    };
+    for (body, want) in [
+        ("return @sqrt(x);", "ExprCall(@sqrt)"),
+        ("return std.math.sqrt(x);", "ExprCall(std.*)"),
+        ("return @floatFromInt(n) + x;", "ExprCall(@floatFromInt)"),
+        ("const y: f32 = 1.0;\nreturn x;", "type f32"),
+        ("return n as f64;", "ExprCast(f64)"),
+        ("return x + 0.1 * 3.0;", "ExprBinary(*)"),
+        ("return x * 2;", "ExprBinary(f64 * 2^k)"),
+        ("return x % 2.0;", "ExprBinary(%)"),
+        ("return x + n;", "type mismatch"),
+    ] {
+        let msg = first(body);
+        assert!(msg.contains(&format!("unsupported construct {} ", want)), "{}: {}", body, msg);
+    }
+    // Exact literals fold: 1e22 is an f64 exactly, 1e23 is not.
+    assert!(f64_lower("module ok;\nfn f() f64 {\nreturn 1e22 * 0.5 + 0.5 * 3.0;\n}\n").is_ok());
+    assert!(f64_lower("module no;\nfn f() f64 {\nreturn 1e23 * 1.0;\n}\n").is_err());
 }
