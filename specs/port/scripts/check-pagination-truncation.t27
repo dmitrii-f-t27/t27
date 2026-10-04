@@ -97,6 +97,7 @@ test args_exit_code_usage {
     assert(args_exit_code(1, "") == EXIT_ENV);
     assert(args_exit_code(0, "") == EXIT_ENV);
     assert(args_exit_code(2, "gHashTag") == EXIT_OK);
+    assert(args_exit_code(2, "") == EXIT_ENV);
 }
 
 test is_population_edges {
@@ -132,9 +133,9 @@ test main_reports_truncation_after_eight_probes {
 }
 
 test main_caps_probes_at_eight {
-    // Nine truncating counts: the original's loop runs eight times and stops,
-    // so the ninth never probes. Exit 1 either way.
-    var counts: [9]i64 = [100, 200, 400, 800, 1600, 3200, 6400, 12800, 25600];
+    // Eight truncated replies followed by a ninth that would succeed.
+    // The original never makes that ninth query, so its result cannot matter.
+    var counts: [9]i64 = [100, 200, 400, 800, 1600, 3200, 6400, 12800, 0];
     assert(main(2, "gHashTag", DEFAULT_START_LIMIT, &counts) == EXIT_TRUNCATED);
 }
 
@@ -154,4 +155,20 @@ test main_usage_error_exits_two {
     // "usage: $0 <owner> [start-limit]" through the top level: exit 2.
     var counts: [1]i64 = [0];
     assert(main(1, "", DEFAULT_START_LIMIT, &counts) == EXIT_ENV);
+}
+
+
+test main_accepts_population_on_eighth_probe {
+    var counts: [8]i64 = [100, 200, 400, 800, 1600, 3200, 6400, 12799];
+    assert(main(2, "gHashTag", DEFAULT_START_LIMIT, &counts) == EXIT_OK);
+}
+
+test main_ignores_query_failure_beyond_cap {
+    var counts: [9]i64 = [100, 200, 400, 800, 1600, 3200, 6400, 12800, NO_COUNT];
+    assert(main(2, "gHashTag", DEFAULT_START_LIMIT, &counts) == EXIT_TRUNCATED);
+}
+
+test main_respects_custom_start_limit {
+    var counts: [8]i64 = [3, 6, 12, 24, 48, 96, 192, 384];
+    assert(main(2, "gHashTag", 3, &counts) == EXIT_TRUNCATED);
 }
