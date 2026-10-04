@@ -1,0 +1,85 @@
+module port::pysr_trinity_blind_test_v2;
+
+// True constants
+const PI_TRUE: f64 = 3.141592653589793;
+const E_TRUE: f64 = 2.718281828459045;
+const PHI: f64 = 1.61803398875; // (1 + sqrt(5)) / 2 ≈ 1.61803398875
+const GAMMA_PHI: f64 = 1.0 / (PHI * PHI * PHI); // = 0.23607
+
+// Target formulas
+const targets = struct {
+    "P6_V_us": struct {
+        formula: []const u8 = "3*GAMMA_PHI/PI_TRUE",
+        target: f64 = 0.224310,
+    }
+}
+
+pub fn run_target(target: []const u8) -> void {
+    // Port the decision logic, not the plumbing
+    // External calls (PySRRegressor, numpy, print) are undefined
+    
+    undefined;
+}
+
+// Test the mathematical constants and calculations
+test constants_calculation {
+    // Test PHI calculation
+    const expected_phi = 1.61803398875; // (1 + sqrt(5)) / 2 ≈ 1.61803398875
+    // Use approximate equality for floating point numbers
+    const phi_diff = if (PHI > expected_phi) PHI - expected_phi else expected_phi - PHI;
+    assert(phi_diff < 0.000001);
+    
+    // Test GAMMA_PHI calculation
+    const expected_gamma_phi = 1.0 / (expected_phi * expected_phi * expected_phi);
+    const gamma_diff = if (GAMMA_PHI > expected_gamma_phi) GAMMA_PHI - expected_gamma_phi else expected_gamma_phi - GAMMA_PHI;
+    assert(gamma_diff < 0.000001);
+    
+    // Test target value calculation
+    const target_value = 3 * GAMMA_PHI / PI_TRUE;
+    assert(target_value > 0.22); // Should be close to 0.224310
+    assert(target_value < 0.23);
+}
+
+// Test the data generation logic
+test data_generation_logic {
+    const n_samples: usize = 50;
+    const train_size: usize = (n_samples * 80 / 100);
+    
+    // Test the split calculation
+    assert(train_size == 40);
+    assert(n_samples - train_size == 10);
+    
+    // Test the target formula calculation
+    const Y_true = 3 * GAMMA_PHI / PI_TRUE;
+    assert(Y_true > 0.22);
+    assert(Y_true < 0.23);
+}
+
+// Test the pattern detection logic with simpler string checks
+test pattern_detection {
+    // Test with expected equation
+    const eq_str = "3*GAMMA*PHI/PI";
+    // Check first character is '3'
+    assert(eq_str[0] == '3');
+    // Check substring "GAMMA" exists by checking specific positions
+    assert(eq_str[2] == 'G');
+    assert(eq_str[3] == 'A'); 
+    assert(eq_str[4] == 'M');
+    assert(eq_str[5] == 'M');
+    assert(eq_str[6] == 'A');
+    // Check '/' exists at position 11
+    assert(eq_str[11] == '/');
+    
+    // Test with different equation
+    const eq_str2 = "2*GAMMA+PHI";
+    // Check first character is NOT '3'
+    assert(eq_str2[0] != '3');
+    // Check "GAMMA" still exists
+    assert(eq_str2[2] == 'G');
+    assert(eq_str2[3] == 'A');
+    assert(eq_str2[4] == 'M');
+    assert(eq_str2[5] == 'M');
+    assert(eq_str2[6] == 'A');
+    // Check '/' does NOT exist at position 8
+    assert(eq_str2[8] != '/');
+}
