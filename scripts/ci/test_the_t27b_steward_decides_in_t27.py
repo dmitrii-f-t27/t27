@@ -51,7 +51,7 @@ def runs_tests(src: Path) -> tuple[int, str]:
 
 
 code, out = runs_tests(GEN)
-check(code == 0 and "62 tests passed" in out, f"the generated C passes the spec's tests ({code}: {out})")
+check(code == 0 and "81 tests passed" in out, f"the generated C passes the spec's tests ({code}: {out})")
 
 text = GEN.read_text()
 needle = "return (((in_ref * 1000) + (reference / 2)) / reference);"
@@ -132,6 +132,17 @@ check((r.is_alarm("fail", "pass"), r.is_alarm("fail", "fail"), r.is_alarm("timeo
       == (True, False, False, True, True, False),
       "doctor: a fail or timeout the reference shares is no alarm; a crash or mismatch always is")
 
+check((r.check_effect("FAILURE", "SUCCESS", False), r.check_effect("FAILURE", "FAILURE", False),
+       r.check_effect("FAILURE", "ABSENT", False), r.check_effect("QUEUED", "SUCCESS", True),
+       r.check_effect("SKIPPED", "SUCCESS", True), r.check_effect("SUCCESS", "FAILURE", True))
+      == ("BLOCK", None, None, "WAIT", "WAIT", None),
+      "ready: a non-required red blocks only if master is green; a required check must be SUCCESS (#6244)")
+check(r.check_effect("FAILURE", "PENDING", False) == "WAIT",
+      "ready: a non-required red waits while master's newest run of it is still going (Q29)")
+check((r.pr_ready(True, "MERGEABLE", True, [None, None], [None]), r.pr_ready(True, "MERGEABLE", True, [None], ["BLOCK"]),
+       r.pr_ready(True, "CONFLICTING", True, ["BLOCK"], []), r.pr_ready(False, "MERGEABLE", True, [], []))
+      == ("READY", "BLOCKED", "CONFLICT", "CLOSED"), "ready: the spec folds the effects into one verdict")
+
 tool = TOOL.read_text()
 body = tool[tool.index("def delta("):tool.index("def previous_run(")]
 check('("fail", "mismatch", "crash")' not in body and "rules().delta(" in body,
@@ -142,6 +153,10 @@ check("r.entry(" in body and "got in PASSES" not in body and "want not in PASSES
 body = tool[tool.index("def bless("):tool.index("def dump_ledger(")]
 check("r.bless_reason(" in body and "r.cap_rises(" in body and "r.cap_rise_is_new(" in body and "UNIMPLEMENTED" not in tool and "PASSES" not in tool,
       "t27b.py bless asks the spec and keeps no verdict tuple of its own")
+
+body = tool[tool.index("def ready("):tool.index("def ready_main(")]
+check("r.check_effect(" in body and "r.pr_ready(" in body and '"SUCCESS"' not in body and '"FAILURE"' not in body,
+      "t27b.py ready asks the spec and keeps no check-state branch of its own")
 
 body = tool[tool.index("def anomalies("):tool.index("def lab_card(")]
 check(all(f"rules().{f}(" in body for f in ("lab_stale", "claim", "railway_old", "ledger_quiet", "checkout",

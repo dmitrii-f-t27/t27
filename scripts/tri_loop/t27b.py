@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""tri t27b -- the t27b steward's tick card (status), anomaly scan (doctor), per-spec ratchet between lab runs (delta) and gen-c proof on the t27c lab (gen-check).
+"""tri t27b -- the t27b steward's tick card (status), anomaly scan (doctor), per-spec ratchet between lab runs (delta), gen-c proof on the t27c lab (gen-check) and the merge gate (ready).
 
 WHY THIS EXISTS
 ---------------
@@ -108,6 +108,21 @@ WHAT THIS DOES NOT ESTABLISH
     tri t27b doctor --json         # the same, machine-readable
     tri t27b delta                 # what moved per spec since the previous lab run
     tri t27b gen-check             # is gen/c/tri/t27b/steward.c what master's t27c emits?
+    tri t27b ready [N ...]         # may each open t27b PR merge now? (never merges)
+
+READY (#6244): the steward's merge gate, decided in steward.t27
+---------------------------------------------------------------
+One line per PR: READY, WAIT, RED, CONFLICT, RETARGET, BLOCKED or CLOSED, then the
+checks that decided it. Required: validate, check-linked-issue,
+parse-ratchet, and loop-tools-tracked when it reports on the PR; each must be
+SUCCESS. A non-required check blocks only when it is red on the PR and its
+latest completed result on master is success (Q16); red on master too means
+master broke it. Master's results are the newest completed run per check
+name over the last few master commits. Exit 0 when every PR listed is READY,
+1 otherwise, 2 when GitHub could not be read. Fixtures: prs.json,
+master_checks.json ({name: state}).
+
+    tri t27b ready [N ...] [--json] [--fixture DIR]
 
 GEN-CHECK (#6231): the committed gen-c output against the t27c lab
 -------------------------------------------------------------------
@@ -191,6 +206,7 @@ LAB = "https://t27b-lab-production.up.railway.app"
 REPO = "gHashTag/t27"
 STATE = os.path.expanduser("~/.local/state/t27b-queen")
 REQUIRED = ("validate", "check-linked-issue", "parse-ratchet")
+REQUIRED_WHEN_PRESENT = ("loop-tools-tracked",)
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 LEDGER = os.path.join(ROOT, "docs", "reports", "t27b_expectations.json")
 
@@ -257,6 +273,33 @@ class Sources:
                                   "number,title,body,headRefName,baseRefName,mergeable,statusCheckRollup"],
                                  timeout=90))
         return [p for p in prs if is_t27b(p)]
+
+    PR_FIELDS = "number,title,body,state,headRefName,baseRefName,mergeable,statusCheckRollup"
+
+    def pr(self, n):
+        if self.fixture:
+            for p in json.loads(self._fx("prs.json")):
+                if p.get("number") == n:
+                    return p
+            raise Unreadable(f"fixture prs.json has no #{n}")
+        return json.loads(run(["gh", "pr", "view", str(n), "--repo", REPO, "--json", self.PR_FIELDS], timeout=90))
+
+    def master_checks(self, depth=12):
+        """{check name: state} -- the newest VERDICT per name over the last
+        `depth` master commits. The tip's runs may still be going, and master's
+        runs are often cancelled by the next push: a cancelled, skipped or
+        neutral run says nothing about the check, so the scan looks further
+        back (live 2026-10-04: with cancelled runs counted, five checks red on
+        a PR and green on master read as "red on master too")."""
+        if self.fixture:
+            return json.loads(self._fx("master_checks.json"))
+        shas = run(["gh", "api", f"repos/{REPO}/commits?sha=master&per_page={depth}", "--jq", ".[].sha"],
+                   timeout=60).split()
+        if not shas:
+            raise Unreadable("no master commits from the GitHub API")
+        return fold_master([run(["gh", "api", "--paginate", f"repos/{REPO}/commits/{sha}/check-runs?per_page=100",
+                                 "--jq", r'.check_runs[] | "\(.name)\t\(.conclusion // .status)"'],
+                                timeout=90) for sha in shas])
 
     def claim(self):
         text = self._fx("claim.json") if self.fixture else _read(os.path.join(self.state, "claim.json"))
@@ -1105,13 +1148,113 @@ def gen_check_main(argv, runner=None):
     return {"SAME": 0, "DIFFERS": 1}.get(r["verdict"], 2)
 
 
+MASTER_VERDICTS = ("SUCCESS", "FAILURE", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE")
+# A run still going on a newer master commit than the last verdict: master's
+# answer is not known yet, so a red check on the PR waits (Q29) instead of
+# being judged against a stale verdict.
+MASTER_RUNNING = ("QUEUED", "IN_PROGRESS", "WAITING", "PENDING", "REQUESTED")
+
+
+def fold_master(outputs):
+    """`name<TAB>conclusion` lines per master commit, newest commit first ->
+    {name: the newest conclusion that is a verdict, or PENDING when a newer run
+    is still going (Q29)}. Cancelled, skipped and
+    neutral runs are passed over (MASTER_VERDICTS)."""
+    got = {}
+    for out in outputs:
+        for line in out.splitlines():
+            name, _, concl = line.partition("\t")
+            concl = concl.strip().upper()
+            if name and concl in MASTER_VERDICTS:
+                got.setdefault(name, concl)
+            elif name and concl in MASTER_RUNNING:
+                got.setdefault(name, "PENDING")
+    return got
+
+
+def rollup(pr):
+    """{check name: state} of a PR; a re-run's later entry wins."""
+    got = {}
+    for c in pr.get("statusCheckRollup") or []:
+        name = c.get("name") or c.get("context")
+        if name:
+            got[name] = (c.get("conclusion") or c.get("state") or c.get("status") or "").upper() or "PENDING"
+    return got
+
+
+def ready(pr, master):
+    """One PR against master's check results -> {number, verdict, why}. The
+    verdict is steward.t27's (`check_effect`, `effect_fold`, `pr_ready`)."""
+    r = rules()
+    checks = rollup(pr)
+    required = REQUIRED + tuple(n for n in REQUIRED_WHEN_PRESENT if n in checks)
+    why, eff_req, eff_other = [], [], []
+    for name in required:
+        e = r.check_effect(checks.get(name, "ABSENT"), master.get(name, "ABSENT"), True)
+        eff_req.append(e)
+        if e:
+            why.append(f"{name}={checks.get(name, 'ABSENT')}")
+    for name, state in sorted(checks.items()):
+        if name in required:
+            continue
+        e = r.check_effect(state, master.get(name, "ABSENT"), False)
+        eff_other.append(e)
+        if e:
+            why.append(f"{name}={state} (master {master.get(name, 'ABSENT')})")
+    base_master = pr.get("baseRefName") == "master"
+    is_open = (pr.get("state") or "OPEN").upper() == "OPEN"
+    verdict = r.pr_ready(is_open, pr.get("mergeable"), base_master, eff_req, eff_other)
+    if verdict == "CLOSED":
+        why = [f"state={pr.get('state')}"]
+    elif verdict == "CONFLICT":
+        why.insert(0, "mergeable=CONFLICTING")
+    elif verdict == "RETARGET":
+        why.insert(0, f"base={pr.get('baseRefName')}")
+    elif verdict == "WAIT" and not why:
+        why.append(f"mergeable={pr.get('mergeable')}")
+    return {"number": pr.get("number"), "verdict": verdict, "title": pr.get("title", ""), "why": why}
+
+
+def ready_main(argv):
+    ap = argparse.ArgumentParser(prog="tri t27b ready", description="may each t27b PR merge now? (#6244; never merges)")
+    ap.add_argument("numbers", nargs="*", type=int, help="PR numbers (default: every open t27b PR)")
+    ap.add_argument("--fixture", help="read prs.json and master_checks.json from this directory (tests)")
+    ap.add_argument("--json", action="store_true")
+    try:
+        args = ap.parse_args(argv)
+    except SystemExit as e:
+        return 2 if e.code else 0
+    src = Sources(fixture=args.fixture)
+    try:
+        prs = [src.pr(n) for n in args.numbers] if args.numbers else src.prs()
+        master = src.master_checks()
+    except (Unreadable, ValueError) as e:
+        print(f"tri t27b ready: UNREADABLE {e}", file=sys.stderr)
+        return 2
+    try:
+        out = [ready(p, master) for p in prs]
+    except ValueError as e:  # an unknown check state is an error, never a guess
+        print(f"tri t27b ready: UNREADABLE {e}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(out, indent=1))
+    else:
+        for o in out:
+            print(f"#{o['number']:<6} {o['verdict']:<9} {', '.join(o['why']) or '-'}  {o['title'][:60]}")
+        if not out:
+            print("tri t27b ready: no open t27b PR")
+    return 0 if out and all(o["verdict"] == "READY" for o in out) else 1
+
+
 def main(argv):
+    if argv[:1] == ["ready"]:
+        return ready_main(argv[1:])
     if argv[:1] == ["ratchet"]:
         return ratchet_main(argv[1:])
     if argv[:1] == ["gen-check"]:
         return gen_check_main(argv[1:])
     ap = argparse.ArgumentParser(prog="tri t27b", description=__doc__.split("\n")[0])
-    ap.add_argument("action", choices=("status", "doctor", "delta", "ratchet", "gen-check"))
+    ap.add_argument("action", choices=("status", "doctor", "delta", "ratchet", "gen-check", "ready"))
     ap.add_argument("--from", dest="from_", help="delta: the earlier lab run's sha (default: the run before --to)")
     ap.add_argument("--to", default="latest", help="delta: the later run's sha (default: latest.json)")
     ap.add_argument("--fixture", help="read every source from this directory (tests)")

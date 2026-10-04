@@ -12,6 +12,7 @@ spec's verdict codes. An unknown string is an error, never a guess.
 """
 
 import ctypes
+import functools
 import hashlib
 import os
 import subprocess
@@ -32,6 +33,16 @@ RATCHETS = (None, "VACUITY MEASURED", "UNEXPECTED FAILURE", "UNEXPECTED PASS", "
 REASONS = (None, "unimplemented", "reference-bug", "n/a")
 CLAIMS = (None, "CLAIM-DEAD", "CLAIM-OLD")
 CHECKOUTS = (None, "LAB-CHECKOUT", "LAB-RECLONED")
+# Merge gate (#6244): GitHub's check states, in the spec's state codes.
+CHECK_STATES = {"SUCCESS": 0,
+                "PENDING": 1, "QUEUED": 1, "IN_PROGRESS": 1, "WAITING": 1, "REQUESTED": 1, "EXPECTED": 1,
+                "FAILURE": 2, "ERROR": 2, "CANCELLED": 2, "TIMED_OUT": 2, "ACTION_REQUIRED": 2,
+                "STARTUP_FAILURE": 2,
+                "ABSENT": 3,
+                "SKIPPED": 4, "NEUTRAL": 4, "STALE": 4}
+MERGEABLES = {"MERGEABLE": 0, "CONFLICTING": 1, "UNKNOWN": 2}
+EFFECTS = (None, "WAIT", "BLOCK")
+READINESS = ("READY", "WAIT", "RED", "CONFLICT", "RETARGET", "BLOCKED", "CLOSED")
 
 
 class RulesUnavailable(RuntimeError):
@@ -94,6 +105,12 @@ def _build():
     so.cap_rise_is_new.restype = ctypes.c_bool
     so.is_alarm.argtypes = [ctypes.c_uint8, ctypes.c_uint8]
     so.is_alarm.restype = ctypes.c_bool
+    so.check_effect.argtypes = [ctypes.c_uint8, ctypes.c_uint8, ctypes.c_bool]
+    so.check_effect.restype = ctypes.c_uint8
+    so.effect_fold.argtypes = [ctypes.c_uint8, ctypes.c_uint8]
+    so.effect_fold.restype = ctypes.c_uint8
+    so.pr_ready.argtypes = [ctypes.c_bool, ctypes.c_uint8, ctypes.c_bool, ctypes.c_uint8, ctypes.c_uint8]
+    so.pr_ready.restype = ctypes.c_uint8
     return so
 
 
@@ -200,3 +217,23 @@ def is_alarm(t27b, reference):
     """True when a run record is a lab alarm: a mismatch or crash always, a fail or
     timeout only where the reference passes."""
     return bool(lib().is_alarm(verdict(t27b), verdict(reference)))
+
+
+def check_state(s):
+    """A GitHub check state or conclusion as the spec's state code; an unknown one is an error."""
+    key = (s or "ABSENT").upper()
+    if key not in CHECK_STATES:
+        raise ValueError(f"unknown check state {s!r}")
+    return CHECK_STATES[key]
+
+
+def check_effect(state, master, required):
+    return EFFECTS[lib().check_effect(check_state(state), check_state(master), bool(required))]
+
+
+def pr_ready(is_open, mergeable, base_master, effects_required, effects_other):
+    """READY | WAIT | RED | CONFLICT | RETARGET | BLOCKED | CLOSED. The effects are lists of
+    check_effect results; the spec folds them."""
+    fold = lambda xs: functools.reduce(lambda a, e: lib().effect_fold(a, EFFECTS.index(e)), xs, 0)  # noqa: E731
+    m = MERGEABLES.get((mergeable or "UNKNOWN").upper(), 2)
+    return READINESS[lib().pr_ready(bool(is_open), m, bool(base_master), fold(effects_required), fold(effects_other))]

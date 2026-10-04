@@ -25,6 +25,14 @@ module T27bSteward;
 // liveness of the claim's pid: DEAD = 0, ALIVE = 1, UNKNOWN = 2.
 // Checkout of a lab run: NONE = 0, LAB_CHECKOUT = 1 (failed: the run measured
 // nothing), LAB_RECLONED = 2 (healed by a fresh clone: report it, #6220).
+//
+// Merge gate (#6244). Check state on a PR or on master: SUCCESS = 0,
+// PENDING = 1, RED = 2 (failure, error, cancelled, timed out), ABSENT = 3,
+// NEUTRAL = 4 (skipped, neutral). What one check does to a PR: NONE = 0,
+// WAIT = 1, BLOCK = 2. Mergeable: MERGEABLE = 0, CONFLICTING = 1, UNKNOWN = 2.
+// Verdict: READY = 0, WAIT = 1, RED = 2, CONFLICT = 3, RETARGET = 4,
+// BLOCKED = 5 (a non-required check is red here and green on master),
+// CLOSED = 6 (merged or closed: nothing to decide).
 
 // fail, mismatch and crash are defects someone has to read, not blockers.
 pub fn is_bad(v: u8) -> bool {
@@ -203,6 +211,40 @@ pub fn is_alarm(t: u8, reference: u8) -> bool {
     return false;
 }
 
+// A required check must be SUCCESS; anything else waits or blocks. A
+// non-required check blocks only when it is red here and its latest
+// completed result on master is success (Q16): red on master too means
+// master broke it, not this PR.
+pub fn check_effect(state: u8, master: u8, required: bool) -> u8 {
+    if (required) {
+        if (state == 0) { return 0; }
+        if (state == 2) { return 2; }
+        return 1;
+    }
+    if (state == 2) {
+        if (master == 0) { return 2; }
+        if (master == 1) { return 1; }
+    }
+    return 0;
+}
+
+// The worse of two effects, so a list of checks folds to one.
+pub fn effect_fold(acc: u8, e: u8) -> u8 {
+    if (e > acc) { return e; }
+    return acc;
+}
+
+pub fn pr_ready(open: bool, mergeable: u8, base_master: bool, required: u8, other: u8) -> u8 {
+    if (open == false) { return 6; }
+    if (mergeable == 1) { return 3; }
+    if (base_master == false) { return 4; }
+    if (required == 2) { return 2; }
+    if (other == 2) { return 5; }
+    if (required == 1) { return 1; }
+    if (mergeable != 0) { return 1; }
+    return 0;
+}
+
 test delta_ref_moved { assert_eq(delta_code(2, 0, 2, 0, 0, 0), 1); }
 test delta_outside_reference_is_silent { assert_eq(delta_code(2, 2, 2, 0, 0, 0), 0); }
 test delta_regressed { assert_eq(delta_code(0, 0, 0, 3, 1, 0), 2); }
@@ -296,6 +338,29 @@ test alarm_timeout { assert(is_alarm(8, 0)); }
 test alarm_crash_always { assert(is_alarm(7, 5)); }
 test alarm_mismatch_always { assert(is_alarm(6, 2)); }
 test alarm_blocked_never { assert(is_alarm(2, 0) == false); }
+
+test gate_required_green { assert_eq(check_effect(0, 3, true), 0); }
+test gate_required_pending_waits { assert_eq(check_effect(1, 0, true), 1); }
+test gate_required_absent_waits { assert_eq(check_effect(3, 0, true), 1); }
+test gate_required_skipped_waits { assert_eq(check_effect(4, 0, true), 1); }
+test gate_required_red_blocks_even_if_master_red { assert_eq(check_effect(2, 2, true), 2); }
+test gate_other_red_green_on_master_blocks { assert_eq(check_effect(2, 0, false), 2); }
+test gate_other_red_red_on_master_passes { assert_eq(check_effect(2, 2, false), 0); }
+test gate_other_red_absent_on_master_passes { assert_eq(check_effect(2, 3, false), 0); }
+test gate_other_pending_never_waits { assert_eq(check_effect(1, 0, false), 0); }
+test gate_other_red_master_running_waits { assert_eq(check_effect(2, 1, false), 1); }
+test gate_fold {
+    assert_eq(effect_fold(effect_fold(effect_fold(0, 1), 0), 2), 2);
+    assert_eq(effect_fold(effect_fold(0, 0), 1), 1);
+}
+test gate_ready { assert_eq(pr_ready(true, 0, true, 0, 0), 0); }
+test gate_conflict_first { assert_eq(pr_ready(true, 1, false, 2, 2), 3); }
+test gate_retarget { assert_eq(pr_ready(true, 0, false, 0, 0), 4); }
+test gate_required_red { assert_eq(pr_ready(true, 0, true, 2, 2), 2); }
+test gate_blocked_by_other { assert_eq(pr_ready(true, 0, true, 1, 2), 5); }
+test gate_waits_on_required { assert_eq(pr_ready(true, 0, true, 1, 0), 1); }
+test gate_closed_first { assert_eq(pr_ready(false, 1, false, 2, 2), 6); }
+test gate_waits_on_mergeable_unknown { assert_eq(pr_ready(true, 2, true, 0, 0), 1); }
 
 invariant gained_never_red {
     assert(delta_is_red(delta_code(0, 0, 2, 0, 0, 1)) == false);
