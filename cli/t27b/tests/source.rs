@@ -1042,3 +1042,56 @@ invariant msg_invariant {
         assert!(m.contains(detail), "{}: {}", body, m);
     }
 }
+
+#[test]
+fn undefined_stub_only_where_zig_never_looks() {
+    // `fn f() { undefined; }` is the stub a port leaves where plumbing was.
+    // t27c's Zig backend emits it as is; Zig rejects it only in a fn it
+    // analyzes. Nothing a test reaches names `plumbing` or `stub` here, and
+    // `pub` or `main` is not a root, so the reference runs both tests.
+    let src = "module st;
+
+fn stub() u32 {
+    undefined;
+}
+
+fn plumbing() {
+    undefined;
+}
+
+pub fn main() {
+    plumbing();
+    var x: u32 = stub();
+}
+
+fn inc(x: u32) u32 {
+    return x + 1;
+}
+
+test inc_works {
+    assert(inc(1) == 2);
+}
+
+test inc_fails {
+    assert(inc(1) == 3);
+}
+";
+    let r = run(src);
+    assert_eq!(names_ok(&r), vec![("inc_works", false, true), ("inc_fails", false, false)]);
+    // A stub something analyzed can reach (even through another fn, even on
+    // a branch no test takes) makes the reference fail to compile: refused.
+    let reached = [
+        "fn stub() u32 { undefined; }\nfn f(x: u32) u32 { if (x > 9) { return stub(); } return x; }\ntest t { assert(f(1) == 1); }\n",
+        "fn stub() { undefined; }\nfn g() { stub(); }\ninvariant i { g(); assert(true); }\n",
+        "test t { undefined; }\n",
+    ];
+    for body in reached {
+        let m = rejected(&format!("module sr;\n\n{}", body));
+        assert!(
+            m.starts_with("t27b: unsupported construct ExprIdentifier(undefined) statement at line"),
+            "{}: {}",
+            body,
+            m
+        );
+    }
+}

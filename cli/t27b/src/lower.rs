@@ -295,6 +295,13 @@ struct Lower<'a> {
     /// lowered (`var h : i32 = 1 << d;`). An untyped literal shifted by a
     /// non-literal amount takes this width, as in the Zig backend.
     decl_int: Option<Ty>,
+    /// Fns the reference's Zig may analyze: every fn a test, invariant,
+    /// bench or module-level declaration names, and every fn those name, to
+    /// a fixed point (`analyzed_fns`).
+    analyzed: HashSet<String>,
+    /// Lowering a fn outside `analyzed`: Zig compiles a fn body only when
+    /// something analyzed references it, so a body stub there is never seen.
+    unanalyzed_fn: bool,
 }
 
 /// Lower a parsed module. All rejected constructs are returned (at most one per
@@ -381,6 +388,8 @@ fn lower_mode<'a>(
         type_decls: HashMap::new(),
         ret_poison: false,
         decl_int: None,
+        analyzed: HashSet::new(),
+        unanalyzed_fn: false,
     };
     let module = if ast.kind == NodeKind::Module {
         ast.name.clone()
@@ -403,6 +412,8 @@ fn lower_mode<'a>(
             l.enum_nodes.insert(item.name.clone(), item);
         }
     }
+
+    l.analyzed = analyzed_fns(&items);
 
     // Pass 1: signatures and constant declarations.
     let mut fn_nodes: Vec<&Node> = Vec::new();
@@ -1136,6 +1147,7 @@ impl<'a> Lower<'a> {
         self.see(n);
         self.begin_body(&n.children);
         self.in_test = false;
+        self.unanalyzed_fn = !self.analyzed.contains(&n.name);
         let (params, ret, poisoned) = {
             let s = &self.sigs[&n.name];
             (s.params.clone(), s.ret.clone(), s.poisoned)
@@ -1280,6 +1292,7 @@ impl<'a> Lower<'a> {
         }
         self.begin_body(&n.children);
         self.in_test = true;
+        self.unanalyzed_fn = false;
         self.comptime = invariant;
         self.ret = None;
         self.ret_poison = false;
@@ -1452,6 +1465,7 @@ impl<'a> Lower<'a> {
             NodeKind::StmtExpr => match n.children.first() {
                 Some(c) if c.kind == NodeKind::ExprCall => self.call_stmt(c, out),
                 Some(c) if c.kind == NodeKind::ExprReturn => self.stmt(c, out),
+                Some(c) if c.kind == NodeKind::ExprIdentifier && c.name == "undefined" => self.undefined_stmt(c, out),
                 Some(c) => {
                     self.see(c);
                     let k = if c.kind == NodeKind::ExprUnary && !c.extra_op.is_empty() {
@@ -1867,6 +1881,26 @@ impl<'a> Lower<'a> {
             }
             None => self.reject("StmtAssign(undeclared)", format!("assignment to undeclared `{}`", name)),
         }
+    }
+
+    /// `undefined;`, the body stub a port leaves where plumbing was. t27c's
+    /// Zig backend emits it as is, and Zig rejects it ("value of type
+    /// '@TypeOf(undefined)' ignored") only in a fn it analyzes, i.e. one
+    /// something analyzed references. In a fn nothing reaches, the reference
+    /// compiles the file and runs every test, so the stub lowers to a trap
+    /// that no test can reach. Anywhere a test, invariant or bench could
+    /// reach it, the reference does not compile: refused, not matched.
+    fn undefined_stmt(&mut self, c: &Node, out: &mut Vec<Stmt>) -> R<()> {
+        self.see(c);
+        if !self.unanalyzed_fn {
+            return self.reject(
+                "ExprIdentifier(undefined) statement",
+                "`undefined;` where a test, invariant or bench reaches it: the reference's Zig does not compile it".into(),
+            );
+        }
+        let site = self.site(TrapKind::Stub, "undefined;".into(), Ty::Bool);
+        out.push(Stmt::Assert { cond: Expr { ty: Ty::Bool, kind: ExprKind::Const(0) }, site });
+        Ok(())
     }
 
     fn call_stmt(&mut self, c: &Node, out: &mut Vec<Stmt>) -> R<()> {
@@ -4850,6 +4884,48 @@ fn scan_addr_taken(ns: &[Node], out: &mut HashSet<String>) {
 
 /// Count plain assignments per identifier in a test body (all nesting levels).
 /// Whether `name` occurs as an identifier anywhere under `ns`.
+/// Every name a subtree mentions (identifiers, callees, anything named): an
+/// over-approximation of what it references, so a fn left out of
+/// `analyzed_fns` is one Zig cannot reach.
+fn names_in(ns: &[Node], out: &mut HashSet<String>) {
+    for n in ns {
+        if !n.name.is_empty() {
+            out.insert(n.name.clone());
+        }
+        names_in(&n.children, out);
+    }
+}
+
+/// The fns Zig's lazy analysis may reach in `zig test`: the roots are every
+/// top-level item that is not a fn (tests; invariants, which t27c emits as
+/// `comptime` blocks; benches; constants and vars), and a fn is reached when
+/// a reached body names it. `pub` does not make a fn a root, nor does `main`.
+fn analyzed_fns(items: &[&Node]) -> HashSet<String> {
+    let mut bodies: HashMap<&str, Vec<&Node>> = HashMap::new();
+    let mut work: HashSet<String> = HashSet::new();
+    for item in items {
+        if item.kind == NodeKind::FnDecl {
+            bodies.entry(item.name.as_str()).or_default().push(item);
+        } else {
+            names_in(std::slice::from_ref(*item), &mut work);
+        }
+    }
+    let mut reached: HashSet<String> = HashSet::new();
+    let mut stack: Vec<String> = work.into_iter().collect();
+    while let Some(name) = stack.pop() {
+        let Some(fns) = bodies.get(name.as_str()) else { continue };
+        if !reached.insert(name.clone()) {
+            continue;
+        }
+        let mut more = HashSet::new();
+        for f in fns {
+            names_in(&f.children, &mut more);
+        }
+        stack.extend(more.into_iter().filter(|m| !reached.contains(m)));
+    }
+    reached
+}
+
 fn mentions(ns: &[Node], name: &str) -> bool {
     ns.iter().any(|n| (n.kind == NodeKind::ExprIdentifier && n.name == name) || mentions(&n.children, name))
 }
