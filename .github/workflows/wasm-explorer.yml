@@ -36,4 +36,5 @@ jobs:
           wasm-objdump -x target/wasm32-unknown-unknown/release/t27_wasm_explorer.wasm | grep -E '(t27_alloc|t27_analyze|t27_analyze_named|t27_free)' || (echo "Missing exports" && exit 1)
 
       - name: Run tests (skipping compiler tests)
-        run: cargo test -- --skip compiler:: -p t27-wasm-explorer
+        run: |
+          cargo test -p t27-wasm-explorer -- --skip compiler::
