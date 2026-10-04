@@ -410,7 +410,7 @@ def lab_run(sha, log):
     def reference_path():
         if corpus.get("totals", {}).get("reference", {}).get("ran"):
             for r in corpus["results"]:
-                reference[r["file"]] = (r["reference"], "")
+                reference[r["file"]] = (r["reference"], r.get("reference_detail", ""))
             return {"source": "t27b corpus (reference verdicts in its JSON)"}
         if corpus.get("results"):
             files = [r["file"] for r in corpus["results"]]

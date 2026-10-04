@@ -87,13 +87,14 @@ impl W {
 }
 
 /// Serialise a linked image (no prefix) with one global symbol per function.
-/// `names[i]` is the t27 name of function i; the symbol is `_` + name.
+/// `names[i]` is the t27 name of function i; the symbol is `_` + name. An
+/// empty name exports nothing (a function only other functions call).
 /// `data` is `Program::data`, referenced by `linked.data_refs`.
 pub fn object(linked: &Linked, names: &[String], data: &[Vec<u8>]) -> Vec<u8> {
     let text: Vec<u8> = linked.code.iter().flat_map(|w| w.to_le_bytes()).collect();
     let mut syms: Vec<(String, u64)> = Vec::new();
     for (i, off) in linked.offsets.iter().enumerate() {
-        if let Some(o) = off {
+        if let (Some(o), false) = (off, names[i].is_empty()) {
             syms.push((format!("_{}", names[i]), (*o as u64) * 4));
         }
     }

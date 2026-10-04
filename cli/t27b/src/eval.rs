@@ -324,16 +324,8 @@ impl<'p> Interp<'p> {
                 };
                 Ok(Flow::Return(v))
             }
-            Stmt::Eval(e) => {
-                if let ExprKind::Call { func, args } = &e.kind {
-                    let mut vals = Vec::with_capacity(args.len());
-                    for a in args {
-                        vals.push(self.expr(a, env)?);
-                    }
-                    self.call(*func as usize, &vals)?;
-                } else {
-                    self.expr(e, env)?;
-                }
+            Stmt::Eval(_) | Stmt::Store { .. } | Stmt::Copy { .. } => {
+                self.effect(s, env)?;
                 Ok(Flow::Next)
             }
             Stmt::Assert { cond, site } => {
@@ -350,11 +342,30 @@ impl<'p> Interp<'p> {
                 }
                 Ok(Flow::Next)
             }
+        }
+    }
+
+    /// The statements an `ExprKind::Seq` may hold, which have no control
+    /// flow: `Eval`, `Store` and `Copy`.
+    fn effect(&mut self, s: &Stmt, env: &mut Frame) -> Result<(), Stop> {
+        match s {
+            Stmt::Eval(e) => {
+                if let ExprKind::Call { func, args } = &e.kind {
+                    let mut vals = Vec::with_capacity(args.len());
+                    for a in args {
+                        vals.push(self.expr(a, env)?);
+                    }
+                    self.call(*func as usize, &vals)?;
+                } else {
+                    self.expr(e, env)?;
+                }
+                Ok(())
+            }
             Stmt::Store { addr, off, value } => {
                 let p = self.expr(addr, env)? as u64;
                 let v = self.expr(value, env)?;
                 self.mem.store(p.wrapping_add(*off as u64), value.ty, v)?;
-                Ok(Flow::Next)
+                Ok(())
             }
             Stmt::Copy { dst, src, size } => {
                 let d = self.expr(dst, env)? as u64;
@@ -375,8 +386,9 @@ impl<'p> Interp<'p> {
                         self.mem.written[dofs + i] = w;
                     }
                 }
-                Ok(Flow::Next)
+                Ok(())
             }
+            _ => Err(Stop::Fault("a statement with control flow inside an expression".into())),
         }
     }
 
@@ -454,6 +466,13 @@ impl<'p> Interp<'p> {
                 } else {
                     Err(Stop::Trap { site: *site, a: i, b: n })
                 }
+            }
+            ExprKind::Seq { stmts, value } => {
+                for s in stmts {
+                    self.tick()?;
+                    self.effect(s, env)?;
+                }
+                self.expr(value, env)
             }
         }
     }

@@ -188,6 +188,8 @@ struct Gen<'r> {
     regions: Vec<Region>,
     /// Nesting of loads inside index expressions, kept shallow.
     mem_depth: u32,
+    /// Inside a `Seq` (whose statements are not nested again).
+    in_seq: bool,
 }
 
 impl<'r> Gen<'r> {
@@ -274,10 +276,35 @@ impl<'r> Gen<'r> {
             };
             return arith(ty, op, konst(ty, 0), inner, site);
         }
+        if r < 93 {
+            if let Some(e) = self.seq(ty, depth) {
+                return e;
+            }
+        }
         if r < 95 {
             return self.chain(ty);
         }
         self.leaf(ty)
+    }
+
+    /// Stores and copies run in the middle of an expression, as lowering
+    /// builds a struct temporary: often with temps live around them.
+    fn seq(&mut self, ty: Ty, depth: u32) -> Option<Expr> {
+        if self.in_seq || self.mem_depth > 0 {
+            return None;
+        }
+        self.in_seq = true;
+        let mut stmts = Vec::new();
+        for _ in 0..1 + self.rng.below(2) {
+            let s = if self.rng.chance(60) { self.store() } else { self.copy() };
+            stmts.extend(s);
+        }
+        let value = self.expr(ty, depth - 1);
+        self.in_seq = false;
+        if stmts.is_empty() {
+            return None;
+        }
+        Some(Expr { ty, kind: ExprKind::Seq { stmts, value: Box::new(value) } })
     }
 
     /// A right-leaning chain whose left operands are all computed values, so
@@ -1010,6 +1037,7 @@ fn program(rng: &mut Rng, mode: OverflowMode) -> Program {
         slots: Vec::new(),
         regions: Vec::new(),
         mem_depth: 0,
+        in_seq: false,
     };
     let mut funcs = Vec::new();
     for i in 0..nhelpers {
@@ -1024,7 +1052,7 @@ fn program(rng: &mut Rng, mode: OverflowMode) -> Program {
         funcs.push(f);
         g.sigs.pop();
     }
-    Program { module: "rnd".into(), funcs, sites: g.sites, mode, unchecked: Vec::new(), data }
+    Program { module: "rnd".into(), funcs, sites: g.sites, mode, unchecked: Vec::new(), data, internal_abi: Vec::new() }
 }
 
 // ------------------------------------------------------- pretty printer
@@ -1066,6 +1094,11 @@ fn show_expr(p: &Program, f: &Func, e: &Expr) -> String {
         }
         ExprKind::Bounds { idx, len, site } => {
             format!("chk@{}({} < {})", site, show_expr(p, f, idx), show_expr(p, f, len))
+        }
+        ExprKind::Seq { stmts, value } => {
+            let mut b = String::new();
+            show_block(p, f, stmts, 0, &mut b);
+            format!("seq{{ {}; {} }}", b.trim().replace('\n', " "), show_expr(p, f, value))
         }
     }
 }
@@ -1483,7 +1516,7 @@ fn every_operator_at_edge_values() {
                     funcs.push(one_func("cr", &[at], ty, vec![Stmt::Return(Some(e))], 1));
                     lconst.push((funcs.len() - 1, c));
                 }
-                let prog = Program { module: "edge".into(), funcs, sites, mode: OverflowMode::Trap, unchecked: Vec::new(), data: Vec::new() };
+                let prog = Program { module: "edge".into(), funcs, sites, mode: OverflowMode::Trap, unchecked: Vec::new(), data: Vec::new(), internal_abi: Vec::new() };
                 let mut calls: Vec<(usize, Vec<i128>)> = Vec::new();
                 for &a in &vals {
                     for &b in &rvals {
@@ -1552,7 +1585,7 @@ fn compare_unary_widen_at_edge_values() {
                 funcs.push(one_func("cb", &[ty], Ty::U32, as_branch(cmp(op, konst(ty, c), var(ty, 0))), 1));
                 single.push(funcs.len() - 1);
             }
-            let prog = Program { module: "cmp".into(), funcs, sites, mode: OverflowMode::Trap, unchecked: Vec::new(), data: Vec::new() };
+            let prog = Program { module: "cmp".into(), funcs, sites, mode: OverflowMode::Trap, unchecked: Vec::new(), data: Vec::new(), internal_abi: Vec::new() };
             let mut calls = Vec::new();
             for &a in &vals {
                 for &b in &vals {
@@ -1580,7 +1613,7 @@ fn compare_unary_widen_at_edge_values() {
             }
         }
         let n = funcs.len();
-        let prog = Program { module: "unary".into(), funcs, sites, mode: OverflowMode::Trap, unchecked: Vec::new(), data: Vec::new() };
+        let prog = Program { module: "unary".into(), funcs, sites, mode: OverflowMode::Trap, unchecked: Vec::new(), data: Vec::new(), internal_abi: Vec::new() };
         let calls: Vec<(usize, Vec<i128>)> =
             (0..n).flat_map(|f| vals.iter().map(move |&a| (f, vec![a]))).collect();
         if let Err(e) = compare_calls(&prog, &calls, &mut rng, &mut stats) {
@@ -1600,7 +1633,7 @@ fn compare_unary_widen_at_edge_values() {
                 one_func("wa", &[ty], to, vec![Stmt::Return(Some(arith(to, ArithOp::ShrW, use_, konst(Ty::U32, 1), 0)))], 1),
                 one_func("wc", &[ty], Ty::Bool, vec![Stmt::Return(Some(cmp(CmpOp::Lt, w, konst(to, 0))))], 1),
             ];
-            let prog = Program { module: "widen".into(), funcs, sites, mode: OverflowMode::Trap, unchecked: Vec::new(), data: Vec::new() };
+            let prog = Program { module: "widen".into(), funcs, sites, mode: OverflowMode::Trap, unchecked: Vec::new(), data: Vec::new(), internal_abi: Vec::new() };
             let calls: Vec<(usize, Vec<i128>)> =
                 (0..3).flat_map(|f| vals.iter().map(move |&a| (f, vec![a]))).collect();
             if let Err(e) = compare_calls(&prog, &calls, &mut rng, &mut stats) {
