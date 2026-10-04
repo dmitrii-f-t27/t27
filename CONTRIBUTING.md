@@ -51,8 +51,25 @@ If **`gen_hash_*` mismatches** appear for many specs, the compiler output change
 ## Specs and tests
 
 - New or changed `.t27` files should include **`test`**, **`invariant`**, and/or **`bench`** blocks as required by SOUL (TDD mandate).
-- Run **`cargo build --release`** in `bootstrap/` after compiler changes.
+- After compiler changes, build the release binary once before pushing (`cargo build --release -p t27c`); iterate with the faster builds in [Build speed](#build-speed-the-t27c-inner-loop).
 - Before pushing, run **`./scripts/tri test`** (same as CI: `t27c suite`).
+
+## Build speed: the t27c inner loop
+
+`cargo build --release -p t27c` is the build CI and releases use, and the slowest one to iterate with: the release profile has no incremental compilation, so a one-line edit recompiles the whole `t27c` crate. While you work, use one of the first three rows.
+
+| you need | command (from the repo root) | one-line edit, then rebuild |
+|---|---|---|
+| type errors only | `cargo check -p t27c` | 2.4-3.3 s |
+| a binary that runs | `cargo build -p t27c` | 3.2-4.1 s |
+| a release binary that runs | `CARGO_PROFILE_RELEASE_INCREMENTAL=true cargo build --release -p t27c` | 3.2-5.0 s |
+| the CI / release build | `cargo build --release -p t27c` | 29.8-33.9 s |
+
+Measured 2026-10-04 on an idle M1 Pro (8 cores), adding one function to `bootstrap/src/suite.rs`; the debug row had `CARGO_PROFILE_DEV_DEBUG=0`. Each figure is a range over repeated edits after one warm-up build. `bootstrap/src/compiler.rs` (44.6k lines) was not timed on an idle machine; splitting it is tracked in [#5905](https://github.com/gHashTag/t27/issues/5905).
+
+- **Do not benchmark or ship an incremental release build.** Incremental mode splits the crate into many more codegen units and optimises less across them, so its speed and size are not the release build's. Run timings, `tri test` before a PR, and anything you hand to someone else on a plain `cargo build --release`.
+- **`./scripts/tri` prefers `target/release/t27c`** over `target/debug/t27c` when both exist, so after a debug rebuild it can still run an older release binary. Point it at the one you just built: `TRI_T27C=target/debug/t27c ./scripts/tri test`.
+- **Editing `bootstrap/src/compiler.rs` changes the seal.** `build.rs` refuses to build until `bootstrap/stage0/FROZEN_HASH` carries the new SHA-256 of that file. Moving the seal is the M5 freeze ceremony in [`FROZEN.md`](FROZEN.md) section 5. Its step 3 command, `cargo run --release -- frozen-digest`, cannot run after the edit, because the rebuild hits the same check ([#5928](https://github.com/gHashTag/t27/issues/5928)). Until that is fixed, print the line with a binary built before the edit (`./target/debug/t27c frozen-digest`), or with `shasum -a 256 bootstrap/src/compiler.rs`, which gives the same digest.
 
 ## Language
 
