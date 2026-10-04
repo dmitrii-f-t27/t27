@@ -10232,6 +10232,28 @@ impl Codegen {
                         self.write(")");
                         return;
                     }
+                    // #5973: `%` has the same rule as `/` and was never given
+                    // it: "remainder division with 'i32' and 'i32': signed
+                    // integers and floats must use @rem or @mod". So
+                    // `return a % b;` with `a: i32` did not compile at all.
+                    // `@rem` is the TRUNCATED remainder (rem(-7, 2) == -1), the
+                    // same as C, Rust and t27b; `@mod` would floor and give 1.
+                    // Floats are refused by the same message, and `@rem`
+                    // accepts them, so they take the same arm. Unsigned `%`
+                    // stays `%`.
+                    if op == "%"
+                        && (self.is_signed_int_expr(&node.children[0])
+                            || self.is_signed_int_expr(&node.children[1])
+                            || self.is_float_expr(&node.children[0])
+                            || self.is_float_expr(&node.children[1]))
+                    {
+                        self.write("@rem(");
+                        self.gen_expr(&node.children[0]);
+                        self.write(", ");
+                        self.gen_expr(&node.children[1]);
+                        self.write(")");
+                        return;
+                    }
                     // Zig shift RHS must be Log2(LHS-width)-typed (u5 for u32);
                     // a runtime u32/usize amount needs @intCast, and a bare
                     // integer-literal LHS (comptime_int) needs a pinned width
