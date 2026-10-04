@@ -1002,3 +1002,43 @@ fn module_var_rejections_are_precise() {
     let ok = "module b;\n\nvar g: u32 = 7;\n\nfn f(g: u32) u32 { return g + 1; }\nfn h() u32 { return g; }\n\ntest t {\n    assert(f(1) == 2);\n    assert(h() == 7);\n}\n";
     assert_eq!(names_ok(&run(ok)), vec![("t", false, true)]);
 }
+
+#[test]
+fn assert_with_message_checks_the_condition_only() {
+    // t27c's Zig backend lowers `assert(cond, "msg")` to
+    // `if (!(cond)) @panic("msg")`: the message never decides the verdict.
+    let src = "module am;
+
+fn twice(x: u32) u32 {
+    return x * 2;
+}
+
+test holds {
+    assert(twice(3) == 6, \"twice(3) is 6\");
+}
+
+test fails {
+    assert(twice(3) == 7, \"twice(3) is not 7\");
+}
+
+invariant msg_invariant {
+    assert(twice(1) == 2, \"invariant with a message\");
+}
+";
+    let r = run(src);
+    assert_eq!(
+        names_ok(&r),
+        vec![("holds", false, true), ("fails", false, false), ("msg_invariant", true, true)]
+    );
+    assert!(matches!(r[1].2, Err((TrapKind::Assert, 12))), "{:?}", r[1].2);
+    // A message that is not a string literal is refused by name.
+    let head = "module an;\n\nconst M: u32 = 1;\n\n";
+    let cases: &[(&str, &str, &str)] = &[
+        ("test t { assert(M == 1, M); }", "ExprCall(assert with non-literal message)", "not a string literal"),
+    ];
+    for (body, construct, detail) in cases {
+        let m = rejected(&format!("{}{}\n", head, body));
+        assert!(m.starts_with(&format!("t27b: unsupported construct {} at line", construct)), "{}: {}", body, m);
+        assert!(m.contains(detail), "{}: {}", body, m);
+    }
+}

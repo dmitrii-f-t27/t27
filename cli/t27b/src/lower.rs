@@ -1873,8 +1873,26 @@ impl<'a> Lower<'a> {
         self.see(c);
         match c.name.as_str() {
             "assert" => {
-                if c.children.len() != 1 {
-                    return self.reject("ExprCall(assert with message)", format!("assert with {} arguments", c.children.len()));
+                // `assert(cond, "msg")`: t27c's Zig backend emits
+                // `if (!(cond)) @panic("msg")` and never evaluates the
+                // message, so the verdict is the one-argument assert's. Only a
+                // string-literal message is accepted: anything else would be a
+                // value the reference silently drops, and matching that is a
+                // claim this backend has not checked.
+                match c.children.len() {
+                    1 => {}
+                    2 => {
+                        let m = &c.children[1];
+                        if m.kind != NodeKind::ExprLiteral || m.extra_kind != "string" {
+                            return self.reject(
+                                "ExprCall(assert with non-literal message)",
+                                format!("assert message is a {:?}, not a string literal", m.kind),
+                            );
+                        }
+                    }
+                    n => {
+                        return self.reject("ExprCall(assert with message)", format!("assert with {} arguments", n));
+                    }
                 }
                 let cond = self.cond(&c.children[0])?;
                 let site = self.site(TrapKind::Assert, "assert".into(), Ty::Bool);
