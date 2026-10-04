@@ -576,11 +576,6 @@ def status(d):
 # ------------------------------------------------------------------ ratchet
 
 REASONS = ("unimplemented", "reference-bug", "n/a")
-PASSES = ("pass", "pass_vacuous")
-# A t27b verdict bless may record as `unimplemented` on its own: t27b says it
-# cannot compile the spec. A `fail`, `mismatch`, `crash` or `timeout` where the
-# reference passes is a defect somebody has to read; bless will not file it.
-UNIMPLEMENTED = ("blocked", "frontend", "codegen")
 # Report order only; which kind is red is the spec's (`ratchet_is_red`).
 KINDS = ("UNEXPECTED FAILURE", "UNEXPECTED PASS", "UNLISTED", "STALE", "OVER CAP", "BAD REASON",
          "MOVED", "UNJUDGED", "VACUITY MEASURED")
@@ -609,7 +604,7 @@ def read_run(where):
 def observed(rec):
     """(verdict, first blocker) of one run record, t27b's side."""
     v = rec.get("t27b") or "missing"
-    if v in PASSES:
+    if rules().is_pass(v):
         return v, None
     blockers = rec.get("blockers") or []
     first = blockers[0] if blockers else (rec.get("detail") or "")
@@ -673,21 +668,23 @@ def ratchet(run, ledger):
 
 
 def bless(run, old):
-    """(new ledger, refusals). Reasons a human wrote are kept; the cap never rises."""
+    """(new ledger, refusals). Reasons a human wrote are kept; the cap never rises.
+
+    What is recorded, with which reason, and whether the cap may move is
+    decided by specs/tri/t27b/steward.t27 (`unlisted`, `is_pass`,
+    `bless_reason`, `cap_rises`)."""
+    r = rules()
     old_entries = {e["path"]: e for e in (old or {}).get("entries", [])}
     entries, refused = [], []
-    for rec in sorted(run["results"], key=lambda r: r.get("file") or ""):
-        if rec.get("reference") != "pass":
+    for rec in sorted(run["results"], key=lambda x: x.get("file") or ""):
+        if not r.unlisted(rec.get("reference") or "missing", False):
             continue
         path = rec["file"]
         got, blocker = observed(rec)
-        if got in PASSES:
+        if r.is_pass(got):
             entries.append({"path": path, "t27b": got})
             continue
-        prev = old_entries.get(path) or {}
-        reason = prev.get("reason") if prev.get("reason") in REASONS else None
-        if reason is None and got in UNIMPLEMENTED:
-            reason = "unimplemented"
+        reason = r.bless_reason(got, (old_entries.get(path) or {}).get("reason"))
         if reason is None:
             refused.append(f"{path}: t27b {got} where the reference passes ({blocker}); read it, then add the "
                            f"entry by hand with reason reference-bug or n/a")
@@ -701,7 +698,7 @@ def bless(run, old):
         # The run's t27b did not count runtime asserts: 0 would be a claim.
         counts["pass_vacuous"] = None
     old_cap = (old or {}).get("max_not_pass")
-    if isinstance(old_cap, int) and counts["not_pass"] > old_cap:
+    if r.cap_rises(counts["not_pass"], old_cap):
         refused.append(f"{counts['not_pass']} non-pass entries would exceed max_not_pass {old_cap}; the cap only "
                        f"moves down. If the rise is deliberate, raise it by hand in the PR and say why")
     new = {

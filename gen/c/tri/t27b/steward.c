@@ -27,6 +27,9 @@ uint8_t entry_code(uint8_t want, uint8_t reference, uint8_t got, bool counted, b
 bool unlisted(uint8_t reference, bool listed);
 bool over_cap(uint32_t not_pass, uint32_t cap, bool has_cap);
 bool ratchet_is_red(uint8_t code);
+bool is_unimplemented(uint8_t v);
+uint8_t bless_reason(uint8_t got, uint8_t kept);
+bool cap_rises(uint32_t not_pass, uint32_t old_cap, bool has_old);
 
 /* -------------------------------------------------------
    Function implementations
@@ -187,6 +190,36 @@ bool ratchet_is_red(uint8_t code) {
     return false;
 }
 
+bool is_unimplemented(uint8_t v) {
+    if ((v == 2)) {
+        return true;
+    }
+    if ((v == 3)) {
+        return true;
+    }
+    if ((v == 4)) {
+        return true;
+    }
+    return false;
+}
+
+uint8_t bless_reason(uint8_t got, uint8_t kept) {
+    if ((kept != 0)) {
+        return kept;
+    }
+    if (is_unimplemented(got)) {
+        return 1;
+    }
+    return 0;
+}
+
+bool cap_rises(uint32_t not_pass, uint32_t old_cap, bool has_old) {
+    if ((has_old == false)) {
+        return false;
+    }
+    return (not_pass > old_cap);
+}
+
 /* -------------------------------------------------------
    Invariants (compile-time assertions)
    ------------------------------------------------------- */
@@ -335,6 +368,34 @@ void test_ratchet_red_codes(void) {
     assert((ratchet_is_red(6) == false));
 }
 
+void test_bless_keeps_a_written_reason(void) {
+    assert_eq(bless_reason(5, 2), 2);
+}
+
+void test_bless_unimplemented(void) {
+    assert_eq(bless_reason(3, 0), 1);
+}
+
+void test_bless_refuses_a_defect(void) {
+    assert_eq(bless_reason(6, 0), 0);
+}
+
+void test_bless_refuses_a_timeout(void) {
+    assert_eq(bless_reason(8, 0), 0);
+}
+
+void test_bless_cap_rises(void) {
+    assert_eq(cap_rises(6, 5, true), true);
+}
+
+void test_bless_cap_holds(void) {
+    assert_eq(cap_rises(5, 5, true), false);
+}
+
+void test_bless_first_cap(void) {
+    assert_eq(cap_rises(9, 0, false), false);
+}
+
 
 /* -------------------------------------------------------
    Test runner (compile with -DT27_TEST_MAIN to execute)
@@ -374,7 +435,14 @@ int main(void) {
     test_ratchet_unlisted();
     test_ratchet_cap();
     test_ratchet_red_codes();
-    printf("All %d tests passed.\n", 31);
+    test_bless_keeps_a_written_reason();
+    test_bless_unimplemented();
+    test_bless_refuses_a_defect();
+    test_bless_refuses_a_timeout();
+    test_bless_cap_rises();
+    test_bless_cap_holds();
+    test_bless_first_cap();
+    printf("All %d tests passed.\n", 38);
     return 0;
 }
 #endif /* T27_TEST_MAIN */

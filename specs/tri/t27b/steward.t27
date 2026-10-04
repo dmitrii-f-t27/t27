@@ -17,6 +17,9 @@ module T27bSteward;
 // NONE = 0, VACUITY_MEASURED = 1, UNEXPECTED_FAILURE = 2, UNEXPECTED_PASS = 3,
 // MOVED = 4, STALE = 5, UNJUDGED = 6, UNLISTED = 7, OVER_CAP = 8,
 // BAD_REASON = 9.
+//
+// Reason codes of a non-pass ledger entry: NONE = 0, UNIMPLEMENTED = 1,
+// REFERENCE_BUG = 2, NA = 3.
 
 // fail, mismatch and crash are defects someone has to read, not blockers.
 pub fn is_bad(v: u8) -> bool {
@@ -122,6 +125,28 @@ pub fn ratchet_is_red(code: u8) -> bool {
     return false;
 }
 
+// Bless records what t27b says it cannot compile yet; it never files a defect.
+pub fn is_unimplemented(v: u8) -> bool {
+    if (v == 2) { return true; }
+    if (v == 3) { return true; }
+    if (v == 4) { return true; }
+    return false;
+}
+
+// The reason bless writes for a non-pass entry: the one a human wrote, else
+// UNIMPLEMENTED for a construct t27b rejects, else NONE (bless refuses).
+pub fn bless_reason(got: u8, kept: u8) -> u8 {
+    if (kept != 0) { return kept; }
+    if (is_unimplemented(got)) { return 1; }
+    return 0;
+}
+
+// Bless may lower the cap, never raise it; a ledger without a cap sets one.
+pub fn cap_rises(not_pass: u32, old_cap: u32, has_old: bool) -> bool {
+    if (has_old == false) { return false; }
+    return not_pass > old_cap;
+}
+
 test delta_ref_moved { assert_eq(delta_code(2, 0, 2, 0, 0, 0), 1); }
 test delta_outside_reference_is_silent { assert_eq(delta_code(2, 2, 2, 0, 0, 0), 0); }
 test delta_regressed { assert_eq(delta_code(0, 0, 0, 3, 1, 0), 2); }
@@ -175,6 +200,14 @@ test ratchet_red_codes {
     assert(ratchet_is_red(4) == false);
     assert(ratchet_is_red(6) == false);
 }
+test bless_keeps_a_written_reason { assert_eq(bless_reason(5, 2), 2); }
+test bless_unimplemented { assert_eq(bless_reason(3, 0), 1); }
+test bless_refuses_a_defect { assert_eq(bless_reason(6, 0), 0); }
+test bless_refuses_a_timeout { assert_eq(bless_reason(8, 0), 0); }
+test bless_cap_rises { assert_eq(cap_rises(6, 5, true), true); }
+test bless_cap_holds { assert_eq(cap_rises(5, 5, true), false); }
+test bless_first_cap { assert_eq(cap_rises(9, 0, false), false); }
+
 invariant gained_never_red {
     assert(delta_is_red(delta_code(0, 0, 2, 0, 0, 1)) == false);
 }
