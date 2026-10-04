@@ -13,6 +13,10 @@
 - Original019e Linux bootstrap job recorded2828 passed/6 failed/2 ignored/124 targets. All six new tests failed spawning missing zig. Install actual Zig0.16 before the unchanged full ratchet; no test skip, ledger adjustment or compiler change.
 - Existing Icarus lowerability tests include missing gitignored witness skips. Their cargo count must not be presented as359 executed RTL simulations. Independent tri-net113 simulations and the new Zig controls have separate actual execution receipts.
 
+## Canonical alignment
+
+- Merge upstream c107 history unchanged; its loop-tools workflow adds three shell steps. Combined native census is268 run steps/247 runner-selected shell steps (master267/246 plus one Zig install). Own compiler f668 and upstream CLI source/manifest/lock are preserved; preserve genuine upstream authors and all events.
+
 ## Limits and next
 
 - Separate upstream SHA256 source still BLOCKED on pointer errors; accepted-baseline source-only value rename reproduces all three. Temporal alias substitution in the existing optimizer is also unfixed. Broader keyword/dotted issue2631 remains open.
