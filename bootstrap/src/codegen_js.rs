@@ -164,8 +164,16 @@ impl Bound {
         if self.emitted.insert(name.to_string()) {
             return Ok(());
         }
+        if t.is_py() {
+            // A second `NAME = ...` in a Python module does not fail; it
+            // silently rebinds, and the first value is the one nobody reads.
+            return Err(format!(
+                "{}: {:?} is declared more than once in this spec, and a second `{} = ...` would silently rebind the first",
+                t.tag, name, name
+            ));
+        }
         Err(format!(
-            "{}: {:?} is declared more than once in this spec, and a second binding of {} there would stop the whole module -- an ES module fails the import, a Python module silently rebinds it",
+            "{}: {:?} is declared more than once in this spec, and a second `export const {}` would stop the whole module from parsing",
             t.tag, name, name
         ))
     }
@@ -525,8 +533,10 @@ pub(crate) fn enum_variants(t: &Target, node: &Node, scope: &Bound) -> Result<En
             dropped.push((
                 format!("variant {}.{} = {}", node.name, variant.name, value),
                 format!(
-                    "{}: {:?} appears twice in this enum, and a mapping literal keeps only the last -- the first is the one emitted, so this discriminant is absent rather than silently overwriting it",
-                    t.tag, variant.name
+                    "{}: {:?} appears twice in this enum, and {} keeps only the last -- the first is the one emitted, so this discriminant is absent rather than silently overwriting it",
+                    t.tag,
+                    variant.name,
+                    if t.is_py() { "a dict literal" } else { "an object literal" }
                 ),
             ));
             continue;
