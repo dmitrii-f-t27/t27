@@ -210,7 +210,7 @@ def remote_sha():
     raise RuntimeError("ref %s not found on %s: %s" % (REF, REPO, out.stderr.strip()))
 
 
-def checkout(sha, log):
+def _checkout_once(sha, log):
     if not (CLONE / ".git").exists():
         code, tail = run(["git", "clone", "--filter=blob:none", "--no-checkout", REPO, CLONE], log)
         if code != 0:
@@ -223,6 +223,25 @@ def checkout(sha, log):
     code, tail = run(["git", "checkout", "--force", "--detach", sha], log, cwd=CLONE)
     if code != 0:
         raise RuntimeError("git checkout failed: %s" % tail[-1:])
+
+
+def checkout(sha, log):
+    """Check `sha` out in the clone; a clone that cannot is cloned again, once.
+
+    A redeploy that kills a run mid-way can leave the partial clone unable to
+    fetch a blob from its promisor remote (2026-10-04, bae81aee2: "could not
+    fetch ... from promisor remote"), and every later poll fails the same way.
+    The clone holds nothing but git objects, so a fresh one is the repair."""
+    try:
+        _checkout_once(sha, log)
+        return {"clone": "kept"}
+    except RuntimeError as e:
+        first = str(e)
+        log("checkout failed (%s); removing the clone and cloning again" % first)
+    shutil.rmtree(CLONE, ignore_errors=True)
+    _checkout_once(sha, log)
+    # Recorded in the run, so a heal is an anomaly a reader can see, not a silence.
+    return {"clone": "recloned", "first_error": first[:300]}
 
 
 # ------------------------------------------------------------ reference path
