@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""tri t27b -- the t27b steward's tick card (status) and anomaly scan (doctor): lab, PRs, claim, worktrees, processes.
+"""tri t27b -- the t27b steward's tick card (status), anomaly scan (doctor) and per-spec ratchet between lab runs (delta).
 
 WHY THIS EXISTS
 ---------------
@@ -19,6 +19,13 @@ hand on 2026-10-04, that state produced four slips in one afternoon (#6112):
   * A local three-hour reference run kept a Mac at load 700 while the lab
     produced the same denominator in 321 s.
 
+And one slip this tool made itself (#6184): `status` printed `t27b 70 /
+reference 648` and the steward posted it. 14 of those 70 passes were specs the
+reference fails; the honest figure was 56 of 648. Of those 56, 29 ran no test
+and no invariant -- they compiled and checked nothing. The card now prints the
+in-reference ratio, splits it into checked and compile-only, and keeps the
+out-of-reference passes on their own line.
+
 WHAT IS READ (nothing is written, fetched or pushed)
 ----------------------------------------------------
   lab        GET <lab>/latest.json                       (fixture: lab.json)
@@ -31,6 +38,8 @@ WHAT IS READ (nothing is written, fetched or pushed)
   cwd        lsof -d cwd -Fpn: which process sits where   (cwd.txt)
   ps         ps -axo pid=,etime=,command=                 (ps.txt)
   railway    `railway --version` of the first on PATH     (railway.txt)
+  runs       GET <lab>/runs/ and <lab>/runs/<sha>.json    (runs/<sha>.json)
+             -- delta only
   now        the clock                                    (now.txt)
 
 --fixture DIR reads every source from DIR instead (worktrees.txt lists real
@@ -59,6 +68,19 @@ ANOMALY CODES (doctor exits 1 when any is printed, 0 when none, 2 on usage)
   LOCAL-REFERENCE     a local `t27b corpus ... --reference` run is going
                       while the lab answers
   LEDGER-QUIET        the last ledger row is older than --quiet-hours
+  LAB-FRONTEND-DISAGREES  t27b's frontend rejects a spec the reference
+                      passes: a disagreement `mismatch` does not count
+
+DELTA (tri t27b delta [--from SHA] [--to SHA]; exit 1 on the first three)
+---------------------------------------------------------------------------
+Per spec, over the specs the reference passes in BOTH runs:
+  REGRESSED     t27b passed in --from and does not in --to
+  NEW-MISMATCH  t27b fails (or crashes) where it did not, reference passing
+  CHECK-LOST    a pass that ran tests/invariants now runs none
+  GAINED        t27b passes now and did not before          (reported)
+  REF-MOVED     the reference's own verdict changed          (reported: the
+                denominator moved, not t27b)
+--to defaults to latest.json; --from to the run before it by `finished`.
 
 WHAT THIS DOES NOT ESTABLISH
 ----------------------------
@@ -69,10 +91,13 @@ WHAT THIS DOES NOT ESTABLISH
   * That the lab's numbers are right. Only that they are master's, fresh, and
     free of the failure classes above.
   * Anything about PRs that do not match the search `t27b`.
+  * That a "checked" pass checks much: one test block counts. Compile-only
+    means 0 tests and 0 invariants as the lab reports them.
 
     tri t27b status                # the tick card
     tri t27b doctor                # anomalies, one per line, with the fix
     tri t27b doctor --json         # the same, machine-readable
+    tri t27b delta                 # what moved per spec since the previous lab run
 """
 import argparse
 import datetime as dt
@@ -190,6 +215,30 @@ class Sources:
             return self._fx("railway.txt").strip()
         return run(["railway", "--version"], timeout=20).strip()
 
+    def _get(self, path):
+        try:
+            with urllib.request.urlopen(f"{self.lab}/{path}", timeout=60) as r:
+                return r.read().decode("utf-8")
+        except Exception as e:  # noqa: BLE001 -- any failure is "could not read"
+            raise Unreadable(f"{self.lab}/{path}: {e}")
+
+    def run_shas(self):
+        if self.fixture:
+            d = os.path.join(self.fixture, "runs")
+            if not os.path.isdir(d):
+                raise Unreadable("fixture runs/ absent")
+            names = os.listdir(d)
+        else:
+            names = re.findall(r'href="([0-9a-f]{7,40}\.json)"', self._get("runs/"))
+        return sorted(n[:-5] for n in names if n.endswith(".json"))
+
+    def run_json(self, sha):
+        text = self._fx(os.path.join("runs", sha + ".json")) if self.fixture else self._get(f"runs/{sha}.json")
+        try:
+            return json.loads(text)
+        except ValueError as e:
+            raise Unreadable(f"runs/{sha}.json: {e}")
+
 
 def _read(path):
     try:
@@ -236,6 +285,26 @@ def required_states(pr):
         if name in REQUIRED:
             got[name] = (c.get("conclusion") or c.get("state") or c.get("status") or "").upper()
     return got
+
+
+def honest(lab):
+    """The numbers a report may quote. `t27b_pass` alone is not one of them: it
+    includes passes on specs the reference fails (#6184)."""
+    s = lab.get("summary") or {}
+    outside = s.get("t27b_pass_where_reference_does_not") or 0
+    in_ref = s.get("t27b_pass_where_reference_passes")
+    if in_ref is None and s.get("t27b_pass") is not None:
+        in_ref = s["t27b_pass"] - outside
+    h = {"in_ref": in_ref, "reference": s.get("reference_pass"), "outside": outside,
+         "mismatch": s.get("mismatch"), "checked": None, "compile_only": None, "frontend": []}
+    results = lab.get("results")
+    if isinstance(results, list) and results:
+        ok = [x for x in results if x.get("t27b") == "pass" and x.get("reference") == "pass"]
+        h["checked"] = sum(1 for x in ok if (x.get("tests") or 0) + (x.get("invariants") or 0) > 0)
+        h["compile_only"] = len(ok) - h["checked"]
+        h["frontend"] = sorted(x.get("file", "?") for x in results
+                               if x.get("t27b") == "frontend" and x.get("reference") == "pass")
+    return h
 
 
 def worktree_state(path):
@@ -318,6 +387,9 @@ def anomalies(d, args):
         errs = {k: s.get(k, 0) for k in ("reference_lab_error", "crash", "timeout", "t27b_fail") if s.get(k, 0)}
         if errs:
             add("LAB-ERROR", ", ".join(f"{k} {v}" for k, v in errs.items()), "read runs/<sha>.log for each")
+        for f in honest(lab)["frontend"]:
+            add("LAB-FRONTEND-DISAGREES", f"{f}: t27b's frontend rejects it, the reference passes it",
+                "a t27b parser/typecheck defect (or a reference that accepts too much): file it, not a blocker")
         steps = lab.get("steps") or {}
         red = [k for k, v in steps.items() if isinstance(v, dict) and v.get("ok") is False]
         ct = steps.get("cargo_test_t27b") or {}
@@ -402,9 +474,15 @@ def lab_card(lab):
     if isinstance(lab, Unreadable):
         return [f"lab        UNREADABLE: {lab}"]
     s = lab.get("summary") or {}
+    h = honest(lab)
+    pct = f" ({100.0 * h['in_ref'] / h['reference']:.1f}%)" if h["in_ref"] is not None and h["reference"] else ""
     lines = [f"lab        ref {lab.get('ref')} @ {str(lab.get('commit', ''))[:9]}, finished {lab.get('finished')}",
-             f"           t27b {s.get('t27b_pass')} / reference {s.get('reference_pass')} of {s.get('files')} files, "
-             f"mismatch {s.get('mismatch')}"]
+             f"           t27b passes {h['in_ref']} of the {h['reference']} specs the reference passes{pct}, "
+             f"mismatch {h['mismatch']}  ({s.get('files')} files)"]
+    if h["checked"] is not None:
+        lines.append(f"           of those {h['checked']} ran a test or invariant, {h['compile_only']} compile-only")
+    lines.append(f"           not counted: {h['outside']} t27b pass(es) where the reference fails, "
+                 f"{len(h['frontend'])} frontend reject(s) where it passes")
     for b in (lab.get("top_blockers") or [])[:5]:
         lines.append(f"           blocker {b.get('construct'):<34} first {b.get('first'):>4}  all {b.get('all')}")
     return lines
@@ -442,9 +520,87 @@ def status(d):
     return lines
 
 
+def delta(src, frm, to):
+    """Per-spec transitions between two lab runs. Returns (findings, header)."""
+    a, b = src.run_json(frm), (src.lab_json() if to == "latest" else src.run_json(to))
+    by = lambda run: {x["file"]: x for x in run.get("results") or [] if "file" in x}  # noqa: E731
+    ra, rb = by(a), by(b)
+    if not ra or not rb:
+        raise Unreadable("a run has no per-spec results")
+    out = []
+    add = lambda code, f, what: out.append({"code": code, "file": f, "what": what})  # noqa: E731
+    checks = lambda x: (x.get("tests") or 0) + (x.get("invariants") or 0)  # noqa: E731
+    bad = ("fail", "mismatch", "crash")
+    for f in sorted(set(ra) | set(rb)):
+        x, y = ra.get(f), rb.get(f)
+        if x is None or y is None:
+            continue
+        if x.get("reference") != y.get("reference"):
+            add("REF-MOVED", f, f"reference {x.get('reference')} -> {y.get('reference')}")
+            continue
+        if y.get("reference") != "pass":
+            continue
+        tx, ty = x.get("t27b"), y.get("t27b")
+        if tx == "pass" and ty != "pass":
+            add("REGRESSED", f, f"t27b pass -> {ty}: {(y.get('detail') or '')[:100]}")
+        elif ty in bad and tx not in bad:
+            add("NEW-MISMATCH", f, f"t27b {tx} -> {ty}: {(y.get('detail') or '')[:100]}")
+        elif tx != "pass" and ty == "pass":
+            add("GAINED", f, f"t27b {tx} -> pass" + ("" if checks(y) else " (compile-only)"))
+        elif tx == ty == "pass" and checks(x) and not checks(y):
+            add("CHECK-LOST", f, f"tests+invariants {checks(x)} -> 0")
+    ha, hb = honest(a), honest(b)
+    head = (f"from {str(a.get('commit', ''))[:9]} ({a.get('ref')}, {a.get('finished')})  "
+            f"to {str(b.get('commit', ''))[:9]} ({b.get('ref')}, {b.get('finished')})\n"
+            f"in-reference passes {ha['in_ref']}/{ha['reference']} -> {hb['in_ref']}/{hb['reference']}; "
+            f"checked {ha['checked']} -> {hb['checked']}")
+    return out, head
+
+
+def previous_run(src, to):
+    """The latest run that finished before --to, by `finished` (the listing is by sha)."""
+    target = src.lab_json() if to == "latest" else src.run_json(to)
+    tfin, tsha = target.get("finished") or "", target.get("commit")
+    best = None
+    for sha in src.run_shas():
+        if tsha and (sha == tsha or tsha.startswith(sha) or sha.startswith(tsha)):
+            continue
+        fin = src.run_json(sha).get("finished") or ""
+        if fin < tfin and (best is None or fin > best[0]):
+            best = (fin, sha)
+    if best is None:
+        raise Unreadable("no earlier lab run to compare with")
+    return best[1]
+
+
+DELTA_RED = ("REGRESSED", "NEW-MISMATCH", "CHECK-LOST")
+
+
+def main_delta(args):
+    src = Sources(fixture=args.fixture, lab=args.lab)
+    try:
+        frm = args.from_ or previous_run(src, args.to)
+        found, head = delta(src, frm, args.to)
+    except Unreadable as e:
+        print(f"tri t27b delta: could not read: {e}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps({"header": head, "findings": found}, indent=1))
+    else:
+        print(head)
+        for f in found:
+            print(f"{f['code']:<13} {f['file']}  {f['what']}")
+        red = sum(1 for f in found if f["code"] in DELTA_RED)
+        print(f"tri t27b delta: {red} regression(s), {sum(1 for f in found if f['code'] == 'GAINED')} gained, "
+              f"{sum(1 for f in found if f['code'] == 'REF-MOVED')} reference move(s)")
+    return 1 if any(f["code"] in DELTA_RED for f in found) else 0
+
+
 def main(argv):
     ap = argparse.ArgumentParser(prog="tri t27b", description=__doc__.split("\n")[0])
-    ap.add_argument("action", choices=("status", "doctor"))
+    ap.add_argument("action", choices=("status", "doctor", "delta"))
+    ap.add_argument("--from", dest="from_", help="delta: the earlier lab run's sha (default: the run before --to)")
+    ap.add_argument("--to", default="latest", help="delta: the later run's sha (default: latest.json)")
     ap.add_argument("--fixture", help="read every source from this directory (tests)")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--lab", default=LAB)
@@ -455,12 +611,17 @@ def main(argv):
         args = ap.parse_args(argv)
     except SystemExit as e:
         return 2 if e.code else 0
+    if args.action == "delta":
+        return main_delta(args)
     src = Sources(fixture=args.fixture, lab=args.lab)
     d = collect(src, args)
     found = anomalies(d, args)
     if args.action == "status":
         if args.json:
-            print(json.dumps({"anomalies": found, "lab": None if isinstance(d["lab"], Unreadable) else d["lab"].get("summary")}, indent=1))
+            lab = d["lab"]
+            print(json.dumps({"anomalies": found,
+                              "lab": None if isinstance(lab, Unreadable) else lab.get("summary"),
+                              "honest": None if isinstance(lab, Unreadable) else honest(lab)}, indent=1))
         else:
             print("\n".join(status(d)))
             print(f"anomalies  {len(found)} (tri t27b doctor)")

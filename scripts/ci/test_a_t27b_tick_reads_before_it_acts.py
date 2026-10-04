@@ -19,6 +19,12 @@ the worktrees are real git repositories, because "mid-merge" is a fact about a
   unread   lab.json absent -> LAB-UNREADABLE, never "no lab anomalies", and
            no LOCAL-REFERENCE (it is only an anomaly while the lab answers).
   usage    an unknown action -> exit 2.
+  honest   (#6184) the card quotes in-reference passes / reference passes,
+           splits compile-only passes out, and LAB-FRONTEND-DISAGREES names a
+           spec t27b's frontend rejects while the reference passes it.
+  delta    per-spec transitions between two lab runs: REGRESSED, NEW-MISMATCH
+           and CHECK-LOST exit 1; GAINED and REF-MOVED are reported; the
+           default --from is chosen by `finished`, not by sha.
 
 And "never write": the worktrees' git state (HEAD, MERGE_HEAD, status) is the
 same before and after.
@@ -177,8 +183,77 @@ with tempfile.TemporaryDirectory() as tmp:
     check(p.returncode == 2, f"usage: unknown action exits 2 (got {p.returncode})")
 
     p = subprocess.run([sys.executable, TOOL, "status", "--fixture", healthy], capture_output=True, text=True)
-    check(p.returncode == 0 and "t27b 47 / reference 646" in p.stdout and "#6012" not in p.stdout,
+    check(p.returncode == 0 and "t27b passes 47 of the 646 specs the reference passes" in p.stdout and "#6012" not in p.stdout,
           "status: prints the lab totals and drops the PR that only mentions t27b")
+
+    # honest (#6184): the card quotes in-reference passes, never t27b_pass / reference_pass
+    def spec(f, t, r, tests=0, inv=0):
+        return {"file": f, "t27b": t, "reference": r, "tests": tests, "invariants": inv, "detail": f"{t} detail"}
+    honest = os.path.join(tmp, "fx-honest")
+    hl = lab(t27b_pass=3, t27b_pass_where_reference_passes=2, t27b_pass_where_reference_does_not=1,
+             reference_pass=4)
+    hl["results"] = [spec("a.t27", "pass", "pass", tests=2), spec("b.t27", "pass", "pass"),
+                     spec("c.t27", "pass", "blocked"), spec("d.t27", "frontend", "pass"),
+                     spec("e.t27", "frontend", "blocked")]
+    write_fixture(honest, {**{k: open(os.path.join(healthy, k)).read() for k in os.listdir(healthy)},
+                           "lab.json": hl})
+    p = subprocess.run([sys.executable, TOOL, "status", "--fixture", honest], capture_output=True, text=True)
+    check("t27b passes 2 of the 4 specs the reference passes (50.0%)" in p.stdout,
+          "honest: the card quotes in-reference passes over reference passes")
+    check("t27b 3 /" not in p.stdout and "3 of the 4" not in p.stdout,
+          "honest: t27b_pass (which includes out-of-reference passes) is never the numerator")
+    check("1 ran a test or invariant, 1 compile-only" in p.stdout, "honest: compile-only passes are split out")
+    check("1 t27b pass(es) where the reference fails, 1 frontend reject(s)" in p.stdout,
+          "honest: out-of-reference passes and frontend rejects are on their own line")
+    code, codes, out = doctor(honest)
+    check(codes is not None and codes.count("LAB-FRONTEND-DISAGREES") == 1 and "d.t27" in out and "e.t27" not in out,
+          f"honest: LAB-FRONTEND-DISAGREES names only the spec the reference passes ({codes})")
+    lab_nr = lab(t27b_pass=5, t27b_pass_where_reference_does_not=2)
+    lab_nr["summary"].pop("t27b_pass_where_reference_passes", None)
+    nr = os.path.join(tmp, "fx-noresults")
+    write_fixture(nr, {**{k: open(os.path.join(healthy, k)).read() for k in os.listdir(healthy)}, "lab.json": lab_nr})
+    p = subprocess.run([sys.executable, TOOL, "status", "--fixture", nr], capture_output=True, text=True)
+    check("t27b passes 3 of the 646" in p.stdout and "ran a test" not in p.stdout,
+          "honest: an old lab without the field subtracts the outside passes; no results, no checked line")
+
+    # delta: per-spec ratchet between two lab runs
+    dl = os.path.join(tmp, "fx-delta")
+    os.makedirs(os.path.join(dl, "runs"))
+    A, B = "f" * 40, "1" * 40  # A sorts after B by sha but finished first: order must come from `finished`
+    base = [spec("s1", "pass", "pass", tests=1), spec("s2", "blocked", "pass"), spec("s3", "pass", "pass", tests=2),
+            spec("s4", "blocked", "pass"), spec("s5", "blocked", "pass"), spec("s6", "pass", "pass", tests=1)]
+    ra = lab(commit=A, finished="2026-10-04T10:00:00Z")
+    ra["results"] = [dict(x) for x in base[:4]] + [spec("s5", "blocked", "pass"), spec("s6", "blocked", "pass")]
+    rb = lab(commit=B, finished="2026-10-04T12:00:00Z")
+    rb["results"] = base
+    rc = lab(commit=MASTER, finished="2026-10-04T14:00:00Z")
+    rc["results"] = [spec("s1", "blocked", "pass"), spec("s2", "fail", "pass"), spec("s3", "pass", "pass"),
+                     spec("s4", "pass", "pass"), spec("s5", "blocked", "blocked"), spec("s6", "pass", "pass", tests=1)]
+    for sha, r in ((A, ra), (B, rb)):
+        with open(os.path.join(dl, "runs", sha + ".json"), "w") as f:
+            json.dump(r, f)
+    write_fixture(dl, {"lab.json": rc})
+
+    def run_delta(*extra):
+        p = subprocess.run([sys.executable, TOOL, "delta", "--json", "--fixture", dl, *extra],
+                           capture_output=True, text=True)
+        try:
+            j = json.loads(p.stdout)
+        except ValueError:
+            j = None
+        return p.returncode, j, p.stdout + p.stderr
+    code, j, out = run_delta()
+    got = sorted((f["code"], f["file"]) for f in j["findings"]) if j else None
+    check(code == 1, f"delta: a regression exits 1 (got {code})")
+    check(got == [("CHECK-LOST", "s3"), ("GAINED", "s4"), ("NEW-MISMATCH", "s2"), ("REF-MOVED", "s5"),
+                  ("REGRESSED", "s1")], f"delta: each transition once, s6 unchanged is silent ({got})")
+    check(j is not None and j["header"].startswith("from 111111111"),
+          "delta: the default --from is the run that finished last before --to, not the last sha")
+    code, j, out = run_delta("--from", A, "--to", B)
+    got = sorted((f["code"], f["file"]) for f in j["findings"]) if j else None
+    check(code == 0 and got == [("GAINED", "s6")], f"delta: gains only exit 0 ({code} {got})")
+    code, j, out = run_delta("--from", "0" * 40)
+    check(code == 2 and "could not read" in out, f"delta: an absent run is 'could not read', exit 2 ({code})")
 
     check(snapshot([clean, mid, dirty]) == before, "never write: the worktrees' git state is unchanged")
     # negative control for the snapshot: a change must show
