@@ -34,6 +34,7 @@ And "never write": the worktrees' git state (HEAD, MERGE_HEAD, status) is the
 same before and after.
 """
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -356,6 +357,36 @@ with tempfile.TemporaryDirectory() as tmp:
     check(t27b_tool.fold_master(["a\tin_progress\nb\tcancelled\n", "a\tsuccess\nb\tqueued\n", "b\tsuccess\n"])
           == {"a": "PENDING", "b": "PENDING"},
           "ready: a master run still going on a newer commit makes master PENDING, not the older verdict (Q29)")
+
+    # watch (#6285): what each PR of a stack gets, decided by steward.t27
+    wx = os.path.join(tmp, "fx-watch")
+    write_fixture(wx, {"prs.json": [gate(20), gate(21, base="claude/20"), gate(22, base="claude/x"),
+                                    gate(23, validate="FAILURE"), gate(24, state="MERGED", mergeable="UNKNOWN"),
+                                    gate(25, base="claude/gone")],
+                       "master_checks.json": {},
+                       "heads.json": {"claude/20": [{"number": 20, "state": "OPEN"}],
+                                      "claude/x": [{"number": 19, "state": "CLOSED"}, {"number": 18, "state": "MERGED"}],
+                                      "claude/gone": [{"number": 17, "state": "CLOSED"}]}})
+    def run_watch(n):
+        p = subprocess.run([sys.executable, TOOL, "watch", "--once", "--fixture", wx, str(n)],
+                           capture_output=True, text=True)
+        m = re.search(r"-> (\w+)", p.stdout)
+        return p.returncode, m.group(1) if m else None, p.stdout + p.stderr
+    got = {n: run_watch(n)[1] for n in range(20, 26)}
+    want = {20: "MERGE", 21: "WAIT", 22: "RETARGET", 23: "STOP", 24: "DONE", 25: "STOP"}
+    check(got == want, f"watch: each PR's action as planted\n        got  {got}\n        want {want}")
+    code, act, out = run_watch(20)
+    check(code == 0 and "(dry run)" in out, f"watch: a fixture never merges for real; --once exits 0 on MERGE ({code})")
+    acted, slept = [], []
+    code = t27b_tool.watch_main(["--fixture", wx, "--interval", "0", "24", "20", "23"],
+                                act=lambda n, a: acted.append((n, a)), sleep=slept.append)
+    check(code == 1 and acted == [(20, "MERGE")] and slept == [],
+          f"watch: a stack is walked in order -- done, merged, then a red PR stops it ({code} {acted})")
+    wx = os.path.join(tmp, "fx-watch-noheads")
+    write_fixture(wx, {"prs.json": [gate(22, base="claude/x")], "master_checks.json": {}})
+    code, act, out = run_watch(22)
+    check(code == 2 and act is None and "UNREADABLE" in out,
+          f"watch: an unreadable parent is no action, never a guessed retarget (Q30) ({code})")
 
     check(snapshot([clean, mid, dirty]) == before, "never write: the worktrees' git state is unchanged")
     # negative control for the snapshot: a change must show

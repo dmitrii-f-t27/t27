@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""tri t27b -- the t27b steward's tick card (status), anomaly scan (doctor), per-spec ratchet between lab runs (delta), gen-c proof on the t27c lab (gen-check) and the merge gate (ready).
+"""tri t27b -- the t27b steward's tick card (status), anomaly scan (doctor), per-spec ratchet between lab runs (delta), gen-c proof on the t27c lab (gen-check), the merge gate (ready) and the stack merger (watch).
 
 WHY THIS EXISTS
 ---------------
@@ -192,6 +192,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import urllib.request
 
 
@@ -283,6 +284,13 @@ class Sources:
                     return p
             raise Unreadable(f"fixture prs.json has no #{n}")
         return json.loads(run(["gh", "pr", "view", str(n), "--repo", REPO, "--json", self.PR_FIELDS], timeout=90))
+
+    def heads(self, branch):
+        """[{number, state}] of every PR whose head is `branch` (watch: the stacked parent)."""
+        if self.fixture:
+            return json.loads(self._fx("heads.json")).get(branch, [])
+        return json.loads(run(["gh", "pr", "list", "--repo", REPO, "--head", branch, "--state", "all",
+                               "--json", "number,state"], timeout=60))
 
     def master_checks(self, depth=12):
         """{check name: state} -- the newest VERDICT per name over the last
@@ -1246,7 +1254,95 @@ def ready_main(argv):
     return 0 if out and all(o["verdict"] == "READY" for o in out) else 1
 
 
+def parent_of(src, pr):
+    """NONE | MERGED | OPEN | GONE: the state of the PR whose head is this PR's
+    base. Read from GitHub every time, never inferred from a read that failed
+    (Q30: a watcher that guessed skipped the retarget of #6254)."""
+    base = pr.get("baseRefName")
+    if base == "master":
+        return "NONE"
+    states = {(p.get("state") or "").upper() for p in src.heads(base)}
+    if "MERGED" in states:
+        return "MERGED"
+    if "OPEN" in states:
+        return "OPEN"
+    return "GONE"
+
+
+def watch_step(src, n):
+    """One look at PR n -> (action, line). The action is steward.t27's
+    `watch_action`; nothing is changed here."""
+    pr = src.pr(n)
+    v = ready(pr, src.master_checks())
+    parent = parent_of(src, pr)
+    act = rules().watch_action(v["verdict"], parent)
+    why = ", ".join(v["why"]) or "-"
+    return act, f"#{n:<6} {v['verdict']:<9} parent={parent:<7} -> {act:<8} {why}"
+
+
+def watch_act(n, act):
+    """Run the action. A merge is `gh pr merge --merge` only; master comes in
+    through `gh pr update-branch`, a merge commit on the PR branch (no force-push)."""
+    if act == "MERGE":
+        run(["gh", "pr", "merge", str(n), "--repo", REPO, "--merge"], timeout=120)
+    elif act == "RETARGET":
+        run(["gh", "pr", "edit", str(n), "--repo", REPO, "--base", "master"], timeout=60)
+        run(["gh", "pr", "update-branch", str(n), "--repo", REPO], timeout=120)
+
+
+def watch_main(argv, act=watch_act, sleep=time.sleep):
+    ap = argparse.ArgumentParser(prog="tri t27b watch",
+                                 description="merge a t27b PR stack in order, as steward.t27 decides (#6285)")
+    ap.add_argument("numbers", nargs="+", type=int, help="PR numbers, parent first")
+    ap.add_argument("--fixture", help="read prs.json, master_checks.json, heads.json from here; never acts")
+    ap.add_argument("--once", action="store_true", help="look at the first open PR once and exit")
+    ap.add_argument("--dry-run", action="store_true", help="print the action, do not run it")
+    ap.add_argument("--interval", type=float, default=150.0, help="seconds between looks (default 150)")
+    ap.add_argument("--hours", type=float, default=8.0, help="give up after this long (default 8)")
+    try:
+        args = ap.parse_args(argv)
+    except SystemExit as e:
+        return 2 if e.code else 0
+    src = Sources(fixture=args.fixture)
+    # a fixture never reaches GitHub: only an injected `act` (tests) runs there
+    dry = args.dry_run or (bool(args.fixture) and act is watch_act)
+    queue = list(args.numbers)
+    deadline = time.time() + args.hours * 3600
+    while queue and time.time() < deadline:
+        n = queue[0]
+        try:
+            a, line = watch_step(src, n)
+        except (Unreadable, ValueError) as e:
+            print(f"#{n:<6} UNREADABLE {e} -- looking again, no action", flush=True)
+            if args.once:
+                return 2
+            sleep(args.interval)
+            continue
+        print(line + (" (dry run)" if dry and a in ("MERGE", "RETARGET") else ""), flush=True)
+        if a == "STOP":
+            return 1
+        if not dry and a in ("MERGE", "RETARGET"):
+            try:
+                act(n, a)
+            except Unreadable as e:
+                print(f"#{n:<6} {a} failed: {e}", flush=True)
+                return 1
+        if a == "DONE" or (a == "MERGE" and not dry):
+            queue.pop(0)
+            continue
+        if args.once:
+            return 0 if a == "MERGE" else 1
+        sleep(args.interval)
+    if queue:
+        print(f"tri t27b watch: still open after {args.hours} h: {queue}", flush=True)
+        return 1
+    print("tri t27b watch: all merged or closed", flush=True)
+    return 0
+
+
 def main(argv):
+    if argv[:1] == ["watch"]:
+        return watch_main(argv[1:])
     if argv[:1] == ["ready"]:
         return ready_main(argv[1:])
     if argv[:1] == ["ratchet"]:
@@ -1254,7 +1350,7 @@ def main(argv):
     if argv[:1] == ["gen-check"]:
         return gen_check_main(argv[1:])
     ap = argparse.ArgumentParser(prog="tri t27b", description=__doc__.split("\n")[0])
-    ap.add_argument("action", choices=("status", "doctor", "delta", "ratchet", "gen-check", "ready"))
+    ap.add_argument("action", choices=("status", "doctor", "delta", "ratchet", "gen-check", "ready", "watch"))
     ap.add_argument("--from", dest="from_", help="delta: the earlier lab run's sha (default: the run before --to)")
     ap.add_argument("--to", default="latest", help="delta: the later run's sha (default: latest.json)")
     ap.add_argument("--fixture", help="read every source from this directory (tests)")
