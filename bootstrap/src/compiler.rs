@@ -26731,7 +26731,13 @@ impl RustCodegen {
                 self.write_line("unsafe {");
                 self.indent += 1;
             }
-            for child in &node.children {
+            for (index, child) in node.children.iter().enumerate() {
+                if index + 1 == node.children.len()
+                    && self.fn_ret_type != "()"
+                    && self.gen_rust_tail_stmt(child)
+                {
+                    continue;
+                }
                 match child.kind {
                     NodeKind::ExprReturn => {
                         let val = if child.children.is_empty() {
@@ -26970,6 +26976,59 @@ impl RustCodegen {
         children.len() == 1
             && children[0].kind == NodeKind::ExprIdentifier
             && children[0].name == "undefined"
+    }
+
+    fn rust_body_has_tail_expr(stmts: &[Node]) -> bool {
+        stmts.last().is_some_and(|stmt| match stmt.kind {
+            NodeKind::StmtExpr => stmt.children.len() == 1,
+            NodeKind::StmtIf if stmt.children.len() == 3 => {
+                Self::rust_body_has_tail_expr(&stmt.children[1].children)
+                    || Self::rust_body_has_tail_expr(&stmt.children[2].children)
+            }
+            _ => false,
+        })
+    }
+
+    fn gen_rust_tail_body(&mut self, stmts: &[Node]) {
+        for (index, stmt) in stmts.iter().enumerate() {
+            if index + 1 == stmts.len() && self.gen_rust_tail_stmt(stmt) {
+                continue;
+            }
+            self.gen_rust_stmt(stmt);
+        }
+    }
+
+    /// A non-unit function's final value uses its declared return coercion.
+    /// Ordinary statements and loops keep their existing semicolons.
+    fn gen_rust_tail_stmt(&mut self, stmt: &Node) -> bool {
+        match stmt.kind {
+            NodeKind::StmtExpr if stmt.children.len() == 1 => {
+                let ret_type = self.fn_ret_type.clone();
+                let value = self.expr_to_rust_as(&stmt.children[0], &ret_type);
+                self.write_line(&value);
+                true
+            }
+            NodeKind::StmtIf if stmt.children.len() == 3
+                && (Self::rust_body_has_tail_expr(&stmt.children[1].children)
+                    || Self::rust_body_has_tail_expr(&stmt.children[2].children)) =>
+            {
+                self.write_indent();
+                self.write("if ");
+                self.write(&self.expr_to_rust_cond(&stmt.children[0]));
+                self.write(" {\n");
+                self.indent += 1;
+                self.gen_rust_tail_body(&stmt.children[1].children);
+                self.indent -= 1;
+                self.write_indent();
+                self.write("} else {\n");
+                self.indent += 1;
+                self.gen_rust_tail_body(&stmt.children[2].children);
+                self.indent -= 1;
+                self.write_line("}");
+                true
+            }
+            _ => false,
+        }
     }
 
     fn gen_rust_stmt(&mut self, stmt: &Node) {
