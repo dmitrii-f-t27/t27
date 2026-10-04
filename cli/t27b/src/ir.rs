@@ -395,8 +395,14 @@ pub struct Func {
     pub vars: Vec<Var>,
     pub body: Vec<Stmt>,
     pub line: u32,
-    /// A `test` block: no parameters, no return value, never callable.
+    /// A `test` or `invariant` block: no parameters, no return value, never
+    /// callable.
     pub is_test: bool,
+    /// An `invariant` block (also `is_test`). t27c's Zig backend emits one as
+    /// a `comptime { ... }` block, so a broken invariant is a compile error
+    /// there; t27b runs it at test time, through the same trap machinery as a
+    /// test, and reports it separately.
+    pub is_invariant: bool,
     /// Site used when control falls off the end of a non-void fn.
     pub noreturn_site: SiteId,
 }
@@ -408,6 +414,10 @@ pub struct Program {
     /// Site 0 is a placeholder meaning "cannot trap".
     pub sites: Vec<Site>,
     pub mode: OverflowMode,
+    /// Invariants whose body the front-end discarded (a `forall`, or a clause
+    /// it cannot parse): nothing to run, and reported as NOT CHECKED rather
+    /// than as held.
+    pub unchecked: Vec<String>,
 }
 
 impl Program {

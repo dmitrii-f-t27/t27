@@ -579,6 +579,7 @@ impl<'r> Gen<'r> {
             body,
             line: self.line,
             is_test,
+            is_invariant: false,
             noreturn_site,
         }
     }
@@ -617,10 +618,12 @@ fn program(rng: &mut Rng, mode: OverflowMode) -> Program {
         g.sigs.push(Sig { params: Vec::new(), ret: None });
         let mut f = g.func(nhelpers, true);
         f.name = format!("test{}", t);
+        // An invariant block is lowered exactly like a test.
+        f.is_invariant = g.rng.chance(30);
         funcs.push(f);
         g.sigs.pop();
     }
-    Program { module: "rnd".into(), funcs, sites: g.sites, mode }
+    Program { module: "rnd".into(), funcs, sites: g.sites, mode, unchecked: Vec::new() }
 }
 
 // ------------------------------------------------------- pretty printer
@@ -934,6 +937,7 @@ fn one_func(name: &str, params: &[Ty], ret: Ty, body: Vec<Stmt>, nsite: SiteId) 
         body,
         line: 1,
         is_test: false,
+        is_invariant: false,
         noreturn_site: nsite,
     }
 }
@@ -1032,7 +1036,7 @@ fn every_operator_at_edge_values() {
                     funcs.push(one_func("cr", &[at], ty, vec![Stmt::Return(Some(e))], 1));
                     lconst.push((funcs.len() - 1, c));
                 }
-                let prog = Program { module: "edge".into(), funcs, sites, mode: OverflowMode::Trap };
+                let prog = Program { module: "edge".into(), funcs, sites, mode: OverflowMode::Trap, unchecked: Vec::new() };
                 let mut calls: Vec<(usize, Vec<i128>)> = Vec::new();
                 for &a in &vals {
                     for &b in &rvals {
@@ -1101,7 +1105,7 @@ fn compare_unary_widen_at_edge_values() {
                 funcs.push(one_func("cb", &[ty], Ty::U32, as_branch(cmp(op, konst(ty, c), var(ty, 0))), 1));
                 single.push(funcs.len() - 1);
             }
-            let prog = Program { module: "cmp".into(), funcs, sites, mode: OverflowMode::Trap };
+            let prog = Program { module: "cmp".into(), funcs, sites, mode: OverflowMode::Trap, unchecked: Vec::new() };
             let mut calls = Vec::new();
             for &a in &vals {
                 for &b in &vals {
@@ -1129,7 +1133,7 @@ fn compare_unary_widen_at_edge_values() {
             }
         }
         let n = funcs.len();
-        let prog = Program { module: "unary".into(), funcs, sites, mode: OverflowMode::Trap };
+        let prog = Program { module: "unary".into(), funcs, sites, mode: OverflowMode::Trap, unchecked: Vec::new() };
         let calls: Vec<(usize, Vec<i128>)> =
             (0..n).flat_map(|f| vals.iter().map(move |&a| (f, vec![a]))).collect();
         if let Err(e) = compare_calls(&prog, &calls, &mut rng, &mut stats) {
@@ -1149,7 +1153,7 @@ fn compare_unary_widen_at_edge_values() {
                 one_func("wa", &[ty], to, vec![Stmt::Return(Some(arith(to, ArithOp::ShrW, use_, konst(Ty::U32, 1), 0)))], 1),
                 one_func("wc", &[ty], Ty::Bool, vec![Stmt::Return(Some(cmp(CmpOp::Lt, w, konst(to, 0))))], 1),
             ];
-            let prog = Program { module: "widen".into(), funcs, sites, mode: OverflowMode::Trap };
+            let prog = Program { module: "widen".into(), funcs, sites, mode: OverflowMode::Trap, unchecked: Vec::new() };
             let calls: Vec<(usize, Vec<i128>)> =
                 (0..3).flat_map(|f| vals.iter().map(move |&a| (f, vec![a]))).collect();
             if let Err(e) = compare_calls(&prog, &calls, &mut rng, &mut stats) {
