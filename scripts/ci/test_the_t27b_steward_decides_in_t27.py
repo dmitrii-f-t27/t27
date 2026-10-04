@@ -147,7 +147,7 @@ check(tuple(r.watch_action(v, "NONE") for v in r.READINESS)
       == ("MERGE", "WAIT", "STOP", "STOP", "STOP", "STOP", "DONE"),
       "watch: READY merges, WAIT waits, CLOSED is done, every red verdict stops the chain (#6285)")
 check(tuple(r.watch_action("RETARGET", p) for p in r.PARENTS) == ("STOP", "RETARGET", "WAIT", "STOP"),
-      "watch: a stacked PR is retargeted only once its parent merged (Q30)")
+      "watch: a stacked PR is retargeted only once its parent merged (Q33)")
 
 tool = TOOL.read_text()
 body = tool[tool.index("def delta("):tool.index("def previous_run(")]

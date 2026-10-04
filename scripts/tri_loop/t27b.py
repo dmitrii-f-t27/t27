@@ -1257,7 +1257,7 @@ def ready_main(argv):
 def parent_of(src, pr):
     """NONE | MERGED | OPEN | GONE: the state of the PR whose head is this PR's
     base. Read from GitHub every time, never inferred from a read that failed
-    (Q30: a watcher that guessed skipped the retarget of #6254)."""
+    (Q33: a watcher that guessed skipped the retarget of #6254)."""
     base = pr.get("baseRefName")
     if base == "master":
         return "NONE"

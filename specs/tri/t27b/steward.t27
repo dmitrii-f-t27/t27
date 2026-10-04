@@ -250,7 +250,7 @@ pub fn pr_ready(open: bool, mergeable: u8, base_master: bool, required: u8, othe
 // base is master), 1 merged, 2 still open, 3 closed unmerged or not found.
 // 0 wait, 1 merge, 2 retarget to master and bring master in, 3 stop and
 // report, 4 done. A stacked PR is retargeted only once its parent merged
-// (Q30: from the parent's state, never from a read that failed).
+// (Q33: from the parent's state, never from a read that failed).
 pub fn watch_action(verdict: u8, parent: u8) -> u8 {
     if (verdict == 6) { return 4; }
     if (verdict == 0) { return 1; }

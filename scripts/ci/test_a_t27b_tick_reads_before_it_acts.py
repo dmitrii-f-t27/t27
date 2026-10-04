@@ -386,7 +386,7 @@ with tempfile.TemporaryDirectory() as tmp:
     write_fixture(wx, {"prs.json": [gate(22, base="claude/x")], "master_checks.json": {}})
     code, act, out = run_watch(22)
     check(code == 2 and act is None and "UNREADABLE" in out,
-          f"watch: an unreadable parent is no action, never a guessed retarget (Q30) ({code})")
+          f"watch: an unreadable parent is no action, never a guessed retarget (Q33) ({code})")
 
     check(snapshot([clean, mid, dirty]) == before, "never write: the worktrees' git state is unchanged")
     # negative control for the snapshot: a change must show
