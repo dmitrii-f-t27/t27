@@ -27,4 +27,12 @@ over ten minutes. t27b corpus runs move to a Railway service.
   and serves `/latest.json`, `/runs/<sha>.json` and `/runs/<sha>.log`.
 - No secrets: the repository is cloned anonymously and the service never
   writes to GitHub. The only variable set on it is `T27_REF`.
+- First full run (commit 9d87d1406, 1190 files under `specs/`): reference
+  646 pass, 25 fail, 516 blocked, 3 timeout; t27b 47 pass, all 47 among the
+  reference passes, 0 mismatch, 0 crash, 0 timeout; `cargo test -p t27b`
+  under qemu-user 18 passed, 0 failed. The JIT runs under qemu-user.
+- The first deploy failed the reference step with `can't start new thread`:
+  the container sees 48 CPUs, has a 24-CPU quota and `pids.max` 1000, and
+  each `zig test` starts one thread per visible CPU. Workers are now sized
+  from `cpu.max` and `pids.max`.
 - Epic: #6063.
