@@ -151,7 +151,7 @@ import urllib.request
 
 def rules():
     """The steward's decisions, compiled from specs/tri/t27b/steward.t27 (#6198).
-    Loaded on first use: `status --json`, `doctor` and `ratchet` do not need it."""
+    Loaded on first use: `status --json` and `doctor` do not need it."""
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import t27b_rules
     return t27b_rules
@@ -581,8 +581,9 @@ PASSES = ("pass", "pass_vacuous")
 # cannot compile the spec. A `fail`, `mismatch`, `crash` or `timeout` where the
 # reference passes is a defect somebody has to read; bless will not file it.
 UNIMPLEMENTED = ("blocked", "frontend", "codegen")
-RED = ("UNEXPECTED FAILURE", "UNEXPECTED PASS", "UNLISTED", "STALE", "OVER CAP", "BAD REASON")
-INFO = ("MOVED", "UNJUDGED", "VACUITY MEASURED")
+# Report order only; which kind is red is the spec's (`ratchet_is_red`).
+KINDS = ("UNEXPECTED FAILURE", "UNEXPECTED PASS", "UNLISTED", "STALE", "OVER CAP", "BAD REASON",
+         "MOVED", "UNJUDGED", "VACUITY MEASURED")
 
 
 def read_run(where):
@@ -616,53 +617,57 @@ def observed(rec):
 
 
 def ratchet(run, ledger):
-    """Every finding of `run` against `ledger`, as [{kind, path, what}]."""
+    """Every finding of `run` against `ledger`, as [{kind, path, what}].
+
+    Which finding an entry gets is decided by specs/tri/t27b/steward.t27
+    (`entry_code`, `unlisted`, `over_cap`); this function only words it.
+    """
+    r = rules()
     found = []
     add = lambda kind, path, what: found.append({"kind": kind, "path": path, "what": what})  # noqa: E731
-    by_path = {r.get("file"): r for r in run["results"]}
+    by_path = {x.get("file"): x for x in run["results"]}
     entries = {e["path"]: e for e in ledger.get("entries", [])}
     # A ledger blessed from a run without assert counts cannot tell pass from
     # pass_vacuous; the first counted run measures it instead of regressing it.
     counted = (ledger.get("source") or {}).get("asserts_counted") is not False
     for path, e in sorted(entries.items()):
-        want = e.get("t27b")
-        if want not in PASSES and e.get("reason") not in REASONS:
+        want = e.get("t27b") or "missing"
+        if not r.is_pass(want) and e.get("reason") not in REASONS:
             add("BAD REASON", path, f"reason {e.get('reason')!r} is not one of {', '.join(REASONS)}")
         rec = by_path.get(path)
         if rec is None:
             add("STALE", path, "not in this run: the spec is gone or was renamed")
             continue
-        ref = rec.get("reference")
-        if ref != "pass":
-            if ref in ("blocked", "fail"):
-                add("STALE", path, f"the reference does not pass it any more ({ref}: "
-                    f"{(rec.get('reference_detail') or '')[:120]})")
-            else:
-                add("UNJUDGED", path, f"reference {ref}: no verdict either way")
-            continue
+        ref = rec.get("reference") or "missing"
         got, blocker = observed(rec)
-        if want == "pass" and got == "pass_vacuous" and not counted:
-            add("VACUITY MEASURED", path, "ledger pass was blessed before asserts were counted; "
-                "this run counts 0 runtime asserts: bless to record pass_vacuous")
-        elif want == "pass" and got != "pass":
+        kind = r.entry(want, ref, got, counted, blocker == e.get("blocker"))
+        if kind is None:
+            continue
+        if kind == "STALE":
+            what = f"the reference does not pass it any more ({ref}: {(rec.get('reference_detail') or '')[:120]})"
+        elif kind == "UNJUDGED":
+            what = f"reference {ref}: no verdict either way"
+        elif kind == "VACUITY MEASURED":
+            what = ("ledger pass was blessed before asserts were counted; "
+                    "this run counts 0 runtime asserts: bless to record pass_vacuous")
+        elif kind == "UNEXPECTED FAILURE":
             why = "passes with 0 runtime asserts" if got == "pass_vacuous" else f"{got}: {blocker}"
-            add("UNEXPECTED FAILURE", path, f"ledger pass, now {why}")
-        elif want == "pass_vacuous" and got not in PASSES:
-            add("UNEXPECTED FAILURE", path, f"ledger pass_vacuous, now {got}: {blocker}")
-        elif want == "pass_vacuous" and got == "pass":
-            add("UNEXPECTED PASS", path, f"ledger pass_vacuous, now a pass with {rec.get('asserts')} runtime asserts")
-        elif want not in PASSES and got in PASSES:
-            add("UNEXPECTED PASS", path, f"ledger {want} ({e.get('blocker')}), now {got}")
-        elif want not in PASSES and blocker != e.get("blocker"):
-            add("MOVED", path, f"{want} ({e.get('blocker')}) -> {got} ({blocker})")
+            what = f"ledger {want}, now {why}"
+        elif kind == "UNEXPECTED PASS" and want == "pass_vacuous":
+            what = f"ledger pass_vacuous, now a pass with {rec.get('asserts')} runtime asserts"
+        elif kind == "UNEXPECTED PASS":
+            what = f"ledger {want} ({e.get('blocker')}), now {got}"
+        else:
+            what = f"{want} ({e.get('blocker')}) -> {got} ({blocker})"
+        add(kind, path, what)
     for path, rec in sorted(by_path.items()):
-        if rec.get("reference") == "pass" and path not in entries:
+        if r.unlisted(rec.get("reference") or "missing", path in entries):
             got, blocker = observed(rec)
             add("UNLISTED", path, f"the reference passes it and the ledger does not name it (t27b {got}"
                 + (f": {blocker})" if blocker else ")"))
-    not_pass = sum(1 for e in entries.values() if e.get("t27b") not in PASSES)
+    not_pass = sum(1 for e in entries.values() if not r.is_pass(e.get("t27b") or "missing"))
     cap = ledger.get("max_not_pass")
-    if not isinstance(cap, int) or not_pass > cap:
+    if r.over_cap(not_pass, cap):
         add("OVER CAP", "-", f"{not_pass} non-pass entries, max_not_pass {cap}")
     return found
 
@@ -764,9 +769,15 @@ def ratchet_main(argv):
     if old is None:
         print(f"tri t27b ratchet: UNREADABLE ledger {args.ledger}: absent", file=sys.stderr)
         return 2
-    found = ratchet(run, old)
-    counts = {k: sum(1 for f in found if f["kind"] == k) for k in RED + INFO}
-    red = sum(counts[k] for k in RED)
+    try:
+        found = ratchet(run, old)
+        counts = {k: sum(1 for f in found if f["kind"] == k) for k in KINDS}
+        red = sum(v for k, v in counts.items() if rules().ratchet_is_red(k))
+    except Exception as e:  # noqa: BLE001 -- RulesUnavailable lives in a lazily imported module
+        if type(e).__name__ != "RulesUnavailable":
+            raise
+        print(f"tri t27b ratchet: UNREADABLE rules: {e}", file=sys.stderr)
+        return 2
     verdict = "red" if red else "green"
     if args.json:
         print(json.dumps({"verdict": verdict, "commit": run.get("commit"),

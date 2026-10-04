@@ -51,7 +51,7 @@ def runs_tests(src: Path) -> tuple[int, str]:
 
 
 code, out = runs_tests(GEN)
-check(code == 0 and "14 tests passed" in out, f"the generated C passes the spec's tests ({code}: {out})")
+check(code == 0 and "31 tests passed" in out, f"the generated C passes the spec's tests ({code}: {out})")
 
 text = GEN.read_text()
 needle = "return (((in_ref * 1000) + (reference / 2)) / reference);"
@@ -86,10 +86,35 @@ try:
 except r.RulesUnavailable:
     check(True, "an unknown lab verdict is an error, not a guess")
 
+rcases = [
+    (("pass", "pass", "pass", True, True), None),
+    (("pass", "pass", "pass_vacuous", False, True), "VACUITY MEASURED"),
+    (("pass", "pass", "pass_vacuous", True, True), "UNEXPECTED FAILURE"),
+    (("pass_vacuous", "pass", "pass", True, True), "UNEXPECTED PASS"),
+    (("blocked", "pass", "pass", True, True), "UNEXPECTED PASS"),
+    (("blocked", "pass", "blocked", True, False), "MOVED"),
+    (("blocked", "fail", "blocked", True, True), "STALE"),
+    (("blocked", "not run", "blocked", True, True), "UNJUDGED"),
+    (("missing", "pass", "fail", True, True), None),
+    (("missing", "pass", "fail", True, False), "MOVED"),
+]
+got = [r.entry(*a) for a, _ in rcases]
+check(got == [w for _, w in rcases], f"the ratchet entry finding is the spec's ({got})")
+check([k for k in r.RATCHETS if k and r.ratchet_is_red(k)]
+      == ["UNEXPECTED FAILURE", "UNEXPECTED PASS", "STALE", "UNLISTED", "OVER CAP", "BAD REASON"],
+      "red ratchet findings come from ratchet_is_red")
+check((r.unlisted("pass", False), r.unlisted("pass", True), r.unlisted("fail", False)) == (True, False, False),
+      "unlisted: only a reference pass the ledger does not name")
+check((r.over_cap(5, 5), r.over_cap(6, 5), r.over_cap(0, None), r.over_cap(0, "7"), r.over_cap(0, True))
+      == (False, True, True, True, True), "over_cap: the cap only moves down; no whole-number cap is over")
+
 tool = TOOL.read_text()
 body = tool[tool.index("def delta("):tool.index("def previous_run(")]
 check('("fail", "mismatch", "crash")' not in body and "rules().delta(" in body,
       "t27b.py delta asks the spec and keeps no verdict tuple of its own")
+body = tool[tool.index("def ratchet("):tool.index("def bless(")]
+check("r.entry(" in body and "got in PASSES" not in body and "want not in PASSES" not in body,
+      "t27b.py ratchet asks the spec and keeps no branch of its own")
 
 t27c = os.environ.get("TRI_T27C") or next(
     (str(p) for p in (ROOT / "target/release/t27c", ROOT / "target/debug/t27c") if os.access(p, os.X_OK)), None)

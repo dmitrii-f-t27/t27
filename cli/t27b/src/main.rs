@@ -448,12 +448,15 @@ fn cmd_build(prog: &Program, ph: &mut Phases, o: &Opts) -> ExitCode {
         Ok(c) => c,
         Err(e) => return codegen_error(&e),
     };
-    // A function taking or returning a struct uses t27b's own convention
-    // (a struct is passed by address), not the platform's, so no C caller
-    // can link to it.
+    // A function taking or returning a struct or a str uses t27b's own
+    // convention (an aggregate is passed by address), not the platform's, so
+    // no C caller can link to it. `__t27b_*` helpers are never exported and
+    // need no note.
     let mut names: Vec<String> = prog.funcs.iter().map(|f| f.name.clone()).collect();
     for &id in &prog.internal_abi {
-        errln!("t27b: note: `{}` takes or returns a struct and is not exported", names[id as usize]);
+        if !names[id as usize].starts_with("__t27b_") {
+            errln!("t27b: note: `{}` takes or returns a struct or a str and is not exported", names[id as usize]);
+        }
         names[id as usize].clear();
     }
     let obj = ph.time("emit", || {
