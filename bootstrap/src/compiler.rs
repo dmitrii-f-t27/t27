@@ -26369,6 +26369,12 @@ impl RustCodegen {
         } else {
             "pub const"
         };
+        // Source constant names are public API. Accommodate Rust's naming lint
+        // on this declaration only, rather than renaming the symbol or
+        // silencing unrelated warnings in the generated module.
+        if !node.extra_mutable && node.name.bytes().any(|byte| byte.is_ascii_lowercase()) {
+            self.write_line("#[allow(non_upper_case_globals)]");
+        }
         self.write_line(&format!(
             "{} {}: {} = {};",
             kw, node.name, const_type, value
