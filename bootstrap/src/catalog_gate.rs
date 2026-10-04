@@ -701,6 +701,96 @@ mod tests {
         assert!((PHI2 + 1.0 / PHI2 - 3.0).abs() < 1e-12);
     }
 
+    /// The tracked catalog of the tree this test binary was built from; the
+    /// generator is found by walking up from it, as in a real run.
+    fn repo_catalog() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../specs/numeric/formats_catalog.t27")
+    }
+
+    fn empty_report() -> Report {
+        Report {
+            records: 0,
+            getters: 0,
+            by_shape: BTreeMap::new(),
+            by_cluster: BTreeMap::new(),
+            checked: BTreeMap::new(),
+            findings: Vec::new(),
+            emitted: None,
+        }
+    }
+
+    /// A path with no `formats_catalog.json`, so `check_emitted_at` regenerates.
+    fn no_emitted_dir() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("t27-catalog-gate-test-absent-{}", std::process::id()))
+    }
+
+    /// Runs at once must not remove each other's regenerated catalog. With the
+    /// shared `$TMPDIR/t27-catalog-emitted`, cleared by every call before it
+    /// wrote, threads released together reported `emitted-unreadable` for a
+    /// catalog that is fine -- the false Phase 7 failure two `t27c suite` runs
+    /// produced on 2026-10-04. Threads, not processes: they share a pid, which
+    /// is also why the scratch name carries a counter.
+    #[test]
+    fn concurrent_regenerations_do_not_remove_each_other() {
+        use std::sync::{Arc, Barrier};
+        const RUNS: usize = 8;
+        let cat = repo_catalog();
+        let src = std::fs::read_to_string(&cat).expect("the tracked catalog is readable");
+        let records = Arc::new(parse_records(&src));
+        let barrier = Arc::new(Barrier::new(RUNS));
+        let handles: Vec<_> = (0..RUNS)
+            .map(|_| {
+                let (cat, records, barrier) = (cat.clone(), records.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    let mut r = empty_report();
+                    barrier.wait();
+                    check_emitted_at(&no_emitted_dir(), &records, &mut r, Some(&cat));
+                    r
+                })
+            })
+            .collect();
+        let mut broken = Vec::new();
+        for h in handles {
+            let r = h.join().expect("a run panicked");
+            let unreadable: Vec<String> = r
+                .findings
+                .iter()
+                .filter(|f| f.check == "emitted-unreadable")
+                .map(|f| f.detail.clone())
+                .collect();
+            if unreadable.is_empty() {
+                let msg = r.emitted.unwrap_or_default();
+                assert!(msg.contains("numeric fields compared"), "the comparison did not run: {msg}");
+            }
+            broken.extend(unreadable);
+        }
+        assert!(
+            broken.is_empty(),
+            "{} of {RUNS} concurrent runs reported emitted-unreadable: {:?}",
+            broken.len(),
+            broken
+        );
+    }
+
+    /// The report says the artifact was regenerated, and the directory it
+    /// names is already gone -- the line must not point at a path to go read.
+    #[test]
+    fn the_emitted_line_names_the_regeneration_and_its_removal() {
+        let cat = repo_catalog();
+        let records = parse_records(&std::fs::read_to_string(&cat).unwrap());
+        let mut r = empty_report();
+        check_emitted_at(&no_emitted_dir(), &records, &mut r, Some(&cat));
+        let msg = r.emitted.unwrap_or_default();
+        assert!(msg.contains("numeric fields compared"), "{msg}");
+        let dir = msg
+            .split("regenerated into ")
+            .nth(1)
+            .and_then(|rest| rest.split(" (gen/").next())
+            .unwrap_or_else(|| panic!("the line does not say it regenerated: {msg}"));
+        assert!(msg.contains("removed after the comparison"), "{msg}");
+        assert!(!Path::new(dir).exists(), "{dir} is still there: {msg}");
+    }
+
     #[test]
     fn a_quoted_value_with_spaces_parses_whole() {
         let recs = parse_records(r#"// CATALOG: id=x name="A B C" bits=8 s=1 e=3 m=4"#);
