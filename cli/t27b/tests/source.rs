@@ -240,6 +240,52 @@ test overflow_through_a_field {
     assert_eq!(internal, vec!["mk", "swap", "sum", "wrap"]);
 }
 
+/// A scalar field initialised from a call inside a struct literal is a store
+/// of the call's value. It once went down the in-place path meant for an
+/// aggregate result, passing a result pointer to a fn that returns a
+/// register, so the field was never written (gf16_dot4.t27, d6_test.t27).
+#[test]
+fn struct_field_initialised_from_a_scalar_call() {
+    let src = "module sf;
+
+const In = struct {
+    a0: u16,
+    b0: u16,
+};
+
+const Out = struct {
+    result: u16,
+};
+
+fn mul(a: u16, b: u16) u16 {
+    return a * b;
+}
+
+fn dot(inputs: In) Out {
+    var r: Out = Out{ .result = mul(inputs.a0, inputs.b0) };
+    return r;
+}
+
+fn direct(x: u16) Out {
+    return Out{ .result = mul(x, x) };
+}
+
+test field_from_call {
+    const o = dot(In{ .a0 = 3, .b0 = 5 });
+    assert(o.result == 15);
+    assert(direct(4).result == 16);
+}
+
+test overflow_in_field_call {
+    const o = dot(In{ .a0 = 300, .b0 = 300 });
+    assert(o.result == 0);
+}
+";
+    let r = run(src);
+    assert_eq!(names_ok(&r), vec![("field_from_call", false, true), ("overflow_in_field_call", false, false)]);
+    assert_eq!(r[1].2.unwrap_err().0, TrapKind::Overflow);
+}
+
 #[test]
 fn struct_rejections_are_precise() {
     let head = "module st;\n\nconst Pt = struct { x: u32, y: u32 };\n\n";

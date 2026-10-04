@@ -2250,6 +2250,30 @@ fn bench_unlowerable_body_names_its_construct() {
     assert!(e.iter().all(|m| !m.contains("BenchBlock")), "{:?}", e);
 }
 
+/// A bench written as prose clauses (`measure: nanoseconds to f(x)`,
+/// `target: < 10ns`) reaches lowering as childless StmtExpr nodes holding the
+/// text. t27c writes `// NOT LOWERED: empty statement` for each, so the bench
+/// compiles to an empty body and the file's tests run as before.
+#[test]
+fn bench_prose_clauses_lower_to_nothing() {
+    let src = "module bp;
+
+fn sq(x: u32) u32 {
+    return x * x;
+}
+
+test sq_small {
+    assert(sq(3) == 9);
+}
+
+bench sq_latency
+    measure: nanoseconds to sq(sq(2)) when 2 bytes available
+    target: < 10ns
+";
+    let prog = lower_text(src).unwrap_or_else(|e| panic!("{}", e.join("\n")));
+    assert_eq!(run_both(&prog), vec![("sq_small".to_string(), false)]);
+}
+
 // ------------------------------------------------------------ shift source
 
 /// `<<` and `>>` from source, in the shapes t27c's Zig backend emits: a
