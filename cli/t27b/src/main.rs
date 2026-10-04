@@ -234,7 +234,7 @@ fn cmd_test(prog: &Program, ph: &mut Phases, o: &Opts) -> ExitCode {
         Ok(c) => c,
         Err(e) => return codegen_error(&e),
     };
-    let jit = ph.time("jit-map", || Jit::load(&code, prog.funcs.len()));
+    let jit = ph.time("jit-map", || Jit::load(&code, prog.funcs.len(), &prog.data));
     let mut jit = match jit {
         Ok(j) => j,
         Err(e) => {
@@ -293,6 +293,8 @@ fn cmd_test(prog: &Program, ph: &mut Phases, o: &Opts) -> ExitCode {
                             || (ty.from_raw(t.a) == *a && ty.from_raw(t.b) == *b))
                 }
                 (_, Err(Stop::Fuel)) | (_, Err(Stop::Depth)) => true,
+                // An interpreter fault is a lowering defect: never agreement.
+                (_, Err(Stop::Fault(_))) => false,
                 _ => false,
             };
             if !agree {
@@ -364,7 +366,7 @@ fn cmd_build(prog: &Program, ph: &mut Phases, o: &Opts) -> ExitCode {
     };
     let names: Vec<String> = prog.funcs.iter().map(|f| f.name.clone()).collect();
     let obj = ph.time("emit", || {
-        codegen::link(Vec::new(), None, &code, prog.funcs.len()).map(|l| (macho::object(&l, &names), l.code.len()))
+        codegen::link(Vec::new(), None, &code, prog.funcs.len()).map(|l| (macho::object(&l, &names, &prog.data), l.code.len()))
     });
     let (obj, words) = match obj {
         Ok(x) => x,
