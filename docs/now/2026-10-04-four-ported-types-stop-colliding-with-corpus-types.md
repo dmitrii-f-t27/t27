@@ -2,9 +2,24 @@
 
 ## Give each newer port definition its own name (Closes #5810)
 
-- `tri types ratchet` failed on master at `17f09865a` (run 37147322541): ledger 77, observed 81, four NEW conflicts from the 2026-10-03 trinity port batch. `CounterState`: #5797 (`d_f19_test.t27`) and #5798 (`d_slow_blink.t27`) against `uart_echo_top.t27`, three different field lists. `LRUCache`: #5794 (`gen_cache.t27`) against `specs/tri/collections/lru_cache.t27`. `TestCase` and `TestRunner`: #5792 (`gen_test_runner.t27`) against `wp18_gate_selfconsistent_selftest.t27` and `specs/test_framework/runner.t27`.
-- Rename the newer definition inside its own file, as #5504 did for fifteen names, instead of blessing four conflicts: `F19CounterState`, `SlowBlinkCounterState`, `GenLRUCache`, `GenTestCase`, `GenTestRunner`. Function and test names (`LRUCache_init`, `TestRunner_run`, ...) are left as ported, as #5504 left `BezierCurve_eval`.
-- Proof that nothing else moved: for each of the four files, `t27c gen`, `gen-rust`, `gen-c` and `gen-verilog` emit the same bytes before and after once the new name is mapped back to the old one; every backend accepted every file both times.
-- Ledger, classification and `docs/TYPE_CONFLICTS.md` do not change: none of the four names was in them. `tri types ratchet`: CLEAN at 77; `tri types classified`: OK; `tools/dupe_scan.py`: no new group.
-- No seal is touched: none of the four specs had one, and minting them is not this change -- `d_f19_test.t27` and `d_slow_blink.t27` are both `module trinity_top` and would write the same `openxc7-synth_trinity_top.json`. The porter (`tools/queen/feed_roadmap.py`, `pick`) skips a target that already exists, so it does not regenerate these files over the rename.
-- Not fixed here, and now visible: the same job's next step, `t27c suite --ratchet --corpus-only`, was skipped on master behind this failure and is RATCHET: FAIL on 3 UNEXPECTED FAILURES from the same 2026-10-03 batch, all merged with this job red: `d_simple_ff.t27` (#5793) and `d_slow_blink.t27` (#5798) `[parse-no-discard]` (tuple `var (a, b) =` test clauses dropped; 182 tokens in `d_slow_blink.t27` before and after the rename), and `specs/xilinx7/packets.t27` (#5795) `[parse]` (`for (var i = 0; ...)` at line 137).
+### What was read
+
+- Original PR #5812, source commit `0b4d69383f03f593809dce6eb599773eb4af74eb` by Dmitrii Vasilev, and current master `e6f873383ccea1d76f6fb9837a4f20d0b00863ff`. The original commit is preserved unchanged in the integration history.
+- The corpus gate found 81 conflicting names against a ledger of 77: CounterState, LRUCache, TestCase and TestRunner were new collisions between unrelated ports. The original PR conflicted with the executable slow-blink tests accepted in #5851.
+
+### What changed
+
+- Retain the original five definition renames: F19CounterState, SlowBlinkCounterState, GenLRUCache, GenTestCase and GenTestRunner. Function/test names, fields and behavior remain unchanged.
+- Resolve the slow-blink conflict by retaining the current explicit zero-initialization, const bindings, all eight executable tests and four invariants. Reversing just the approved type names restores all four current-master files byte for byte.
+- Update this one receipt. No compiler, generated file, failure ledger, classification or seal is edited.
+
+### What was verified
+
+- Fresh `cargo build --release -p tri` succeeds (18 existing warnings). `tri types ratchet`: ledger77/observed77, CLEAN; `tri types classified`:77 names,44 DRIFT/33 DISTINCT, OK; `tri types redef`: zero same-file redefinitions.
+- For each of four current-master/repaired source pairs, all four generators (`gen`, `gen-rust`, `gen-c`, `gen-verilog`) exit0. All16 emitted output pairs are byte-identical after reversing only the new type identifiers and their uppercase/lowercase backend spellings. No statements or diagnostics are excluded from the comparison.
+- All four sources have no discarded tokens and zero typecheck errors/warnings before and after. Existing generated-Zig tests pass before and after: F19 counter16tests/5invariants, slow-blink8tests/4invariants, cache4tests, test runner4tests. These32 tests are preserved existing tests, not32 newly added tests.
+
+### Not verified
+
+- Generation equivalence is not compilation or execution of C, Rust or RTL. Verilog cache output still marks its fields UNSUPPORTED_ICARUS, unchanged by the rename; the cache put/deinit and runner add/deinit remain existing stubs. This change does not claim complete LRU or test-runner implementations.
+- No physical board, RF, timing, synthesis, or model inference was tested. The independent packets parser failure and existing seal/ring drift remain visible; no failure is blessed away.
