@@ -2249,3 +2249,144 @@ fn bench_unlowerable_body_names_its_construct() {
     assert!(e[0].starts_with("t27b: unsupported construct StmtFor(range) at line "), "{:?}", e);
     assert!(e.iter().all(|m| !m.contains("BenchBlock")), "{:?}", e);
 }
+
+// ------------------------------------------------------------ shift source
+
+/// `<<` and `>>` from source, in the shapes t27c's Zig backend emits: a
+/// non-literal amount goes through `@intCast` to `Log2Int(T)` (a negative or
+/// too-wide amount traps), and an untyped literal on the left is pinned with
+/// `@as(T, lit)`: T is the declared integer type of the local being
+/// initialized, else u32, else u64 when the literal does not fit u32 -- even
+/// when the amount is a named constant (`0xFF << K` wraps in u32). `<<`
+/// drops the bits that leave the type (no `@shlExact`); `>>` is arithmetic on
+/// signed types and logical on unsigned ones. Every block's verdict here is
+/// the one `t27c gen` + `zig test` (Zig 0.16) gives for the same text.
+const SHIFT_SRC: &str = r#"module shiftsrc;
+
+const K = 28;
+
+fn pow2(d: i32) i32 {
+    var hf: i32 = 1 << d;
+    return hf;
+}
+
+fn mask(width: u32) u32 {
+    return (1 << width) - 1;
+}
+
+fn wide(d: u32) u64 {
+    var m: u64 = 1 << d;
+    return m;
+}
+
+fn big(d: u32) u64 {
+    return 0x100000000 << d;
+}
+
+fn shl_i8(x: i8, n: u8) i8 {
+    return x << n;
+}
+
+fn sar(x: i32, n: i32) i32 {
+    return x >> n;
+}
+
+fn shr(x: u32, n: u32) u32 {
+    return x >> n;
+}
+
+fn named() u64 {
+    return 0xFF << K;
+}
+
+fn folded() u32 {
+    const s = 3;
+    return 1 << (s + 2);
+}
+
+fn folded_right() u32 {
+    return 0x100 >> (2 + 2);
+}
+
+fn compound(x: u16, n: u16) u16 {
+    var y: u16 = x;
+    y = y << n;
+    y = y >> 1;
+    return y;
+}
+
+test shift_basics {
+    assert(pow2(0) == 1);
+    assert(pow2(31) == -2147483648);
+    assert(mask(8) == 255);
+    assert(mask(0) == 0);
+    assert(wide(40) == 1099511627776);
+    assert(big(4) == 68719476736);
+    assert(shl_i8(3, 6) == -64);
+    assert(sar(-8, 1) == -4);
+    assert(sar(-1, 31) == -1);
+    assert(shr(0x80000000, 31) == 1);
+    assert(named() == 0xF0000000);
+    assert(compound(3, 15) == 0x4000);
+    assert(folded() == 32);
+    assert(folded_right() == 16);
+}
+
+test shift_amount_too_wide {
+    assert(pow2(32) == 0);
+}
+
+test shift_negative_amount {
+    assert(sar(1, -1) == 0);
+}
+
+test shift_literal_pinned_to_u32 {
+    assert(mask(32) == 0);
+}
+"#;
+
+#[test]
+fn shift_source_programs_run_in_both_engines() {
+    let r = f64_run(SHIFT_SRC);
+    let got: Vec<(&str, Result<(), TrapKind>)> = r.iter().map(|(n, o)| (n.as_str(), *o)).collect();
+    assert_eq!(
+        got,
+        vec![
+            ("shift_basics", Ok(())),
+            ("shift_amount_too_wide", Err(TrapKind::ShiftRange)),
+            ("shift_negative_amount", Err(TrapKind::ShiftRange)),
+            ("shift_literal_pinned_to_u32", Err(TrapKind::ShiftRange)),
+        ]
+    );
+}
+
+/// Shift shapes refused by name. A constant amount out of range for the left
+/// type (a literal or a typed constant) is a Zig compile error. An untyped
+/// left operand that is not a literal (`(1 + 1) << n`) has a width only if
+/// t27c's optimizer happens to fold it, which depends on where it stands, so
+/// it is refused. So is an untyped literal shifted by a literal-only amount
+/// whose value differs between the folded (comptime_int) and the pinned
+/// (`@as(u32, ..)`) readings.
+#[test]
+fn shift_refusals_name_the_construct() {
+    let first = |body: &str| -> String {
+        let src = format!("module shiftrej;\nconst KB: u32 = 40;\nfn f(x: u32, n: u32) u32 {{\n{}\n}}\n", body);
+        match f64_lower(&src) {
+            Ok(_) => panic!("expected a rejection for {}", body),
+            Err(e) => e[0].clone(),
+        }
+    };
+    for (body, want) in [
+        ("return x << 32;", "shift amount 32 out of range for u32"),
+        ("return x >> KB;", "shift amount 40 out of range for u32"),
+        ("return 1 << KB;", "shift amount 40 out of range for u32"),
+        ("return (1 + 1) << n;", "untyped literal shifted by a runtime amount"),
+        ("return 0xFF << (20 + 8);", "width depends on t27c constant folding"),
+    ] {
+        let msg = first(body);
+        assert!(msg.contains("unsupported construct ExprBinary(<< >>) "), "{}: {}", body, msg);
+        assert!(msg.contains(want), "{}: {}", body, msg);
+    }
+    // In range, a typed constant amount folds like a literal one.
+    assert!(f64_lower("module ok;\nconst KS: u32 = 31;\nfn f(x: u32) u32 {\nreturn (x >> KS) + (1 << KS);\n}\n").is_ok());
+}

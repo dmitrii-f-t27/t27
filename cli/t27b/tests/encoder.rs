@@ -58,6 +58,12 @@ fn encoders_match_clang() {
         ("lsl w0, w1, w2", lslv(false, 0, 1, 2), 0x1ac2_2020),
         ("lsr x0, x1, x2", lsrv(true, 0, 1, 2), 0x9ac2_2420),
         ("asr w0, w1, w2", asrv(false, 0, 1, 2), 0x1ac2_2820),
+        // The other width of each register shift, and the X16/X8 operand
+        // registers codegen uses for a narrowed amount (words from clang).
+        ("lsl x3, x4, x5", lslv(true, 3, 4, 5), 0x9ac5_2083),
+        ("lsr w7, w8, w9", lsrv(false, 7, 8, 9), 0x1ac9_2507),
+        ("asr x10, x11, x12", asrv(true, 10, 11, 12), 0x9acc_296a),
+        ("lsl w17, w16, w8", lslv(false, 17, 16, 8), 0x1ac8_2211),
         ("madd x0, x1, x2, x3", madd(true, 0, 1, 2, 3), 0x9b02_0c20),
         ("msub w2, w8, w17, w2", msub(false, 2, 8, 17, 2), 0x1b11_8902),
         ("mul w9, w2, w17", mul(false, 9, 2, 17), 0x1b11_7c49),
@@ -72,6 +78,8 @@ fn encoders_match_clang() {
         ("lsl x0, x1, #1", lsl_imm(true, 0, 1, 1), 0xd37f_f820),
         ("asr w3, w4, #31", asr_imm(false, 3, 4, 31), 0x131f_7c83),
         ("lsr x5, x6, #0", lsr_imm(true, 5, 6, 0), 0xd340_fcc5),
+        ("lsr x0, x16, #63", lsr_imm(true, 0, 16, 63), 0xd37f_fe00),
+        ("lsl w0, w16, #31", lsl_imm(false, 0, 16, 31), 0x5301_0200),
         ("uxtb w0, w1", uxtb(0, 1), 0x5300_1c20),
         ("uxth w0, w1", uxth(0, 1), 0x5300_3c20),
         ("sxtb w0, w1", sxtb(0, 1), 0x1300_1c20),
@@ -182,7 +190,7 @@ fn encoders_match_clang() {
         }
     }
     assert!(bad.is_empty(), "encoder mismatches:\n{}", bad.join("\n"));
-    assert_eq!(cases.len(), 151);
+    assert_eq!(cases.len(), 157);
 }
 
 #[test]
