@@ -628,12 +628,12 @@ two domains, and a tool the Queen runs daily may still be N's or K's to answer f
 | **V** | 8 | 3 | `gHashTag/trinity:tri/bench`, `gHashTag/trinity:tri/test`, `tri/competitors`, `tri/mutate`, `tri/orphaned`, `tri/test`, `tri/verdict`, `tri/vsim`, *t27/tri-pipeline*, *trinity/review-code*, *trinity/status* |
 | **W** | 7 | 3 | `mcp/t27-traceability`, `mcp/tri-mcp`, `tri/cell`, `tri/merging`, `tri/pr`, `tri/status`, `tri/worktrees`, *t27/phi-loop*, *t27/tri*, *trinity/implement-issue* |
 | **X** | 0 | 1 | *trinity/scholar* |
-| **Y** | 7 | 2 | `gHashTag/trinity:tri/govern`, `gHashTag/trinity:tri/hardware`, `gHashTag/trinity:tri/identity`, `gHashTag/trinity:tri/mesh`, `gHashTag/trinity:tri/reputation`, `gHashTag/trinity:tri/wallet`, `tri/serve`, *trinity/farm-garden*, *trinity/wave* |
+| **Y** | 7 | 3 | `gHashTag/trinity:tri/govern`, `gHashTag/trinity:tri/hardware`, `gHashTag/trinity:tri/identity`, `gHashTag/trinity:tri/mesh`, `gHashTag/trinity:tri/reputation`, `gHashTag/trinity:tri/wallet`, `tri/serve`, *t27/providers-steward*, *trinity/farm-garden*, *trinity/wave* |
 | **Z** | 2 | 4 | `mcp/tri-ssot`, `tri/now`, *trinity/blog-post*, *trinity/doctor*, *trinity/queen-hive-visuals*, *trinity/ux-wave* |
 | **TI** | 1 | 0 | `gHashTag/trinity:tri/identity` |
 
 Tools are written in `code`, skills in *italics*. The Queen is not listed: she
-holds all 92 tools and all 26 skills by rule 1, which is why her own cards say so
+holds all 92 tools and all 27 skills by rule 1, which is why her own cards say so
 rather than repeating this table.
 
 Each binding is recorded twice and checked both ways: a tool card's `AGENTS` must
