@@ -1569,9 +1569,41 @@ impl Parser {
             }
         }
         {
+            // A Rust macro call -- `format!(..)`, `assert!(..)`, `panic!(..)` --
+            // is refused in the same pass. t27 has no macros, and nothing said
+            // so: `const s = format!("{}", a);` parsed as `const s = format`
+            // followed by the statement `!("{}", a)`, which gen-rust lowered to
+            // `(("{}", a) == 0);`. `assert!(c, "m")` in a test became an assert
+            // of `!(c, "m")`, which gen-zig wrote as `!.{ c, "m" }` and gen-rust
+            // dropped with the rest of the test. Only a struct-literal field
+            // value was loud about it. The shape is an identifier glued to `!`,
+            // then an opening bracket on the same line (Rust also accepts
+            // `format! (..)`); `a != b` lexes `!=` as one token and `!x` has no
+            // identifier glued to its left.
             let mut scan = self.lexer.clone();
+            let mut window: [Option<Token>; 2] = [Some(self.current.clone()), Some(self.peek.clone())];
             loop {
                 let t = scan.next_token();
+                if let [Some(name), Some(bang)] = &window {
+                    let glued = |a: &Token, b: &Token, width: usize| {
+                        a.line == b.line && a.col + width == b.col
+                    };
+                    if name.kind == TokenKind::Ident
+                        && bang.kind == TokenKind::Bang
+                        && matches!(
+                            t.kind,
+                            TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace
+                        )
+                        && glued(name, bang, name.lexeme.len())
+                        && bang.line == t.line
+                    {
+                        return Err(format!(
+                            "`{}!` at line {}:{} is a Rust macro call; t27 has no macros, and \
+the parser used to read it as `{}` followed by a negation",
+                            name.lexeme, name.line, name.col, name.lexeme
+                        ));
+                    }
+                }
                 match t.kind {
                     TokenKind::Eof => break,
                     TokenKind::UnterminatedString => {
@@ -1582,6 +1614,7 @@ impl Parser {
                     }
                     _ => {}
                 }
+                window = [window[1].take(), Some(t)];
             }
         }
 
@@ -2712,6 +2745,9 @@ impl Parser {
             }
             if self.current.kind == TokenKind::Ident {
                 let field_name = self.current.lexeme.clone();
+                // Kept so typecheck can name the field's line (#5968); no
+                // backend reads a field's line.
+                let field_line = self.current.line as u32;
                 self.advance();
 
                 let mut type_str = String::new();
@@ -2834,6 +2870,7 @@ impl Parser {
                 let mut field = Node::new(NodeKind::ExprIdentifier);
                 field.name = field_name;
                 field.extra_type = type_str;
+                field.line = field_line;
                 if let Some(v) = field_default {
                     field.children.push(v);
                 }
@@ -3630,12 +3667,18 @@ impl Parser {
         // parsed, and this parser hard-errored -- both wrong. Capture the
         // whole block verbatim (brace-aware) into a named statement: read,
         // counted as nothing, executed as nothing.
+        //
+        // #5949: executed as nothing is the defect. A `match` that is a fn's
+        // value lowered to an empty body in every backend and no gate said so.
+        // Parse still accepts the block, for W914's reason; `typecheck` refuses
+        // it (`check_captured_match`), so the capture records its line.
         if self.current.kind == TokenKind::Ident
             && self.current.lexeme == "match"
             && self.peek.kind != TokenKind::Equals
             && self.peek.kind != TokenKind::Dot
             && self.peek.kind != TokenKind::LParen
         {
+            let line = self.current.line as u32;
             let mut text = String::new();
             let mut depth: i32 = 0;
             let mut seen = false;
@@ -3664,6 +3707,7 @@ impl Parser {
             let mut stmt = Node::new(NodeKind::StmtExpr);
             stmt.name = "match".to_string();
             stmt.value = text;
+            stmt.line = line;
             return Ok(stmt);
         }
         // W914: `pub const X = ...` inside a body -- Zig-style local pub decl.
@@ -25517,10 +25561,153 @@ drop the parameter from the declaration and keep it at each use, where it is und
     // literal is the value; nothing compared them.
     check_const_widths(ast, &mut result);
 
+    // A struct field must have a type (#3225).
+    //
+    // `variants : [A, B]` and the `- name : 0` list form are declarations the
+    // parser does not implement, and error recovery turns their items into
+    // fields: one with an EMPTY type, the rest with an integer literal for a
+    // type. gen-rust writes `pub variants: ,` and `pub success: 0,`, gen-c
+    // writes `0 success;`, and every stage before them accepted the spec --
+    // `tri misread` counted 28 specs carrying the empty form alone.
+    check_field_types(ast, &mut result);
+    check_captured_match(ast, "", &mut result);
+
+    // Two shapes `tri misread` found silent: parse and typecheck accepted the
+    // spec and the generated code did not compile (#5968). A struct field type
+    // holding a lone `:` (a field that swallowed the ones after it, or a map
+    // type), and `@as` to a slice or array type, which every backend loses.
+    check_colon_in_field_type(ast, &mut result);
+    check_as_slice_type(ast, "", &mut result);
+
     if result.error_count > 0 {
         result.ok = false;
     }
     result
+}
+
+/// Refuse a struct field whose type slot holds no type: empty, or an integer
+/// literal. Both are what the parser's recovery leaves behind, never what a
+/// spec meant, and no backend can lower either.
+fn check_field_types(node: &Node, result: &mut TypeCheckResult) {
+    if node.kind == NodeKind::StructDecl {
+        for f in &node.children {
+            if f.kind != NodeKind::ExprIdentifier || f.name.is_empty() {
+                continue;
+            }
+            let ty = f.extra_type.trim();
+            let digits = ty.strip_prefix('-').unwrap_or(ty);
+            let what = if ty.is_empty() {
+                "has no type".to_string()
+            } else if digits.chars().all(|c| c.is_ascii_digit()) {
+                format!("has the integer literal `{ty}` for a type")
+            } else {
+                continue;
+            };
+            result.error_count += 1;
+            result.errors.push(format!(
+                "struct `{}` field `{}` {what} -- the parser recovered a declaration it does \
+not implement as a field, and the backends emit it unparseable (#3225)",
+                node.name, f.name
+            ));
+        }
+    }
+    for c in &node.children {
+        check_field_types(c, result);
+    }
+}
+
+/// A Rust `match` block captured as text by the body parser (W914). No backend
+/// lowers it, so the statement -- and a fn's return value, when the block was
+/// its tail -- disappears from every generated file (#5949). The node is the
+/// only `StmtExpr` named `match` with no children; a call `match(x)` or an
+/// assignment `match = x` keeps its expression as a child.
+fn check_captured_match(node: &Node, owner: &str, result: &mut TypeCheckResult) {
+    let owner = match node.kind {
+        NodeKind::FnDecl => format!("fn `{}`", node.name),
+        NodeKind::TestBlock => format!("test `{}`", node.name),
+        _ => owner.to_string(),
+    };
+    if node.kind == NodeKind::StmtExpr && node.name == "match" && node.children.is_empty() {
+        let at = if owner.is_empty() { String::new() } else { format!(" in {owner}") };
+        result.error_count += 1;
+        result.errors.push(format!(
+            "`match` block at line {}{at} is Rust; t27 has no `match`, so the parser keeps it \
+as text and every backend lowers it to nothing. Write it as `switch (x) {{ a => .., else => .. }}` (#5949)",
+            node.line
+        ));
+    }
+    for c in &node.children {
+        check_captured_match(c, &owner, result);
+    }
+}
+
+/// A struct field whose type holds a `:` that is not part of a `::` path.
+///
+/// No type is spelled that way. Measured on the corpus (#5968) it arrives two
+/// ways. A field with no `,` after it -- missing, or inside a trailing `#`
+/// comment, which runs to the end of the line -- swallows the declarations
+/// that follow into its type: `identity : String  # note,` then
+/// `sacred_score : Float` gives the one field `identity` of type
+/// `Stringsacred_score:Float`. Or the type is a map, `[str: str]`, which t27
+/// does not have. gen-rust writes either as a type with a colon in it.
+fn check_colon_in_field_type(node: &Node, result: &mut TypeCheckResult) {
+    if node.kind == NodeKind::StructDecl {
+        for f in &node.children {
+            if f.kind != NodeKind::ExprIdentifier || f.name.is_empty() {
+                continue;
+            }
+            let ty = f.extra_type.trim();
+            if !ty.replace("::", "").contains(':') {
+                continue;
+            }
+            let why = if ty.starts_with('[') && ty.ends_with(']') {
+                "is a map type; t27 has no map type, and gen-rust writes it as `Vec<K:V>`. \
+Use a slice of a key/value struct"
+            } else {
+                "holds the fields declared after it: the field has no `,` after it, either \
+missing or inside a trailing `#` comment, which runs to the end of the line. Put the `,` \
+before the comment, and write the comment with `//`"
+            };
+            result.error_count += 1;
+            result.errors.push(format!(
+                "struct `{}` field `{}` at line {} has the type `{ty}`, which {why} (#5968)",
+                node.name, f.name, f.line
+            ));
+        }
+    }
+    for c in &node.children {
+        check_colon_in_field_type(c, result);
+    }
+}
+
+/// `@as(T, x)` where `T` is a slice or array type. In argument position the
+/// parser reads `[]u8` as an empty array literal of `u8`, so the type is gone
+/// before any backend sees it: gen-zig writes `@as(.{}, x)`, gen-c
+/// `({ 0 })(x)`, gen-rust `(x as Vec<>)`, and `[4]u8` comes out as
+/// `.{ 4 }` / `Vec<4>` (#5968).
+fn check_as_slice_type(node: &Node, owner: &str, result: &mut TypeCheckResult) {
+    let owner = match node.kind {
+        NodeKind::FnDecl => format!("fn `{}`", node.name),
+        NodeKind::TestBlock => format!("test `{}`", node.name),
+        _ => owner.to_string(),
+    };
+    if node.kind == NodeKind::ExprCall && node.name == "@as" {
+        if let Some(t) = node.children.first() {
+            if t.kind == NodeKind::ExprArrayLiteral {
+                let at = if owner.is_empty() { String::new() } else { format!(" in {owner}") };
+                result.error_count += 1;
+                result.errors.push(format!(
+                    "`@as` at line {}{at} casts to a slice or array of `{}`; in that position \
+the parser reads the type as an array literal, and every backend loses it -- gen-zig writes \
+`@as(.{{}}, x)`, gen-rust `(x as Vec<>)`. Write the value without the cast (#5968)",
+                    node.line, t.extra_type
+                ));
+            }
+        }
+    }
+    for c in &node.children {
+        check_as_slice_type(c, &owner, result);
+    }
 }
 
 /// The number of value bits a t27 integer type holds, or `None` if the type is
@@ -26042,6 +26229,13 @@ fn types_compatible(target: &TypeInfo, value: &TypeInfo) -> bool {
     if target == value {
         return true;
     }
+    // `?T` accepts a `T` (and a `?T`), as Zig coerces T to ?T (#6186).
+    if let TypeInfo::Optional(inner) = target {
+        return match value {
+            TypeInfo::Optional(v) => types_compatible(inner, v),
+            v => types_compatible(inner, v),
+        };
+    }
     // Reject narrowing f64 -> f32 (precision loss). Widening f32 -> f64 is still
     // permitted by the rank check below. Fixes #920 (typechecker unsoundness, bug 1).
     if *target == TypeInfo::GF16 && (*value == TypeInfo::F32 || *value == TypeInfo::F64) {
@@ -26071,8 +26265,11 @@ fn is_signed_int(t: &TypeInfo) -> bool {
 }
 
 fn resolve_type_str(s: &str) -> TypeInfo {
-    let t = s.trim().trim_end_matches('?');
-    let is_opt = s.trim().ends_with('?');
+    // Both spellings of an optional: `i32?` and Zig's `?i32`. The prefix form fell
+    // through to Custom("?i32") and rejected `opt = value` (#6186).
+    let trimmed = s.trim();
+    let is_opt = trimmed.ends_with('?') || trimmed.starts_with('?');
+    let t = trimmed.trim_end_matches('?').trim_start_matches('?').trim();
     let base = match t {
         "void" => TypeInfo::Void,
         "bool" => TypeInfo::Bool,
@@ -27389,10 +27586,68 @@ impl RustCodegen {
             "@mod" if two => format!("({}).rem_euclid({})", a(0), a(1)),
             "@divTrunc" if two => format!("({} / {})", a(0), a(1)),
             "@divFloor" if two => format!("({}).div_euclid({})", a(0), a(1)),
+            // Zig's `@panic(msg)` takes a message and never returns; so does
+            // Rust's `panic!`. The message goes through `"{}"` for the reason
+            // given at `std_macro_call_to_rust`.
+            "@panic" if one => format!("panic!(\"{{}}\", {})", a(0)),
             // Anything else keeps its spelling: a wrong translation is worse
             // than an untranslated one, because the first compiles.
             _ => return None,
         })
+    }
+
+    /// The calls t27 shares with Rust by NAME, which Rust spells as MACROS.
+    ///
+    /// `assert(cond)` reached rustc as `assert((cond))` -- the generic call
+    /// arm prints `name(args)` -- and rustc answered E0423, "expected function,
+    /// found macro `assert`". Measured over the corpus: 95 such lines in the
+    /// function bodies of 9 specs, and 94 E0423 diagnostics naming `assert`
+    /// (the 95th line sits in a file whose parse stops first). `panic` is the
+    /// same defect at 1 site; `assert_eq` and `assert_ne` are the same defect
+    /// with no function-body site yet; the bare `unreachable` identifier is
+    /// the same defect in the identifier arm.
+    ///
+    /// A MESSAGE argument is passed through `"{}"`, never as the format string.
+    /// `assert!(c, msg)` with a non-literal `msg` is an error in edition 2021,
+    /// and a literal holding `{` or `}` would be read as a format directive.
+    ///
+    /// A spec that declares its own function of one of these names keeps its
+    /// call: Rust resolves `assert(c)` to that function, because functions and
+    /// macros live in different namespaces, so the plain call already
+    /// compiles there, and rewriting it would call the wrong thing.
+    ///
+    /// `expect`, `expectEqual` and `std.testing.*` are NOT here. Rust has no
+    /// macro of those names (`expect` is a lint attribute), so they are not a
+    /// missing `!`; mapping them onto `assert!` would be choosing semantics
+    /// (Zig's `expect` returns an error, it does not abort).
+    fn std_macro_call_to_rust(&self, name: &str, args: &[String]) -> Option<String> {
+        if self.module_declares(name) {
+            return None;
+        }
+        Some(match (name, args.len()) {
+            ("assert", 1) => format!("assert!({})", args[0]),
+            ("assert", 2) => format!("assert!({}, \"{{}}\", {})", args[0], args[1]),
+            ("assert_eq" | "assert_ne", 2) => format!("{}!({}, {})", name, args[0], args[1]),
+            ("assert_eq" | "assert_ne", 3) => {
+                format!("{}!({}, {}, \"{{}}\", {})", name, args[0], args[1], args[2])
+            }
+            ("panic", 0) => "panic!()".to_string(),
+            ("panic", 1) => format!("panic!(\"{{}}\", {})", args[0]),
+            _ => return None,
+        })
+    }
+
+    /// True when this module gives `name` a meaning of its own -- a function,
+    /// a typed parameter or local of the current function, a typed constant,
+    /// or a module `var`. Not every binding is recorded: an UNTYPED local is
+    /// in none of these sets. Measured 2026-10-04: no spec in the corpus
+    /// declares anything named `assert`, `assert_eq`, `assert_ne`, `panic` or
+    /// `unreachable`.
+    fn module_declares(&self, name: &str) -> bool {
+        self.declared_fns.contains(name)
+            || self.var_types.contains_key(name)
+            || self.const_types.contains_key(name)
+            || self.static_mut_names.contains(name)
     }
 
     /// Split a comma-separated type list, honouring nesting.
@@ -28030,6 +28285,15 @@ impl RustCodegen {
             // Anchored inside `expr_to_rust`: `expr_to_string` carries the same
             // arm and is not a backend, so it must keep returning the name.
             NodeKind::ExprIdentifier if node.name == "null" => "None".to_string(),
+            // `unreachable` is Zig's keyword and Rust's MACRO; see
+            // `std_macro_call_to_rust`. The bare name is E0423, "expected value,
+            // found macro `unreachable`", in both of the positions the corpus
+            // writes it: a statement, and a branch of `if .. else`.
+            NodeKind::ExprIdentifier
+                if node.name == "unreachable" && !self.module_declares("unreachable") =>
+            {
+                "unreachable!()".to_string()
+            }
             NodeKind::ExprIdentifier => node.name.clone(),
             NodeKind::ExprBinary => {
                 if node.children.len() >= 2 {
@@ -28111,6 +28375,9 @@ impl RustCodegen {
                 }
                 let args = args;
                 if let Some(built) = Self::zig_builtin_to_rust(&node.name, &args) {
+                    return built;
+                }
+                if let Some(built) = self.std_macro_call_to_rust(&node.name, &args) {
                     return built;
                 }
                 // Specs write the math builtins BARE -- `abs(x)`, `min(a, b)` --
@@ -44115,6 +44382,25 @@ mod tests_typecheck_soundness_920 {
         assert!(types_compatible(&TypeInfo::I64, &TypeInfo::I32));
         assert!(types_compatible(&TypeInfo::U64, &TypeInfo::U32));
     }
+
+    // #6186: `?i32` (Zig's prefix spelling) is an optional, and an optional
+    // accepts its payload type. The prefix form resolved to Custom("?i32") and
+    // `wave = wave_num` was rejected while zig accepts it.
+    #[test]
+    fn optional_accepts_its_payload_6186() {
+        let opt = TypeInfo::Optional(Box::new(TypeInfo::I32));
+        assert_eq!(resolve_type_str("?i32"), opt);
+        assert_eq!(resolve_type_str("i32?"), opt);
+        assert_eq!(resolve_type_str("i32"), TypeInfo::I32);
+        assert!(types_compatible(&opt, &TypeInfo::I32), "i32 -> ?i32 must be allowed");
+        assert!(types_compatible(&opt, &opt));
+        assert!(types_compatible(&opt, &TypeInfo::I16), "widening into the payload is allowed");
+        // the payload rules still apply: no cross-sign, no narrowing
+        assert!(!types_compatible(&opt, &TypeInfo::U32), "u32 -> ?i32 must still be rejected");
+        assert!(!types_compatible(&opt, &TypeInfo::I64), "i64 -> ?i32 must still be rejected");
+        let optf = TypeInfo::Optional(Box::new(TypeInfo::F32));
+        assert!(!types_compatible(&optf, &TypeInfo::F64), "f64 -> ?f32 must still be rejected");
+    }
 }
 
 #[cfg(test)]
@@ -45321,6 +45607,282 @@ fn read_it() -> u16 {
                 v
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests_5987_rust_std_macro_bang {
+    // #5987: gen-rust printed a t27 `assert(c)` in a function body as
+    // `assert((c));` -- a call to a FUNCTION named `assert`, which Rust does
+    // not have, so rustc refused the file with E0423 ("expected function,
+    // found macro `assert`"). The same missing `!` hit `assert_eq`,
+    // `assert_ne`, `panic`, Zig's `@panic` and the bare `unreachable`.
+    // Each source below is the reproducer that was run through
+    // `t27c gen-rust` + `rustc --edition 2021 --crate-type lib`.
+    use super::Compiler;
+
+    fn rust_of(body: &str) -> String {
+        let src = format!("module m;\n{}", body);
+        Compiler::compile_rust(&src).expect("gen-rust should succeed")
+    }
+
+    #[test]
+    fn assert_in_a_fn_body_is_the_macro() {
+        let out = rust_of("fn f(a : u32) -> u32 {\n    assert(a <= 2);\n    return a;\n}\n");
+        assert!(out.contains("assert!((a <= 2));"), "{}", out);
+        assert!(!out.contains("assert((a <= 2))"), "{}", out);
+    }
+
+    #[test]
+    fn an_assert_message_is_an_argument_not_the_format_string() {
+        // A literal with braces would be read as a format directive if it
+        // were the format string; through "{}" it is printed as written.
+        let out = rust_of(
+            "fn f(a : u32) -> u32 {\n    assert(a <= 2, \"a too big {x}\");\n    return a;\n}\n",
+        );
+        assert!(out.contains("assert!((a <= 2), \"{}\", \"a too big {x}\");"), "{}", out);
+    }
+
+    #[test]
+    fn assert_eq_and_assert_ne_are_the_macros() {
+        let eq = rust_of("fn f(a : u32) -> u32 {\n    assert_eq(a, a);\n    return a;\n}\n");
+        assert!(eq.contains("assert_eq!(a, a);"), "{}", eq);
+        let ne = rust_of("fn f(a : u32) -> u32 {\n    assert_ne(a, 3);\n    return a;\n}\n");
+        assert!(ne.contains("assert_ne!(a, 3);"), "{}", ne);
+    }
+
+    #[test]
+    fn unreachable_is_the_macro_as_a_statement_and_as_a_branch() {
+        let stmt = rust_of(
+            "fn f(a : u32) -> u32 {\n    if (a > 2) {\n        unreachable;\n    }\n    return a;\n}\n",
+        );
+        assert!(stmt.contains("unreachable!();"), "{}", stmt);
+        let branch = rust_of(
+            "fn f(a : u32) -> u32 {\n    const s = if (a > 2) unreachable else a;\n    return s;\n}\n",
+        );
+        assert!(branch.contains("{ unreachable!() }"), "{}", branch);
+    }
+
+    #[test]
+    fn panic_and_zig_at_panic_are_the_macro() {
+        let plain = rust_of(
+            "fn f(a : u32) -> u32 {\n    if (a > 2) {\n        panic(\"too big\");\n    }\n    return a;\n}\n",
+        );
+        assert!(plain.contains("panic!(\"{}\", \"too big\");"), "{}", plain);
+        let at = rust_of(
+            "fn f(a : u32, msg : str) -> u32 {\n    if (a > 2) {\n        @panic(msg);\n    }\n    return a;\n}\n",
+        );
+        assert!(at.contains("panic!(\"{}\", msg);"), "{}", at);
+        assert!(!at.contains("@panic"), "{}", at);
+    }
+
+    #[test]
+    fn a_spec_that_declares_the_name_keeps_its_own_call() {
+        // Negative control: Rust resolves `assert(c)` to the spec's own
+        // function (functions and macros are separate namespaces), so the
+        // plain call already compiles and must not be rewritten.
+        let own_assert = rust_of(
+            "fn assert(c : bool) -> u32 {\n    return 0;\n}\nfn f(a : u32) -> u32 {\n    assert(a <= 2);\n    return a;\n}\n",
+        );
+        assert!(own_assert.contains("assert((a <= 2));"), "{}", own_assert);
+        assert!(!own_assert.contains("assert!"), "{}", own_assert);
+        let own_panic = rust_of(
+            "fn panic(m : str) -> u32 {\n    return 0;\n}\nfn f(a : u32) -> u32 {\n    panic(\"x\");\n    return a;\n}\n",
+        );
+        assert!(own_panic.contains("panic(\"x\");"), "{}", own_panic);
+        assert!(!own_panic.contains("panic!"), "{}", own_panic);
+    }
+
+    #[test]
+    fn a_binding_named_unreachable_stays_a_value() {
+        // Negative control: a parameter or constant of that name is a value.
+        let param = rust_of("fn f(unreachable : u32) -> u32 {\n    return unreachable;\n}\n");
+        assert!(param.contains("return unreachable;"), "{}", param);
+        assert!(!param.contains("unreachable!"), "{}", param);
+        let konst = rust_of(
+            "pub const unreachable : u32 = 3;\nfn f(a : u32) -> u32 {\n    return a + unreachable;\n}\n",
+        );
+        assert!(konst.contains("(a + unreachable)"), "{}", konst);
+        assert!(!konst.contains("unreachable!"), "{}", konst);
+    }
+
+    #[test]
+    fn expect_is_not_mapped_onto_assert() {
+        // Rust has no `expect` macro; mapping it would choose semantics,
+        // so it is deliberately left as it was.
+        let out = rust_of("fn f(a : u32) -> u32 {\n    expect(a == a);\n    return a;\n}\n");
+        assert!(out.contains("expect((a == a));"), "{}", out);
+        assert!(!out.contains("assert!"), "{}", out);
+    }
+}
+
+#[cfg(test)]
+mod tests_5923_macros_and_typeless_fields {
+    use super::*;
+
+    fn parse(src: &str) -> Result<Node, String> {
+        Parser::new(Lexer::new(src)).parse()
+    }
+
+    #[test]
+    fn a_rust_macro_call_is_refused_by_parse() {
+        // Each of these used to parse as `name` followed by a negation.
+        for (src, name) in [
+            ("module m;\nfn f(a : u32) -> u32 { const s = format!(\"{}\", a); return a; }\n", "format"),
+            ("module m;\ntest \"t\" { assert!(1 == 1); }\n", "assert"),
+            ("module m;\nfn f() -> u32 { const v = vec![1, 2]; return 0; }\n", "vec"),
+            ("module m;\nfn f() -> u32 { panic! (\"no\"); return 0; }\n", "panic"),
+            ("module m;\nfn f() -> u32 { const x = m!{ 1 }; return 0; }\n", "m"),
+        ] {
+            let err = parse(src).expect_err(src);
+            assert!(
+                err.contains("is a Rust macro call") && err.contains(&format!("`{}!`", name)),
+                "{:?} -> {}",
+                src,
+                err
+            );
+        }
+    }
+
+    #[test]
+    fn a_bang_that_is_not_a_macro_still_parses() {
+        // The negative control: `!=`, a prefix `!`, a `!` after a space, a
+        // macro spelled inside a string, and one inside each kind of comment.
+        for src in [
+            "module m;\nfn f(a : bool, b : bool) -> bool { return a != b; }\n",
+            "module m;\nfn f(a : bool) -> bool { return !a; }\n",
+            "module m;\nfn f(a : bool) -> bool { return a and !(a); }\n",
+            "module m;\npub const S : str = \"format!(x)\";\n",
+            "module m;\n; format!(x) in a line comment\npub const N : u32 = 1;\n",
+            "module m;\n// format!(x) in a slash comment\npub const N : u32 = 1;\n",
+        ] {
+            if let Err(e) = parse(src) {
+                panic!("{:?} should parse, got: {}", src, e);
+            }
+        }
+    }
+
+    fn field_type_errors(src: &str) -> Vec<String> {
+        let r = Compiler::typecheck(src).expect("parses");
+        r.errors.into_iter().filter(|e| e.contains("#3225")).collect()
+    }
+
+    #[test]
+    fn typecheck_refuses_a_field_with_no_type_or_a_literal_type() {
+        let src = "module m;\npub const Thing = struct {\n    ok : u8,\n    bad : 0,\n    empty : ,\n};\n";
+        let errs = field_type_errors(src);
+        assert!(
+            errs.iter().any(|e| e.contains("field `bad`") && e.contains("integer literal `0`")),
+            "{:?}",
+            errs
+        );
+        assert!(
+            errs.iter().any(|e| e.contains("field `empty`") && e.contains("has no type")),
+            "{:?}",
+            errs
+        );
+        assert!(!errs.iter().any(|e| e.contains("field `ok`")), "{:?}", errs);
+    }
+
+    #[test]
+    fn typecheck_accepts_a_struct_whose_fields_all_have_types() {
+        let src = "module m;\npub const Thing = struct {\n    ok : u8,\n    name : []u8,\n};\n";
+        assert_eq!(field_type_errors(src), Vec::<String>::new());
+    }
+}
+
+#[cfg(test)]
+mod tests_5949_captured_match {
+    use super::*;
+
+    fn match_errors(src: &str) -> Vec<String> {
+        let r = Compiler::typecheck(src).expect("parses");
+        r.errors.into_iter().filter(|e| e.contains("#5949")).collect()
+    }
+
+    #[test]
+    fn a_rust_match_is_refused_by_typecheck_naming_its_line() {
+        // A tail `match` in a fn, and one in a test: both used to be read,
+        // counted as nothing, and lowered to nothing by every backend.
+        let src = "module m;\npub const Color = enum { Red, Green };\n\
+fn f(c : Color) -> u32 {\n    match c {\n        Color::Red => 1,\n        Color::Green => 2,\n    }\n}\n\
+test \"t\" {\n    match f(Color.Red) {\n        1 => assert(true),\n        _ => assert(false),\n    }\n}\n";
+        let errs = match_errors(src);
+        assert_eq!(errs.len(), 2, "{:?}", errs);
+        assert!(errs[0].contains("at line 4 in fn `f`"), "{:?}", errs);
+        assert!(errs[1].contains("at line 10 in test `t`"), "{:?}", errs);
+        assert!(errs[0].contains("switch (x)"), "{:?}", errs);
+    }
+
+    #[test]
+    fn a_switch_and_an_identifier_named_match_are_not_refused() {
+        // The negative control: t27's own `switch`, a variable called
+        // `match`, a struct field called `match`, and a call `match(x)`.
+        let src = "module m;\npub const Color = enum { Red, Green };\n\
+pub const Hit = struct {\n    match : u32,\n};\n\
+fn g(x : u32) -> u32 { return x; }\n\
+fn f(c : Color) -> u32 {\n    var match = true;\n    match = false;\n\
+    const h = Hit { match: 1 };\n    const n = g(h.match);\n    match(n);\n\
+    return switch (c) {\n        .Red => n,\n        .Green => 2,\n    };\n}\n";
+        assert_eq!(match_errors(src), Vec::<String>::new());
+    }
+}
+
+#[cfg(test)]
+mod tests_5968_colon_types_and_slice_casts {
+    use super::*;
+
+    fn errors_5968(src: &str) -> Vec<String> {
+        let r = Compiler::typecheck(src).expect("parses");
+        r.errors.into_iter().filter(|e| e.contains("#5968")).collect()
+    }
+
+    #[test]
+    fn a_field_that_swallowed_the_next_one_is_refused_naming_its_line() {
+        // Line 3 has no `,`; line 7's `,` sits inside a `#` comment.
+        let src = "module m;\nstruct A {\n    a: u8\n    b: u16,\n}\n\
+struct B {\n    c: u8  # note,\n    d: u32,\n}\n\
+test t { assert(true); }\n";
+        let e = errors_5968(src);
+        assert_eq!(e.len(), 2, "{e:?}");
+        assert!(e[0].contains("struct `A` field `a` at line 3"), "{}", e[0]);
+        assert!(e[0].contains("u8b:u16"), "{}", e[0]);
+        assert!(e[1].contains("struct `B` field `c` at line 7"), "{}", e[1]);
+        assert!(e[1].contains("trailing `#` comment"), "{}", e[1]);
+    }
+
+    #[test]
+    fn a_map_type_is_refused_as_a_map() {
+        let src = "module m;\nstruct O {\n    cwd: str,\n    env: [str: str],\n}\n\
+test t { assert(true); }\n";
+        let e = errors_5968(src);
+        assert_eq!(e.len(), 1, "{e:?}");
+        assert!(e[0].contains("field `env` at line 4"), "{}", e[0]);
+        assert!(e[0].contains("map type"), "{}", e[0]);
+    }
+
+    #[test]
+    fn as_to_a_slice_or_array_type_is_refused_naming_its_line() {
+        let src = "module m;\nfn g(i: usize) []u8 { return \"x\"; }\n\
+fn f(i: usize) []u8 {\n    const a = @as([]u8, g(i));\n    const c = @as([4]u8, g(i));\n    return a;\n}\n\
+test t { assert(true); }\n";
+        let e = errors_5968(src);
+        assert_eq!(e.len(), 2, "{e:?}");
+        assert!(e[0].contains("`@as` at line 4 in fn `f`"), "{}", e[0]);
+        assert!(e[1].contains("`@as` at line 5 in fn `f`"), "{}", e[1]);
+    }
+
+    #[test]
+    fn paths_comments_scalar_casts_and_array_values_are_not_refused() {
+        // Negative control: `::` paths, a `//` comment holding a colon after
+        // the `,`, a `#` comment after the `,`, a default value, and `@as` to
+        // a scalar, an enum and a path type; an array literal as a value.
+        let src = "module m;\nenum Trit { Neg, Zero, Pos }\n\
+struct S {\n    a: gf16::GF16,\n    b: []u8, // note: x\n    c: u8, # note: y\n    d: u32 = 5,\n}\n\
+fn h(x: []u8) u8 { return 0; }\n\
+fn f(i: usize) u8 {\n    const a = @as(u32, i);\n    const t = @as(Trit, i);\n    const g = @as(gf16::GF16, i);\n    return h([1, 2]);\n}\n\
+test t { assert(true); }\n";
+        assert_eq!(errors_5968(src), Vec::<String>::new());
     }
 }
 

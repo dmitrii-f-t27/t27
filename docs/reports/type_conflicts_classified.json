@@ -1,8 +1,8 @@
 {
   "note": "Classification of every conflicted type name reported by `tri types dup`. DRIFT = one concept that grew two definitions; DISTINCT = two concepts that collided on a name. Evidence is the reading that decided it. Regenerate the observation with `tri types dup`; cross-check this file against it with `tri types classified`.",
   "verdicts": {
-    "DRIFT": 44,
-    "DISTINCT": 33
+    "DRIFT": 51,
+    "DISTINCT": 37
   },
   "names": [
     {
@@ -92,6 +92,17 @@
       "suggested_action": "Rename the training one to QuantizationBenchmarkResult -- it is the smaller blast radius (two invariants, one function) and the name is more honest."
     },
     {
+      "name": "BufgConfig",
+      "sites": [
+        "specs/port/trinity/fpga/openxc7-synth/d_bufg_test.t27:19",
+        "specs/port/trinity/fpga/openxc7-synth/d_f19_test.t27:24"
+      ],
+      "verdict": "DRIFT",
+      "evidence": "d_bufg_test.t27:19 `pub struct BufgConfig { name : &str, input_delay_ps : u32, output_delay_ps : u32, fanout_capacity : u32 }` vs d_f19_test.t27:24 `pub struct BufgConfig { name : &str, input_delay_ps : u32, output_delay_ps : u32 }`. Same concept -- the BUFG global clock buffer of one Artix-7 diagnostic design -- in two ports of sibling Verilog files from gHashTag/trinity fpga/openxc7-synth/ (#5781, #5797). The f19 copy drops fanout_capacity; the first three fields agree in name, order and type.",
+      "confidence": "certain -- both are the BUFG descriptor of a one-module LED diagnostic in the same port directory",
+      "suggested_action": "Hoist one BufgConfig (with fanout_capacity) into a shared openxc7-synth primitives module and have both diagnostics use it."
+    },
+    {
       "name": "BusPort",
       "sites": [
         "specs/fpga/axi4.t27:52",
@@ -136,6 +147,30 @@
       "evidence": "Three unrelated things sharing the most generic name in the corpus. schema.t27:148 `pub const Config = struct { version: u16, provider: ProviderConfig, agents: []AgentConfig, mcp_servers: []MCPServerConfig, lsp: LSPConfig, tui: TuiConfig, logging: LoggingConfig, paths: PathsConfig }`, commented `/// Main configuration structure` -- the whole application's settings tree, beside `DEFAULT_CONFIG_FILE = \"config.json\"` and `ValidationResult { valid: bool, errors: []ConfigError }`. eternal_monitor.t27:21 `pub const Config = struct { interval_ms: u64, max_alerts: usize, auto_heal: bool, log_file: ?[]const u8 }` -- one daemon's tuning knobs, embedded as a field of its owner: `EternalMonitor { allocator: \"std.mem.Allocator\", config: Config, components: \"ArrayList(SystemComponent)\", alerts: \"ArrayList(Alert)\", ... }`. utils/config.t27:25 `pub const Config = struct { entries: []ConfigEntry, error: ?[]const u8 }` in `module TriConfig` -- not settings at all but the OUTCOME of parsing a config file, over `ConfigEntry { key: []const u8, value: ConfigValue }` and `ConfigValue { string: ?[]const u8, number: ?f64, boolean: ?bool, is_null: bool }`, consumed by `fn parse(...)`, `fn get_string(config: Config)`, `fn get_number(config: Config)`, `fn get_bool(config: Config)`. No field is shared by any two of the three. Three subsystems -- an application schema, a monitoring daemon, a generic key/value parser -- with no import edges among them.",
       "confidence": "certain -- an 8-field settings tree, a 4-knob monitor loop and a parse result with an `error` slot cannot be one type, and each file's own functions name its subject",
       "suggested_action": "Rename the narrow two (MonitorConfig, ParsedConfig -- the third is really a parse result, not a config) and leave specs/config/schema.t27 owning the bare name."
+    },
+    {
+      "name": "CounterConfig",
+      "sites": [
+        "specs/port/trinity/fpga/openxc7-synth/d_bufg_test.t27:37",
+        "specs/port/trinity/fpga/openxc7-synth/d_g22_test.t27:13",
+        "specs/port/trinity/fpga/openxc7-synth/d_y0_test.t27:38"
+      ],
+      "verdict": "DRIFT",
+      "evidence": "d_bufg_test.t27:37 and d_y0_test.t27:38 both `pub struct CounterConfig { width : u32, initial_value : u32, max_value : u32 }` -- identical, and both followed by the same `fn counter_24bit()` body (now a dupe_scan ledger entry); d_g22_test.t27:13 `pub struct CounterConfig { width : u32, initial_value : u32 }` drops max_value. One concept: the free-running divider counter of an LED blink diagnostic, ported from sibling Verilog files (#5781, #5756, #5757).",
+      "confidence": "certain -- three ports of the same counter idiom from one Verilog directory",
+      "suggested_action": "One CounterConfig in a shared openxc7-synth module (max_value is derivable from width; keep it or compute it, but in one place), plus one counter_24bit."
+    },
+    {
+      "name": "CounterState",
+      "sites": [
+        "specs/port/fpga/vivado/uart_echo_top.t27:43",
+        "specs/port/trinity/fpga/openxc7-synth/led_diagnostic.t27:21",
+        "specs/port/trinity/fpga/openxc7-synth/symbiflow_blink.t27:24"
+      ],
+      "verdict": "DRIFT",
+      "evidence": "uart_echo_top.t27:43 `pub struct CounterState { value : u32 }`; symbiflow_blink.t27:24 `{ value : u32, cycles : u32 }`; led_diagnostic.t27:21 `{ value : u32, max_value : u32 }`. All three are the register of a clock-divider counter in a ported top module (#5009, #5663, #6090); `value` is common, the second field differs per port. d_f19_test.t27 already shows the alternative: it named its copy F19CounterState.",
+      "confidence": "high -- one concept (blink/heartbeat divider register), three spellings of its extra field",
+      "suggested_action": "Either share one CounterState with value plus an optional bound, or follow d_f19_test.t27 and prefix each per-design state (UartEchoCounterState, ...)."
     },
     {
       "name": "DataSample",
@@ -307,6 +342,17 @@
       "suggested_action": "Leave the three types; the ambiguity is in the name. If cross-spec resolution matters, qualify at use sites (hir::Instance, rtl::Instance, runtime::Instance) \u2014 three subsystems each have a legitimate claim to the word."
     },
     {
+      "name": "Issue",
+      "sites": [
+        "specs/github/issues.t27:6",
+        "specs/port/scripts/tri-search.t27:4"
+      ],
+      "verdict": "DRIFT",
+      "evidence": "issues.t27:6 `struct Issue { id: u32, number: u32, title: str, state: str }` vs tri-search.t27:4 `struct Issue { id: i32, title: []const u8, state: []const u8, url: []const u8 }`. Both are a GitHub issue record; tri-search.t27 (#6191, a Queen salvage commit) restates it with a signed id, Zig string spelling, url instead of number.",
+      "confidence": "certain -- same external object (a GitHub issue), overlapping id/title/state",
+      "suggested_action": "Have specs/port/scripts/tri-search.t27 use the github::issues Issue and add url there, or rename the port's record SearchHit."
+    },
+    {
       "name": "JitCompiler",
       "sites": [
         "specs/jit/jit.t27:61",
@@ -339,6 +385,30 @@
       "evidence": "lstm_cell.t27:29 `pub const LSTMWeights = struct { Wf : []f32, bf : []f32, Wi : []f32, bi : []f32, Wo : []f32, bo : []f32, Wg : []f32, bg : []f32, }` \u2014 4 gates, one fused matrix each. lstm_single.t27:29 `pub const LSTMWeights = struct { W_ii : []f32, W_hi : []f32, b_i : []f32, W_if : []f32, W_hf : []f32, b_f : []f32, W_ig : []f32, W_hg : []f32, b_g : []f32, W_io : []f32, W_ho : []f32, b_o : []f32, }` \u2014 the same 4 gates with input and hidden projections split (the PyTorch parameterisation). Same math, incompatible layouts: 8 arrays vs 12, and a checkpoint written by one cannot be read by the other. That the two files are copies is settled by their neighbours, which the census reports as DUPLICATED: `LSTMConfig { input_size: u32, hidden_size: u32 }` and `LSTMState { h: []f32, c: []f32 }` are byte-identical at lines 19 and 24 of BOTH files. Only the weights drifted.",
       "confidence": "Certain. Two identical sibling types at identical line numbers in both files, and a third that diverged.",
       "suggested_action": "Pick one parameterisation (split W_ii/W_hi is the interoperable one) and delete the other file's copy. Until then, any spec that says `LSTMWeights` is ambiguous about tensor count."
+    },
+    {
+      "name": "LedConfig",
+      "sites": [
+        "specs/port/trinity/fpga/openxc7-synth/d_g22_test.t27:18",
+        "specs/port/trinity/fpga/openxc7-synth/d_simple_led.t27:12",
+        "specs/port/trinity/fpga/openxc7-synth/d_static_on.t27:13",
+        "specs/port/trinity/fpga/openxc7-synth/led_both_test.t27:30"
+      ],
+      "verdict": "DRIFT",
+      "evidence": "d_simple_led.t27:12 and d_static_on.t27:13 are identical `{ name : &str, is_active_low : bool, default_state : bool }`; d_g22_test.t27:18 `{ is_active_low : bool, bit_position : u32 }`; led_both_test.t27:30 `{ t23_on : bool, r23_on : bool }` is a two-LED on/off scenario rather than a per-LED descriptor. Three of four describe one LED's polarity and default; all four are ports from one Verilog directory (#5386, #5463, #5757, #5866).",
+      "confidence": "high for the three per-LED descriptors; led_both_test's row is the odd one and would be DISTINCT on its own",
+      "suggested_action": "One per-LED LedConfig (name, is_active_low, default_state, optional bit_position) in a shared openxc7-synth module; rename led_both_test's to LedBothScenario."
+    },
+    {
+      "name": "LedOutputs",
+      "sites": [
+        "specs/port/fpga/openxc7-synth/phi_temporal/temporal_heartbeat.t27:11",
+        "specs/port/trinity/fpga/openxc7-synth/led_diagnostic.t27:28"
+      ],
+      "verdict": "DISTINCT",
+      "evidence": "temporal_heartbeat.t27:11 `pub struct LedOutputs { led_d5 : bool, led_d6 : bool, led_j26 : bool }` vs led_diagnostic.t27:28 `{ led0 : bool, led1 : bool }`. Each is the output-port list of its own top module (#5008, #6090), named after that design's pins; a port list is per-module by nature.",
+      "confidence": "certain -- a module's port bundle has no meaning outside that module",
+      "suggested_action": "No defect. If the type namespace is ever flattened, prefix with the module (HeartbeatLeds, DiagnosticLeds)."
     },
     {
       "name": "Lexer",
@@ -430,6 +500,17 @@
       "suggested_action": "Rename to ConfigFieldMigration and StorageMigration; the shared word buys nothing since neither can be executed by the other's runner."
     },
     {
+      "name": "ModuleInterface",
+      "sites": [
+        "specs/port/trinity/fpga/openxc7-synth/d_bufg_test.t27:12",
+        "specs/port/fpga/verilog/ternary_mac_demo_top.t27:13"
+      ],
+      "verdict": "DISTINCT",
+      "evidence": "d_bufg_test.t27:12 `pub struct ModuleInterface { clk : bool, led : bool }` vs ternary_mac_demo_top.t27:13 `{ led_r23 : bool, led_t23 : bool }`. Each records the port list of the Verilog module it ports (#5781, #4997); the name is the porter's generic label for 'this module's ports'.",
+      "confidence": "certain -- two different modules' port lists",
+      "suggested_action": "No defect. Rename to <Module>Ports if names must resolve across specs."
+    },
+    {
       "name": "Node",
       "sites": [
         "specs/compiler/parser.t27:56",
@@ -451,6 +532,29 @@
       "evidence": "`updated_params: []gf16::GF16, m: []gf16::GF16, v: []gf16::GF16, step_norm: gf16::GF16` (adamw) vs `updated_params: []gf16::GF16, velocities: []gf16::GF16, step_norm: gf16::GF16` (sgd_momentum). The trailing comments are byte-identical across the two files \u2014 `// New parameter values` on updated_params and `// L2 norm of the parameter update` on step_norm \u2014 so the lineage is copy-paste; only the optimizer's own state field was swapped (Adam's first/second moments m,v for SGD's velocities). Both files namespace their siblings and leave this one bare: AdamWConfig/AdamWState next to a plain OptimizerStepResult, SgdMomentumConfig/SgdMomentumState next to a plain OptimizerStepResult. Separately, sites 1 and 2 are the SAME FILE and byte-identical: specs/ml/optimizer/adamw.t27 (1019 lines) holds two complete copies of its body \u2014 `// 2. Types` at lines 25 and 470, `// 3. Core Functions` at 54 and 509, `pub const AdamWConfig` at 28 and 483, `pub const OptimizerStepResult` at 46 and 501 \u2014 an ASCII/PhiVariant rewrite pasted in without deleting the original, so `init` and `step` are each declared twice in one module and AdamWConfig's last field is `use_phi_betas: bool` in the first copy and `phi_variant: PhiVariant` in the second.",
       "confidence": "certain \u2014 identical comment text on the shared fields proves common origin, and both live in specs/ml/optimizer/",
       "suggested_action": "Two fixes: (1) delete the second body of adamw.t27 (lines ~460-end duplicate lines ~14-459) or finish the intended replacement; (2) rename to AdamWStepResult / SgdStepResult, or factor a common `{ updated_params, step_norm }` and let each optimizer return its own state alongside."
+    },
+    {
+      "name": "OscillatorState",
+      "sites": [
+        "specs/port/trinity/fpga/openxc7-synth/d_oscillator.t27:54",
+        "specs/port/fpga/verilog/ternary_mac_demo_top.t27:28"
+      ],
+      "verdict": "DISTINCT",
+      "evidence": "ternary_mac_demo_top.t27:28 `pub struct OscillatorState { chain : [20]bool, counter : [23]u32 }` -- a 20-stage ring oscillator plus its 23-bit divider; d_oscillator.t27:54 `{ slow_chain : [4]u32 }` -- a 4-LUT cascade with no counter (#5887). Different circuits that both happen to oscillate.",
+      "confidence": "high -- different structure and different hardware, no shared field",
+      "suggested_action": "No defect. RingOscState / LutCascadeState if a single namespace is ever needed."
+    },
+    {
+      "name": "Outputs",
+      "sites": [
+        "specs/port/trinity/fpga/openxc7-synth/blink_minimal.t27:25",
+        "specs/port/trinity/fpga/openxc7-synth/d_oscillator.t27:48",
+        "specs/port/trinity/fpga/openxc7-synth/d_slow_blink.t27:23"
+      ],
+      "verdict": "DISTINCT",
+      "evidence": "blink_minimal.t27:25 `pub struct Outputs { t23 : bool, r23 : bool }`; d_oscillator.t27:48 and d_slow_blink.t27:23 `{ led : bool }`. Each is the output-port list of its own one-module design (#5956, #5887, #5798), with the Inputs/Outputs naming the porter uses for every top.",
+      "confidence": "certain -- per-module port bundles; agreement between two of them is coincidence of a one-LED design",
+      "suggested_action": "No defect. Prefix per module if names must resolve across specs."
     },
     {
       "name": "ParseError",
@@ -763,6 +867,28 @@
       "evidence": "runtime/execute.t27: `pub const TaskResult = struct { task_id : TaskID, result_type : ExecResultType, exit_code : ?u8, stdout : []u8, stderr : []u8, duration_ms : u64, error_message : ?[]u8 }` \u2014 the exit of a spawned process, next to `ExecResultType { success, timeout, cancelled, error }`, `TaskState`, `CancelReason` and `ExecContext { task, start_time_ms, state, cancel_requested }`. swarm_agents.t27: `pub const TaskResult = struct { agent_id : String, task_id : String, result : String, phi_score : Float }` \u2014 an agent's report on a swarm work item, next to `AgentCommunication`, `SacredPattern` and `ConsensusProposal`. The only shared field name is `task_id`, and even that is `TaskID = [TASK_ID_LENGTH]u8` on one side and `String` on the other, because the two `Task` types it points at are themselves different things.",
       "confidence": "certain \u2014 stdout/stderr/exit_code is a process; agent_id/phi_score is a swarm member's \u03c6-scored deliverable.",
       "suggested_action": "No defect in itself, but it inherits the Task ambiguity: rename to ProcessResult / AgentTaskReport alongside the Task fix so `TaskResult` resolves to one type."
+    },
+    {
+      "name": "TbCheck",
+      "sites": [
+        "specs/fpga/testbench.t27:69",
+        "specs/port/bootstrap/src/compiler/TbCheck_new.t27:3"
+      ],
+      "verdict": "DRIFT",
+      "evidence": "testbench.t27:69 `pub struct TbCheck { cycle : u32, signal : &str, expected : u32, mask : u32 }` vs TbCheck_new.t27:3 `pub struct TbCheck { pub cycle: u32, pub signal: []const u8, pub expected: u32, pub mask: u32 }`. Same four fields in the same order; only the string spelling (&str vs []const u8) and `pub` differ. TbCheck_new.t27 (#6197) is a port of bootstrap/src/compiler.rs, which itself implements specs/fpga/testbench.t27.",
+      "confidence": "certain -- the port restates the spec's own type",
+      "suggested_action": "Have the compiler.rs port `use fpga::testbench` instead of restating TbCheck; pick one string spelling."
+    },
+    {
+      "name": "TbConfig",
+      "sites": [
+        "specs/fpga/testbench.t27:96",
+        "specs/port/bootstrap/src/compiler/TbCheck_new.t27:10"
+      ],
+      "verdict": "DRIFT",
+      "evidence": "testbench.t27:96 `pub struct TbConfig { name : &str, dut_name : &str, timescale : &str, max_cycles : u32, timeout_ns : u32, fail_fast : bool }` vs TbCheck_new.t27:10 with the same six fields in the same order, strings spelled []const u8 and fields marked pub (#6197).",
+      "confidence": "certain -- same as TbCheck, same file pair",
+      "suggested_action": "Same repair as TbCheck: import from fpga::testbench."
     },
     {
       "name": "TernaryWeight",

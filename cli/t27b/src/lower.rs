@@ -17,6 +17,27 @@
 //! function returning a struct takes a hidden last pointer parameter to the
 //! caller's result slot, builds the value there and returns that pointer.
 //! Struct layout is C's: fields in order, each at its own alignment.
+//!
+//! Strings: `str` (also spelled `string`, `&str`, `[]const u8`) is Zig's
+//! `[]const u8`, a 16-byte aggregate in memory -- the address of the bytes at
+//! offset 0, the length (u64) at offset 8 -- passed, returned and copied like
+//! a struct. A string literal is a compile-time value (`Val::S`) whose bytes
+//! sit in read-only data; it is written into memory only where a `str` place
+//! needs it. `==` and `!=` on strings compare contents, as t27c's Zig backend
+//! does with `std.mem.eql`: two literals fold, anything else calls one
+//! synthesized IR function, `__t27b_str_eql`.
+//!
+//! Arrays: `[N]T` (N a literal or an integer constant) is N elements of T back
+//! to back in memory, an aggregate like a struct: copied on assignment, passed
+//! by pointer, returned through the result slot. An array literal takes the
+//! type it is assigned to (t27c's Zig backend writes `.{...}`), so one with no
+//! result type is refused, and its element count must be N. An index is a
+//! u64; a constant one out of range is refused (Zig refuses it at compile
+//! time), a runtime one is checked and traps as `index out of bounds`. `.len`
+//! is the constant N. `for (a) |x|` walks the elements with a hidden index. A
+//! module constant array of strings cannot live in read-only data (it holds
+//! addresses), so it stays a compile-time value (`Val::A`) and is written into
+//! a frame temporary only where memory is needed.
 
 use crate::compiler::{Node, NodeKind};
 use crate::ir::*;
@@ -55,6 +76,14 @@ enum Val {
     E(Expr),
     P(Expr, LTy),
     M(Place),
+    /// A compile-time string: read-only blob `k` (its bytes, then one NUL
+    /// byte that is not part of the string) and the length in bytes.
+    S(u32, u64),
+    /// A compile-time array whose elements hold strings (`LTy::Arr` type,
+    /// one `S` or nested `A` per element): read-only data cannot hold the
+    /// address of a string, so the array is written into a frame temporary
+    /// wherever memory is needed, and a constant index folds to the element.
+    A(LTy, Vec<Val>),
     /// Recovery mode only (`blockers`): the value of an expression that was
     /// already rejected. Anything built from it is dropped without a second
     /// report, so one unsupported construct is named once, not once per use.
@@ -83,6 +112,10 @@ enum LTy {
     /// `*T` (true: mutable) or `*const T` (false).
     Ptr(Box<LTy>, bool),
     Struct(u32),
+    /// `str`: `[]const u8`, a (pointer, length) pair in memory.
+    Str,
+    /// `[N]T`: N elements of T, back to back, in memory.
+    Arr(Box<LTy>, u32),
 }
 
 /// `ty` at `addr + off`. `addr` is evaluated exactly once by whatever
@@ -138,6 +171,12 @@ struct Lower<'a> {
     struct_ids: HashMap<String, u32>,
     data: Vec<Vec<u8>>,
     internal_abi: Vec<FuncId>,
+    /// Blob of each string literal's bytes, so equal literals share one.
+    strings: HashMap<Vec<u8>, u32>,
+    /// The number of source fns: the id `__t27b_str_eql` gets if used.
+    nfuncs: FuncId,
+    /// `__t27b_str_eql` is called somewhere.
+    eql_used: bool,
     // Per-function state.
     vars: Vec<Var>,
     /// The source type of each variable (parallel to `vars`).
@@ -225,6 +264,9 @@ fn lower_mode<'a>(
         struct_ids: HashMap::new(),
         data: Vec::new(),
         internal_abi: Vec::new(),
+        strings: HashMap::new(),
+        nfuncs: 0,
+        eql_used: false,
         vars: Vec::new(),
         ltys: Vec::new(),
         slots: Vec::new(),
@@ -292,8 +334,7 @@ fn lower_mode<'a>(
                 }
                 match l.signature(item) {
                     Ok((params, ret)) => {
-                        let agg = |t: &LTy| matches!(t, LTy::Struct(_));
-                        if params.iter().any(agg) || ret.as_ref().is_some_and(agg) {
+                        if params.iter().any(is_agg) || ret.as_ref().is_some_and(is_agg) {
                             l.internal_abi.push(next_id);
                         }
                         l.sigs.insert(
@@ -363,6 +404,7 @@ fn lower_mode<'a>(
             }
         }
     }
+    l.nfuncs = next_id;
     let mut const_names: Vec<String> = l.const_nodes.keys().cloned().collect();
     const_names.sort();
     for name in const_names {
@@ -401,6 +443,12 @@ fn lower_mode<'a>(
     }
     if !l.errors.is_empty() {
         return Err(l.errors);
+    }
+    if l.eql_used {
+        // Source fns are ids 0..nfuncs and come first in `funcs`, in order.
+        let site = l.site(TrapKind::NoReturn, format!("end of fn {}", STR_EQL), Ty::Bool);
+        funcs.insert(l.nfuncs as usize, str_eql_func(site));
+        l.internal_abi.push(l.nfuncs);
     }
     Ok(Program {
         module,
@@ -548,7 +596,7 @@ impl<'a> Lower<'a> {
             Some(self.lty(rt)?)
         };
         // A struct result is returned through a hidden pointer parameter.
-        let total = n.params.len() + matches!(ret, Some(LTy::Struct(_))) as usize;
+        let total = n.params.len() + ret.as_ref().is_some_and(is_agg) as usize;
         if total > 8 {
             return self.reject(
                 "FnDecl",
@@ -633,6 +681,17 @@ impl<'a> Lower<'a> {
         let st = if !ann.is_empty() {
             match self.lty(ann)? {
                 t @ LTy::Struct(_) => Some(t),
+                t @ LTy::Arr(..) if holds_str(&t) => return self.const_array(init, &t),
+                t @ LTy::Arr(..) => Some(t),
+                LTy::Str => {
+                    return match self.expr(init)? {
+                        v @ (Val::S(..) | Val::Poison) => Ok(v),
+                        _ => self.reject(
+                            "ConstDecl",
+                            format!("`{}` is a module-level str that is not a string literal", node.name),
+                        ),
+                    };
+                }
                 LTy::Ptr(..) => {
                     return self.reject("ConstDecl", format!("`{}` is a module-level pointer", node.name))
                 }
@@ -654,7 +713,7 @@ impl<'a> Lower<'a> {
             Val::E(self.coerce(v, ty)?)
         };
         match &v {
-            Val::Ct(_) | Val::Poison => Ok(v),
+            Val::Ct(_) | Val::S(..) | Val::A(..) | Val::Poison => Ok(v),
             Val::E(e) if matches!(e.kind, ExprKind::Const(_)) => Ok(v),
             // Another struct constant: the same read-only bytes.
             Val::M(p) if matches!(p.addr.kind, ExprKind::Data(_)) => Ok(v),
@@ -697,12 +756,12 @@ impl<'a> Lower<'a> {
         let mut ids = Vec::new();
         for (i, (pname, _)) in n.params.iter().enumerate() {
             let t = match &params[i] {
-                LTy::Struct(_) => LTy::Ptr(Box::new(params[i].clone()), false),
+                t if is_agg(t) => LTy::Ptr(Box::new(t.clone()), false),
                 t => t.clone(),
             };
             ids.push(self.hidden_var(pname, t));
         }
-        if matches!(ret, Some(LTy::Struct(_))) {
+        if ret.as_ref().is_some_and(is_agg) {
             self.sret = Some(self.hidden_var("%sret", LTy::Ptr(Box::new(ret.clone().unwrap()), true)));
         }
         let nparams = self.vars.len();
@@ -710,8 +769,8 @@ impl<'a> Lower<'a> {
         for (i, (pname, _)) in n.params.iter().enumerate() {
             let var = Expr { ty: Ty::Ptr, kind: ExprKind::Var(ids[i]) };
             match &params[i] {
-                // A struct argument is the caller's memory, read-only.
-                LTy::Struct(_) => {
+                // A struct or str argument is the caller's memory, read-only.
+                t if is_agg(t) => {
                     let p = Place { addr: var, off: 0, ty: params[i].clone(), mutable: false, temp: None };
                     self.bind(pname, Binding::Mem(p));
                 }
@@ -901,6 +960,7 @@ impl<'a> Lower<'a> {
                 out.push(Stmt::While { cond, body, step });
                 Ok(())
             }
+            NodeKind::StmtFor => self.for_array(n, out),
             NodeKind::StmtBreak | NodeKind::StmtContinue => {
                 let k = kind_name(n);
                 if !n.name.is_empty() || !n.children.is_empty() {
@@ -930,7 +990,7 @@ impl<'a> Lower<'a> {
                 }
                 match (self.ret.clone(), v) {
                     (None, None) => out.push(Stmt::Return(None)),
-                    (Some(t @ LTy::Struct(_)), Some(c)) => {
+                    (Some(t), Some(c)) if is_agg(&t) => {
                         // Build the result in the caller's memory.
                         let sret = Expr { ty: Ty::Ptr, kind: ExprKind::Var(self.sret.unwrap()) };
                         let dst = Place { addr: sret.clone(), off: 0, ty: t, mutable: true, temp: None };
@@ -978,6 +1038,98 @@ impl<'a> Lower<'a> {
         }
     }
 
+    /// `for (a) |x| { ... }` over one array: a hidden index counts from 0 to
+    /// the length, and `x` is the element it reaches, a constant. The array
+    /// is evaluated once, before the loop; its elements are read as the loop
+    /// reaches them.
+    fn for_array(&mut self, n: &Node, out: &mut Vec<Stmt>) -> R<()> {
+        if !n.name.is_empty() {
+            return self.reject("StmtFor", format!("labelled loop `{}`", n.name));
+        }
+        if n.children.len() != 2 || n.params.len() != 1 {
+            return self.reject("StmtFor", "more than one iterable or capture".into());
+        }
+        let (iter, body_node) = (&n.children[0], &n.children[1]);
+        if body_node.kind != NodeKind::Module || body_node.name != "body" {
+            return self.reject("StmtFor", "unexpected body shape".into());
+        }
+        if iter.kind == NodeKind::ExprBinary && iter.extra_op == ".." {
+            return self.reject("StmtFor(range)", "`for` over a range".into());
+        }
+        let p = match self.expr(iter)? {
+            Val::Poison => return Err(()),
+            Val::M(p) if matches!(p.ty, LTy::Arr(..)) => p,
+            Val::A(t, elems) => self.materialize(t, elems)?,
+            Val::P(e, LTy::Ptr(inner, m)) if matches!(*inner, LTy::Arr(..)) => {
+                Place { addr: e, off: 0, ty: *inner, mutable: m, temp: None }
+            }
+            v => {
+                let d = self.val_desc(&v);
+                return self.reject("StmtFor", format!("`for` over {}", d));
+            }
+        };
+        let capture = n.params[0].0.trim().to_string();
+        if capture.starts_with('*') || capture.contains(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
+            return self.reject("StmtFor", format!("capture `{}`", capture));
+        }
+        let LTy::Arr(elem, len) = p.ty.clone() else { unreachable!() };
+        let elem = *elem;
+        let (esize, _) = self.size_align(&elem)?;
+        let mut base = addr_of(&p);
+        if !pure_addr(&base) {
+            let h = self.hidden_var("%for_base", LTy::Ptr(Box::new(p.ty.clone()), false));
+            out.push(Stmt::Assign { var: h, value: base });
+            base = Expr { ty: Ty::Ptr, kind: ExprKind::Var(h) };
+        }
+        let i = self.hidden_var("%for_i", LTy::S(Ty::U64));
+        let var_i = Expr { ty: Ty::U64, kind: ExprKind::Var(i) };
+        out.push(Stmt::Assign { var: i, value: Expr { ty: Ty::U64, kind: ExprKind::Const(0) } });
+        let at = Expr {
+            ty: Ty::Ptr,
+            kind: ExprKind::Offset { base: Box::new(base), idx: Box::new(var_i.clone()), scale: esize },
+        };
+        let mut body = Vec::new();
+        self.scopes.push(HashMap::new());
+        if capture != "_" {
+            match reg_ty(&elem) {
+                Some(ty) => {
+                    let value = Expr { ty, kind: ExprKind::Load { addr: Box::new(at), off: 0 } };
+                    let x = self.new_lvar(&capture, elem.clone(), false);
+                    body.push(Stmt::Assign { var: x, value });
+                }
+                None => {
+                    let place = Place { addr: at, off: 0, ty: elem.clone(), mutable: false, temp: None };
+                    self.bind(&capture, Binding::Mem(place));
+                }
+            }
+        }
+        self.loop_depth += 1;
+        let r = self.stmts(&body_node.children);
+        self.loop_depth -= 1;
+        self.scopes.pop();
+        body.extend(r?);
+        let cond = Expr {
+            ty: Ty::Bool,
+            kind: ExprKind::Cmp {
+                op: CmpOp::Lt,
+                lhs: Box::new(var_i.clone()),
+                rhs: Box::new(Expr { ty: Ty::U64, kind: ExprKind::Const(len as i128) }),
+            },
+        };
+        // i < len <= 2^32, so i + 1 cannot wrap.
+        let next = Expr {
+            ty: Ty::U64,
+            kind: ExprKind::Arith {
+                op: ArithOp::AddW,
+                lhs: Box::new(var_i),
+                rhs: Box::new(Expr { ty: Ty::U64, kind: ExprKind::Const(1) }),
+                site: 0,
+            },
+        };
+        out.push(Stmt::While { cond, body, step: vec![Stmt::Assign { var: i, value: next }] });
+        Ok(())
+    }
+
     fn local(&mut self, n: &Node, out: &mut Vec<Stmt>) -> R<()> {
         let name = n.name.clone();
         if name.is_empty() || name.contains(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
@@ -988,14 +1140,14 @@ impl<'a> Lower<'a> {
         let init = n.children.first().filter(|i| !is_undefined(i));
         if !ann.is_empty() {
             let t = self.lty(&ann)?;
-            if matches!(t, LTy::Struct(_)) || self.addr_taken.contains(&name) {
+            if is_agg(&t) || self.addr_taken.contains(&name) {
                 // In memory; the name is bound only after its initializer.
                 let k = self.new_slot(&t)?;
                 let dst = Place { addr: slot_expr(k), off: 0, ty: t, mutable, temp: None };
                 match init {
                     Some(i) => self.init(i, dst.clone(), true, out)?,
                     // A scalar with no value reads as zero, like a register.
-                    None if !matches!(dst.ty, LTy::Struct(_)) => {
+                    None if !is_agg(&dst.ty) => {
                         let ty = reg_ty(&dst.ty).unwrap();
                         out.push(Stmt::Store { addr: slot_expr(k), off: 0, value: Expr { ty, kind: ExprKind::Const(0) } });
                     }
@@ -1050,6 +1202,25 @@ impl<'a> Lower<'a> {
         let (t, value) = match v {
             Val::Poison => return Err(()),
             Val::Ct(_) => return self.reject("StmtLocal", format!("`{}` needs a type", name)),
+            // A string literal stays a compile-time value, like Zig's
+            // `const s = "abc";`.
+            Val::S(..) if !mutable => {
+                self.bind(name, Binding::Const(v));
+                return Ok(());
+            }
+            Val::S(..) => {
+                let v = self.coerce_to(v, &LTy::Str)?;
+                return self.bind_value(name, v, mutable, out);
+            }
+            // A compile-time array, likewise.
+            Val::A(..) if !mutable => {
+                self.bind(name, Binding::Const(v));
+                return Ok(());
+            }
+            Val::A(t, elems) => {
+                let p = self.materialize(t, elems)?;
+                return self.bind_value(name, Val::M(p), mutable, out);
+            }
             Val::E(e) => (LTy::S(e.ty), e),
             Val::P(e, t) => (t, e),
             Val::M(p) => {
@@ -1093,7 +1264,7 @@ impl<'a> Lower<'a> {
         }
         let target = &n.children[0];
         let op = n.extra_op.as_str();
-        if target.kind == NodeKind::ExprFieldAccess {
+        if matches!(target.kind, NodeKind::ExprFieldAccess | NodeKind::ExprIndex) {
             let dst = self.lvalue(target)?;
             return self.store(dst, op, &n.children[1], out);
         }
@@ -1295,7 +1466,7 @@ impl<'a> Lower<'a> {
         let mut temp = None;
         let ty = match &ret {
             None => Ty::Bool,
-            Some(LTy::Struct(_)) => {
+            Some(t) if is_agg(t) => {
                 let dst = match sret {
                     Some(d) => d,
                     None => {
@@ -1323,7 +1494,10 @@ impl<'a> Lower<'a> {
             Val::E(e) => self.reject("condition", format!("expected bool, found {}", e.ty.name())),
             Val::Ct(_) => self.reject("condition", "expected bool, found an integer literal".into()),
             Val::P(..) => self.reject("condition", "expected bool, found a pointer".into()),
+            Val::M(ref p) if matches!(p.ty, LTy::Arr(..)) => self.reject("condition", "expected bool, found an array".into()),
+            Val::A(..) => self.reject("condition", "expected bool, found an array".into()),
             Val::M(_) => self.reject("condition", "expected bool, found a struct".into()),
+            Val::S(..) => self.reject("condition", "expected bool, found a string".into()),
         }
     }
 
@@ -1367,7 +1541,12 @@ impl<'a> Lower<'a> {
                 )
             }
             Val::P(..) => self.reject("type mismatch", format!("expected {}, found a pointer", to.name())),
+            Val::M(ref p) if matches!(p.ty, LTy::Arr(..)) => {
+                self.reject("type mismatch", format!("expected {}, found an array", to.name()))
+            }
+            Val::A(..) => self.reject("type mismatch", format!("expected {}, found an array", to.name())),
             Val::M(_) => self.reject("type mismatch", format!("expected {}, found a struct", to.name())),
+            Val::S(..) => self.reject("type mismatch", format!("expected {}, found a string", to.name())),
         }
     }
 
@@ -1408,7 +1587,12 @@ impl<'a> Lower<'a> {
             }
             (Val::Ct(_), Val::Ct(_)) => self.reject("type mismatch", "internal: two literals".into()),
             (Val::Poison, _) | (_, Val::Poison) => Err(()),
+            (Val::A(..), _) | (_, Val::A(..)) => self.reject("type mismatch", format!("`{}` on an array", what)),
+            (Val::M(p), _) | (_, Val::M(p)) if matches!(p.ty, LTy::Arr(..)) => {
+                self.reject("type mismatch", format!("`{}` on an array", what))
+            }
             (Val::M(_), _) | (_, Val::M(_)) => self.reject("type mismatch", format!("`{}` on a struct", what)),
+            (Val::S(..), _) | (_, Val::S(..)) => self.reject("type mismatch", format!("`{}` on a string", what)),
             (Val::P(..), _) | (_, Val::P(..)) => self.reject("type mismatch", format!("`{}` on a pointer", what)),
         }
     }
@@ -1485,16 +1669,44 @@ impl<'a> Lower<'a> {
             NodeKind::ExprCall => {
                 let (call, ret, temp) = self.call(n, None)?;
                 match ret {
-                    Some(t @ LTy::Struct(_)) => {
+                    Some(t) if is_agg(&t) => {
                         Ok(Val::M(Place { addr: call, off: 0, ty: t, mutable: false, temp }))
                     }
                     Some(t) => Ok(val_of(call, &t)),
                     None => self.reject("ExprCall", format!("void fn `{}` used as a value", n.name)),
                 }
             }
+            NodeKind::ExprCast => {
+                if n.children.len() != 1 {
+                    return self.reject("ExprCast", "unexpected shape".into());
+                }
+                // The operand first, so that in recovery mode an unsupported
+                // operand and an unsupported target type are both named.
+                let v = self.expr(&n.children[0])?;
+                let to = self.ty(n.extra_type.trim())?;
+                self.cast(v, to)
+            }
             NodeKind::ExprFieldAccess => {
-                let p = self.lvalue(n)?;
-                self.place_value(p)
+                // `.len` of a compile-time string is a constant.
+                if n.name == "len"
+                    && n.children.len() == 1
+                    && matches!(n.children[0].kind, NodeKind::ExprIdentifier | NodeKind::ExprLiteral)
+                {
+                    if let Some(len) = self.peek_string(&n.children[0])? {
+                        return Ok(Val::E(Expr { ty: Ty::U64, kind: ExprKind::Const(len as i128) }));
+                    }
+                }
+                match self.member(n)? {
+                    Ok(p) => self.place_value(p),
+                    Err(v) => Ok(v),
+                }
+            }
+            NodeKind::ExprIndex => match self.index(n)? {
+                Ok(p) => self.place_value(p),
+                Err(v) => Ok(v),
+            },
+            NodeKind::ExprArrayLiteral => {
+                self.reject("ExprArrayLiteral", "array literal with no result type".into())
             }
             NodeKind::ExprStructLit => {
                 if n.name.is_empty() {
@@ -1508,6 +1720,75 @@ impl<'a> Lower<'a> {
                 self.reject(&k, String::new())
             }
         }
+    }
+
+    /// A literal or a name, evaluated only if it is a compile-time string:
+    /// nothing is reported or emitted otherwise.
+    fn peek_string(&mut self, n: &Node) -> R<Option<u64>> {
+        if n.kind == NodeKind::ExprLiteral {
+            return Ok((n.extra_kind == "string").then(|| n.value.len() as u64));
+        }
+        match self.lookup(&n.name) {
+            Some(Binding::Const(Val::S(_, len))) => Ok(Some(len)),
+            Some(_) => Ok(None),
+            // Only a constant initialised with a string literal is evaluated
+            // here; any rejection it has is its own.
+            None if self.const_nodes.get(&n.name).is_some_and(|c| {
+                c.children.first().is_some_and(|i| i.kind == NodeKind::ExprLiteral && i.extra_kind == "string")
+            }) =>
+            {
+                match self.global(&n.name)? {
+                    Some(Val::S(_, len)) => Ok(Some(len)),
+                    _ => Ok(None),
+                }
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// `v as to`. Lossless conversions (bool to an integer as 0 / 1
+    /// included) are a `Widen`. A narrowing between two unsigned types
+    /// truncates, like Zig's `@truncate`; every other one is checked, like
+    /// `@intCast`, and traps when the value is outside `to`. In Wrap mode every
+    /// narrowing truncates, as a C cast does.
+    fn cast(&mut self, v: Val, to: Ty) -> R<Val> {
+        let e = match v {
+            Val::Poison => return Err(()),
+            Val::Ct(c) if to.is_int() => return Ok(Val::E(self.coerce(Val::Ct(c), to)?)),
+            Val::Ct(_) => return self.reject("ExprCast(to bool)", "integer literal as bool".into()),
+            Val::E(e) => e,
+            Val::P(..) => return self.reject("ExprCast", format!("pointer as {}", to.name())),
+            Val::M(_) | Val::A(..) => return self.reject("ExprCast", format!("struct or array as {}", to.name())),
+            Val::S(..) => return self.reject("ExprCast", format!("string as {}", to.name())),
+        };
+        let from = e.ty;
+        if from == to {
+            return Ok(Val::E(e));
+        }
+        if to == Ty::Bool {
+            return self.reject("ExprCast(to bool)", format!("{} as bool", from.name()));
+        }
+        if from == Ty::Bool || to.can_widen_from(from) {
+            if let ExprKind::Const(c) = e.kind {
+                return Ok(Val::E(Expr { ty: to, kind: ExprKind::Const(c) }));
+            }
+            return Ok(Val::E(Expr { ty: to, kind: ExprKind::Widen(Box::new(e)) }));
+        }
+        let truncate = self.mode == OverflowMode::Wrap || (!from.signed() && !to.signed());
+        if let ExprKind::Const(c) = e.kind {
+            if truncate {
+                return Ok(Val::E(Expr { ty: to, kind: ExprKind::Const(to.wrap(c)) }));
+            }
+            if to.fits(c) {
+                return Ok(Val::E(Expr { ty: to, kind: ExprKind::Const(c) }));
+            }
+        }
+        let site = if truncate {
+            0
+        } else {
+            self.site(TrapKind::Cast, format!("{} as {}", from.name(), to.name()), to)
+        };
+        Ok(Val::E(Expr { ty: to, kind: ExprKind::Cast { arg: Box::new(e), site } }))
     }
 
     /// A name that is neither in scope nor a module-level constant.
@@ -1541,6 +1822,11 @@ impl<'a> Lower<'a> {
     }
 
     fn literal(&mut self, n: &Node) -> R<Val> {
+        // The t27c lexer strips the quotes and unescapes, so the node holds
+        // the string's own bytes (not trimmed: spaces are part of it).
+        if n.extra_kind == "string" {
+            return Ok(self.string(n.value.as_bytes()));
+        }
         let s = n.value.trim();
         if s == "true" || s == "false" {
             return Ok(Val::E(Expr {
@@ -1620,7 +1906,7 @@ impl<'a> Lower<'a> {
                 &format!("ExprUnary({})", op),
                 "on an untyped integer literal".into(),
             ),
-            (op, _) => self.reject(&format!("ExprUnary({})", op), "operand is a pointer or a struct".into()),
+            (op, _) => self.reject(&format!("ExprUnary({})", op), "operand is a pointer, a struct or a string".into()),
         }
     }
 
@@ -1628,8 +1914,21 @@ impl<'a> Lower<'a> {
         if a.is_poison() || b.is_poison() {
             return Err(());
         }
-        if matches!(a, Val::P(..) | Val::M(_)) || matches!(b, Val::P(..) | Val::M(_)) {
-            let what = if matches!(a, Val::M(_)) || matches!(b, Val::M(_)) { "a struct" } else { "a pointer" };
+        if self.is_str(&a) || self.is_str(&b) {
+            return match op {
+                "==" | "!=" => self.str_eq(op == "!=", a, b),
+                _ => self.reject(&format!("ExprBinary({})", op), "on a string".into()),
+            };
+        }
+        if matches!(a, Val::P(..) | Val::M(_) | Val::A(..)) || matches!(b, Val::P(..) | Val::M(_) | Val::A(..)) {
+            let arr = |v: &Val| matches!(v, Val::A(..)) || matches!(v, Val::M(p) if matches!(p.ty, LTy::Arr(..)));
+            let what = if arr(&a) || arr(&b) {
+                "an array"
+            } else if matches!(a, Val::M(_)) || matches!(b, Val::M(_)) {
+                "a struct"
+            } else {
+                "a pointer"
+            };
             return self.reject("type mismatch", format!("`{}` on {}", op, what));
         }
         let cmp = match op {
@@ -1823,6 +2122,10 @@ impl<'a> Lower<'a> {
         if let Some(ty) = Ty::from_name(t) {
             return Ok(LTy::S(ty));
         }
+        // t27c's Zig backend spells all four `[]const u8`.
+        if matches!(t, "str" | "&str" | "string" | "[]const u8") {
+            return Ok(LTy::Str);
+        }
         if self.struct_nodes.contains_key(t) {
             let id = self.struct_id(t);
             if by_value {
@@ -1830,8 +2133,43 @@ impl<'a> Lower<'a> {
             }
             return Ok(LTy::Struct(id));
         }
+        // `[N]T`, N a literal or the name of a compile-time integer.
+        if let Some((len, elem)) = t.strip_prefix('[').and_then(|r| r.split_once(']')) {
+            let (len, elem) = (len.trim(), elem.trim());
+            if !len.is_empty() && !elem.is_empty() {
+                let n = self.array_len(t, len)?;
+                let inner = self.lty_in(elem, by_value)?;
+                return Ok(LTy::Arr(Box::new(inner), n));
+            }
+        }
         let (construct, detail) = self.type_construct(t);
         self.reject(&construct, detail)
+    }
+
+    /// The length of array type `t`, spelled `len`.
+    fn array_len(&mut self, t: &str, len: &str) -> R<u32> {
+        let v = if let Some(c) = parse_int(len) {
+            Some(c)
+        } else if len.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && !len.starts_with(|c: char| c.is_ascii_digit()) && len != "_" {
+            let v = match self.lookup(len) {
+                Some(Binding::Const(v)) => Some(v),
+                Some(_) => None,
+                None => self.global(len)?,
+            };
+            match v {
+                Some(Val::Poison) => return Err(()),
+                Some(Val::Ct(c)) => Some(c),
+                Some(Val::E(Expr { kind: ExprKind::Const(c), ty })) if ty.is_int() => Some(c),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        match v {
+            Some(c) if (0..=u32::MAX as i128).contains(&c) => Ok(c as u32),
+            Some(c) => self.reject("type [N]T", format!("`{}`: length {} out of range", t, c)),
+            None => self.reject("type [N]T", format!("`{}`: length `{}` is not a compile-time integer", t, len)),
+        }
     }
 
     fn struct_id(&mut self, name: &str) -> u32 {
@@ -1918,10 +2256,21 @@ impl<'a> Lower<'a> {
         match t {
             LTy::S(ty) => Ok((ty.bytes(), ty.bytes())),
             LTy::Ptr(..) => Ok((8, 8)),
+            LTy::Str => Ok((16, 8)),
             LTy::Struct(id) => {
                 self.layout(*id)?;
                 let sd = &self.structs[*id as usize];
                 Ok((sd.size.unwrap(), sd.align))
+            }
+            LTy::Arr(inner, n) => {
+                let (es, ea) = self.size_align(inner)?;
+                match es.checked_mul(*n) {
+                    Some(size) if size < 1 << 30 => Ok((size, ea)),
+                    _ => {
+                        let what = self.type_name(t);
+                        self.reject("type [N]T", format!("`{}` is too large", what))
+                    }
+                }
             }
         }
     }
@@ -1931,6 +2280,8 @@ impl<'a> Lower<'a> {
             LTy::S(ty) => ty.name().to_string(),
             LTy::Ptr(inner, m) => format!("*{}{}", if *m { "" } else { "const " }, self.type_name(inner)),
             LTy::Struct(id) => self.structs[*id as usize].name.clone(),
+            LTy::Str => "str".to_string(),
+            LTy::Arr(inner, n) => format!("[{}]{}", n, self.type_name(inner)),
         }
     }
 
@@ -1952,6 +2303,10 @@ impl<'a> Lower<'a> {
         if n.kind == NodeKind::ExprStructLit && matches!(want, LTy::Struct(_)) {
             self.see(n);
             self.lit_type(n, want)?;
+            return self.struct_temp(n, want.clone());
+        }
+        if n.kind == NodeKind::ExprArrayLiteral && matches!(want, LTy::Arr(..)) {
+            self.see(n);
             return self.struct_temp(n, want.clone());
         }
         let v = self.expr(n)?;
@@ -1990,6 +2345,32 @@ impl<'a> Lower<'a> {
                     self.reject("type mismatch", format!("expected {}, found a value", a))
                 }
             },
+            // A literal is written into a temporary; the place it is copied
+            // to, if any, is the caller's business.
+            LTy::Str => match v {
+                Val::S(k, len) => {
+                    let slot = self.new_slot(want)?;
+                    let dst = Place { addr: slot_expr(slot), off: 0, ty: LTy::Str, mutable: true, temp: None };
+                    let mut stmts = Vec::new();
+                    self.store_str(&dst, k, len, &mut stmts);
+                    let addr = Expr { ty: Ty::Ptr, kind: ExprKind::Seq { stmts, value: Box::new(slot_expr(slot)) } };
+                    Ok(Val::M(Place { addr, off: 0, ty: LTy::Str, mutable: false, temp: Some(slot) }))
+                }
+                Val::M(p) if p.ty == LTy::Str => Ok(Val::M(p)),
+                Val::M(p) => {
+                    let b = self.type_name(&p.ty);
+                    self.reject("type mismatch", format!("expected str, found {}", b))
+                }
+                _ => self.reject("type mismatch", "expected str, found a scalar".into()),
+            },
+            LTy::Arr(..) => match v {
+                Val::M(p) if &p.ty == want => Ok(Val::M(p)),
+                Val::A(t, elems) if &t == want => Ok(Val::M(self.materialize(t, elems)?)),
+                v => {
+                    let (a, b) = (self.type_name(want), self.val_desc(&v));
+                    self.reject("type mismatch", format!("expected {}, found {}", a, b))
+                }
+            },
             LTy::Struct(_) => match v {
                 Val::M(p) if &p.ty == want => Ok(Val::M(p)),
                 Val::M(p) => {
@@ -2010,12 +2391,113 @@ impl<'a> Lower<'a> {
             Val::E(e) | Val::P(e, _) => Ok(e),
             Val::Poison => Err(()),
             Val::Ct(_) => self.reject("type mismatch", "untyped integer literal".into()),
-            Val::M(_) => self.reject("type mismatch", "a struct where a scalar is expected".into()),
+            Val::M(_) | Val::A(..) => self.reject("type mismatch", "a struct or array where a scalar is expected".into()),
+            Val::S(..) => self.reject("type mismatch", "a string where a scalar is expected".into()),
         }
     }
 
-    /// A struct literal built in a fresh temporary slot, at the point the
-    /// value is evaluated.
+    /// The blob of a string literal's bytes (deduplicated), as a value.
+    fn string(&mut self, bytes: &[u8]) -> Val {
+        let len = bytes.len() as u64;
+        if let Some(&k) = self.strings.get(bytes) {
+            return Val::S(k, len);
+        }
+        // A trailing NUL, as Zig's literals have, so no blob is empty.
+        let mut blob = bytes.to_vec();
+        blob.push(0);
+        self.data.push(blob);
+        let k = (self.data.len() - 1) as u32;
+        self.strings.insert(bytes.to_vec(), k);
+        Val::S(k, len)
+    }
+
+    /// `dst = literal`: the address of the bytes, then the length. `dst`'s
+    /// address is pure.
+    fn store_str(&mut self, dst: &Place, k: u32, len: u64, out: &mut Vec<Stmt>) {
+        let ptr = Expr { ty: Ty::Ptr, kind: ExprKind::Data(k) };
+        out.push(Stmt::Store { addr: dst.addr.clone(), off: dst.off, value: ptr });
+        let n = Expr { ty: Ty::U64, kind: ExprKind::Const(len as i128) };
+        out.push(Stmt::Store { addr: dst.addr.clone(), off: dst.off + 8, value: n });
+    }
+
+    /// A compile-time array, written into a fresh temporary at the point
+    /// the value is evaluated.
+    fn materialize(&mut self, t: LTy, elems: Vec<Val>) -> R<Place> {
+        let k = self.new_slot(&t)?;
+        let dst = Place { addr: slot_expr(k), off: 0, ty: t.clone(), mutable: true, temp: None };
+        let mut stmts = Vec::new();
+        self.store_const(&dst, &elems, &mut stmts)?;
+        let addr = if stmts.is_empty() {
+            slot_expr(k)
+        } else {
+            Expr { ty: Ty::Ptr, kind: ExprKind::Seq { stmts, value: Box::new(slot_expr(k)) } }
+        };
+        Ok(Place { addr, off: 0, ty: t, mutable: false, temp: Some(k) })
+    }
+
+    /// The elements of a compile-time array into `dst` (pure address).
+    fn store_const(&mut self, dst: &Place, elems: &[Val], out: &mut Vec<Stmt>) -> R<()> {
+        let LTy::Arr(elem, _) = &dst.ty else { unreachable!() };
+        let elem = (**elem).clone();
+        let (esize, _) = self.size_align(&elem)?;
+        for (i, v) in elems.iter().enumerate() {
+            let p = elem_place(dst, &elem, esize, i as u32);
+            match v {
+                Val::S(k, len) => self.store_str(&p, *k, *len, out),
+                Val::A(_, sub) => self.store_const(&p, sub, out)?,
+                _ => return self.reject("ConstDecl", "internal: array constant element".into()),
+            }
+        }
+        Ok(())
+    }
+
+    /// What a value is, for a type error.
+    fn val_desc(&self, v: &Val) -> String {
+        match v {
+            Val::Ct(_) | Val::E(_) => "a scalar".into(),
+            Val::P(..) => "a pointer".into(),
+            Val::S(..) => "a string".into(),
+            Val::M(p) => self.type_name(&p.ty),
+            Val::A(t, _) => self.type_name(t),
+            Val::Poison => "an unknown value".into(),
+        }
+    }
+
+    fn is_str(&self, v: &Val) -> bool {
+        match v {
+            Val::S(..) => true,
+            Val::M(p) => p.ty == LTy::Str,
+            _ => false,
+        }
+    }
+
+    /// `a == b` (or `!=`) where one side is a string: content equality.
+    fn str_eq(&mut self, negate: bool, a: Val, b: Val) -> R<Val> {
+        let eq = if let (Val::S(ka, la), Val::S(kb, lb)) = (&a, &b) {
+            let (x, y) = (&self.data[*ka as usize][..*la as usize], &self.data[*kb as usize][..*lb as usize]);
+            Expr { ty: Ty::Bool, kind: ExprKind::Const((x == y) as i128) }
+        } else {
+            let mut args = Vec::new();
+            for v in [a, b] {
+                match self.coerce_to(v, &LTy::Str)? {
+                    Val::M(p) => args.push(addr_of(&p)),
+                    _ => return Err(()),
+                }
+            }
+            self.eql_used = true;
+            Expr { ty: Ty::Bool, kind: ExprKind::Call { func: self.nfuncs, args } }
+        };
+        if !negate {
+            return Ok(Val::E(eq));
+        }
+        Ok(Val::E(match eq.kind {
+            ExprKind::Const(c) => Expr { ty: Ty::Bool, kind: ExprKind::Const(1 - c) },
+            _ => Expr { ty: Ty::Bool, kind: ExprKind::Not(Box::new(eq)) },
+        }))
+    }
+
+    /// A struct or array literal built in a fresh temporary slot, at the
+    /// point the value is evaluated.
     fn struct_temp(&mut self, n: &Node, t: LTy) -> R<Val> {
         let k = self.new_slot(&t)?;
         let dst = Place { addr: slot_expr(k), off: 0, ty: t, mutable: true, temp: None };
@@ -2038,7 +2520,54 @@ impl<'a> Lower<'a> {
             return Ok(());
         }
         let t = dst.ty.clone();
+        let in_place = n.kind == NodeKind::ExprCall
+            && fresh
+            && self.sigs.get(&n.name).is_some_and(|s| s.ret == Some(t.clone()));
+        if t == LTy::Str && !in_place {
+            let v = self.expr(n)?;
+            return match v {
+                Val::S(k, len) if pure_addr(&dst.addr) => {
+                    self.store_str(&dst, k, len, out);
+                    Ok(())
+                }
+                v => match self.coerce_to(v, &t)? {
+                    Val::M(src) => self.copy(&dst, src, out),
+                    _ => Err(()),
+                },
+            };
+        }
+        if let LTy::Arr(..) = t {
+            if n.kind == NodeKind::ExprArrayLiteral {
+                if fresh && pure_addr(&dst.addr) {
+                    return self.init_array(n, &dst, out);
+                }
+                // The literal may read `dst`: build it aside first.
+                let k = self.new_slot(&t)?;
+                let tmp = Place { addr: slot_expr(k), off: 0, ty: t, mutable: true, temp: None };
+                self.init_array(n, &tmp, out)?;
+                return self.copy(&dst, tmp, out);
+            }
+            if in_place {
+                let (call, _, _) = self.call(n, Some(addr_of(&dst)))?;
+                out.push(Stmt::Eval(call));
+                return Ok(());
+            }
+            let v = self.expr(n)?;
+            return match v {
+                Val::A(u, elems) if u == t && pure_addr(&dst.addr) => self.store_const(&dst, &elems, out),
+                v => match self.coerce_to(v, &t)? {
+                    Val::M(src) => self.copy(&dst, src, out),
+                    _ => Err(()),
+                },
+            };
+        }
         let LTy::Struct(id) = t else {
+            if in_place {
+                // A call that returns a str, built in place.
+                let (call, _, _) = self.call(n, Some(addr_of(&dst)))?;
+                out.push(Stmt::Eval(call));
+                return Ok(());
+            }
             let v = self.expr_as(n, &t)?;
             let value = self.reg(v)?;
             out.push(Stmt::Store { addr: dst.addr, off: dst.off, value });
@@ -2065,6 +2594,22 @@ impl<'a> Lower<'a> {
             Val::Poison => Err(()),
             _ => self.reject("type mismatch", "internal: struct value not in memory".into()),
         }
+    }
+
+    /// The elements of an array literal, into `dst` (whose address is pure).
+    /// The literal's own type, if it names one (`[_]u8{ ... }`), is not
+    /// checked: t27c's Zig backend writes every array literal as an
+    /// anonymous `.{ ... }`, which takes the type of its destination.
+    fn init_array(&mut self, n: &Node, dst: &Place, out: &mut Vec<Stmt>) -> R<()> {
+        self.array_count(n, &dst.ty)?;
+        let LTy::Arr(elem, _) = &dst.ty else { unreachable!() };
+        let elem = (**elem).clone();
+        let (esize, _) = self.size_align(&elem)?;
+        for (i, c) in n.children.iter().enumerate() {
+            let p = elem_place(dst, &elem, esize, i as u32);
+            self.init(c, p, true, out)?;
+        }
+        Ok(())
     }
 
     /// The fields of a struct literal, into `dst` (whose address is pure).
@@ -2143,65 +2688,175 @@ impl<'a> Lower<'a> {
             NodeKind::ExprIdentifier => match self.lookup(&n.name) {
                 Some(Binding::Mem(p)) => Ok(p),
                 Some(Binding::Const(Val::Poison)) => Err(()),
+                Some(Binding::Const(Val::A(t, elems))) => self.materialize(t, elems),
                 Some(_) => self.reject("ExprUnary(&)", format!("`{}` is not in memory", n.name)),
                 None => match self.global(&n.name)? {
                     Some(Val::M(p)) => Ok(p),
+                    Some(Val::A(t, elems)) => self.materialize(t, elems),
                     Some(Val::Poison) => Err(()),
                     Some(_) => self.reject("ExprUnary(&)", format!("address of constant `{}`", n.name)),
                     None => self.unknown_name(&n.name),
                 },
             },
-            NodeKind::ExprFieldAccess if n.children.len() == 1 => {
-                let base = &n.children[0];
-                if n.name == "*" {
-                    return match self.expr(base)? {
-                        Val::P(e, LTy::Ptr(inner, m)) => {
-                            if let LTy::Struct(id) = *inner {
-                                self.layout(id)?;
-                            }
-                            Ok(Place { addr: e, off: 0, ty: *inner, mutable: m, temp: None })
-                        }
-                        Val::Poison => Err(()),
-                        _ => self.reject("ExprFieldAccess(.*)", "dereference of a non-pointer".into()),
-                    };
-                }
-                // `Color.red`, `std.math`: the base is not a value.
-                if base.kind == NodeKind::ExprIdentifier
-                    && self.lookup(&base.name).is_none()
-                    && !self.const_nodes.contains_key(&base.name)
-                {
-                    if self.recover && self.poison_names.contains(&base.name) {
-                        return Err(());
-                    }
-                    return self.reject("ExprFieldAccess", format!("`{}.{}`", base.name, n.name));
-                }
-                let p = match self.expr(base)? {
-                    Val::M(p) => p,
-                    Val::Poison => return Err(()),
-                    // Field access through a pointer dereferences it.
-                    Val::P(e, LTy::Ptr(inner, m)) if matches!(*inner, LTy::Struct(_)) => {
-                        Place { addr: e, off: 0, ty: *inner, mutable: m, temp: None }
-                    }
-                    _ => return self.reject("ExprFieldAccess", format!("`.{}` on a value that is not a struct", n.name)),
-                };
-                let LTy::Struct(id) = p.ty else { unreachable!() };
-                let fields = self.fields(id)?;
-                match fields.iter().find(|f| f.name == n.name) {
-                    Some(f) => {
-                        // A field of a temporary is read from it only once.
-                        let mut q = field_place(&p, f);
-                        q.mutable = p.mutable && p.temp.is_none();
-                        Ok(q)
-                    }
-                    None => {
-                        let s = self.structs[id as usize].name.clone();
-                        self.reject("ExprFieldAccess", format!("`{}` has no field `{}`", s, n.name))
-                    }
-                }
-            }
+            NodeKind::ExprFieldAccess if n.children.len() == 1 => match self.member(n)? {
+                Ok(p) => Ok(p),
+                Err(_) => self.reject("ExprFieldAccess(.len)", "`.len` of an array is not a place".into()),
+            },
+            NodeKind::ExprIndex => match self.index(n)? {
+                Ok(p) => Ok(p),
+                Err(_) => self.reject("StmtAssign", "assignment through a constant".into()),
+            },
             _ => {
                 let k = kind_name(n);
                 self.reject(&k, "not addressable".into())
+            }
+        }
+    }
+
+    /// `base[i]`: the place of an array element, or, for a constant index
+    /// into a compile-time array, the element itself. A constant index out
+    /// of range is rejected, as Zig rejects it at compile time; any other
+    /// index is checked when it is evaluated and traps out of range, as
+    /// Zig's safety check does.
+    fn index(&mut self, n: &Node) -> R<Result<Place, Val>> {
+        if !n.extra_op.is_empty() {
+            return self.reject(&format!("ExprIndex({})", n.extra_op), "slice of an array or string".into());
+        }
+        if n.children.len() != 2 {
+            return self.reject("ExprIndex", "unexpected shape".into());
+        }
+        let base = self.expr(&n.children[0])?;
+        let idx = self.expr(&n.children[1])?;
+        if base.is_poison() || idx.is_poison() {
+            return Err(());
+        }
+        let p = match base {
+            Val::A(t, elems) => {
+                let c = match &idx {
+                    Val::Ct(c) => Some(*c),
+                    Val::E(Expr { kind: ExprKind::Const(c), ty }) if ty.is_int() && !ty.signed() => Some(*c),
+                    _ => None,
+                };
+                if let Some(c) = c {
+                    if (0..elems.len() as i128).contains(&c) {
+                        return Ok(Err(elems[c as usize].clone()));
+                    }
+                }
+                self.materialize(t, elems)?
+            }
+            Val::M(p) if matches!(p.ty, LTy::Arr(..)) => p,
+            Val::P(e, LTy::Ptr(inner, m)) if matches!(*inner, LTy::Arr(..)) => {
+                Place { addr: e, off: 0, ty: *inner, mutable: m, temp: None }
+            }
+            Val::S(..) => return self.reject("ExprIndex(str)", "index of a string".into()),
+            Val::M(p) if p.ty == LTy::Str => return self.reject("ExprIndex(str)", "index of a string".into()),
+            v => {
+                let d = self.val_desc(&v);
+                return self.reject("ExprIndex", format!("index of {}", d));
+            }
+        };
+        let LTy::Arr(elem, len) = p.ty.clone() else { unreachable!() };
+        let (esize, _) = self.size_align(&elem)?;
+        let mutable = p.mutable && p.temp.is_none();
+        // Zig: the index is a usize.
+        let e = self.coerce(idx, Ty::U64)?;
+        if let ExprKind::Const(c) = e.kind {
+            if c >= len as i128 {
+                let t = self.type_name(&p.ty);
+                return self.reject("ExprIndex", format!("index {} out of bounds for `{}`", c, t));
+            }
+            let mut q = elem_place(&p, &elem, esize, c as u32);
+            q.mutable = mutable;
+            return Ok(Ok(q));
+        }
+        let t = self.type_name(&p.ty);
+        let site = self.site(TrapKind::Bounds, format!("index of {}", t), Ty::U64);
+        let len = Expr { ty: Ty::U64, kind: ExprKind::Const(len as i128) };
+        let checked = Expr { ty: Ty::U64, kind: ExprKind::Bounds { idx: Box::new(e), len: Box::new(len), site } };
+        let addr = Expr {
+            ty: Ty::Ptr,
+            kind: ExprKind::Offset { base: Box::new(addr_of(&p)), idx: Box::new(checked), scale: esize },
+        };
+        Ok(Ok(Place { addr, off: 0, ty: *elem, mutable, temp: None }))
+    }
+
+    /// `base.name`: the place of a field (or of `p.*`), or, for `.len` of
+    /// an array, its value.
+    fn member(&mut self, n: &Node) -> R<Result<Place, Val>> {
+        if n.children.len() != 1 {
+            return self.reject("ExprFieldAccess", "unexpected shape".into());
+        }
+        let base = &n.children[0];
+        if n.name == "*" {
+            return match self.expr(base)? {
+                Val::P(e, LTy::Ptr(inner, m)) => {
+                    if let LTy::Struct(id) = *inner {
+                        self.layout(id)?;
+                    }
+                    Ok(Ok(Place { addr: e, off: 0, ty: *inner, mutable: m, temp: None }))
+                }
+                Val::Poison => Err(()),
+                _ => self.reject("ExprFieldAccess(.*)", "dereference of a non-pointer".into()),
+            };
+        }
+        // `Color.red`, `std.math`: the base is not a value.
+        if base.kind == NodeKind::ExprIdentifier
+            && self.lookup(&base.name).is_none()
+            && !self.const_nodes.contains_key(&base.name)
+        {
+            if self.recover && self.poison_names.contains(&base.name) {
+                return Err(());
+            }
+            return self.reject("ExprFieldAccess", format!("`{}.{}`", base.name, n.name));
+        }
+        let p = match self.expr(base)? {
+            Val::M(p) => p,
+            Val::Poison => return Err(()),
+            Val::A(LTy::Arr(_, len), _) if n.name == "len" => {
+                return Ok(Err(Val::E(Expr { ty: Ty::U64, kind: ExprKind::Const(len as i128) })))
+            }
+            Val::A(t, elems) => self.materialize(t, elems)?,
+            // Field access through a pointer dereferences it.
+            Val::P(e, LTy::Ptr(inner, m)) if is_agg(&inner) => {
+                Place { addr: e, off: 0, ty: *inner, mutable: m, temp: None }
+            }
+            v @ Val::S(..) => match self.coerce_to(v, &LTy::Str)? {
+                Val::M(p) => p,
+                _ => return Err(()),
+            },
+            _ => return self.reject("ExprFieldAccess", format!("`.{}` on a value that is not a struct", n.name)),
+        };
+        if p.ty == LTy::Str {
+            if n.name != "len" {
+                return self.reject("ExprFieldAccess(str)", format!("`.{}` of a str", n.name));
+            }
+            // `.len` is read-only here: a str is never resized in place.
+            return Ok(Ok(Place { addr: p.addr, off: p.off + 8, ty: LTy::S(Ty::U64), mutable: false, temp: None }));
+        }
+        if let LTy::Arr(_, len) = p.ty {
+            if n.name != "len" {
+                return self.reject("ExprFieldAccess", format!("`.{}` of an array", n.name));
+            }
+            // A compile-time constant; the array is still evaluated.
+            let c = Expr { ty: Ty::U64, kind: ExprKind::Const(len as i128) };
+            if pure_addr(&p.addr) {
+                return Ok(Err(Val::E(c)));
+            }
+            let kind = ExprKind::Seq { stmts: vec![Stmt::Eval(p.addr)], value: Box::new(c) };
+            return Ok(Err(Val::E(Expr { ty: Ty::U64, kind })));
+        }
+        let LTy::Struct(id) = p.ty else { unreachable!() };
+        let fields = self.fields(id)?;
+        match fields.iter().find(|f| f.name == n.name) {
+            Some(f) => {
+                // A field of a temporary is read from it only once.
+                let mut q = field_place(&p, f);
+                q.mutable = p.mutable && p.temp.is_none();
+                Ok(Ok(q))
+            }
+            None => {
+                let s = self.structs[id as usize].name.clone();
+                self.reject("ExprFieldAccess", format!("`{}` has no field `{}`", s, n.name))
             }
         }
     }
@@ -2238,11 +2893,12 @@ impl<'a> Lower<'a> {
 
     /// A module-level struct constant: its bytes in read-only data.
     fn rodata(&mut self, n: &Node, t: LTy) -> R<Val> {
-        if n.kind != NodeKind::ExprStructLit {
+        if n.kind != NodeKind::ExprStructLit && n.kind != NodeKind::ExprArrayLiteral {
             let v = self.expr_as(n, &t)?;
             return match v {
                 Val::M(p) if matches!(p.addr.kind, ExprKind::Data(_)) => Ok(Val::M(p)),
-                _ => self.reject("ConstDecl", "struct constant is not a compile-time value".into()),
+                Val::Poison => Err(()),
+                _ => self.reject("ConstDecl", "struct or array constant is not a compile-time value".into()),
             };
         }
         let (size, _) = self.size_align(&t)?;
@@ -2251,6 +2907,52 @@ impl<'a> Lower<'a> {
         self.data.push(buf);
         let k = (self.data.len() - 1) as u32;
         Ok(Val::M(Place { addr: Expr { ty: Ty::Ptr, kind: ExprKind::Data(k) }, off: 0, ty: t, mutable: false, temp: None }))
+    }
+
+    /// A module-level array constant with strings in it: `Val::A`.
+    fn const_array(&mut self, n: &Node, t: &LTy) -> R<Val> {
+        self.see(n);
+        let LTy::Arr(elem, _) = t else { unreachable!() };
+        if n.kind != NodeKind::ExprArrayLiteral {
+            let v = self.expr(n)?;
+            return match v {
+                Val::A(ref u, _) if u == t => Ok(v),
+                Val::Poison => Err(()),
+                _ => {
+                    let a = self.type_name(t);
+                    self.reject("ConstDecl", format!("`{}` constant is not a compile-time value", a))
+                }
+            };
+        }
+        self.array_count(n, t)?;
+        let mut elems = Vec::new();
+        for c in &n.children {
+            let v = if **elem == LTy::Str {
+                self.see(c);
+                match self.expr(c)? {
+                    v @ Val::S(..) => v,
+                    Val::Poison => return Err(()),
+                    _ => return self.reject("ConstDecl", "array element is not a string literal".into()),
+                }
+            } else {
+                self.const_array(c, elem)?
+            };
+            elems.push(v);
+        }
+        Ok(Val::A(t.clone(), elems))
+    }
+
+    /// An array literal's element count must be the array's length.
+    fn array_count(&mut self, n: &Node, t: &LTy) -> R<()> {
+        let LTy::Arr(_, len) = t else { unreachable!() };
+        if n.children.len() != *len as usize {
+            let a = self.type_name(t);
+            return self.reject(
+                "ExprArrayLiteral",
+                format!("{} elements for `{}`", n.children.len(), a),
+            );
+        }
+        Ok(())
     }
 
     fn const_fill(&mut self, n: &Node, t: &LTy, buf: &mut [u8], off: usize) -> R<()> {
@@ -2272,6 +2974,7 @@ impl<'a> Lower<'a> {
                 Ok(())
             }
             LTy::Ptr(..) => self.reject("ConstDecl", "pointer in a constant struct".into()),
+            LTy::Str => self.reject("ConstDecl(str field)", "str field in a module-level struct constant".into()),
             LTy::Struct(id) if n.kind == NodeKind::ExprStructLit => {
                 self.lit_type(n, t)?;
                 let fields = self.fields(*id)?;
@@ -2301,9 +3004,17 @@ impl<'a> Lower<'a> {
                 }
                 Ok(())
             }
-            LTy::Struct(_) => {
+            LTy::Arr(elem, _) if n.kind == NodeKind::ExprArrayLiteral => {
+                self.array_count(n, t)?;
+                let (esize, _) = self.size_align(elem)?;
+                for (i, c) in n.children.iter().enumerate() {
+                    self.const_fill(c, elem, buf, off + i * esize as usize)?;
+                }
+                Ok(())
+            }
+            LTy::Struct(_) | LTy::Arr(..) => {
                 let v = self.expr_as(n, t)?;
-                let Val::M(p) = v else { unreachable!() };
+                let Val::M(p) = v else { return Err(()) };
                 let ExprKind::Data(k) = p.addr.kind else {
                     return self.reject("ConstDecl", "struct field is not a compile-time value".into());
                 };
@@ -2321,9 +3032,99 @@ fn reg_ty(t: &LTy) -> Option<Ty> {
     match t {
         LTy::S(ty) => Some(*ty),
         LTy::Ptr(..) => Some(Ty::Ptr),
-        LTy::Struct(_) => None,
+        LTy::Struct(_) | LTy::Str | LTy::Arr(..) => None,
     }
 }
+
+/// Lives in memory and is passed by reference: a struct, a `str` or an
+/// array.
+fn is_agg(t: &LTy) -> bool {
+    matches!(t, LTy::Struct(_) | LTy::Str | LTy::Arr(..))
+}
+
+/// An array type with strings at its leaves: no read-only image of it can
+/// exist, so its module constants are `Val::A`.
+fn holds_str(t: &LTy) -> bool {
+    match t {
+        LTy::Str => true,
+        LTy::Arr(inner, _) => holds_str(inner),
+        _ => false,
+    }
+}
+
+/// The place of element `i` (a constant) of array place `p`.
+fn elem_place(p: &Place, elem: &LTy, esize: u32, i: u32) -> Place {
+    Place { addr: p.addr.clone(), off: p.off + i * esize, ty: elem.clone(), mutable: p.mutable, temp: None }
+}
+
+/// `__t27b_str_eql(a: *const str, b: *const str) bool`: equal lengths and
+/// equal bytes, what `std.mem.eql(u8, a, b)` computes.
+fn str_eql_func(noreturn_site: SiteId) -> Func {
+    let var = |id: VarId, ty: Ty| Expr { ty, kind: ExprKind::Var(id) };
+    let cnst = |ty: Ty, v: i128| Expr { ty, kind: ExprKind::Const(v) };
+    let load = |addr: Expr, off: u32, ty: Ty| Expr { ty, kind: ExprKind::Load { addr: Box::new(addr), off } };
+    let ne = |a: Expr, b: Expr| Expr { ty: Ty::Bool, kind: ExprKind::Cmp { op: CmpOp::Ne, lhs: Box::new(a), rhs: Box::new(b) } };
+    let byte = |s: VarId| {
+        let base = load(var(s, Ty::Ptr), 0, Ty::Ptr);
+        let at = Expr {
+            ty: Ty::Ptr,
+            kind: ExprKind::Offset { base: Box::new(base), idx: Box::new(var(3, Ty::U64)), scale: 1 },
+        };
+        load(at, 0, Ty::U8)
+    };
+    let (a, b, n, i) = (0, 1, 2, 3);
+    let body = vec![
+        Stmt::Assign { var: n, value: load(var(a, Ty::Ptr), 8, Ty::U64) },
+        Stmt::If {
+            cond: ne(load(var(b, Ty::Ptr), 8, Ty::U64), var(n, Ty::U64)),
+            then: vec![Stmt::Return(Some(cnst(Ty::Bool, 0)))],
+            els: vec![],
+        },
+        Stmt::Assign { var: i, value: cnst(Ty::U64, 0) },
+        Stmt::While {
+            cond: Expr {
+                ty: Ty::Bool,
+                kind: ExprKind::Cmp { op: CmpOp::Lt, lhs: Box::new(var(i, Ty::U64)), rhs: Box::new(var(n, Ty::U64)) },
+            },
+            body: vec![Stmt::If {
+                cond: ne(byte(a), byte(b)),
+                then: vec![Stmt::Return(Some(cnst(Ty::Bool, 0)))],
+                els: vec![],
+            }],
+            // i < n <= 2^64 - 1, so i + 1 cannot wrap.
+            step: vec![Stmt::Assign {
+                var: i,
+                value: Expr {
+                    ty: Ty::U64,
+                    kind: ExprKind::Arith {
+                        op: ArithOp::AddW,
+                        lhs: Box::new(var(i, Ty::U64)),
+                        rhs: Box::new(cnst(Ty::U64, 1)),
+                        site: 0,
+                    },
+                },
+            }],
+        },
+        Stmt::Return(Some(cnst(Ty::Bool, 1))),
+    ];
+    let v = |name: &str, ty: Ty| Var { name: name.to_string(), ty };
+    Func {
+        name: STR_EQL.to_string(),
+        nparams: 2,
+        ret: Some(Ty::Bool),
+        vars: vec![v("a", Ty::Ptr), v("b", Ty::Ptr), v("n", Ty::U64), v("i", Ty::U64)],
+        body,
+        line: 0,
+        is_test: false,
+        is_invariant: false,
+        noreturn_site,
+        slots: Vec::new(),
+    }
+}
+
+/// The one function lowering synthesizes; not a name t27 source can declare
+/// (`__t27b_` is reserved to the backend).
+pub const STR_EQL: &str = "__t27b_str_eql";
 
 fn val_of(e: Expr, t: &LTy) -> Val {
     match t {
