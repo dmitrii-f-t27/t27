@@ -40,6 +40,8 @@ CHECK_STATES = {"SUCCESS": 0,
                 "STARTUP_FAILURE": 2,
                 "ABSENT": 3,
                 "SKIPPED": 4, "NEUTRAL": 4, "STALE": 4}
+# One name per state code, for a state the spec returns (master_state).
+STATE_NAMES = ("SUCCESS", "PENDING", "FAILURE", "ABSENT", "NEUTRAL")
 MERGEABLES = {"MERGEABLE": 0, "CONFLICTING": 1, "UNKNOWN": 2}
 EFFECTS = (None, "WAIT", "BLOCK")
 READINESS = ("READY", "WAIT", "RED", "CONFLICT", "RETARGET", "BLOCKED", "CLOSED")
@@ -112,6 +114,8 @@ def _build():
     so.is_alarm.restype = ctypes.c_bool
     so.check_effect.argtypes = [ctypes.c_uint8, ctypes.c_uint8, ctypes.c_bool]
     so.check_effect.restype = ctypes.c_uint8
+    so.master_state.argtypes = [ctypes.c_bool, ctypes.c_uint8]
+    so.master_state.restype = ctypes.c_uint8
     so.effect_fold.argtypes = [ctypes.c_uint8, ctypes.c_uint8]
     so.effect_fold.restype = ctypes.c_uint8
     so.pr_ready.argtypes = [ctypes.c_bool, ctypes.c_uint8, ctypes.c_bool, ctypes.c_uint8, ctypes.c_uint8]
@@ -241,6 +245,18 @@ def check_state(s):
 
 def check_effect(state, master, required):
     return EFFECTS[lib().check_effect(check_state(state), check_state(master), bool(required))]
+
+
+def is_red_state(s):
+    """A red check state (failure, error, cancelled, timed out): for reports only."""
+    return check_state(s) == CHECK_STATES["FAILURE"]
+
+
+def master_state(running, last):
+    """The master state a PR check is judged against (#6334): `last` is master's
+    newest completed verdict of it in the window (ABSENT when none), `running`
+    says a newer master run has no conclusion yet."""
+    return STATE_NAMES[lib().master_state(bool(running), check_state(last))]
 
 
 def pr_ready(is_open, mergeable, base_master, effects_required, effects_other):

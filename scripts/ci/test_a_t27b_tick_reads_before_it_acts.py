@@ -351,12 +351,53 @@ with tempfile.TemporaryDirectory() as tmp:
     check(code == 2 and "unknown check state" in out, f"ready: an unknown check state is unreadable, exit 2 ({code})")
     sys.path.insert(0, os.path.dirname(TOOL))
     import t27b as t27b_tool
+    def ent(last, sha=None, running=False):
+        return {"last": last, "sha": sha, "running": running}
     check(t27b_tool.fold_master(["a\tcancelled\nb\tfailure\nc\tskipped\n", "a\tsuccess\nb\tsuccess\nc\tneutral\n"])
-          == {"a": "SUCCESS", "b": "FAILURE"},
+          == {"a": ent("SUCCESS"), "b": ent("FAILURE")},
           "ready: master's newest verdict per check; cancelled, skipped and neutral runs are passed over")
     check(t27b_tool.fold_master(["a\tin_progress\nb\tcancelled\n", "a\tsuccess\nb\tqueued\n", "b\tsuccess\n"])
-          == {"a": "PENDING", "b": "PENDING"},
-          "ready: a master run still going on a newer commit makes master PENDING, not the older verdict (Q29)")
+          == {"a": ent("SUCCESS", running=True), "b": ent("SUCCESS", running=True)},
+          "ready: a master run still going on a newer commit is kept with the verdict below it (Q29)")
+    shas = ["d566906a4" + "0" * 31, "f329e27c1" + "1" * 31, "c0ffee000" + "2" * 31]
+    check(t27b_tool.fold_master(["coverage\tqueued\n", "coverage\tfailure\n", "coverage\tfailure\n"], shas)
+          == {"coverage": ent("FAILURE", "f329e27c1", True)},
+          "ready: past a queued tip the newest completed verdict and its commit are found (#6334, the #6333 case)")
+    check(t27b_tool.fold_master(["coverage\tqueued\n", "coverage\tcancelled\n"], shas)
+          == {"coverage": ent(None, None, True)},
+          "ready: a running tip with no completed run in the window has no verdict (#6334)")
+
+    # #6334: a red non-required check against a master tip whose run is still going
+    write_fixture(gx, {"prs.json": [gate(31, coverage="FAILURE"), gate(32, coverage="FAILURE"),
+                                    gate(33, coverage="FAILURE"), gate(34, coverage="FAILURE"),
+                                    gate(35, coverage="FAILURE")],
+                       "master_checks.json": {}})
+    def run_ready_one(n, master_cov):
+        write_fixture(gx, {"prs.json": [gate(n, coverage="FAILURE")], "master_checks.json": {"coverage": master_cov}})
+        p = subprocess.run([sys.executable, TOOL, "ready", "--json", "--fixture", gx, str(n)],
+                           capture_output=True, text=True)
+        try:
+            o = json.loads(p.stdout)[0]
+            return p.returncode, o["verdict"], o["why"]
+        except (ValueError, IndexError, KeyError):
+            return p.returncode, None, p.stdout + p.stderr
+    code, v, why = run_ready_one(31, ent("FAILURE", "f329e27c1", True))
+    check(code == 0 and v == "READY" and why == ["coverage=FAILURE (master FAILURE@f329e27c1, newer run going)"],
+          f"ready: red below a running tip is master's breakage -- READY, reported with the commit (#6334) ({code} {v} {why})")
+    code, v, why = run_ready_one(32, ent(None, None, True))
+    check(code == 1 and v == "WAIT" and why == ["coverage=FAILURE (master PENDING, no completed run in window)"],
+          f"ready: no completed master run in the window WAITs, never READY (#6334, #6333 merged here) ({code} {v} {why})")
+    code, v, why = run_ready_one(33, ent("SUCCESS", "f329e27c1", True))
+    check(code == 1 and v == "WAIT", f"ready: green below a running tip WAITs, not BLOCKED (Q29) ({code} {v} {why})")
+    code, v, why = run_ready_one(34, "PENDING")
+    check(code == 1 and v == "WAIT", f"ready: a plain PENDING master WAITs -- pr_ready honours a non-required WAIT ({code} {v} {why})")
+    write_fixture(gx, {"prs.json": [gate(36)], "master_checks.json": {"validate": ent("SUCCESS", "f329e27c1", True)}})
+    p = subprocess.run([sys.executable, TOOL, "ready", "--json", "--fixture", gx, "36"], capture_output=True, text=True)
+    check(p.returncode == 0 and '"READY"' in p.stdout,
+          f"ready: a required check's master entry in the new shape is read, not a crash ({p.returncode} {p.stderr[-200:]})")
+    code, v, why = run_ready_one(35, ent("FAILURE", "f329e27c1", False))
+    check(code == 0 and v == "READY" and why == [],
+          f"ready: a settled red master verdict lets the PR through as before ({code} {v} {why})")
 
     # watch (#6285): what each PR of a stack gets, decided by steward.t27
     wx = os.path.join(tmp, "fx-watch")
@@ -382,6 +423,11 @@ with tempfile.TemporaryDirectory() as tmp:
                                 act=lambda n, a: acted.append((n, a)), sleep=slept.append)
     check(code == 1 and acted == [(20, "MERGE")] and slept == [],
           f"watch: a stack is walked in order -- done, merged, then a red PR stops it ({code} {acted})")
+    wx = os.path.join(tmp, "fx-watch-running")
+    write_fixture(wx, {"prs.json": [gate(26, coverage="FAILURE")],
+                       "master_checks.json": {"coverage": {"last": None, "sha": None, "running": True}}})
+    code, act, out = run_watch(26)
+    check(act == "WAIT", f"watch: a red check against a master tip with no completed run waits, never merges (#6334) ({act})")
     wx = os.path.join(tmp, "fx-watch-noheads")
     write_fixture(wx, {"prs.json": [gate(22, base="claude/x")], "master_checks.json": {}})
     code, act, out = run_watch(22)

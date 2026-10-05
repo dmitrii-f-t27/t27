@@ -118,9 +118,13 @@ parse-ratchet, and loop-tools-tracked when it reports on the PR; each must be
 SUCCESS. A non-required check blocks only when it is red on the PR and its
 latest completed result on master is success (Q16); red on master too means
 master broke it. Master's results are the newest completed run per check
-name over the last few master commits. Exit 0 when every PR listed is READY,
+name over the last 12 master commits, looked up past a tip whose run is still
+going (#6334): red below a running tip stays red, reported as
+`coverage=FAILURE (master FAILURE@f329e27c1, newer run going)`; green below
+it, or no completed run in the window, makes the PR WAIT, never READY
+(steward.t27 `master_state`). Exit 0 when every PR listed is READY,
 1 otherwise, 2 when GitHub could not be read. Fixtures: prs.json,
-master_checks.json ({name: state}).
+master_checks.json ({name: state} or {name: {last, sha, running}}).
 
     tri t27b ready [N ...] [--json] [--fixture DIR]
 
@@ -327,7 +331,7 @@ class Sources:
             raise Unreadable("no master commits from the GitHub API")
         return fold_master([run(["gh", "api", "--paginate", f"repos/{REPO}/commits/{sha}/check-runs?per_page=100",
                                  "--jq", r'.check_runs[] | "\(.name)\t\(.conclusion // .status)"'],
-                                timeout=90) for sha in shas])
+                                timeout=90) for sha in shas], shas)
 
     def claim(self):
         text = self._fx("claim.json") if self.fixture else _read(os.path.join(self.state, "claim.json"))
@@ -1183,21 +1187,53 @@ MASTER_VERDICTS = ("SUCCESS", "FAILURE", "TIMED_OUT", "ACTION_REQUIRED", "STARTU
 MASTER_RUNNING = ("QUEUED", "IN_PROGRESS", "WAITING", "PENDING", "REQUESTED")
 
 
-def fold_master(outputs):
+def fold_master(outputs, shas=None):
     """`name<TAB>conclusion` lines per master commit, newest commit first ->
-    {name: the newest conclusion that is a verdict, or PENDING when a newer run
-    is still going (Q29)}. Cancelled, skipped and
-    neutral runs are passed over (MASTER_VERDICTS)."""
+    {name: {"last": the newest conclusion that is a verdict or None, "sha":
+    the commit it ran on (9 chars) or None, "running": a newer run has no
+    conclusion yet (Q29)}}. The scan goes past a running tip to the newest
+    verdict below it (#6334: #6333 merged on `master PENDING` while coverage
+    had failed on the three commits under the queued tip). Cancelled, skipped
+    and neutral runs are passed over (MASTER_VERDICTS); a check with none of
+    either in the window is left out (ABSENT)."""
     got = {}
-    for out in outputs:
+    shas = list(shas or [])
+    for i, out in enumerate(outputs):
+        sha = shas[i][:9] if i < len(shas) else None
         for line in out.splitlines():
             name, _, concl = line.partition("\t")
             concl = concl.strip().upper()
-            if name and concl in MASTER_VERDICTS:
-                got.setdefault(name, concl)
-            elif name and concl in MASTER_RUNNING:
-                got.setdefault(name, "PENDING")
+            if not name:
+                continue
+            e = got.get(name)
+            if e is not None and e["last"] is not None:
+                continue
+            if concl in MASTER_VERDICTS:
+                got[name] = {"last": concl, "sha": sha, "running": bool(e and e["running"])}
+            elif concl in MASTER_RUNNING:
+                got[name] = {"last": None, "sha": None, "running": True}
     return got
+
+
+def master_entry(v):
+    """One master_checks value as {last, sha, running}. A fixture may give a
+    plain state: PENDING is a running tip with no verdict below it, anything
+    else a settled verdict."""
+    if isinstance(v, dict):
+        return {"last": v.get("last"), "sha": v.get("sha"), "running": bool(v.get("running"))}
+    if v is None:
+        return {"last": None, "sha": None, "running": False}
+    if str(v).upper() in MASTER_RUNNING:
+        return {"last": None, "sha": None, "running": True}
+    return {"last": v, "sha": None, "running": False}
+
+
+def master_why(m):
+    """`FAILURE@f329e27c1`, `PENDING (no verdict in window)`, ... for the why list."""
+    last = (m["last"] + (f"@{m['sha']}" if m["sha"] else "")) if m["last"] else None
+    if m["running"]:
+        return f"{last}, newer run going" if last else "PENDING, no completed run in window"
+    return last or "ABSENT"
 
 
 def rollup(pr):
@@ -1218,17 +1254,19 @@ def ready(pr, master):
     required = REQUIRED + tuple(n for n in REQUIRED_WHEN_PRESENT if n in checks)
     why, eff_req, eff_other = [], [], []
     for name in required:
-        e = r.check_effect(checks.get(name, "ABSENT"), master.get(name, "ABSENT"), True)
+        m = master_entry(master.get(name))
+        e = r.check_effect(checks.get(name, "ABSENT"), r.master_state(m["running"], m["last"] or "ABSENT"), True)
         eff_req.append(e)
         if e:
             why.append(f"{name}={checks.get(name, 'ABSENT')}")
     for name, state in sorted(checks.items()):
         if name in required:
             continue
-        e = r.check_effect(state, master.get(name, "ABSENT"), False)
+        m = master_entry(master.get(name))
+        e = r.check_effect(state, r.master_state(m["running"], m["last"] or "ABSENT"), False)
         eff_other.append(e)
-        if e:
-            why.append(f"{name}={state} (master {master.get(name, 'ABSENT')})")
+        if e or (m["running"] and r.is_red_state(state)):  # report the look-back past a running tip
+            why.append(f"{name}={state} (master {master_why(m)})")
     base_master = pr.get("baseRefName") == "master"
     is_open = (pr.get("state") or "OPEN").upper() == "OPEN"
     verdict = r.pr_ready(is_open, pr.get("mergeable"), base_master, eff_req, eff_other)

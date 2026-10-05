@@ -228,6 +228,21 @@ pub fn check_effect(state: u8, master: u8, required: bool) -> u8 {
     return 0;
 }
 
+// Which master state a PR check is judged against (#6334). `last` is the
+// newest completed verdict of the check over the last few master commits (a
+// state code; ABSENT = 3 when none in the window); `running` says a newer
+// master run of it has no conclusion yet. A red verdict stays red: master was
+// already broken at that commit, the queued run cannot clear this PR (live
+// 2026-10-05 02:02Z, #6333: coverage FAILURE on the three commits under a
+// queued tip). A green verdict under a running tip is not trusted: PENDING,
+// so a red check waits (Q29). No verdict at all under a running tip is
+// PENDING too: nothing was proved, so the gate waits, never merges.
+pub fn master_state(running: bool, last: u8) -> u8 {
+    if (running == false) { return last; }
+    if (last == 2) { return 2; }
+    return 1;
+}
+
 // The worse of two effects, so a list of checks folds to one.
 pub fn effect_fold(acc: u8, e: u8) -> u8 {
     if (e > acc) { return e; }
@@ -241,6 +256,7 @@ pub fn pr_ready(open: bool, mergeable: u8, base_master: bool, required: u8, othe
     if (required == 2) { return 2; }
     if (other == 2) { return 5; }
     if (required == 1) { return 1; }
+    if (other == 1) { return 1; }
     if (mergeable != 0) { return 1; }
     return 0;
 }
@@ -396,6 +412,16 @@ test gate_other_red_red_on_master_passes { assert_eq(check_effect(2, 2, false), 
 test gate_other_red_absent_on_master_passes { assert_eq(check_effect(2, 3, false), 0); }
 test gate_other_pending_never_waits { assert_eq(check_effect(1, 0, false), 0); }
 test gate_other_red_master_running_waits { assert_eq(check_effect(2, 1, false), 1); }
+test gate_master_settled_is_its_verdict {
+    assert_eq(master_state(false, 0), 0);
+    assert_eq(master_state(false, 2), 2);
+    assert_eq(master_state(false, 3), 3);
+}
+test gate_master_running_red_below_stays_red { assert_eq(master_state(true, 2), 2); }
+test gate_master_running_green_below_is_pending { assert_eq(master_state(true, 0), 1); }
+test gate_master_running_no_verdict_is_pending { assert_eq(master_state(true, 3), 1); }
+test gate_other_red_master_running_no_verdict_waits { assert_eq(check_effect(2, master_state(true, 3), false), 1); }
+test gate_other_red_master_red_below_running_passes { assert_eq(check_effect(2, master_state(true, 2), false), 0); }
 test gate_fold {
     assert_eq(effect_fold(effect_fold(effect_fold(0, 1), 0), 2), 2);
     assert_eq(effect_fold(effect_fold(0, 0), 1), 1);
@@ -407,6 +433,7 @@ test gate_required_red { assert_eq(pr_ready(true, 0, true, 2, 2), 2); }
 test gate_blocked_by_other { assert_eq(pr_ready(true, 0, true, 1, 2), 5); }
 test gate_waits_on_required { assert_eq(pr_ready(true, 0, true, 1, 0), 1); }
 test gate_closed_first { assert_eq(pr_ready(false, 1, false, 2, 2), 6); }
+test gate_waits_on_other_wait { assert_eq(pr_ready(true, 0, true, 0, 1), 1); }
 test gate_waits_on_mergeable_unknown { assert_eq(pr_ready(true, 2, true, 0, 0), 1); }
 test watch_merges_ready { assert_eq(watch_action(0, 0), 1); }
 test watch_waits { assert_eq(watch_action(1, 0), 0); }
