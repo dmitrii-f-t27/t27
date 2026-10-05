@@ -60,7 +60,12 @@
 //! temporary that outlives the call), unless the element is itself an array
 //! or a slice; an untyped local bound to an array literal and passed so is a
 //! `[_]T` array of the callee's element type, passed by address (t27c's
-//! `slice_locals`). `[*]T` and the map `[K:V]` are refused by name.
+//! `slice_locals`). An untyped `const` local bound to an array literal and
+//! only ever passed where one array type `[N]T` is declared is that array
+//! (the reference's `.{ ... }` coerces at each call); one of plain literals
+//! that nothing reads is dropped. An empty literal for a slice field of a
+//! named struct literal is an empty slice. `[*]T` and the map `[K:V]` are
+//! refused by name.
 //! `for (s) |x|` reads the slice's address and length once, before the loop.
 
 use crate::codegen;
@@ -288,6 +293,15 @@ struct Lower<'a> {
     /// makes each a `var x = [_]T{ ... }` array and passes `&x`
     /// (`collect_slice_locals`).
     slice_locals: HashMap<String, LTy>,
+    /// Untyped `const` locals bound to an array literal whose every mention
+    /// is a call argument where the callee declares one array type `[N]T`,
+    /// with that type. t27c's Zig backend writes the local as an anonymous
+    /// `.{ ... }` (any `[N]T` prefix dropped), which coerces at each call.
+    tuple_locals: HashMap<String, LTy>,
+    /// Untyped `const` locals bound to an array literal of plain literals
+    /// and never mentioned again: the reference's `.{ ... }` plus
+    /// `_ = x; // dead after const-inlining`, which does nothing at all.
+    dead_lits: HashSet<String>,
     /// The hidden result pointer of a function returning a struct.
     sret: Option<VarId>,
     scopes: Vec<HashMap<String, Binding>>,
@@ -403,6 +417,8 @@ fn lower_mode<'a>(
         slots: Vec::new(),
         addr_taken: HashSet::new(),
         slice_locals: HashMap::new(),
+        tuple_locals: HashMap::new(),
+        dead_lits: HashSet::new(),
         sret: None,
         scopes: Vec::new(),
         loop_depth: 0,
@@ -1321,22 +1337,71 @@ impl<'a> Lower<'a> {
         self.addr_taken.clear();
         scan_addr_taken(body, &mut self.addr_taken);
         self.slice_locals.clear();
+        self.tuple_locals.clear();
+        self.dead_lits.clear();
         let mut arrays = HashSet::new();
         array_locals(body, &mut arrays);
         if !arrays.is_empty() {
             let mut calls = Vec::new();
             calls_in(body, &mut calls);
-            for c in calls {
+            for c in &calls {
                 let Some(sig) = self.sigs.get(&c.name) else { continue };
                 for (i, a) in c.children.iter().enumerate() {
                     if a.kind != NodeKind::ExprIdentifier || !arrays.contains(&a.name) {
                         continue;
                     }
-                    if let Some(LTy::Slice(elem, _)) = sig.params.get(i) {
-                        if **elem == LTy::Str || !has_brackets(elem) {
-                            self.slice_locals.insert(a.name.clone(), (**elem).clone());
+                    // `[]const u8` is a slice of `u8` to the reference too.
+                    let elem = match sig.params.get(i) {
+                        Some(LTy::Slice(elem, _)) => (**elem).clone(),
+                        Some(LTy::Str) => LTy::S(Ty::U8),
+                        _ => continue,
+                    };
+                    if elem == LTy::Str || !has_brackets(&elem) {
+                        self.slice_locals.insert(a.name.clone(), elem);
+                    }
+                }
+            }
+            for name in &arrays {
+                if self.slice_locals.contains_key(name) {
+                    continue;
+                }
+                let mut decls = Vec::new();
+                decls_of(body, name, &mut decls);
+                let [d] = decls[..] else { continue };
+                if d.kind != NodeKind::StmtLocal
+                    || d.extra_mutable
+                    || !d.extra_type.trim().is_empty()
+                    || mutated(body, name)
+                {
+                    continue;
+                }
+                // Every node that names it, less the declaration itself.
+                let uses = name_count(body, name) - 1;
+                if uses == 0 {
+                    if plain_lit(&d.children[0]) {
+                        self.dead_lits.insert(name.clone());
+                    }
+                    continue;
+                }
+                let (mut ty, mut args, mut same) = (None::<LTy>, 0usize, true);
+                for c in &calls {
+                    let Some(sig) = self.sigs.get(&c.name) else { continue };
+                    for (i, a) in c.children.iter().enumerate() {
+                        if a.kind != NodeKind::ExprIdentifier || a.name != *name {
+                            continue;
+                        }
+                        if let Some(t @ LTy::Arr(..)) = sig.params.get(i) {
+                            args += 1;
+                            match &ty {
+                                None => ty = Some(t.clone()),
+                                Some(u) if u != t => same = false,
+                                _ => {}
+                            }
                         }
                     }
+                }
+                if let (Some(t), true, true) = (ty, same, args == uses) {
+                    self.tuple_locals.insert(name.clone(), t);
                 }
             }
         }
@@ -1991,6 +2056,26 @@ impl<'a> Lower<'a> {
         Ok(())
     }
 
+    /// `given p = [a, b]` where every use of `p` is an argument the callee
+    /// declares as one array type `[N]T`: t27c's Zig backend writes
+    /// `const p = .{ a, b }`, which coerces to `[N]T` at each call, so this
+    /// is a `[N]T` built once, here.
+    fn tuple_local(&mut self, init: &Node, name: String, t: LTy, out: &mut Vec<Stmt>) -> R<()> {
+        self.see(init);
+        if init.children.is_empty() && init.extra_type.trim().is_empty() && init.extra_size.contains(';') {
+            // The reference pastes `v;n` between the braces of `.{ ... }`.
+            return self.reject(
+                "ExprArrayLiteral(repeat)",
+                format!("`{}` = `[{}]` is passed where an array is declared", name, init.extra_size.trim()),
+            );
+        }
+        let k = self.new_slot(&t)?;
+        let dst = Place { addr: slot_expr(k), off: 0, ty: t, mutable: false, temp: None };
+        self.init(init, dst.clone(), true, out)?;
+        self.bind(&name, Binding::Mem(dst));
+        Ok(())
+    }
+
     fn local_with(&mut self, n: &Node, name: String, ann: String, out: &mut Vec<Stmt>) -> R<()> {
         let mutable = n.extra_mutable;
         let init = n.children.first().filter(|i| !is_undefined(i));
@@ -2039,6 +2124,13 @@ impl<'a> Lower<'a> {
         if init.kind == NodeKind::ExprArrayLiteral {
             if let Some(elem) = self.slice_locals.get(&name).cloned() {
                 return self.slice_local(init, name, elem, out);
+            }
+            if !mutable && self.dead_lits.contains(&name) {
+                self.see(init);
+                return Ok(());
+            }
+            if let Some(t) = self.tuple_locals.get(&name).filter(|_| !mutable).cloned() {
+                return self.tuple_local(init, name, t, out);
             }
         }
         let v = self.expr(init)?;
@@ -4390,9 +4482,14 @@ impl<'a> Lower<'a> {
     /// Zig refuses.
     fn arg_as(&mut self, n: &Node, want: &LTy) -> R<Val> {
         if n.kind == NodeKind::ExprIdentifier && self.slice_locals.contains_key(&n.name) {
-            if let (LTy::Slice(elem, _), Some(Binding::Mem(p))) = (want, self.lookup(&n.name)) {
+            let elem = match want {
+                LTy::Slice(elem, _) => Some((**elem).clone()),
+                LTy::Str => Some(LTy::S(Ty::U8)),
+                _ => None,
+            };
+            if let (Some(elem), Some(Binding::Mem(p))) = (elem, self.lookup(&n.name)) {
                 if let LTy::Arr(e, len) = &p.ty {
-                    if e == elem {
+                    if **e == elem {
                         self.see(n);
                         return self.slice_of(addr_of(&p), *len, want.clone());
                     }
@@ -4402,11 +4499,14 @@ impl<'a> Lower<'a> {
         if n.kind != NodeKind::ExprArrayLiteral {
             return self.expr_as(n, want);
         }
-        let LTy::Slice(elem, _) = want else {
-            return self.expr_as(n, want);
+        // `[]const u8` is a slice of `u8` to the reference too.
+        let elem = match want {
+            LTy::Slice(elem, _) => elem.clone(),
+            LTy::Str => Box::new(LTy::S(Ty::U8)),
+            _ => return self.expr_as(n, want),
         };
         self.see(n);
-        if !(**elem == LTy::Str || !has_brackets(elem)) {
+        if !(*elem == LTy::Str || !has_brackets(&elem)) {
             return self.reject(
                 "ExprArrayLiteral(to slice)",
                 "an array literal passed where a slice of arrays or slices is declared".into(),
@@ -5371,7 +5471,12 @@ impl<'a> Lower<'a> {
             }
             seen[i] = true;
             let sub = field_place(dst, &fields[i]);
-            self.init(&c.children[0], sub, true, out)?;
+            let v = &c.children[0];
+            if v.kind == NodeKind::ExprArrayLiteral && matches!(fields[i].ty, LTy::Str | LTy::Slice(..)) {
+                self.slice_field(n, &sname, v, sub, out)?;
+                continue;
+            }
+            self.init(v, sub, true, out)?;
         }
         for (i, f) in fields.iter().enumerate() {
             if seen[i] {
@@ -5387,6 +5492,45 @@ impl<'a> Lower<'a> {
             r?;
         }
         Ok(())
+    }
+
+    /// An array literal for slice field `dst` of struct literal `n`. t27c's
+    /// Zig backend writes `@constCast(&[_]T{ ... })` when the literal names
+    /// its struct (otherwise `.{ ... }`, which Zig refuses for a slice).
+    /// Only the empty literal is taken: its slice has length zero, so where
+    /// it points is never read. A non-empty one points at a constant in the
+    /// reference, which outlives any frame t27b could build it in.
+    fn slice_field(&mut self, n: &Node, sname: &str, v: &Node, dst: Place, out: &mut Vec<Stmt>) -> R<()> {
+        self.see(v);
+        if n.name != sname {
+            return self.reject(
+                "ExprArrayLiteral(to slice)",
+                "an array literal for a slice field of an anonymous struct literal (the reference writes `.{ ... }`)".into(),
+            );
+        }
+        let elem = match &dst.ty {
+            LTy::Slice(elem, _) => (**elem).clone(),
+            _ => LTy::S(Ty::U8),
+        };
+        if !(elem == LTy::Str || !has_brackets(&elem)) {
+            return self.reject(
+                "ExprArrayLiteral(to slice)",
+                "an array literal for a slice-of-arrays field (the reference writes `.{ ... }`)".into(),
+            );
+        }
+        if !v.children.is_empty() || !v.extra_size.trim().is_empty() || !v.extra_type.trim().is_empty() {
+            return self.reject(
+                "ExprArrayLiteral(to slice field)",
+                "a non-empty array literal for a slice field (the reference points into a constant)".into(),
+            );
+        }
+        let Val::M(arr) = self.struct_temp(v, LTy::Arr(Box::new(elem), 0))? else {
+            return Err(());
+        };
+        let Val::M(src) = self.slice_of(addr_of(&arr), 0, dst.ty.clone())? else {
+            return Err(());
+        };
+        self.copy(&dst, src, out)
     }
 
     /// `dst = src` for a struct: one copy. Both addresses are evaluated, dst
@@ -6317,6 +6461,45 @@ fn array_locals(ns: &[Node], out: &mut HashSet<String>) {
         }
         array_locals(&n.children, out);
     }
+}
+
+/// The local declarations of `name` under `ns`, at every nesting level.
+fn decls_of<'n>(ns: &'n [Node], name: &str, out: &mut Vec<&'n Node>) {
+    for n in ns {
+        if matches!(n.kind, NodeKind::StmtLocal | NodeKind::StmtAssign) && n.name == name {
+            out.push(n);
+        }
+        decls_of(&n.children, name, out);
+    }
+}
+
+/// How many nodes under `ns` carry `name` (or a dotted path starting with
+/// it) as their name, of any kind: an over-count of its uses.
+fn name_count(ns: &[Node], name: &str) -> usize {
+    ns.iter()
+        .map(|n| {
+            let hit = n.name == name || n.name.strip_prefix(name).is_some_and(|r| r.starts_with('.'));
+            hit as usize + name_count(&n.children, name)
+        })
+        .sum()
+}
+
+/// An array literal whose elements are all plain literals (a negated one
+/// too): evaluating it does nothing.
+fn plain_lit(n: &Node) -> bool {
+    if n.kind != NodeKind::ExprArrayLiteral {
+        return false;
+    }
+    if n.children.is_empty() {
+        return n.extra_size.trim().is_empty();
+    }
+    n.children.iter().all(|c| {
+        c.kind == NodeKind::ExprLiteral
+            || (c.kind == NodeKind::ExprUnary
+                && c.extra_op == "-"
+                && c.children.len() == 1
+                && c.children[0].kind == NodeKind::ExprLiteral)
+    })
 }
 
 fn calls_in<'n>(ns: &'n [Node], out: &mut Vec<&'n Node>) {
