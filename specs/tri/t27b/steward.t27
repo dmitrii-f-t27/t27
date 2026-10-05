@@ -263,6 +263,35 @@ pub fn watch_action(verdict: u8, parent: u8) -> u8 {
     return 3;
 }
 
+// `tri t27b next` (#6317): which side of the lane picker one file's blockers
+// count on. `reference` and `t` are verdict codes. 0 not counted, 1 lane (the
+// reference passes and t27b is blocked: a construct to implement), 2 reference
+// bug (t27b is blocked but the reference itself does not pass: file it, it is
+// not a lane -- slip Q38: a lane picked without the reference moved the
+// counted number by 0). No reference verdict (not run, missing, lab error)
+// counts nowhere.
+pub fn lane_kind(reference: u8, t: u8) -> u8 {
+    if (t != 2) { return 0; }
+    if (reference == 0) { return 1; }
+    if (reference == 1) { return 0; }
+    if (reference > 8) { return 0; }
+    return 2;
+}
+
+// The rank of a blocker family for the next lane: a file where it is the
+// sole blocker passes once the family lands, so sole outranks first; first
+// (files where it is the first blocker) breaks ties.
+pub fn lane_score(sole: u32, first: u32) -> u32 {
+    return sole * 1000 + first;
+}
+
+// The denominator for "t27b pass among reference passes with tests": a
+// pass_vacuous spec runs no test or invariant, so it proves nothing.
+pub fn with_tests(reference: u32, vacuous: u32) -> u32 {
+    if (vacuous > reference) { return 0; }
+    return reference - vacuous;
+}
+
 test delta_ref_moved { assert_eq(delta_code(2, 0, 2, 0, 0, 0), 1); }
 test delta_outside_reference_is_silent { assert_eq(delta_code(2, 2, 2, 0, 0, 0), 0); }
 test delta_regressed { assert_eq(delta_code(0, 0, 0, 3, 1, 0), 2); }
@@ -389,6 +418,19 @@ test watch_retargets_after_parent_merged { assert_eq(watch_action(4, 1), 2); }
 test watch_stacked_waits_for_parent { assert_eq(watch_action(4, 2), 0); }
 test watch_orphan_stack_stops { assert_eq(watch_action(4, 3), 3); }
 test watch_unknown_base_stops { assert_eq(watch_action(4, 0), 3); }
+test next_lane_when_reference_passes { assert_eq(lane_kind(0, 2), 1); }
+test next_reference_bug_when_reference_blocked { assert_eq(lane_kind(2, 2), 2); }
+test next_reference_bug_when_reference_fails { assert_eq(lane_kind(5, 2), 2); }
+test next_reference_bug_on_reference_timeout { assert_eq(lane_kind(8, 2), 2); }
+test next_no_verdict_counts_nowhere { assert_eq(lane_kind(11, 2), 0); }
+test next_not_run_counts_nowhere { assert_eq(lane_kind(9, 2), 0); }
+test next_only_blocked_files_count { assert_eq(lane_kind(0, 0), 0); }
+test next_frontend_is_not_a_lane { assert_eq(lane_kind(0, 3), 0); }
+test next_sole_outranks_first { assert(lane_score(1, 0) > lane_score(0, 999)); }
+test next_first_breaks_ties { assert(lane_score(3, 10) > lane_score(3, 9)); }
+test next_score_value { assert_eq(lane_score(12, 40), 12040); }
+test next_with_tests { assert_eq(with_tests(720, 271), 449); }
+test next_with_tests_never_wraps { assert_eq(with_tests(3, 5), 0); }
 
 invariant gained_never_red {
     assert(delta_is_red(delta_code(0, 0, 2, 0, 0, 1)) == false);

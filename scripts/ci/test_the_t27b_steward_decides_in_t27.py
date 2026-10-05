@@ -51,7 +51,7 @@ def runs_tests(src: Path) -> tuple[int, str]:
 
 
 code, out = runs_tests(GEN)
-check(code == 0 and "91 tests passed" in out, f"the generated C passes the spec's tests ({code}: {out})")
+check(code == 0 and "104 tests passed" in out, f"the generated C passes the spec's tests ({code}: {out})")
 
 text = GEN.read_text()
 needle = "return (((in_ref * 1000) + (reference / 2)) / reference);"
@@ -149,6 +149,14 @@ check(tuple(r.watch_action(v, "NONE") for v in r.READINESS)
 check(tuple(r.watch_action("RETARGET", p) for p in r.PARENTS) == ("STOP", "RETARGET", "WAIT", "STOP"),
       "watch: a stacked PR is retargeted only once its parent merged (Q33)")
 
+check((r.lane_kind("pass", "blocked"), r.lane_kind("blocked", "blocked"), r.lane_kind("fail", "blocked"),
+       r.lane_kind("lab_error", "blocked"), r.lane_kind("pass", "frontend"), r.lane_kind("pass", "pass"))
+      == ("LANE", "REFERENCE-BUG", "REFERENCE-BUG", None, None, None),
+      "next: a lane is a t27b block where the reference passes; a reference failure is a bug to file (Q38, #6317)")
+check(r.lane_score(1, 0) > r.lane_score(0, 999) and r.lane_score(3, 10) > r.lane_score(3, 9)
+      and (r.with_tests(720, 271), r.with_tests(3, 5)) == (449, 0),
+      "next: sole outranks first, first breaks ties; the with-tests denominator never wraps")
+
 tool = TOOL.read_text()
 body = tool[tool.index("def delta("):tool.index("def previous_run(")]
 check('("fail", "mismatch", "crash")' not in body and "rules().delta(" in body,
@@ -167,6 +175,11 @@ check("r.check_effect(" in body and "r.pr_ready(" in body and '"SUCCESS"' not in
 body = tool[tool.index("def watch_step("):tool.index("def watch_act(")]
 check("rules().watch_action(" in body and '"RETARGET"' not in body and '"MERGED"' not in body,
       "t27b.py watch asks the spec what to do and keeps no verdict branch of its own")
+
+body = tool[tool.index("def next_lanes("):tool.index("def next_card(")]
+check(all(f"R.{f}(" in body for f in ("lane_kind", "lane_score", "with_tests"))
+      and '== "blocked"' not in body and "1000" not in body,
+      "t27b.py next asks the spec which files count and how families rank, and keeps no rule of its own")
 
 body = tool[tool.index("def anomalies("):tool.index("def lab_card(")]
 check(all(f"rules().{f}(" in body for f in ("lab_stale", "claim", "railway_old", "ledger_quiet", "checkout",

@@ -41,6 +41,9 @@ uint8_t check_effect(uint8_t state, uint8_t master, bool required);
 uint8_t effect_fold(uint8_t acc, uint8_t e);
 uint8_t pr_ready(bool open, uint8_t mergeable, bool base_master, uint8_t required, uint8_t other);
 uint8_t watch_action(uint8_t verdict, uint8_t parent);
+uint8_t lane_kind(uint8_t reference, uint8_t t);
+uint32_t lane_score(uint32_t sole, uint32_t first);
+uint32_t with_tests(uint32_t reference, uint32_t vacuous);
 
 /* -------------------------------------------------------
    Function implementations
@@ -364,6 +367,33 @@ uint8_t watch_action(uint8_t verdict, uint8_t parent) {
         return 3;
     }
     return 3;
+}
+
+uint8_t lane_kind(uint8_t reference, uint8_t t) {
+    if ((t != 2)) {
+        return 0;
+    }
+    if ((reference == 0)) {
+        return 1;
+    }
+    if ((reference == 1)) {
+        return 0;
+    }
+    if ((reference > 8)) {
+        return 0;
+    }
+    return 2;
+}
+
+uint32_t lane_score(uint32_t sole, uint32_t first) {
+    return ((sole * 1000) + first);
+}
+
+uint32_t with_tests(uint32_t reference, uint32_t vacuous) {
+    if ((vacuous > reference)) {
+        return 0;
+    }
+    return (reference - vacuous);
 }
 
 /* -------------------------------------------------------
@@ -758,6 +788,58 @@ void test_watch_unknown_base_stops(void) {
     assert_eq(watch_action(4, 0), 3);
 }
 
+void test_next_lane_when_reference_passes(void) {
+    assert_eq(lane_kind(0, 2), 1);
+}
+
+void test_next_reference_bug_when_reference_blocked(void) {
+    assert_eq(lane_kind(2, 2), 2);
+}
+
+void test_next_reference_bug_when_reference_fails(void) {
+    assert_eq(lane_kind(5, 2), 2);
+}
+
+void test_next_reference_bug_on_reference_timeout(void) {
+    assert_eq(lane_kind(8, 2), 2);
+}
+
+void test_next_no_verdict_counts_nowhere(void) {
+    assert_eq(lane_kind(11, 2), 0);
+}
+
+void test_next_not_run_counts_nowhere(void) {
+    assert_eq(lane_kind(9, 2), 0);
+}
+
+void test_next_only_blocked_files_count(void) {
+    assert_eq(lane_kind(0, 0), 0);
+}
+
+void test_next_frontend_is_not_a_lane(void) {
+    assert_eq(lane_kind(0, 3), 0);
+}
+
+void test_next_sole_outranks_first(void) {
+    assert((lane_score(1, 0) > lane_score(0, 999)));
+}
+
+void test_next_first_breaks_ties(void) {
+    assert((lane_score(3, 10) > lane_score(3, 9)));
+}
+
+void test_next_score_value(void) {
+    assert_eq(lane_score(12, 40), 12040);
+}
+
+void test_next_with_tests(void) {
+    assert_eq(with_tests(720, 271), 449);
+}
+
+void test_next_with_tests_never_wraps(void) {
+    assert_eq(with_tests(3, 5), 0);
+}
+
 
 /* -------------------------------------------------------
    Test runner (compile with -DT27_TEST_MAIN to execute)
@@ -857,7 +939,20 @@ int main(void) {
     test_watch_stacked_waits_for_parent();
     test_watch_orphan_stack_stops();
     test_watch_unknown_base_stops();
-    printf("All %d tests passed.\n", 91);
+    test_next_lane_when_reference_passes();
+    test_next_reference_bug_when_reference_blocked();
+    test_next_reference_bug_when_reference_fails();
+    test_next_reference_bug_on_reference_timeout();
+    test_next_no_verdict_counts_nowhere();
+    test_next_not_run_counts_nowhere();
+    test_next_only_blocked_files_count();
+    test_next_frontend_is_not_a_lane();
+    test_next_sole_outranks_first();
+    test_next_first_breaks_ties();
+    test_next_score_value();
+    test_next_with_tests();
+    test_next_with_tests_never_wraps();
+    printf("All %d tests passed.\n", 104);
     return 0;
 }
 #endif /* T27_TEST_MAIN */
