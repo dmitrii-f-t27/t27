@@ -243,20 +243,15 @@ module blink_working {
         given state = blink_state()
         assert validate_state(state) == 0
 
-    invariant counter_bounded
-        given cfg = blink_config(50, 26, 22, 24)
-        and state = blink_state()
-        assert state.counter <= COUNTER_MAX
+    invariant counter_bounded {
+        assert blink_state().counter <= COUNTER_MAX;
+        assert increment_counter(blink_config(50, 26, 22, 24), COUNTER_MAX) <= COUNTER_MAX;
+    }
 
-    invariant_led_output_range
-        given cfg = blink_config(50, 26, 22, 24)
-        and state = blink_state()
-        assert (compute_outputs(cfg, state).t23 == true or compute_outputs(cfg, state).t23 == false)
-
-    invariant_led_output_range_r23
-        given cfg = blink_config(50, 26, 22, 24)
-        and state = blink_state()
-        assert (compute_outputs(cfg, state).r23 == true or compute_outputs(cfg, state).r23 == false)
+    invariant leds_start_off {
+        assert compute_outputs(blink_config(50, 26, 22, 24), blink_state()).t23 == false;
+        assert compute_outputs(blink_config(50, 26, 22, 24), blink_state()).r23 == false;
+    }
 }
 
 // phi^2 + 1/phi^2 = 3 | TRINITY
