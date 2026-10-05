@@ -2261,10 +2261,10 @@ fn bench_bodies_compile_but_never_run() {
 fn bench_unlowerable_body_names_its_construct() {
     let src = BENCH_SRC.replace(
         "    var i: u32 = 0;\n    while (i < 10) : (i += 1) {\n        acc = acc +% sq(i);\n    }",
-        "    for (0..10) |i| {\n        acc = acc +% sq(@as(u32, i));\n    }",
+        "    for (0..10, 0..10) |i, j| {\n        acc = acc +% sq(@as(u32, i + j));\n    }",
     );
     let e = lower_text(&src).err().expect("a rejection");
-    assert!(e[0].starts_with("t27b: unsupported construct StmtFor(range) at line "), "{:?}", e);
+    assert!(e[0].starts_with("t27b: unsupported construct StmtFor(multi-object) at line "), "{:?}", e);
     assert!(e.iter().all(|m| !m.contains("BenchBlock")), "{:?}", e);
 }
 

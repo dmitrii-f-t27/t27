@@ -1801,3 +1801,107 @@ test overflow_traps {
         assert!(m.starts_with(&format!("t27b: unsupported construct {} at line", construct)), "{}: {}", body, m);
     }
 }
+
+// ------------------------------------------------------------ for over a range
+
+#[test]
+fn for_over_a_range() {
+    // `for (a..b) |i|`, `for i in a..b`, `for (i in a..=b)`, `for _ in`, and
+    // `for x in xs` (an array, the loop variable copied into the node's
+    // name). Verdicts as `t27c test-report` gives them: Zig computes the
+    // length `b - a` before the first iteration and panics on overflow.
+    let src = "module fr;
+
+fn sum_paren(n: u32) -> usize {
+    var s: usize = 0;
+    for (0..n) |i| {
+        s += i;
+    }
+    return s;
+}
+
+fn sum_in(lo: usize, hi: usize) -> usize {
+    var s: usize = 0;
+    for i in lo..hi {
+        if (i == 5) {
+            continue;
+        }
+        if (i == 8) {
+            break;
+        }
+        s += i;
+    }
+    return s;
+}
+
+fn sum_inclusive(n: u8) -> usize {
+    var s: usize = 0;
+    for (i in 1..=n) {
+        s += i;
+    }
+    return s;
+}
+
+fn count(n: usize) -> u32 {
+    var c: u32 = 0;
+    for _ in 0..n {
+        c += 1;
+    }
+    return c;
+}
+
+fn total(xs: [4]u32) -> u32 {
+    var s: u32 = 0;
+    for x in xs {
+        s += x;
+    }
+    return s;
+}
+
+test ranges {
+    assert(sum_paren(4) == 6);
+    assert(sum_paren(0) == 0);
+    assert(sum_in(2, 10) == 22);
+    assert(sum_in(3, 3) == 0);
+    assert(sum_inclusive(4) == 10);
+    assert(count(7) == 7);
+    assert(total([1, 2, 3, 4]) == 10);
+}
+
+test nested_ranges {
+    var n: usize = 0;
+    for (0..3) |i| {
+        for (i..3) |j| {
+            n += j;
+        }
+    }
+    assert(n == 8);
+}
+
+test reversed_range_traps {
+    assert(sum_in(5, 3) == 0);
+}
+";
+    let r = run(src);
+    assert_eq!(
+        names_ok(&r),
+        vec![("ranges", false, true), ("nested_ranges", false, true), ("reversed_range_traps", false, false)]
+    );
+    assert_eq!(r[2].2, Err((TrapKind::Overflow, 12)));
+    // Each a compile error in the reference (`zig test` on t27c's output),
+    // except the multi-object loop, which t27b does not lower yet.
+    let cases = [
+        ("for (0..n) |i| { s += i; }", "n: i32", "type mismatch", "expected u64, found i32"),
+        ("for (3..1) |i| { s += i; }", "n: usize", "StmtFor(range)", "range 3..1 runs backwards"),
+        ("for i in -1..n { s += i; }", "n: usize", "literal out of range", "-1 does not fit in u64"),
+        ("const a: [2]usize = [1, 2]; for (a, a) |x, y| { s += x * y; }", "n: usize", "StmtFor(multi-object)", "2 iterables"),
+    ];
+    for (body, param, construct, detail) in cases {
+        let m = rejected(&format!(
+            "module rj;\n\nfn f({}) usize {{ var s: usize = 0; {} return s; }}\n\ntest t {{ assert(f(1) == 1); }}\n",
+            param, body
+        ));
+        assert!(m.starts_with(&format!("t27b: unsupported construct {} at line", construct)), "{}: {}", body, m);
+        assert!(m.contains(detail), "{}: {}", body, m);
+    }
+}
