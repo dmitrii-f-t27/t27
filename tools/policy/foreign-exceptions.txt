@@ -11,3 +11,8 @@
 # An entry names the pull request or chat message that approved it, e.g.
 #   cli/t27b/src/lower.rs
 # with a comment line above it: "# owner 2026-10-05, PR #NNNN: <the approval, in English>".
+
+# owner 2026-10-05, via the coordinator ("fix it and do not stop, do what is best"): the parked t27c
+# gen-zig fixes land as exceptions, one class per PR (#6315, #6451, #6532, #6533, #6295), label
+# owner-approved-foreign. The debt is #5980 (t27core self-host): these fixes move to t27core there.
+bootstrap/src/compiler.rs
