@@ -9080,7 +9080,13 @@ impl Codegen {
                     self.gen_stmt(stmt);
                 }
             }
-            for stmt in node.children.iter() {
+            // #6315: a non-void body's tail expression is its return value.
+            let ret_ty = node.extra_return_type.trim();
+            let mut body: Vec<Node> = node.children.clone();
+            if !ret_ty.is_empty() && ret_ty != "void" && ret_ty != "noreturn" && ret_ty != "()" {
+                Self::zig_tail_returns(&mut body);
+            }
+            for stmt in body.iter() {
                 if !(stmt.kind == NodeKind::StmtLocal && stmt.name.starts_with("_cse")) {
                     self.gen_stmt(stmt);
                 }
@@ -9264,6 +9270,22 @@ impl Codegen {
         self.write_line(&format!("// invariant: {}", node.name));
 
         for stmt in &node.children {
+            // #6315: a brace invariant states its predicate as a bare
+            // expression -- `invariant i { MAX == 59049 }` -- and emitting it
+            // verbatim inside `comptime {}` is "value of type 'bool' ignored",
+            // which kills the whole file. Check it the way the clause form
+            // `invariant i: expr;` already does: as an assertion.
+            if let Some(pred) = self.invariant_predicate(stmt) {
+                let mut call = Node::new(NodeKind::ExprCall);
+                call.name = "assert".to_string();
+                call.line = stmt.line;
+                call.children.push(pred.clone());
+                let mut wrapped = Node::new(NodeKind::StmtExpr);
+                wrapped.line = stmt.line;
+                wrapped.children.push(call);
+                self.gen_stmt(&wrapped);
+                continue;
+            }
             self.gen_stmt(stmt);
         }
 
@@ -9290,6 +9312,75 @@ impl Codegen {
 
         self.dedent();
         self.write_line("}");
+    }
+
+    /// #6315: the expression of a brace-invariant statement that is a
+    /// predicate (a value, not an action), or None. A call is a predicate only
+    /// when it is a module fn declared to return `bool`; any other call is an
+    /// action and keeps its statement form.
+    fn invariant_predicate<'a>(&self, stmt: &'a Node) -> Option<&'a Node> {
+        if stmt.kind != NodeKind::StmtExpr || stmt.children.len() != 1 {
+            return None;
+        }
+        let e = &stmt.children[0];
+        match e.kind {
+            NodeKind::ExprBinary | NodeKind::ExprUnary | NodeKind::ExprIdentifier
+            | NodeKind::ExprIndex | NodeKind::ExprFieldAccess => Some(e),
+            NodeKind::ExprLiteral if e.value == "true" || e.value == "false" => Some(e),
+            NodeKind::ExprCall
+                if self.declared_fn_returns.get(&e.name).map(|r| r.trim() == "bool").unwrap_or(false) =>
+            {
+                Some(e)
+            }
+            _ => None,
+        }
+    }
+
+    /// #6315: does a declared module fn return a value (so a bare call to it
+    /// is a value Zig refuses to ignore)?
+    fn call_returns_value(&self, e: &Node) -> bool {
+        e.kind == NodeKind::ExprCall
+            && self
+                .declared_fn_returns
+                .get(&e.name)
+                .map(|r| {
+                    let r = r.trim();
+                    !r.is_empty() && r != "void" && r != "noreturn" && r != "()"
+                })
+                .unwrap_or(false)
+    }
+
+    /// #6315: a Rust-style tail expression is the fn's return value. Rewrite
+    /// the LAST statement of a non-void body (and, through an if/else that
+    /// is last, the last statement of each branch) into a `return`, as
+    /// gen-verilog already does (t27#1948). Zig has no tail expressions, so
+    /// `fn f(v: u8) -> u32 { v }` emitted `v;`: "value ignored".
+    fn zig_tail_returns(stmts: &mut Vec<Node>) {
+        let Some(last) = stmts.last_mut() else { return };
+        match last.kind {
+            NodeKind::StmtExpr if last.children.len() == 1 => {
+                let e = &last.children[0];
+                let action = match e.kind {
+                    NodeKind::ExprReturn => true,
+                    NodeKind::ExprCall => matches!(
+                        e.name.as_str(),
+                        "assert" | "assert_eq" | "panic" | "unreachable" | "print" | "println"
+                    ),
+                    _ => false,
+                };
+                if !action {
+                    let mut ret = Node::new(NodeKind::ExprReturn);
+                    ret.line = last.line;
+                    ret.children.push(last.children[0].clone());
+                    *last = ret;
+                }
+            }
+            NodeKind::StmtIf if last.children.len() == 3 => {
+                Self::zig_tail_returns(&mut last.children[1].children);
+                Self::zig_tail_returns(&mut last.children[2].children);
+            }
+            _ => {}
+        }
     }
 
     fn gen_bench_block(&mut self, node: &Node) {
@@ -9803,6 +9894,14 @@ impl Codegen {
                     return;
                 }
                 self.write_indent();
+                // #6315: a bare call to a module fn that returns a value is a
+                // value Zig refuses to ignore ("value of type 'bool'
+                // ignored"). The spec discards it, as Rust does; say so.
+                if node.children.first().map(|c| self.call_returns_value(c)).unwrap_or(false)
+                    && !rendered.trim_start().starts_with("_ =")
+                {
+                    self.write("_ = ");
+                }
                 self.write(&rendered);
                 self.write_line(";");
             }
