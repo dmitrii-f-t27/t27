@@ -831,6 +831,14 @@ def serve():
     httpd.serve_forever()
 
 
+def run_done(doc):
+    """Whether a published run settles its commit. A run whose checkout failed
+    (2026-10-05 16:35Z, 18a240eca: a fresh container's `git clone` got
+    "fatal: expected 'packfile'") measured nothing, so the next poll tries
+    the same commit again instead of waiting for master to move."""
+    return ((doc or {}).get("steps") or {}).get("checkout", {}).get("ok") is not False
+
+
 def main():
     SRV.mkdir(parents=True, exist_ok=True)
     (SRV / "runs").mkdir(exist_ok=True)
@@ -842,7 +850,8 @@ def main():
     latest = SRV / "latest.json"
     if latest.exists():
         try:
-            last = json.loads(latest.read_text()).get("commit")
+            doc = json.loads(latest.read_text())
+            last = doc.get("commit") if run_done(doc) else None
         except ValueError:
             pass
     while True:
@@ -858,8 +867,8 @@ def main():
                 publish(doc, sha)
                 log("published /runs/%s.json: %s" % (sha, json.dumps(doc.get("summary"))))
                 log.close()
-                last = sha
-            set_status(phase="idle", commit=last, next_poll_in_s=POLL)
+                last = sha if run_done(doc) else None
+            set_status(phase="idle", commit=sha, next_poll_in_s=POLL, retry=last is None)
         except Exception as e:
             print("lab loop error: %s" % e, flush=True)
             set_status(phase="error", error=str(e))
