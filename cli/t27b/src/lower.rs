@@ -72,6 +72,7 @@
 
 mod lencall;
 mod stdmem;
+mod unanalyzed;
 
 use crate::codegen;
 use crate::compiler::{Node, NodeKind};
@@ -1087,7 +1088,7 @@ impl<'a> Lower<'a> {
             }
         }
         let rt = n.extra_return_type.trim();
-        let ret = if rt.is_empty() || rt == "void" {
+        let ret = if rt.is_empty() || rt == "void" || self.unanalyzed_undefined_ret(n) {
             None
         } else {
             Some(self.ret_lty(rt)?)
