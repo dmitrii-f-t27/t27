@@ -44,7 +44,7 @@ fn make(ok: bool) -> Res { return Res { ok: ok, note: null, error: \"none\" }; }
 fn err_of(r: Res) -> str { return r.error; }\n\
 fn fail(error: str) -> Res { return Res { ok: false, note: null, error: error }; }\n\
 fn sum_two() -> i32 { var xs: [i32; 2] = [0i32; 2]; xs[1] = 5; return xs[0] + xs[1]; }\n\
-test optional_and_keyword { const r = make(true); assert(r.ok); assert(r.note == null); assert(err_of(r).len == 4); assert(!fail("x").ok); }\n\
+test optional_and_keyword { const r = make(true); assert(r.ok); assert(r.note == null); assert(err_of(r).len == 4); assert(!fail(\"x\").ok); }\n\
 test repeat { assert(sum_two() == 5); }\n";
 
 #[test]
