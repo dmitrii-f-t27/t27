@@ -2,14 +2,18 @@
   "gen_hash_c": "sha256:a52b97018788b0e6f423f966cc028ffcebbb78201d4b82dc862ee12c0297d99d",
   "gen_hash_rust": "sha256:6f5e6ae29e97adfd55939b41d8b622abe593dd1f808dee95547c288a583e8ab6",
   "gen_hash_verilog": "sha256:42566f28a73b8e5608584123781c21b55ad3cd9501bb8beac554dc6ed9a821d4",
-  "gen_hash_zig": "sha256:0d997dca076b3c72c9f25ac40f2d967190c15ca6a0a03b852366e53e280fb3ab",
+  "gen_hash_zig": "sha256:ad602b23fbc59b02092fb510ea80d1b9546f72c2687822a6d1674cce09065196",
   "module": "Formal_Testbench",
   "ring": 12,
-  "sealed_at": "2026-10-05T16:46:50Z",
+  "sealed_at": "2026-10-05T18:40:19Z",
   "sealed_by": "t27c-bootstrap@0.4.0",
   "spec_hash": "sha256:e9a001b46f6e06019d8d58fe8d1336cddf2a4eed6adfde30ec98f7cc4815e13d",
   "spec_path": "specs/fpga/testbench/formal_tb.t27",
   "tests": {
-    "blocked": "does not compile: /tmp/t27c-test-report-formal_tb-3603556/spec.zig:96:11: error: local constant shadows declaration of 'cover_hit'"
+    "failed": 0,
+    "failing": [],
+    "forced": false,
+    "passed": 10,
+    "total": 10
   }
 }
