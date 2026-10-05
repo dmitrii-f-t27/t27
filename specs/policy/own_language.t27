@@ -30,6 +30,14 @@
 ;   with an allowed .t27 edit plus a regenerated gen/ file. Only the owner's label lets such a change in.
 ; - A line the reader cannot parse is DENY (fail closed): a gate that waves through what it cannot read
 ;   is not a gate.
+; - Owner-approved exceptions are DATA, not a bypass: tools/policy/foreign-exceptions.txt lists path
+;   prefixes, one per line ('#' starts a comment; an empty line is skipped, never "match everything"). The
+;   plumbing feeds the list first, then a separator line, then the diff. A path under an entry is ALLOW
+;   (R_EXCEPTION) unless it is malformed or protected. Separator "--" is the local hooks: the list is read
+;   from the working tree, so an agent on an owner-approved branch adds its entry and can commit. Separator
+;   "--ci" is the pull-request check: the list is read from the BASE revision (a PR cannot approve itself)
+;   and any change to the list file is PROTECTED, so every new entry needs the owner's label. No separator
+;   at all means no exceptions.
 ; phi^2 + 1/phi^2 = 3 | TRINITY
 
 module PolicyOwnLanguage;
@@ -45,6 +53,7 @@ pub const R_GENERATED : u8 = 3;
 pub const R_PROSE : u8 = 4;
 pub const R_DATA : u8 = 5;
 pub const R_NOT_CODE : u8 = 6;
+pub const R_EXCEPTION : u8 = 7;
 pub const DENY_FROM : u8 = 16;
 pub const R_FOREIGN_EXT : u8 = 16;
 pub const R_FOREIGN_NAME : u8 = 17;
@@ -68,6 +77,8 @@ pub const GENERATED_PREFIXES : str = "gen/,bootstrap/gen/,bootstrap/src/memory/g
 pub const SCRIPT_DIRS : str = "scripts/,bin/,.githooks/,.husky/,$";
 /// The gate itself; matched as whole paths.
 pub const PROTECTED_PATHS : str = "specs/policy/own_language.t27,gen/c/policy/own_language.c,lefthook.yml,.github/workflows/own-language.yml,$";
+/// The owner's exception list; protected in "--ci" mode only.
+pub const EXCEPTIONS_FILE : str = "tools/policy/foreign-exceptions.txt,$";
 /// The status letters `git diff --name-status` prints.
 pub const KINDS : str = "ACDMRTUXB$";
 
@@ -236,13 +247,80 @@ pub fn put_msg(out: []u8, w: usize, cap: usize, msg: []const u8) -> usize {
     return p;
 }
 
-/// Read `git diff --name-status` output buf[0..n] (lines "X\tpath" or "R100\told\tnew"; the judged path
-/// is the last field), write one failure line per DENY into out[0..cap], and return how many paths were
+/// Is buf[f..t] under one entry of the exception list buf[ef..et] (lines of path prefixes)? A '#' line is
+/// a comment and an empty line is skipped: an empty prefix would match every path.
+pub fn excepted(buf: []const u8, ef: usize, et: usize, f: usize, t: usize) -> bool {
+    var s : usize = ef;
+    while (s < et) {
+        var e : usize = s;
+        while (e < et and buf[e] != '\n') { e += 1; }
+        var x : usize = e;
+        if (x > s and buf[x - 1] == '\r') { x -= 1; }
+        if (x > s and buf[s] != '#' and x - s <= t - f) {
+            var ok : bool = true;
+            var k : usize = 0;
+            while (k < x - s) {
+                if (buf[s + k] != buf[f + k]) { ok = false; }
+                k += 1;
+            }
+            if (ok) { return true; }
+        }
+        s = e + 1;
+    }
+    return false;
+}
+
+/// Start of the first line that is exactly "--" or "--ci", or n when there is none.
+pub fn sep_at(buf: []const u8, n: usize) -> usize {
+    var s : usize = 0;
+    while (s < n) {
+        var e : usize = s;
+        while (e < n and buf[e] != '\n') { e += 1; }
+        var x : usize = e;
+        if (x > s and buf[x - 1] == '\r') { x -= 1; }
+        if (x - s >= 2 and buf[s] == '-' and buf[s + 1] == '-') {
+            if (x - s == 2) { return s; }
+            if (x - s == 4 and buf[s + 2] == 'c' and buf[s + 3] == 'i') { return s; }
+        }
+        s = e + 1;
+    }
+    return n;
+}
+
+/// The reason for one changed path buf[from..to], given the exception list buf[ef..et] and the mode
+/// (`ci` true for the pull-request check).
+pub fn judge(kind: u8, buf: []const u8, from: usize, to: usize, ef: usize, et: usize, ci: bool) -> u8 {
+    const r : u8 = reason(kind, buf, from, to);
+    if (r == R_MALFORMED or r == R_PROTECTED) { return r; }
+    var f : usize = from;
+    var t : usize = to;
+    if (buf[f] == '"') { f += 1; }
+    if (t > f and buf[t - 1] == '"') { t -= 1; }
+    if (ci and in_list(EXCEPTIONS_FILE, buf, f, t, false)) { return R_PROTECTED; }
+    if (verdict(r) == DENY and excepted(buf, ef, et, f, t)) { return R_EXCEPTION; }
+    return r;
+}
+
+/// Read the gate's input buf[0..n] -- an optional exception list, a separator line ("--" local, "--ci"
+/// pull request), then `git diff --name-status` lines ("X\tpath" or "R100\told\tnew"; the judged path is
+/// the last field) -- write one failure line per DENY into out[0..cap], and return how many paths were
 /// denied. The caller exits non-zero when this is not 0.
 pub fn check_all(buf: []const u8, n: usize, out: []u8, cap: usize) -> u32 {
     var denied : u32 = 0;
     var w : usize = 0;
     var s : usize = 0;
+    var et : usize = 0;
+    var ci : bool = false;
+    const sp : usize = sep_at(buf, n);
+    if (sp < n) {
+        et = sp;
+        if (sp + 2 < n) {
+            if (buf[sp + 2] == 'c') { ci = true; }
+        }
+        s = sp;
+        while (s < n and buf[s] != '\n') { s += 1; }
+        s += 1;
+    }
     while (s < n) {
         var e : usize = s;
         while (e < n and buf[e] != '\n') { e += 1; }
@@ -256,7 +334,7 @@ pub fn check_all(buf: []const u8, n: usize, out: []u8, cap: usize) -> u32 {
                 i += 1;
             }
             var r : u8 = R_MALFORMED;
-            if (p > s) { r = reason(buf[s], buf, p, t); }
+            if (p > s) { r = judge(buf[s], buf, p, t, 0, et, ci); }
             if (verdict(r) == DENY) {
                 denied += 1;
                 w = put_range(out, w, cap, buf, p, t);
@@ -405,6 +483,40 @@ test check_all_never_writes_past_cap {
     assert check_all("A\tfoo.rs\nA\tbar.rs\n", 18, &out, 4) == 2;
 }
 
+test an_owner_exception_allows_its_paths_only {
+    assert judge('M', "cli/t27b/src/\n# owner 2026-10-05\n\ncli/t27b/src/lower.rs", 34, 55, 0, 34, false) == R_EXCEPTION;
+    assert judge('M', "cli/t27b/src/\n# owner 2026-10-05\n\ncli/t27b/src/lower.rs", 34, 55, 0, 34, true) == R_EXCEPTION;
+    assert judge('M', "cli/t27b/src/\n# owner 2026-10-05\n\ncli/t27b/src/lower.rs", 34, 55, 0, 0, false) == R_FOREIGN_EXT;
+    assert excepted("cli/t27b/src/\n# owner 2026-10-05\n\ncli/t27b/src/lower.rs", 0, 34, 34, 55) == true;
+}
+
+test an_empty_exception_line_matches_nothing {
+    assert excepted("\n\ntools/x.py", 0, 2, 2, 12) == false;
+    assert judge('A', "\n\ntools/x.py", 2, 12, 0, 2, false) == R_FOREIGN_EXT;
+}
+
+test an_exception_never_opens_the_gate_itself {
+    assert judge('M', "lefthook.yml\nlefthook.yml", 13, 25, 0, 13, false) == R_PROTECTED;
+}
+
+test the_exception_list_is_data_locally_and_owner_only_in_ci {
+    assert judge('M', "tools/policy/foreign-exceptions.txt", 0, 35, 0, 0, false) == R_PROSE;
+    assert judge('M', "tools/policy/foreign-exceptions.txt", 0, 35, 0, 0, true) == R_PROTECTED;
+    assert judge('D', "tools/policy/foreign-exceptions.txt", 0, 35, 0, 0, true) == R_PROTECTED;
+}
+
+test check_all_reads_the_list_before_the_separator {
+    var out : [512]u8 = undefined;
+    assert check_all("cli/t27b/\n--\nM\tcli/t27b/src/lower.rs\nA\tx.py\n", 44, &out, 512) == 1;
+    assert out[0] == 'x';
+    assert check_all("--ci\nM\ttools/policy/foreign-exceptions.txt\n", 43, &out, 512) == 1;
+    assert check_all("--\nM\ttools/policy/foreign-exceptions.txt\n", 41, &out, 512) == 0;
+    assert check_all("cli/\n--ci\nM\tcli/a.rs\n", 21, &out, 512) == 0;
+    assert check_all("\n\n--\nA\tx.py\n", 12, &out, 512) == 1;
+    assert sep_at("cli/\n--ci\nM\tcli/a.rs\n", 21) == 5;
+    assert sep_at("A\tx.py\n", 7) == 7;
+}
+
 invariant every_allow_reason_is_below_every_deny_reason {
     assert verdict(R_DELETED) == ALLOW;
     assert verdict(R_SPEC) == ALLOW;
@@ -412,6 +524,7 @@ invariant every_allow_reason_is_below_every_deny_reason {
     assert verdict(R_PROSE) == ALLOW;
     assert verdict(R_DATA) == ALLOW;
     assert verdict(R_NOT_CODE) == ALLOW;
+    assert verdict(R_EXCEPTION) == ALLOW;
     assert verdict(R_FOREIGN_EXT) == DENY;
     assert verdict(R_FOREIGN_NAME) == DENY;
     assert verdict(R_SCRIPT_NO_EXT) == DENY;

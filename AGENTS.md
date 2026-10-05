@@ -140,8 +140,16 @@ another language; the hooks must stop it. It binds people, bees and agents alike
   `gen/c/policy/own_language.c` runs in `lefthook.yml` (pre-commit, pre-push)
   and in `.github/workflows/own-language.yml` on every pull request. Read the
   spec for the exact list; do not copy it here.
-- **The only override** is the label `owner-approved-foreign`, added by the
-  owner. Changing the gate itself needs it as well.
+- **The only override** is the label `owner-approved-foreign`. It is applied
+  only on the owner's explicit approval, and the pull request body quotes that
+  approval (in English, with its date and where it was given). Changing the gate
+  itself needs the label as well.
+- **Owner-approved exceptions** live in `tools/policy/foreign-exceptions.txt`:
+  data, one path prefix per line, each under a comment naming the approval. On
+  an approved branch, add the entry in the same branch; the local hooks read the
+  working-tree list, so the commit goes through. CI reads the list from the pull
+  request's base, and any change to the list file needs the owner's label, so
+  every entry on master was approved by the owner. There is no env-var bypass.
 - **Existing foreign code is debt** that only shrinks: by deletion, or by
   replacing it with a spec and its generated output.
 - **`--no-verify` is forbidden**, and so is `LEFTHOOK=0`. Install the hooks

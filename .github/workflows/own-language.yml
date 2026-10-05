@@ -7,12 +7,15 @@ name: Own Language
 # rule is specs/policy/own_language.t27, and the classifier that runs here is
 # its `t27c gen-c` output gen/c/policy/own_language.c -- never hand-edited (L2).
 # This file is plumbing: a one-line C main around the generated check_all(),
-# fed the pull request's `git diff --name-status base...head`. The local twin is
+# fed the owner's exception list as it is on BASE (a PR cannot approve itself), a
+# `--ci` line, and the pull request's `git diff --name-status base...head`. The local twin is
 # lefthook.yml (pre-commit and pre-push).
 #
 # The only override is the label `owner-approved-foreign`, which only the owner
 # adds. Changing the gate itself (the spec, its generated file, lefthook.yml,
-# this workflow) needs that label too: the spec marks them protected.
+# this workflow, tools/policy/foreign-exceptions.txt) needs that label too: the
+# spec marks them protected. The label is applied only on the owner's explicit
+# approval, which the PR body quotes (AGENTS.md 'Only t27').
 
 on:
   pull_request:
@@ -44,7 +47,7 @@ jobs:
           HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           printf '#include "gen/c/policy/own_language.c"\n#include <stdio.h>\nint main(void){static char b[1<<22],o[1<<22];unsigned n=check_all((uint8_t*)b,fread(b,1,sizeof b,stdin),(uint8_t*)o,sizeof o-1);fputs(o,stdout);return n!=0;}\n' | cc -w -I . -x c -o "$RUNNER_TEMP/gate" -
-          git diff --name-status "$BASE...$HEAD" > "$RUNNER_TEMP/in"
+          { git show "$BASE:tools/policy/foreign-exceptions.txt" 2>/dev/null || true; printf '\n--ci\n'; git diff --name-status "$BASE...$HEAD"; } > "$RUNNER_TEMP/in"
           "$RUNNER_TEMP/gate" < "$RUNNER_TEMP/in"
 
       - name: The owner approved foreign code in this pull request

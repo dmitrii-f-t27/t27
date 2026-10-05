@@ -26,6 +26,7 @@
 #define R_PROSE 4
 #define R_DATA 5
 #define R_NOT_CODE 6
+#define R_EXCEPTION 7
 #define DENY_FROM 16
 #define R_FOREIGN_EXT 16
 #define R_FOREIGN_NAME 17
@@ -41,6 +42,7 @@
 #define GENERATED_PREFIXES "gen/,bootstrap/gen/,bootstrap/src/memory/generated/,$"
 #define SCRIPT_DIRS "scripts/,bin/,.githooks/,.husky/,$"
 #define PROTECTED_PATHS "specs/policy/own_language.t27,gen/c/policy/own_language.c,lefthook.yml,.github/workflows/own-language.yml,$"
+#define EXCEPTIONS_FILE "tools/policy/foreign-exceptions.txt,$"
 #define KINDS "ACDMRTUXB$"
 #define MSG_HEAD ": hand-written $"
 #define MSG_TAIL " is forbidden (owner rule 2026-10-05): write a .t27 spec and generate it with t27c; see AGENTS.md 'Only t27'$"
@@ -64,6 +66,9 @@ uint8_t classify(uint8_t kind, uint8_t* s, size_t from, size_t to);
 size_t put(uint8_t* out, size_t w, size_t cap, uint8_t c);
 size_t put_range(uint8_t* out, size_t w, size_t cap, uint8_t* s, size_t from, size_t to);
 size_t put_msg(uint8_t* out, size_t w, size_t cap, uint8_t* msg);
+bool excepted(uint8_t* buf, size_t ef, size_t et, size_t f, size_t t);
+size_t sep_at(uint8_t* buf, size_t n);
+uint8_t judge(uint8_t kind, uint8_t* buf, size_t from, size_t to, size_t ef, size_t et, bool ci);
 uint32_t check_all(uint8_t* buf, size_t n, uint8_t* out, size_t cap);
 
 /* -------------------------------------------------------
@@ -260,10 +265,101 @@ size_t put_msg(uint8_t* out, size_t w, size_t cap, uint8_t* msg) {
     return p;
 }
 
+bool excepted(uint8_t* buf, size_t ef, size_t et, size_t f, size_t t) {
+    size_t s = ef;
+    while ((s < et)) {
+        size_t e = s;
+        while (((e < et) && (buf[e] != '\n'))) {
+            e += 1;
+        }
+        size_t x = e;
+        if (((x > s) && (buf[(x - 1)] == '\r'))) {
+            x -= 1;
+        }
+        if ((((x > s) && (buf[s] != '#')) && ((x - s) <= (t - f)))) {
+            bool ok = true;
+            size_t k = 0;
+            while ((k < (x - s))) {
+                if ((buf[(s + k)] != buf[(f + k)])) {
+                    ok = false;
+                }
+                k += 1;
+            }
+            if (ok) {
+                return true;
+            }
+        }
+        s = (e + 1);
+    }
+    return false;
+}
+
+size_t sep_at(uint8_t* buf, size_t n) {
+    size_t s = 0;
+    while ((s < n)) {
+        size_t e = s;
+        while (((e < n) && (buf[e] != '\n'))) {
+            e += 1;
+        }
+        size_t x = e;
+        if (((x > s) && (buf[(x - 1)] == '\r'))) {
+            x -= 1;
+        }
+        if (((((x - s) >= 2) && (buf[s] == '-')) && (buf[(s + 1)] == '-'))) {
+            if (((x - s) == 2)) {
+                return s;
+            }
+            if (((((x - s) == 4) && (buf[(s + 2)] == 'c')) && (buf[(s + 3)] == 'i'))) {
+                return s;
+            }
+        }
+        s = (e + 1);
+    }
+    return n;
+}
+
+uint8_t judge(uint8_t kind, uint8_t* buf, size_t from, size_t to, size_t ef, size_t et, bool ci) {
+    uint8_t r = reason(kind, buf, from, to);
+    if (((r == R_MALFORMED) || (r == R_PROTECTED))) {
+        return r;
+    }
+    size_t f = from;
+    size_t t = to;
+    if ((buf[f] == '"')) {
+        f += 1;
+    }
+    if (((t > f) && (buf[(t - 1)] == '"'))) {
+        t -= 1;
+    }
+    if ((ci && in_list(EXCEPTIONS_FILE, buf, f, t, false))) {
+        return R_PROTECTED;
+    }
+    if (((verdict(r) == DENY) && excepted(buf, ef, et, f, t))) {
+        return R_EXCEPTION;
+    }
+    return r;
+}
+
 uint32_t check_all(uint8_t* buf, size_t n, uint8_t* out, size_t cap) {
     uint32_t denied = 0;
     size_t w = 0;
     size_t s = 0;
+    size_t et = 0;
+    bool ci = false;
+    size_t sp = sep_at(buf, n);
+    if ((sp < n)) {
+        et = sp;
+        if (((sp + 2) < n)) {
+            if ((buf[(sp + 2)] == 'c')) {
+                ci = true;
+            }
+        }
+        s = sp;
+        while (((s < n) && (buf[s] != '\n'))) {
+            s += 1;
+        }
+        s += 1;
+    }
     while ((s < n)) {
         size_t e = s;
         while (((e < n) && (buf[e] != '\n'))) {
@@ -284,7 +380,7 @@ uint32_t check_all(uint8_t* buf, size_t n, uint8_t* out, size_t cap) {
             }
             uint8_t r = R_MALFORMED;
             if ((p > s)) {
-                r = reason(buf[s], buf, p, t);
+                r = judge(buf[s], buf, p, t, 0, et, ci);
             }
             if ((verdict(r) == DENY)) {
                 denied += 1;
@@ -323,6 +419,7 @@ uint32_t check_all(uint8_t* buf, size_t n, uint8_t* out, size_t cap) {
 /* invariant every_allow_reason_is_below_every_deny_reason is not a C constant expression: (verdict(R_PROSE) == ALLOW) */
 /* invariant every_allow_reason_is_below_every_deny_reason is not a C constant expression: (verdict(R_DATA) == ALLOW) */
 /* invariant every_allow_reason_is_below_every_deny_reason is not a C constant expression: (verdict(R_NOT_CODE) == ALLOW) */
+/* invariant every_allow_reason_is_below_every_deny_reason is not a C constant expression: (verdict(R_EXCEPTION) == ALLOW) */
 /* invariant every_allow_reason_is_below_every_deny_reason is not a C constant expression: (verdict(R_FOREIGN_EXT) == DENY) */
 /* invariant every_allow_reason_is_below_every_deny_reason is not a C constant expression: (verdict(R_FOREIGN_NAME) == DENY) */
 /* invariant every_allow_reason_is_below_every_deny_reason is not a C constant expression: (verdict(R_SCRIPT_NO_EXT) == DENY) */
@@ -458,6 +555,40 @@ void test_check_all_never_writes_past_cap(void) {
     assert((check_all("A\tfoo.rs\nA\tbar.rs\n", 18, &out, 4) == 2));
 }
 
+void test_an_owner_exception_allows_its_paths_only(void) {
+    assert((judge('M', "cli/t27b/src/\n# owner 2026-10-05\n\ncli/t27b/src/lower.rs", 34, 55, 0, 34, false) == R_EXCEPTION));
+    assert((judge('M', "cli/t27b/src/\n# owner 2026-10-05\n\ncli/t27b/src/lower.rs", 34, 55, 0, 34, true) == R_EXCEPTION));
+    assert((judge('M', "cli/t27b/src/\n# owner 2026-10-05\n\ncli/t27b/src/lower.rs", 34, 55, 0, 0, false) == R_FOREIGN_EXT));
+    assert((excepted("cli/t27b/src/\n# owner 2026-10-05\n\ncli/t27b/src/lower.rs", 0, 34, 34, 55) == true));
+}
+
+void test_an_empty_exception_line_matches_nothing(void) {
+    assert((excepted("\n\ntools/x.py", 0, 2, 2, 12) == false));
+    assert((judge('A', "\n\ntools/x.py", 2, 12, 0, 2, false) == R_FOREIGN_EXT));
+}
+
+void test_an_exception_never_opens_the_gate_itself(void) {
+    assert((judge('M', "lefthook.yml\nlefthook.yml", 13, 25, 0, 13, false) == R_PROTECTED));
+}
+
+void test_the_exception_list_is_data_locally_and_owner_only_in_ci(void) {
+    assert((judge('M', "tools/policy/foreign-exceptions.txt", 0, 35, 0, 0, false) == R_PROSE));
+    assert((judge('M', "tools/policy/foreign-exceptions.txt", 0, 35, 0, 0, true) == R_PROTECTED));
+    assert((judge('D', "tools/policy/foreign-exceptions.txt", 0, 35, 0, 0, true) == R_PROTECTED));
+}
+
+void test_check_all_reads_the_list_before_the_separator(void) {
+    uint8_t out[512] = {0};
+    assert((check_all("cli/t27b/\n--\nM\tcli/t27b/src/lower.rs\nA\tx.py\n", 44, &out, 512) == 1));
+    assert((out[0] == 'x'));
+    assert((check_all("--ci\nM\ttools/policy/foreign-exceptions.txt\n", 43, &out, 512) == 1));
+    assert((check_all("--\nM\ttools/policy/foreign-exceptions.txt\n", 41, &out, 512) == 0));
+    assert((check_all("cli/\n--ci\nM\tcli/a.rs\n", 21, &out, 512) == 0));
+    assert((check_all("\n\n--\nA\tx.py\n", 12, &out, 512) == 1));
+    assert((sep_at("cli/\n--ci\nM\tcli/a.rs\n", 21) == 5));
+    assert((sep_at("A\tx.py\n", 7) == 7));
+}
+
 
 /* -------------------------------------------------------
    Test runner (compile with -DT27_TEST_MAIN to execute)
@@ -484,7 +615,12 @@ int main(void) {
     test_check_all_counts_and_names_the_denied();
     test_check_all_names_a_protected_path_with_its_own_line();
     test_check_all_never_writes_past_cap();
-    printf("All %d tests passed.\n", 18);
+    test_an_owner_exception_allows_its_paths_only();
+    test_an_empty_exception_line_matches_nothing();
+    test_an_exception_never_opens_the_gate_itself();
+    test_the_exception_list_is_data_locally_and_owner_only_in_ci();
+    test_check_all_reads_the_list_before_the_separator();
+    printf("All %d tests passed.\n", 23);
     return 0;
 }
 #endif /* T27_TEST_MAIN */
