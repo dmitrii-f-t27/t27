@@ -54,13 +54,12 @@ definition moves. `tri types classified` cross-checks the file against a live
 Non-empty drift in either direction exits non-zero. A classification nobody
 re-reads becomes a claim about a tree that no longer exists.
 
-## DRIFT -- 51 names
+## DRIFT -- 50 names
 
 One concept, two definitions. These are the ones with a repair.
 
 | Name | Defs | Where | Suggested repair |
 |------|------|-------|------------------|
-| `ActivationType` | 2 | 2 files | Hoist one ActivationType into specs/ml/activation/ covering the 10 shipped activations, and d... |
 | `AttentionOutput` | 2 | 2 files | Pick the rank (`[][]f32` is the defensible one -- one row per head) and define AttentionOutpu... |
 | `BenchmarkReport` | 2 | 2 files | Keep eval.t27's as the owner (benchmark.t27 already imports it), fold in pass_at_5/synth_rate... |
 | `BufgConfig` | 2 | 2 files | Hoist one BufgConfig (with fanout_capacity) into a shared openxc7-synth primitives module and... |
@@ -121,16 +120,14 @@ has had it: `tri types dup` no longer reports the name, and its row is gone.
 
 Every remaining DRIFT row needs a decision about which module owns the concept.
 
-## DISTINCT -- 37 names
+## DISTINCT -- 34 names
 
 Two concepts that met on a name. Nothing to converge; the question is only
 whether to rename.
 
 | Name | Defs | Where | Suggested repair |
 |------|------|-------|------------------|
-| `Agent` | 2 | 2 files |  |
 | `AgentState` | 2 | 2 files | Rename to RLAgentState and AgentRunnerState; nothing outside each file depends on the bare name. |
-| `AgentStatus` | 2 | 2 files |  |
 | `AttentionConfig` | 2 | 2 files | Rename arch.t27's to CoderAttentionConfig (or GqaConfig); it is model-specific and has no lib... |
 | `BenchmarkResult` | 2 | 2 files | Rename the training one to QuantizationBenchmarkResult -- it is the smaller blast radius (two... |
 | `BusPort` | 2 | 2 files | Rename axi4.t27's to BusSignal (it is one wire) and reconcile the two MAX_BUS_PORTS values --... |
@@ -139,7 +136,6 @@ whether to rename.
 | `Config` | 3 | 3 files | Rename the narrow two (MonitorConfig, ParsedConfig -- the third is really a parse result, not... |
 | `Diagnostic` | 2 | 2 files | Leave both, but rename the protocol one LspDiagnostic (or require the qualified `lsp-schema::... |
 | `EnvVar` | 2 | 2 files | Two fixes, unrelated: (a) leave the types alone, they are genuinely different; (b) fix the fi... |
-| `HealthStatus` | 2 | 2 files | Rename railway_deploy's to HealthProbe -- it is a probe result, not a status -- or accept as ... |
 | `Info` | 3 | 3 files | Two things: have account/repo.t27 `use account::schema` instead of re-declaring Info and the ... |
 | `Instance` | 3 | 3 files | Leave the three types; the ambiguity is in the name. If cross-spec resolution matters, qualif... |
 | `KnowledgeGraph` | 3 | 3 files | Delete specs/igla/coder/_tmp_pipeline_import.t27 — it is a leaked working copy, and removing ... |
@@ -178,6 +174,11 @@ four was decided by opening the source. But the tool's own CONFLICTED for those
 four is a coincidence of a reader limit, and a coincidence that happens to be
 right is still not a measurement. Recorded here rather than left for someone to
 rediscover as a bug.
+
+Since #6446 three of those four are gone: the `variants : ,` sides became real
+`enum(u8)` declarations, so `Agent`, `AgentStatus` and `HealthStatus` no longer
+conflict, and neither does `ActivationType` (its `enum_type`/`values` struct
+became an enum). Their rows were dropped; `Color` is the one left.
 
 ## How this was produced
 
