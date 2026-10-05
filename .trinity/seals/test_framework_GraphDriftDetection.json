@@ -1,11 +1,15 @@
 {
-  "gen_hash_c": "none",
-  "gen_hash_rust": "none",
-  "gen_hash_verilog": "none",
-  "gen_hash_zig": "none",
+  "gen_hash_c": "sha256:e29827baf233574763fd7d312c6e239d6c07ae2c9caa4256a59ca52561f3e00a",
+  "gen_hash_rust": "sha256:32400cd7607186d3dc8ce42d1236d52ae8dda5a340e9f993d520f3ad5a9f0270",
+  "gen_hash_verilog": "sha256:ffb2a5a3cf6c608b68fecb95587aab6e71056c9d36c856deb14192e35c0e99f8",
+  "gen_hash_zig": "sha256:91cfa9a350b4508c6cbf3d695d5c71468787508d0214bb9dd2cb177a73b037a6",
   "module": "GraphDriftDetection",
   "ring": 12,
-  "sealed_at": "2026-08-28T00:21:37Z",
-  "spec_hash": "sha256:cdd0a129629d3b6a0c492870d957d71610146f461af40f73df7c1a128fd285cc",
-  "spec_path": "specs/test_framework/graph_drift_detection.t27"
+  "sealed_at": "2026-10-05T14:50:58Z",
+  "sealed_by": "t27c-bootstrap@0.4.0",
+  "spec_hash": "sha256:063926eec6dff4e6f8481356a0cb021e17392b15d7596ce78bde3067078fa0b3",
+  "spec_path": "specs/test_framework/graph_drift_detection.t27",
+  "tests": {
+    "blocked": "does not compile: /tmp/t27c-test-report-graph_drift_detection-2524377/spec.zig:33:22: error: expected ',' after field"
+  }
 }
