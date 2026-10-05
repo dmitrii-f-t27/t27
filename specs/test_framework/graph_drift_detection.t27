@@ -127,7 +127,7 @@ module GraphDriftDetection {
             edges: edges,
             version: extract_version(content),
             timestamp: get_current_timestamp(),
-            hash: compute_graph_hash(nodes, edges),
+            hash: compute_graph_hash(nodes.length(), edges),
         };
     }
     
@@ -597,7 +597,7 @@ fn get_current_timestamp() -> u64 {
     return 1642694400;  // Placeholder
 }
 
-fn compute_graph_hash(nodes: HashMap<string, GraphNode>, edges: [GraphEdge]) -> string {
+fn compute_graph_hash(node_count: usize, edges: [GraphEdge]) -> string {
     // Implementation would compute hash of graph structure
     return "abc123";
 }
@@ -647,10 +647,12 @@ fn log_error(category: string, message: string) {
 }
 
 fn parse_tolerance_tier(tier_str: string) -> ToleranceTier {
-    match tier_str {
-        "EXACT" => ToleranceTier::EXACT,
-        "CONJECTURAL" => ToleranceTier::CONJECTURAL,
-        "WITHIN_UNCERTAINTY" => ToleranceTier::WITHIN_UNCERTAINTY,
-        _ => ToleranceTier::WITHIN_UNCERTAINTY,
+    if tier_str == "EXACT" {
+        return ToleranceTier::EXACT;
     }
+    if tier_str == "CONJECTURAL" {
+        return ToleranceTier::CONJECTURAL;
+    }
+    // "WITHIN_UNCERTAINTY" and anything unrecognised.
+    return ToleranceTier::WITHIN_UNCERTAINTY;
 }
