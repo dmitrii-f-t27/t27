@@ -210,6 +210,25 @@ with tempfile.TemporaryDirectory() as tmp:
     check(code == 1 and codes == ["LAB-ERROR"] and "t27b_fail 1" in out,
           f"own fail: LAB-ERROR t27b_fail 1 (got {code} {codes})")
 
+    # #6441: a fail both sides share is an alarm when different tests fail, and a reference
+    # disagreement stops the lanes like a jit/interp mismatch does
+    other = lab(t27b_fail=1,
+                results=[{"file": "specs/b.t27", "t27b": "fail", "reference": "fail",
+                          "reference_disagree": ["x: t27b fail, reference pass", "y: t27b pass, reference fail"]}])
+    other["summary"].update(reference_disagree=1, reference_disagree_tests=2, reference_compared=1)
+    fx = os.path.join(tmp, "fx-ref-disagree")
+    write_fixture(fx, {**files, "lab.json": other})
+    code, codes, out = doctor(fx)
+    check(code == 1 and sorted(codes) == ["LAB-ERROR", "LAB-REF-DISAGREE"] and "reference disagree 1 file(s), 2 test(s)" in out,
+          f"other tests fail: LAB-REF-DISAGREE and LAB-ERROR (got {code} {codes})")
+    same = lab(t27b_fail=1,
+               results=[{"file": "specs/b.t27", "t27b": "fail", "reference": "fail", "reference_disagree": []}])
+    same["summary"].update(reference_disagree=0, reference_disagree_tests=0, reference_compared=1)
+    fx = os.path.join(tmp, "fx-ref-agree")
+    write_fixture(fx, {**files, "lab.json": same})
+    code, codes, out = doctor(fx)
+    check(code == 0 and codes == [], f"same tests fail: no anomaly (got {code} {codes})")
+
     # mutation control: the same tool over a generated C whose checkout rule never fires misses LAB-CHECKOUT,
     # so the finding comes from the spec, not from a branch in t27b.py
     gen_src = open(os.path.join(ROOT, "gen", "c", "tri", "t27b", "steward.c")).read()
@@ -351,6 +370,11 @@ with tempfile.TemporaryDirectory() as tmp:
     check(code == 2 and "unknown check state" in out, f"ready: an unknown check state is unreadable, exit 2 ({code})")
     sys.path.insert(0, os.path.dirname(TOOL))
     import t27b as t27b_tool
+    check(t27b_tool.diff_rows({"test_verdicts": {"a": True, "b": False, "c": True},
+                               "reference_tests": {"a": True, "b": True, "d": False}})
+          == [("a", "pass", "pass", False), ("b", "fail", "pass", True),
+              ("c", "pass", "-", True), ("d", "-", "fail", True)],
+          "diff: both verdict lists by name, a test one side lacks reads '-' and differs (#6441)")
     def ent(last, sha=None, running=False):
         return {"last": last, "sha": sha, "running": running}
     check(t27b_tool.fold_master(["a\tcancelled\nb\tfailure\nc\tskipped\n", "a\tsuccess\nb\tsuccess\nc\tneutral\n"])

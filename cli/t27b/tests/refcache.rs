@@ -108,3 +108,30 @@ fn stamp_follows_content_not_mtime() {
     assert!(binary_stamp(&d.join("absent")).is_err());
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// #6441: a row carries the per-test verdicts; a row from before has none.
+#[test]
+fn rows_carry_per_test_verdicts() {
+    use t27b::blockers::{cache_row_tests, decode_row, read_cache_tests};
+    let tests = vec![("a;b%c".to_string(), true), ("x\ty".to_string(), false), ("plain".to_string(), true)];
+    let r = Reference::Fail("1 of 3 tests fail".into());
+    let row = cache_row_tests(0xab, Path::new("specs/a.t27"), &r, Some(&tests));
+    assert_eq!(row.lines().count(), 1);
+    let field = row.trim_end().splitn(3, '\t').nth(2).unwrap();
+    assert_eq!(decode_row(field), Some((r.clone(), Some(tests.clone()))));
+    // An old binary reads the verdict alone.
+    assert_eq!(Reference::decode(field), Some(r.clone()));
+    let empty = cache_row_tests(0xcd, Path::new("specs/b.t27"), &Reference::Pass, Some(&[]));
+    let field = empty.trim_end().splitn(3, '\t').nth(2).unwrap();
+    assert_eq!(decode_row(field), Some((Reference::Pass, Some(vec![]))));
+    assert_eq!(decode_row("pass"), Some((Reference::Pass, None)));
+    assert_eq!(decode_row("fail\tboom\ttests=?x"), None, "a damaged list is a damaged row");
+
+    let d = scratch("tests");
+    let cache = d.join("cache.tsv");
+    std::fs::write(&cache, format!("{}00000000000000aa\tspecs/old.t27\tfail\t1 of 2 tests fail\n", row)).unwrap();
+    let known = read_cache_tests(&cache);
+    assert_eq!(known.get(&0xab), Some(&(r, Some(tests))));
+    assert_eq!(known.get(&0xaa), Some(&(Reference::Fail("1 of 2 tests fail".into()), None)));
+    let _ = std::fs::remove_dir_all(&d);
+}

@@ -211,6 +211,31 @@ pub fn is_alarm(t: u8, reference: u8) -> bool {
     return false;
 }
 
+// is_alarm, judged test by test where both sides ran the file's tests
+// (#6441). `compared` says the record carries the per-test differential
+// against the reference (t27c + zig), `disagree` how many tests differ. A
+// fail the reference shares is no alarm only when the same tests fail; a
+// file t27b passes is an alarm when a test's verdict differs from the
+// reference's. Without the differential it is is_alarm.
+pub fn is_alarm_tests(t: u8, reference: u8, compared: bool, disagree: u32) -> bool {
+    if (is_alarm(t, reference)) { return true; }
+    if (compared) {
+        if (disagree > 0) { return true; }
+    }
+    return false;
+}
+
+// What stops the lanes (#6441). `jit_interp_mismatch` is t27b's JIT against
+// t27b's own interpreter: both run lower.rs's IR, so a lowering defect both
+// share agrees with itself. `reference_disagree` is t27b against the
+// reference, test by test: the files where some test's verdict differs or
+// only one side has it. Either one is a stop and a report, never a skip.
+pub fn lanes_stop(jit_interp_mismatch: u32, reference_disagree: u32) -> bool {
+    if (jit_interp_mismatch > 0) { return true; }
+    if (reference_disagree > 0) { return true; }
+    return false;
+}
+
 // A required check must be SUCCESS; anything else waits or blocks. A
 // non-required check blocks only when it is red here and its latest
 // completed result on master is success (Q16): red on master too means
@@ -401,6 +426,19 @@ test alarm_timeout { assert(is_alarm(8, 0)); }
 test alarm_crash_always { assert(is_alarm(7, 5)); }
 test alarm_mismatch_always { assert(is_alarm(6, 2)); }
 test alarm_blocked_never { assert(is_alarm(2, 0) == false); }
+test alarm_shared_fail_same_tests { assert(is_alarm_tests(5, 5, true, 0) == false); }
+test alarm_shared_fail_other_tests { assert(is_alarm_tests(5, 5, true, 1)); }
+test alarm_shared_fail_not_compared { assert(is_alarm_tests(5, 5, false, 0) == false); }
+test alarm_pass_disagrees { assert(is_alarm_tests(0, 0, true, 2)); }
+test alarm_pass_agrees { assert(is_alarm_tests(0, 0, true, 0) == false); }
+test alarm_tests_keeps_is_alarm {
+    assert(is_alarm_tests(5, 0, true, 0));
+    assert(is_alarm_tests(6, 2, false, 0));
+    assert(is_alarm_tests(2, 0, false, 0) == false);
+}
+test stop_on_mismatch { assert(lanes_stop(1, 0)); }
+test stop_on_reference_disagree { assert(lanes_stop(0, 3)); }
+test stop_neither { assert(lanes_stop(0, 0) == false); }
 
 test gate_required_green { assert_eq(check_effect(0, 3, true), 0); }
 test gate_required_pending_waits { assert_eq(check_effect(1, 0, true), 1); }
@@ -458,6 +496,10 @@ test next_first_breaks_ties { assert(lane_score(3, 10) > lane_score(3, 9)); }
 test next_score_value { assert_eq(lane_score(12, 40), 12040); }
 test next_with_tests { assert_eq(with_tests(720, 271), 449); }
 test next_with_tests_never_wraps { assert_eq(with_tests(3, 5), 0); }
+
+invariant reference_disagree_always_stops {
+    assert(lanes_stop(0, 1));
+}
 
 invariant gained_never_red {
     assert(delta_is_red(delta_code(0, 0, 2, 0, 0, 1)) == false);
