@@ -1,4 +1,4 @@
-"""tri queue -- the Queen's order beside the priority order (#6366). Report only.
+"""tri priority -- the Queen's order beside the priority order (#6366). Report only.
 
 The Queen takes the first eligible open issue in GitHub's listing order and
 reads no label (specs/queen/dispatch.t27, PRIORITY_RULE). The order it should
@@ -14,7 +14,7 @@ Not reproduced: the Queen's other skips (a live claim, landed work, a body
 without a boundary, a held boundary). An issue shown first here can still be
 skipped by the Queen for one of those.
 
-  tri queue [--repo OWNER/NAME] [--top N] [--json]
+  tri priority [--repo OWNER/NAME] [--top N] [--json]
 """
 
 import argparse
@@ -130,12 +130,12 @@ def open_issues(repo):
     p = subprocess.run(["gh", "api", "--paginate", f"repos/{repo}/issues?state=open&per_page=100",
                         "--jq", ".[] | select(.pull_request == null)"], capture_output=True, text=True)
     if p.returncode != 0:
-        sys.exit(f"tri queue: gh api failed: {p.stderr.strip()[:300]}")
+        sys.exit(f"tri priority: gh api failed: {p.stderr.strip()[:300]}")
     return [json.loads(line) for line in p.stdout.splitlines() if line.strip()]
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(prog="tri queue", description=__doc__.split("\n\n")[0])
+    ap = argparse.ArgumentParser(prog="tri priority", description=__doc__.split("\n\n")[0])
     ap.add_argument("--repo", default="gHashTag/t27")
     ap.add_argument("--top", type=int, default=15)
     ap.add_argument("--json", action="store_true")
@@ -143,7 +143,7 @@ def main(argv=None):
     try:
         rules()
     except RulesUnavailable as e:
-        sys.exit(f"tri queue: {e}")
+        sys.exit(f"tri priority: {e}")
     issues = open_issues(a.repo)
     ranked = rank(issues, datetime.now(timezone.utc))
     if a.json:
@@ -151,7 +151,7 @@ def main(argv=None):
         return 0
     labelled = sum(1 for r in ranked if r["labels"])
     blocked = sum(1 for r in ranked if not r["eligible"])
-    print(f"tri queue: {a.repo}  open issues {len(ranked)}  priority-labelled {labelled}  blocked {blocked}")
+    print(f"tri priority: {a.repo}  open issues {len(ranked)}  priority-labelled {labelled}  blocked {blocked}")
     print("today (listing order, first that survives the Queen's skips):",
           " ".join(f"#{i['number']}" for i in issues[:a.top]))
     print(f"priority order (specs/queen/priority.t27), top {a.top} eligible:")

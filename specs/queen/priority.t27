@@ -3,7 +3,7 @@
 ; Today the Queen takes the first eligible issue in GitHub's listing order, newest first, and reads no
 ; label (specs/queen/dispatch.t27, PRIORITY_RULE). This file is the one home of the rule that replaces it.
 ; Runtimes read it, nobody restates it: the supervisor imports the label vocabulary from `t27c gen-js`
-; of this file, `tri queue` calls the functions below through `t27c gen-c` and ctypes.
+; of this file, `tri priority` calls the functions below through `t27c gen-c` and ctypes.
 ; Design notes from the survey of agent schedulers (Copilot agent, Devin, OpenHands, Cursor, Jira rank,
 ; Kubernetes priority queue, Sidekiq weights, stokowski's Linear sort):
 ;   - "no priority" must never sort ahead of "urgent" (stokowski sorted Linear's 0 = none first);
@@ -38,7 +38,7 @@ pub const MAX_AGING_STEPS : u32 = 1;
 /// At most this many issues of one listing run as CRITICAL, taken in listing order; the rest run as HIGH.
 pub const CRITICAL_CAP : u32 = 3;
 
-/// Why an issue sits where it does: the code `tri queue` prints and a supervisor logs.
+/// Why an issue sits where it does: the code `tri priority` prints and a supervisor logs.
 pub const WHY_LISTING : u8 = 0;
 pub const WHY_LABEL : u8 = 1;
 pub const WHY_AGED : u8 = 2;

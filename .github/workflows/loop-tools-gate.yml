@@ -203,7 +203,7 @@ jobs:
         run: python3 scripts/ci/test_the_t27b_gen_check_asks_the_lab.py
 
       - name: The Queen's priority is decided in t27
-        # #6366. tri queue ranks open issues only through gen/c/queen/priority.c
+        # #6366. tri priority ranks open issues only through gen/c/queen/priority.c
         # (t27c gen-c of specs/queen/priority.t27). The system cc builds the
         # spec's own tests; fixtures cover every rule, including the stokowski
         # bug (no priority sorted ahead of urgent); a reversed outranks is the

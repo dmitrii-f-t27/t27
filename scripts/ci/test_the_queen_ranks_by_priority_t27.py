@@ -1,8 +1,8 @@
-"""tri queue ranks open issues only as specs/queen/priority.t27 decides (#6366).
+"""tri priority ranks open issues only as specs/queen/priority.t27 decides (#6366).
 
 Three halves:
   1. the spec's own tests, built by the system cc from gen/c/queen/priority.c;
-  2. queue.rank on fixtures for every rule: no labels keeps the listing order,
+  2. priority.rank on fixtures for every rule: no labels keeps the listing order,
      an unlabelled issue never beats an urgent one (stokowski sorted Linear's
      "no priority" 0 ahead of "urgent" 1), the fourth critical runs as high, a
      blocked issue is skipped, aged low work loses the tie to real high work,
@@ -21,8 +21,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-# Loaded by path under its own name: `queue` is also a stdlib module.
-_spec = importlib.util.spec_from_file_location("tri_queue", ROOT / "scripts" / "tri_loop" / "queue.py")
+# Loaded by path, so nothing in scripts/tri_loop shadows a stdlib module on sys.path.
+_spec = importlib.util.spec_from_file_location("tri_priority", ROOT / "scripts" / "tri_loop" / "priority.py")
 q = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(q)
 
@@ -89,7 +89,7 @@ def main():
             print(f"FAIL  {name}")
         if failed:
             return 1
-        print("ok    every ranking rule holds through tri queue")
+        print("ok    every ranking rule holds through tri priority")
 
         src = gen.read_text()
         needle = "if ((eff_a < eff_b)) {"
