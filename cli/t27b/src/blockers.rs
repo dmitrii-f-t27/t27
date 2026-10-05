@@ -200,6 +200,27 @@ pub struct Captured {
     pub stderr: String,
 }
 
+/// SIGKILL to the process group led by `pgid`, through libc's `kill(2)`
+/// with a negative pid. std links libc already; this is the one call t27b
+/// needs from it, so it is declared here rather than pulled in as a crate.
+fn kill_group(pgid: u32) {
+    extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+    const SIGKILL: i32 = 9;
+    // A pid that does not fit i32, or 0/1, would turn a negative pid into
+    // "every process": refuse those outright.
+    match i32::try_from(pgid) {
+        Ok(p) if p > 1 => {
+            // SAFETY: kill(2) takes two integers and touches no memory.
+            unsafe {
+                kill(-p, SIGKILL);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Run `cmd` to completion or until `timeout`, capturing both pipes. The child
 /// leads its own process group, and a timeout kills the whole group, so the
 /// `zig` and test binaries a reference run spawns die with it. `Ok(None)` is
@@ -229,14 +250,12 @@ pub fn run_capture(cmd: &mut Command, timeout: Duration) -> Result<Option<Captur
             Ok(Some(st)) => break Some(st),
             Ok(None) => {
                 if Instant::now() >= deadline {
-                    // Negative pid: the group. Then the child itself, in case
-                    // `kill` is missing.
-                    let _ = Command::new("kill")
-                        .arg("-KILL")
-                        .arg(format!("-{}", child.id()))
-                        .stdout(Stdio::null())
-                        .stderr(Stdio::null())
-                        .status();
+                    // Negative pid: the group, signalled directly. Spawning
+                    // `kill -KILL -<pgid>` instead killed the corpus driver
+                    // itself on the Railway lab (procps-ng 4.0.2, Debian
+                    // bookworm). Then the child itself, in case the group
+                    // signal failed.
+                    kill_group(child.id());
                     let _ = child.kill();
                     let _ = child.wait();
                     break None;
