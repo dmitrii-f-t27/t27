@@ -17,7 +17,7 @@ module blink_working {
         slow_led_bit : u32,
     }
 
-    pub struct BlinkState {
+    pub struct BlinkWorkingState {
         counter : u64,
         t23_output : bool,
         r23_output : bool,
@@ -54,8 +54,8 @@ module blink_working {
         };
     }
 
-    fn blink_state() -> BlinkState {
-        return BlinkState{
+    fn blink_state() -> BlinkWorkingState {
+        return BlinkWorkingState{
             .counter = 0,
             .t23_output = false,
             .r23_output = false,
@@ -110,12 +110,12 @@ module blink_working {
 
     // === State update function ===
 
-    fn update_blink_state(config: BlinkConfig, current_state: BlinkState, inputs: BlinkInputs) -> BlinkState {
+    fn update_blink_state(config: BlinkConfig, current_state: BlinkWorkingState, inputs: BlinkInputs) -> BlinkWorkingState {
         var new_counter : u64 = increment_counter(config, current_state.counter);
         var new_t23 : bool = compute_fast_led(config, new_counter);
         var new_r23 : bool = compute_slow_led(config, new_counter);
         
-        return BlinkState{
+        return BlinkWorkingState{
             .counter = new_counter,
             .t23_output = new_t23,
             .r23_output = new_r23,
@@ -124,7 +124,7 @@ module blink_working {
 
     // === Output computation function ===
 
-    fn compute_outputs(config: BlinkConfig, state: BlinkState) -> BlinkOutputs {
+    fn compute_outputs(config: BlinkConfig, state: BlinkWorkingState) -> BlinkOutputs {
         return BlinkOutputs{
             .t23 = state.t23_output,
             .r23 = state.r23_output,
@@ -158,7 +158,7 @@ module blink_working {
         return errors;
     }
 
-    fn validate_state(state: BlinkState) -> u32 {
+    fn validate_state(state: BlinkWorkingState) -> u32 {
         var errors : u32 = 0;
         if (state.counter > COUNTER_MAX) {
             errors = errors + 1;
@@ -203,7 +203,7 @@ module blink_working {
 
     test output_computation
         given cfg = blink_config(50, 26, 22, 24)
-        and state = BlinkState{ .counter = 1 << 22, .t23_output = true, .r23_output = false }
+        and state = BlinkWorkingState{ .counter = 1 << 22, .t23_output = true, .r23_output = false }
         then compute_outputs(cfg, state).t23 == true
         and compute_outputs(cfg, state).r23 == false
 
@@ -221,8 +221,8 @@ module blink_working {
 
     test state_validation
         given state1 = blink_state()
-        and state2 = BlinkState{ .counter = COUNTER_MAX, .t23_output = false, .r23_output = false }
-        and state3 = BlinkState{ .counter = COUNTER_MAX + 1, .t23_output = false, .r23_output = false }
+        and state2 = BlinkWorkingState{ .counter = COUNTER_MAX, .t23_output = false, .r23_output = false }
+        and state3 = BlinkWorkingState{ .counter = COUNTER_MAX + 1, .t23_output = false, .r23_output = false }
         then validate_state(state1) == 0
         and validate_state(state2) == 0
         and validate_state(state3) > 0
