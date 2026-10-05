@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-; specs/tri/t27b/conformance/value_params.t27 -- array and struct parameters the body assigns, as the
-; reference runs them (gHashTag/t27#6063 lane: StmtAssign on a by-value parameter). Every test here passes
-; `t27c test-report`; t27b must give the same verdict on each, or refuse the file.
+; specs/tri/t27b/conformance/value_params.t27 -- array and struct parameters and locals the body assigns,
+; as the reference runs them (gHashTag/t27#6063 lane: StmtAssign, assignment through a constant). Every test
+; here passes `t27c test-report`; t27b must give the same verdict on each, or refuse the file.
 ; What t27c's Zig backend prints: a parameter the body assigns is renamed `<name>_arg`, and the body opens
 ; with `var <name> = <name>_arg;`. So an array or struct parameter is the callee's own copy: writing an
-; element or a field never reaches the caller.
-; A parameter counts as assigned when a statement assigns it whole (`p = ...`), one element of it
+; element or a field never reaches the caller. A `let` or `const` local the body assigns is declared `var`.
+; A name counts as assigned when a statement assigns it whole (`p = ...`), one element of it
 ; (`p[i] = ...`) or one field of it (`p.f = ...`), at the top of the body or inside if / while / for.
 ; Not here (the reference cannot compile them): a parameter written only deeper (`p.a[i] = ...`,
 ; `p[i].f = ...`), which keeps it a constant, and a slice or pointer parameter, whose copy is never mutated.
@@ -62,6 +62,10 @@ fn record(c: Counter, h: u32) -> Counter {
     return c;
 }
 
+fn make(a: i64) -> Pair {
+    return Pair { a: a, b: 0 };
+}
+
 fn first_hit(c: Counter) -> u32 {
     return c.hits[0];
 }
@@ -108,4 +112,34 @@ test nested_write_after_a_field_write {
     assert(first_hit(e) == 9);
     assert(c.len == 0);
     assert(d.len == 1);
+}
+
+test let_struct_from_a_call_is_writable {
+    let p = make(4);
+    p.b = 6;
+    assert(p.a + p.b == 10);
+}
+
+test const_struct_literal_written_in_a_loop {
+    const p = Pair { a: 0, b: 0 };
+    var i: i64 = 0;
+    while (i < 3) {
+        p.a += i;
+        i += 1;
+    }
+    assert(p.a == 3);
+}
+
+test typed_let_array_element_write {
+    let xs: [3]u32 = [1, 2, 3];
+    xs[2] = 10;
+    assert(xs[0] + xs[1] + xs[2] == 13);
+}
+
+test a_copy_is_not_an_alias {
+    const p = Pair { a: 1, b: 2 };
+    let q = p;
+    q.a = 50;
+    assert(p.a == 1);
+    assert(q.a == 50);
 }

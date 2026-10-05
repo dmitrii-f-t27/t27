@@ -75,7 +75,7 @@ use std::collections::{HashMap, HashSet};
 
 #[path = "lower_float.rs"]
 mod float;
-mod paramcopy;
+mod refvars;
 mod tuple;
 
 /// A construct outside the supported subset (or a type error inside it).
@@ -293,6 +293,8 @@ struct Lower<'a> {
     /// Names whose address is taken somewhere in the body (`&x`): such a
     /// scalar lives in a frame slot instead of a register.
     addr_taken: HashSet<String>,
+    /// Names the reference makes a `var` in this body (`refvars`).
+    ref_vars: HashSet<String>,
     /// Untyped locals bound to an array literal and passed where a callee
     /// declares a slice, with that slice's element type: t27c's Zig backend
     /// makes each a `var x = [_]T{ ... }` array and passes `&x`
@@ -421,6 +423,7 @@ fn lower_mode<'a>(
         ltys: Vec::new(),
         slots: Vec::new(),
         addr_taken: HashSet::new(),
+        ref_vars: HashSet::new(),
         slice_locals: HashMap::new(),
         tuple_locals: HashMap::new(),
         dead_lits: HashSet::new(),
@@ -1341,6 +1344,7 @@ impl<'a> Lower<'a> {
         self.sret = None;
         self.addr_taken.clear();
         scan_addr_taken(body, &mut self.addr_taken);
+        self.collect_ref_vars(body);
         self.slice_locals.clear();
         self.tuple_locals.clear();
         self.dead_lits.clear();
@@ -1458,7 +1462,7 @@ impl<'a> Lower<'a> {
                 // A struct or str argument is the caller's memory, read-only.
                 t if is_agg(t) => {
                     let p = Place { addr: var, off: 0, ty: params[i].clone(), mutable: false, temp: None };
-                    let p = self.param_place(&n.children, pname, p, &mut body)?;
+                    let p = self.param_place(pname, p, &mut body)?;
                     self.bind(pname, Binding::Mem(p));
                 }
                 t if self.addr_taken.contains(pname) => {
@@ -1564,6 +1568,9 @@ impl<'a> Lower<'a> {
             );
         }
         self.begin_body(&n.children);
+        if invariant || self.in_bench {
+            self.ref_vars.clear();
+        }
         self.in_test = true;
         // A bench is an uncalled `fn bench_<name>() void` in the reference's
         // Zig, so `zig test` never analyzes its body (see `analyzed_fns`).
@@ -2093,6 +2100,7 @@ impl<'a> Lower<'a> {
             if is_agg(&t) || self.addr_taken.contains(&name) {
                 // In memory; the name is bound only after its initializer.
                 let k = self.new_slot(&t)?;
+                let mutable = mutable || self.ref_var_agg(&t, &name);
                 let dst = Place { addr: slot_expr(k), off: 0, ty: t, mutable, temp: None };
                 match init {
                     Some(i) => self.init(i, dst.clone(), true, out)?,
@@ -2163,7 +2171,10 @@ impl<'a> Lower<'a> {
                 }
                 self.bind(&name, Binding::Const(Val::Cf(f, exact)));
             }
-            v => self.bind_value(&name, v, mutable, out)?,
+            v => {
+                let mutable = mutable || matches!(&v, Val::M(p) if self.ref_var_agg(&p.ty, &name));
+                self.bind_value(&name, v, mutable, out)?
+            }
         }
         Ok(())
     }
