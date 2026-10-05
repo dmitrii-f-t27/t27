@@ -2188,7 +2188,8 @@ test nan_to_int {
 }
 
 /// What stays refused, each named: `@sqrt` and `std.math.*`, a conversion
-/// with no result type, f32, `as` to or from f64, compile-time arithmetic
+/// with no result type, f32, `as` from f64 or from a bool to f64 (an
+/// integer `as f64` is `@floatFromInt`, see `source.rs`), compile-time arithmetic
 /// on a literal that is not exactly an f64 (Zig folds it in f128), and
 /// `x * 2^k` on f64 (t27c gen rewrites it into a shift that cannot compile).
 #[test]
@@ -2205,7 +2206,9 @@ fn f64_refusals_name_the_construct() {
         ("return std.math.sqrt(x);", "ExprCall(std.*)"),
         ("return @floatFromInt(n) + x;", "ExprCall(@floatFromInt)"),
         ("const y: f32 = 1.0;\nreturn x;", "type f32"),
-        ("return n as f64;", "ExprCast(f64)"),
+        ("return x as f64;", "ExprCast(f64)"),
+        ("const k: i32 = x as i32;\nreturn x;", "ExprCast(f64)"),
+        ("return (n > 0) as f64;", "ExprCast(f64)"),
         ("return x + 0.1 * 3.0;", "ExprBinary(*)"),
         ("return x * 2;", "ExprBinary(f64 * 2^k)"),
         ("return x % 2.0;", "ExprBinary(%)"),

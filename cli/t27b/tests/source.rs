@@ -111,6 +111,62 @@ test t1 {
     assert_eq!(prog.unchecked, vec!["all_id".to_string()]);
 }
 
+/// `@compileAssert` is `assert`: t27c's Zig backend lowers both through one
+/// arm. In an invariant (a `comptime` block there) a false one fails the
+/// reference's compile and fails the invariant here; in a test it is a
+/// runtime check in both. An integer `as f64` is `@floatFromInt` with result
+/// type f64, which is what the reference emits for it.
+#[test]
+fn compile_assert_is_assert() {
+    let src = "module ca;
+
+const E: u8 = 3;
+const N: u16 = 10;
+
+fn half(x: u32) -> f64 {
+    return x as f64 / 2.0;
+}
+
+invariant widths {
+    @compileAssert(E + 7 == N);
+}
+
+invariant exponent_bounds {
+    @compileAssert((E as f64 - 0.5) * 2.618033988749895 <= N as f64 - 1.0);
+    @compileAssert(N as f64 - 1.0 <= (E as f64 + 0.5) * 2.618033988749895);
+}
+
+invariant broken {
+    @compileAssert(E as f64 > 3.5, \"exponent too small\");
+}
+
+test runtime_operand {
+    @compileAssert(half(7) == 3.5);
+}
+
+test runtime_false {
+    @compileAssert(half(7) == 3.0);
+}
+";
+    let r = run(src);
+    assert_eq!(
+        names_ok(&r),
+        vec![
+            ("widths", true, true),
+            ("exponent_bounds", true, true),
+            ("broken", true, false),
+            ("runtime_operand", false, true),
+            ("runtime_false", false, false),
+        ]
+    );
+    assert_eq!(r[2].2, Err((TrapKind::Assert, 20)));
+    assert_eq!(r[4].2, Err((TrapKind::Assert, 28)));
+
+    // The message must be a string literal, as for `assert`.
+    let m = rejected("module ca2;\nconst E: u8 = 3;\ninvariant i {\n    @compileAssert(E == 3, E);\n}\n");
+    assert!(m.contains("unsupported construct ExprCall(assert with non-literal message)"), "{}", m);
+}
+
 #[test]
 fn partially_parsed_invariant_is_rejected() {
     let src = "module inv;
