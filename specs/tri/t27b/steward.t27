@@ -26,6 +26,9 @@ module T27bSteward;
 // Checkout of a lab run: NONE = 0, LAB_CHECKOUT = 1 (failed: the run measured
 // nothing), LAB_RECLONED = 2 (healed by a fresh clone: report it, #6220).
 //
+// Deployed lab image (#6443): NONE = 0, LAB_IMAGE_STALE = 1 (the running
+// lab.py or Dockerfile is not master's contrib/railway/t27b-lab).
+//
 // Merge gate (#6244). Check state on a PR or on master: SUCCESS = 0,
 // PENDING = 1, RED = 2 (failure, error, cancelled, timed out), ABSENT = 3,
 // NEUTRAL = 4 (skipped, neutral). What one check does to a PR: NONE = 0,
@@ -189,6 +192,19 @@ pub fn ledger_quiet(age_min: u32, limit_min: u32) -> bool {
 pub fn checkout_code(ok: bool, recloned: bool) -> u8 {
     if (ok == false) { return 1; }
     if (recloned) { return 2; }
+    return 0;
+}
+
+// Is the running lab image master's (#6443)? `master_known`: master's
+// contrib/railway/t27b-lab could be read; without it nothing is said.
+// `reported`: the lab published its own lab.py sha -- an image from before
+// #6443 does not, and is older than master by construction (on 2026-10-05
+// latest.json had no steps.ratchet: the image predated #6115). `same`: every
+// file sha the lab published equals master's.
+pub fn image_code(master_known: bool, reported: bool, same: bool) -> u8 {
+    if (master_known == false) { return 0; }
+    if (reported == false) { return 1; }
+    if (same == false) { return 1; }
     return 0;
 }
 
@@ -413,6 +429,11 @@ test doctor_checkout_failed { assert_eq(checkout_code(false, false), 1); }
 test doctor_checkout_reclone_failed { assert_eq(checkout_code(false, true), 1); }
 test doctor_checkout_healed { assert_eq(checkout_code(true, true), 2); }
 test doctor_checkout_kept { assert_eq(checkout_code(true, false), 0); }
+
+test doctor_image_master_unknown { assert_eq(image_code(false, false, false), 0); }
+test doctor_image_unreported_is_stale { assert_eq(image_code(true, false, false), 1); }
+test doctor_image_differs { assert_eq(image_code(true, true, false), 1); }
+test doctor_image_current { assert_eq(image_code(true, true, true), 0); }
 
 test bless_rise_all_new { assert(cap_rise_is_new(594, 582, 41)); }
 test bless_rise_old_entries_over_cap { assert(cap_rise_is_new(624, 582, 41) == false); }

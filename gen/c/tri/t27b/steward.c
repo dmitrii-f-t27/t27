@@ -35,6 +35,7 @@ uint8_t claim_code(uint8_t alive, uint32_t age_min, uint32_t limit_min);
 bool railway_old(uint32_t major);
 bool ledger_quiet(uint32_t age_min, uint32_t limit_min);
 uint8_t checkout_code(bool ok, bool recloned);
+uint8_t image_code(bool master_known, bool reported, bool same);
 bool cap_rise_is_new(uint32_t not_pass, uint32_t old_cap, uint32_t new_not_pass);
 bool is_alarm(uint8_t t, uint8_t reference);
 bool is_alarm_tests(uint8_t t, uint8_t reference, bool compared, uint32_t disagree);
@@ -267,6 +268,19 @@ uint8_t checkout_code(bool ok, bool recloned) {
     }
     if (recloned) {
         return 2;
+    }
+    return 0;
+}
+
+uint8_t image_code(bool master_known, bool reported, bool same) {
+    if ((master_known == false)) {
+        return 0;
+    }
+    if ((reported == false)) {
+        return 1;
+    }
+    if ((same == false)) {
+        return 1;
     }
     return 0;
 }
@@ -664,6 +678,22 @@ void test_doctor_checkout_kept(void) {
     assert_eq(checkout_code(true, false), 0);
 }
 
+void test_doctor_image_master_unknown(void) {
+    assert_eq(image_code(false, false, false), 0);
+}
+
+void test_doctor_image_unreported_is_stale(void) {
+    assert_eq(image_code(true, false, false), 1);
+}
+
+void test_doctor_image_differs(void) {
+    assert_eq(image_code(true, true, false), 1);
+}
+
+void test_doctor_image_current(void) {
+    assert_eq(image_code(true, true, true), 0);
+}
+
 void test_bless_rise_all_new(void) {
     assert(cap_rise_is_new(594, 582, 41));
 }
@@ -1007,6 +1037,10 @@ int main(void) {
     test_doctor_checkout_reclone_failed();
     test_doctor_checkout_healed();
     test_doctor_checkout_kept();
+    test_doctor_image_master_unknown();
+    test_doctor_image_unreported_is_stale();
+    test_doctor_image_differs();
+    test_doctor_image_current();
     test_bless_rise_all_new();
     test_bless_rise_old_entries_over_cap();
     test_bless_rise_at_old_cap();
@@ -1077,7 +1111,7 @@ int main(void) {
     test_next_score_value();
     test_next_with_tests();
     test_next_with_tests_never_wraps();
-    printf("All %d tests passed.\n", 120);
+    printf("All %d tests passed.\n", 124);
     return 0;
 }
 #endif /* T27_TEST_MAIN */

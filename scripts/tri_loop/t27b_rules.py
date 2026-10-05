@@ -33,6 +33,7 @@ RATCHETS = (None, "VACUITY MEASURED", "UNEXPECTED FAILURE", "UNEXPECTED PASS", "
 REASONS = (None, "unimplemented", "reference-bug", "n/a")
 CLAIMS = (None, "CLAIM-DEAD", "CLAIM-OLD")
 CHECKOUTS = (None, "LAB-CHECKOUT", "LAB-RECLONED")
+IMAGES = (None, "LAB-IMAGE-STALE")
 # Merge gate (#6244): GitHub's check states, in the spec's state codes.
 CHECK_STATES = {"SUCCESS": 0,
                 "PENDING": 1, "QUEUED": 1, "IN_PROGRESS": 1, "WAITING": 1, "REQUESTED": 1, "EXPECTED": 1,
@@ -108,6 +109,8 @@ def _build():
     so.railway_old.restype = ctypes.c_bool
     so.checkout_code.argtypes = [ctypes.c_bool, ctypes.c_bool]
     so.checkout_code.restype = ctypes.c_uint8
+    so.image_code.argtypes = [ctypes.c_bool] * 3
+    so.image_code.restype = ctypes.c_uint8
     so.cap_rise_is_new.argtypes = [ctypes.c_uint32] * 3
     so.cap_rise_is_new.restype = ctypes.c_bool
     so.is_alarm.argtypes = [ctypes.c_uint8, ctypes.c_uint8]
@@ -226,6 +229,11 @@ def railway_old(major):
 
 def checkout(ok, recloned):
     return CHECKOUTS[lib().checkout_code(bool(ok), bool(recloned))]
+
+
+def image(master_known, reported, same):
+    """LAB-IMAGE-STALE or None: is the running lab image master's (#6443)?"""
+    return IMAGES[lib().image_code(bool(master_known), bool(reported), bool(same))]
 
 
 def cap_rise_is_new(not_pass, old_cap, new_not_pass):

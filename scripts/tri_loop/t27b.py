@@ -29,6 +29,9 @@ out-of-reference passes on their own line.
 WHAT IS READ (nothing is written, fetched or pushed)
 ----------------------------------------------------
   lab        GET <lab>/latest.json                       (fixture: lab.json)
+  labstatus  GET <lab>/status.json: the running image    (status.json)
+  labfiles   gh api contents/contrib/railway/t27b-lab at
+             master: each file's git blob sha            (master_lab.json)
   master     git ls-remote origin refs/heads/master      (master.txt)
   prs        gh pr list --search t27b, open, with checks  (prs.json)
   claim      ~/.local/state/t27b-queen/claim.json         (claim.json)
@@ -58,6 +61,10 @@ ANOMALY CODES (doctor exits 1 when any is printed, 0 when none, 2 on usage)
                       means the deploy predates #6220 or the remote is broken
   LAB-RECLONED        the lab healed a broken clone with a fresh one: the run
                       counts, but say so in the report (skill rule Q18)
+  LAB-IMAGE-STALE     the running lab's lab.py or Dockerfile (git blob sha,
+                      `image` in status.json, else latest.json) is not
+                      master's contrib/railway/t27b-lab, or the lab does not
+                      say (an image from before #6443): redeploy from source
   LAB-MISMATCH        jit_interp_mismatch (alias mismatch) > 0: t27b's JIT
                       against t27b's own interpreter, same IR; a stop and a
                       report, never a skip
@@ -268,6 +275,31 @@ class Sources:
             return json.loads(text)
         except ValueError as e:
             raise Unreadable(f"latest.json: {e}")
+
+    def lab_status(self):
+        """The running lab process's /status.json (it carries `image`, #6443)."""
+        if self.fixture:
+            text = self._fx("status.json")
+        else:
+            try:
+                with urllib.request.urlopen(self.lab + "/status.json", timeout=30) as r:
+                    text = r.read().decode("utf-8")
+            except Exception as e:  # noqa: BLE001 -- any failure is "could not read"
+                raise Unreadable(f"{self.lab}/status.json: {e}")
+        try:
+            return json.loads(text)
+        except ValueError as e:
+            raise Unreadable(f"status.json: {e}")
+
+    def lab_files(self, ref):
+        """{file name: git blob sha} of contrib/railway/t27b-lab at `ref`."""
+        if self.fixture:
+            return json.loads(self._fx("master_lab.json"))
+        out = json.loads(run(["gh", "api", f"repos/{REPO}/contents/contrib/railway/t27b-lab?ref={ref}"],
+                             timeout=60))
+        if not isinstance(out, list):
+            raise Unreadable("gh api contents: not a directory listing")
+        return {e["name"]: e["sha"] for e in out if e.get("type") == "file"}
 
     def master(self):
         if self.fixture:
@@ -514,6 +546,15 @@ def collect(src, args):
             except Unreadable as e:
                 wts.append({"path": p, "error": str(e)})
     data["wt"] = wts
+    for key, fn in (("lab_status", src.lab_status),
+                    ("lab_files", lambda: src.lab_files(data["master"] if isinstance(data["master"], str)
+                                                         and data["master"] else "master"))):
+        try:
+            data[key] = fn()
+        except Unreadable as e:
+            data[key] = e
+        except (ValueError, KeyError) as e:
+            data[key] = Unreadable(f"{key}: {e}")
     claim = data["claim"]
     data["claim_alive"] = None
     if isinstance(claim, dict) and claim.get("pid") is not None:
@@ -522,6 +563,15 @@ def collect(src, args):
         except Unreadable as e:
             data["claim_alive"] = e
     return data
+
+
+def lab_image(d):
+    """The running lab's image identity: status.json (the live process), else
+    the last run's latest.json; {} when neither says."""
+    for src in (d.get("lab_status"), d.get("lab")):
+        if isinstance(src, dict) and isinstance(src.get("image"), dict):
+            return src["image"]
+    return {}
 
 
 def anomalies(d, args):
@@ -545,6 +595,19 @@ def anomalies(d, args):
             if rules().lab_stale(age, args.stale_hours * 60):
                 word = "finished" if lab.get("finished") else "updated (no finished run)"
                 add("LAB-STALE", f"last run {word} {age / 60:.1f} h ago", "check /status.json and the Railway deploy logs")
+        image, files = lab_image(d), d.get("lab_files")
+        known = isinstance(files, dict) and "lab.py" in files
+        pairs = (("lab_py_sha", "lab.py"), ("dockerfile_sha", "Dockerfile"))
+        reported = bool(image.get("lab_py_sha"))
+        same = known and all(image.get(k) == files.get(f) for k, f in pairs if image.get(k) or f == "lab.py")
+        if rules().image(known, reported, same):
+            what = (", ".join(f"{f} lab {str(image.get(k))[:9]} master {str(files.get(f))[:9]}"
+                              for k, f in pairs if image.get(k) != files.get(f))
+                    if reported else "the lab does not report its image (deployed before #6443)")
+            built = image.get("image_built")
+            add("LAB-IMAGE-STALE", what + (f"; image built {built}" if built else ""),
+                "redeploy from master's contrib/railway/t27b-lab (railway 5.x up, linked dir); "
+                "then check railway deployment list and the next run's image")
         s = lab.get("summary") or {}
         hh = honest(lab)
         jim, rd = hh["jit_interp_mismatch"] or 0, hh["reference_disagree"] or 0

@@ -455,6 +455,88 @@ pub fn binary_stamp(t27c: &Path) -> Result<u64, String> {
     Ok(fnv64(&b))
 }
 
+/// The toolchain half of every reference-cache key (#6443): the t27c
+/// binary's content and the zig that compiles what it emits. `zig version`
+/// that cannot run is recorded as such, so it still keys consistently.
+pub fn toolchain_stamp(t27c: &Path) -> Result<u64, String> {
+    let bin = binary_stamp(t27c)?;
+    let zig = Command::new("zig")
+        .arg("version")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|e| format!("unavailable: {}", e));
+    let mut b = Vec::with_capacity(64);
+    b.extend_from_slice(b"t27c+zig\0");
+    b.extend_from_slice(&bin.to_le_bytes());
+    b.extend_from_slice(zig.as_bytes());
+    Ok(fnv64(&b))
+}
+
+/// bootstrap/src/use_resolve.rs `find_specs_root`, for the cache key.
+fn specs_root(file: &Path) -> Option<PathBuf> {
+    let mut dir = file.parent()?.to_path_buf();
+    loop {
+        if dir.join("specs").is_dir() {
+            return Some(dir.join("specs"));
+        }
+        if dir.file_name().map(|n| n == "specs").unwrap_or(false) && dir.is_dir() {
+            return Some(dir);
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
+}
+
+/// The spec and every spec it imports with `use`, transitively: t27c splices
+/// the imported declarations in, so all their bytes decide the verdict
+/// (#6443). Mirrors bootstrap/src/use_resolve.rs `use_targets`. The spec
+/// itself comes first, the rest sorted.
+pub fn use_closure(file: &Path) -> Vec<PathBuf> {
+    let mut seen: Vec<PathBuf> = Vec::new();
+    let mut todo = vec![file.to_path_buf()];
+    while let Some(p) = todo.pop() {
+        if seen.contains(&p) {
+            continue;
+        }
+        seen.push(p.clone());
+        let (root, src) = match (specs_root(&p), std::fs::read_to_string(&p)) {
+            (Some(r), Ok(s)) => (r, s),
+            _ => continue,
+        };
+        for line in src.lines() {
+            let rest = match line.trim().strip_prefix("use ") {
+                Some(r) => r,
+                None => continue,
+            };
+            let rest = rest.split("//").next().unwrap_or("");
+            let expr = rest.trim().trim_end_matches(';').trim();
+            let segs: Vec<&str> = expr.split("::").flat_map(|s| s.split('.')).collect();
+            if segs.is_empty() || segs.iter().any(|s| s.is_empty()) {
+                continue;
+            }
+            let mut t = root.clone();
+            for s in segs {
+                t.push(s);
+            }
+            t.set_extension("t27");
+            if t.is_file() {
+                todo.push(t);
+            }
+        }
+    }
+    let first = seen.remove(0);
+    seen.sort();
+    seen.insert(0, first);
+    seen
+}
+
+/// Whether a cached verdict may be served (#6443): a timeout says how busy
+/// the machine was, not what the spec does, so it is never cached.
+pub fn cacheable(r: &Reference) -> bool {
+    !matches!(r, Reference::Timeout)
+}
+
 /// One reference-cache row, newline included: key, spec path, verdict, tab
 /// separated. Tabs and line breaks in the path, and line breaks in the
 /// verdict's reason, become spaces so a row is always exactly one line.
@@ -534,9 +616,10 @@ impl CacheWriter {
 
 impl RefRunner {
     /// `cache`, when given, is a tab-separated file of earlier results keyed
-    /// by spec path, spec source, and the content of the t27c binary
-    /// (`binary_stamp`); a changed spec or a rebuilt t27c misses, a copied
-    /// t27c hits.
+    /// by spec path, the source of the spec and of its `use` closure, the
+    /// content of the t27c binary and the zig version (`toolchain_stamp`); a
+    /// changed spec or import, a rebuilt t27c or another zig misses, a copied
+    /// t27c hits. Timeouts are never cached (#6443).
     pub fn new(
         t27c: PathBuf,
         specs_dir: PathBuf,
@@ -545,17 +628,26 @@ impl RefRunner {
         cap_bytes: u64,
         cache: Option<PathBuf>,
     ) -> Result<RefRunner, String> {
-        let stamp = binary_stamp(&t27c)?;
-        let known = cache.as_deref().map(read_cache_tests).unwrap_or_default();
+        let stamp = toolchain_stamp(&t27c)?;
+        let mut known = cache.as_deref().map(read_cache_tests).unwrap_or_default();
+        // Caches written before #6443 kept timeouts; they never hit now (the
+        // key changed), but drop them so nothing can serve one.
+        known.retain(|_, r| cacheable(&r.0));
         let cache = cache.map(CacheWriter::new);
         Ok(RefRunner { t27c, specs_dir, timeout, scratch, cap_bytes, cache, stamp, known: Mutex::new(known) })
     }
 
-    fn key(&self, file: &Path, src: &[u8]) -> u64 {
-        let mut b = Vec::with_capacity(src.len() + 64);
+    fn key(&self, file: &Path) -> u64 {
+        let mut b = Vec::with_capacity(4096);
         b.extend_from_slice(file.to_string_lossy().as_bytes());
         b.push(0);
-        b.extend_from_slice(src);
+        for p in use_closure(file) {
+            let src = std::fs::read(&p).unwrap_or_default();
+            b.extend_from_slice(p.to_string_lossy().as_bytes());
+            b.push(0);
+            b.extend_from_slice(&(src.len() as u64).to_le_bytes());
+            b.extend_from_slice(&src);
+        }
         b.extend_from_slice(&self.stamp.to_le_bytes());
         fnv64(&b)
     }
@@ -566,8 +658,7 @@ impl RefRunner {
     /// (a row from before #6441) is a miss: it cannot be compared test by
     /// test, and a file-level answer is what #6441 replaces.
     pub fn run(&self, worker: usize, file: &Path) -> (Reference, Option<Verdicts>, bool) {
-        let src = std::fs::read(file).unwrap_or_default();
-        let key = self.key(file, &src);
+        let key = self.key(file);
         if let Some((r, t)) = self.known.lock().unwrap().get(&key) {
             let ran = matches!(r, Reference::Pass | Reference::Fail(_));
             if t.is_some() || !ran {
@@ -592,29 +683,36 @@ impl RefRunner {
             .env("ZIG_LOCAL_CACHE_DIR", &local)
             .env("TMPDIR", &tmp);
         let mut tests = None;
-        let r = match run_capture(&mut cmd, self.timeout) {
+        // `keep` is false for what the machine did rather than the spec
+        // (#6443): a timeout, a t27c killed by a signal, one that never ran.
+        let (r, keep) = match run_capture(&mut cmd, self.timeout) {
             Ok(Some(c)) if c.code == Some(0) => {
                 let r = parse_test_report(&c.stdout);
                 if matches!(r, Reference::Pass | Reference::Fail(_)) {
                     tests = parse_test_verdicts(&c.stdout);
                 }
-                r
+                (r, true)
             }
-            Ok(Some(c)) => Reference::Blocked(format!(
-                "t27c test-report exited {:?}: {}",
-                c.code.or(c.signal),
-                c.stderr.lines().next().unwrap_or("").trim()
-            )),
+            Ok(Some(c)) => (
+                Reference::Blocked(format!(
+                    "t27c test-report exited {:?}: {}",
+                    c.code.or(c.signal),
+                    c.stderr.lines().next().unwrap_or("").trim()
+                )),
+                c.code.is_some(),
+            ),
             Ok(None) => {
                 // A killed run leaves its working directory behind.
                 let _ = std::fs::remove_dir_all(&tmp);
-                Reference::Timeout
+                (Reference::Timeout, false)
             }
-            Err(e) => Reference::Blocked(e),
+            Err(e) => (Reference::Blocked(e), false),
         };
-        self.known.lock().unwrap().insert(key, (r.clone(), tests.clone()));
-        if let Some(c) = &self.cache {
-            c.append_tests(key, file, &r, tests.as_deref());
+        if keep && cacheable(&r) {
+            self.known.lock().unwrap().insert(key, (r.clone(), tests.clone()));
+            if let Some(c) = &self.cache {
+                c.append_tests(key, file, &r, tests.as_deref());
+            }
         }
         (r, tests, false)
     }
