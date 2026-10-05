@@ -15,6 +15,7 @@ mod bridge;
 mod compiler;
 mod source_kind;
 mod codegen_js;
+mod codegen_python;
 mod codegen_ts;
 mod use_resolve;
 mod check_calls;
@@ -1118,6 +1119,13 @@ enum Commands {
     /// Generate a TypeScript module of declarations, with the declared types
     #[command(name = "gen-ts")]
     GenTs {
+        /// Input file path
+        input: String,
+    },
+
+    /// Generate a Python module of declarations from a .t27 file
+    #[command(name = "gen-python")]
+    GenPython {
         /// Input file path
         input: String,
     },
@@ -5205,8 +5213,14 @@ fn run_gen_testbench(input_path: &str, period_ns: u32, max_cycles: u32, output: 
     let ast = compiler::Compiler::parse_ast(&source)
         .map_err(|e| anyhow::anyhow!("Parse error: {}", e))?;
 
-    let module_name = if !ast.name.is_empty() { &ast.name } else { "dut" };
-    let mut tb = compiler::HirTestbench::new(module_name, max_cycles, period_ns);
+    // #5978: the DUT name must match the HIR module line, which sanitizes the
+    // name (a dotted `sandbox.health` is not a Verilog identifier).
+    let module_name = if !ast.name.is_empty() {
+        compiler::VerilogCodegen::sanitize_identifier(&ast.name)
+    } else {
+        "dut".to_string()
+    };
+    let mut tb = compiler::HirTestbench::new(&module_name, max_cycles, period_ns);
 
     for node in &ast.children {
         if node.kind == compiler::NodeKind::ConstDecl {
@@ -5352,6 +5366,22 @@ fn run_gen_js(input_path: &str) -> anyhow::Result<()> {
 fn run_gen_ts(input_path: &str) -> anyhow::Result<()> {
     let (ast, name) = ast_for_codegen(input_path)?;
     match codegen_ts::generate(&ast, &name) {
+        Ok(code) => {
+            print!("{}", code);
+            Ok(())
+        }
+        Err(e) => anyhow::bail!("{}", e),
+    }
+}
+
+/// `gen-python`: the same declarations, in the language the analysis harnesses
+/// around this repo actually run. Every Python script that needed a spec's
+/// constants was reading them from a hand-maintained copy -- the deciding-
+/// generator hole `gen-js` closed, back again one language over. This prints
+/// the module from the spec, so the copy does not exist.
+fn run_gen_python(input_path: &str) -> anyhow::Result<()> {
+    let (ast, name) = ast_for_codegen(input_path)?;
+    match codegen_python::generate(&ast, &name) {
         Ok(code) => {
             print!("{}", code);
             Ok(())
@@ -11473,6 +11503,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::GenRust { input } => run_gen_rust(&input)?,
         Commands::GenJs { input } => run_gen_js(&input)?,
         Commands::GenTs { input } => run_gen_ts(&input)?,
+        Commands::GenPython { input } => run_gen_python(&input)?,
         Commands::Conformance { input } => run_conformance(&input)?,
         Commands::Path { input, synth } => {
             service::run_path(&std::env::current_dir()?, &input, synth)?
@@ -11888,6 +11919,7 @@ fn main() -> anyhow::Result<()> {
         Commands::GenRust { input } => run_gen_rust(&input)?,
         Commands::GenJs { input } => run_gen_js(&input)?,
         Commands::GenTs { input } => run_gen_ts(&input)?,
+        Commands::GenPython { input } => run_gen_python(&input)?,
         Commands::Conformance { input } => run_conformance(&input)?,
         Commands::Path { input, synth } => {
             service::run_path(&std::env::current_dir()?, &input, synth)?
