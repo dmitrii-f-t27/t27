@@ -73,6 +73,8 @@ use crate::compiler::{Node, NodeKind};
 use crate::ir::*;
 use std::collections::{HashMap, HashSet};
 
+#[path = "lower_float.rs"]
+mod float;
 mod tuple;
 
 /// A construct outside the supported subset (or a type error inside it).
@@ -2278,7 +2280,7 @@ impl<'a> Lower<'a> {
                     return self.reject("StmtAssign", format!("assignment to constant `{}`", name));
                 }
                 let ty = self.vars[id as usize].ty;
-                let conv = |c: &Node| c.kind == NodeKind::ExprCall && matches!(c.name.as_str(), "@floatFromInt" | "@intFromFloat");
+                let conv = |c: &Node| c.kind == NodeKind::ExprCall && matches!(c.name.as_str(), "@floatFromInt" | "@intFromFloat" | "@floatCast");
                 let rhs = if (op.is_empty() || op == "=") && conv(&n.children[1]) {
                     self.expr_as(&n.children[1], &LTy::S(ty))?
                 } else {
@@ -2456,10 +2458,13 @@ impl<'a> Lower<'a> {
         // Zig's peer type of the three: f64 if any is a typed f64, and a
         // compile error if any other typed operand takes part or none is
         // typed (two comptime_floats).
-        let mut typed = false;
+        let mut typed: Option<Ty> = None;
         for v in &vals {
             match v {
-                Val::E(e) if e.ty == Ty::F64 => typed = true,
+                // f32 with f64 peers to f64 (Zig widens f32 implicitly).
+                Val::E(e) if e.ty.is_float() => {
+                    typed = Some(if typed == Some(Ty::F64) { Ty::F64 } else { e.ty })
+                }
                 Val::Ct(_) | Val::Cf(..) => {}
                 v => {
                     let d = match v {
@@ -2473,23 +2478,23 @@ impl<'a> Lower<'a> {
                 }
             }
         }
-        if !typed {
+        let Some(fty) = typed else {
             return self.reject(
                 &format!("ExprCall({}) on comptime floats", WHAT),
-                "no operand is a typed f64: the reference's Zig refuses it (Cannot approximately compare two comptime_float values)".into(),
+                "no operand is a typed float: the reference's Zig refuses it (Cannot approximately compare two comptime_float values)".into(),
             );
-        }
+        };
         // Each operand once, in order, into a temporary unless it is a
         // variable or a constant already.
         let mut ops = Vec::with_capacity(3);
         for v in vals {
-            let e = self.coerce(v, Ty::F64)?;
+            let e = self.coerce(v, fty)?;
             let e = if matches!(e.kind, ExprKind::Var(_) | ExprKind::Const(_)) {
                 e
             } else {
-                let k = self.new_slot(&LTy::S(Ty::F64))?;
+                let k = self.new_slot(&LTy::S(fty))?;
                 out.push(Stmt::Store { addr: slot_expr(k), off: 0, value: e });
-                Expr { ty: Ty::F64, kind: ExprKind::Load { addr: Box::new(slot_expr(k)), off: 0 } }
+                Expr { ty: fty, kind: ExprKind::Load { addr: Box::new(slot_expr(k)), off: 0 } }
             };
             ops.push(e);
         }
@@ -2499,10 +2504,10 @@ impl<'a> Lower<'a> {
             kind: ExprKind::Cmp { op, lhs: Box::new(l), rhs: Box::new(r) },
         };
         let sub = |l: Expr, r: Expr| Expr {
-            ty: Ty::F64,
+            ty: fty,
             kind: ExprKind::FArith { op: FOp::Sub, lhs: Box::new(l), rhs: Box::new(r) },
         };
-        let zero = Expr { ty: Ty::F64, kind: ExprKind::Const(0) };
+        let zero = Expr { ty: fty, kind: ExprKind::Const(0) };
         let site = self.site(TrapKind::Assert, format!("{}: tolerance >= 0", WHAT), Ty::Bool);
         out.push(Stmt::Assert { cond: cmp(CmpOp::Ge, tol.clone(), zero), site });
         // |x - y| <= tol as (x - y <= tol) and (y - x <= tol): y - x is
@@ -2781,6 +2786,7 @@ impl<'a> Lower<'a> {
                 Ok(Expr { ty: to, kind: ExprKind::Const(f64_bits(f)) })
             }
             Val::Cf(f, _) if to == Ty::F64 => Ok(Expr { ty: to, kind: ExprKind::Const(f64_bits(f)) }),
+            Val::Ct(_) | Val::Cf(..) if to == Ty::F32 => self.comptime_to_f32(v),
             Val::Cf(..) => self.reject(
                 "type mismatch",
                 format!("expected {}, found a float literal", to.name()),
@@ -2803,6 +2809,9 @@ impl<'a> Lower<'a> {
             Val::E(e) => {
                 if e.ty == to {
                     return Ok(e);
+                }
+                if to == Ty::F64 && e.ty == Ty::F32 {
+                    return Ok(float::float_cast(e, to));
                 }
                 if to.can_widen_from(e.ty) {
                     if let ExprKind::Const(c) = e.kind {
@@ -2854,6 +2863,13 @@ impl<'a> Lower<'a> {
             (Val::E(x), Val::E(y)) => {
                 if x.ty == y.ty {
                     return Ok((x, y));
+                }
+                // f32 with f64: Zig's peer type is f64 (exact widening).
+                if x.ty == Ty::F64 && y.ty == Ty::F32 {
+                    return Ok((x, float::float_cast(y, Ty::F64)));
+                }
+                if x.ty == Ty::F32 && y.ty == Ty::F64 {
+                    return Ok((float::float_cast(x, Ty::F64), y));
                 }
                 if x.ty.can_widen_from(y.ty) {
                     let t = x.ty;
@@ -2972,10 +2988,10 @@ impl<'a> Lower<'a> {
                 // t27c's Zig backend rewrites `x * 2^k` as `x << k`, which
                 // does not compile for a float `x`: no reference to agree with
                 // (t27c issue #6284).
-                if op == "*" && pow2_literal(y) && matches!(a, Val::Cf(..) | Val::E(Expr { ty: Ty::F64, .. })) {
+                if op == "*" && pow2_literal(y) && matches!(&a, Val::Cf(..) | Val::E(Expr { ty: Ty::F64 | Ty::F32, .. })) {
                     return self.reject(
                         "ExprBinary(f64 * 2^k)",
-                        format!("`* {}` on f64: t27c gen emits `<<` for it", y.value.trim()),
+                        format!("`* {}` on a float: t27c gen emits `<<` for it", y.value.trim()),
                     );
                 }
                 let a = if (op == "<<" || op == ">>") && is_char_literal(x) {
@@ -3016,7 +3032,7 @@ impl<'a> Lower<'a> {
                 self.unary(&op, v)
             }
             NodeKind::ExprCall if n.name == "@intFromEnum" => self.int_from_enum(n, TagUse::Value),
-            NodeKind::ExprCall if n.name == "@floatFromInt" || n.name == "@intFromFloat" => {
+            NodeKind::ExprCall if n.name == "@floatFromInt" || n.name == "@intFromFloat" || n.name == "@floatCast" => {
                 self.reject(&format!("ExprCall({})", n.name), "with no result type".into())
             }
             NodeKind::ExprCall if n.name == "@enumFromInt" => {
@@ -3120,16 +3136,18 @@ impl<'a> Lower<'a> {
         // is not a float), so this is exactly `@floatFromInt` with result
         // type f64. A float operand (`@floatCast`) and f64 to an integer
         // (`@intFromFloat`) stay refused below.
-        if to == Ty::F64 && (matches!(v, Val::Ct(_)) || matches!(&v, Val::E(e) if e.ty.is_int())) {
-            return self.int_to_f64(v, "ExprCast(f64)");
+        // `x as f32` likewise (`@as(f32, @floatFromInt(x))`).
+        if to.is_float() && (matches!(v, Val::Ct(_)) || matches!(&v, Val::E(e) if e.ty.is_int())) {
+            let what = format!("ExprCast({})", to.name());
+            return self.int_to_float(v, to, &what);
         }
-        if to == Ty::F64 || matches!(v, Val::Cf(..) | Val::E(Expr { ty: Ty::F64, .. })) {
+        if to.is_float() || matches!(v, Val::Cf(..) | Val::E(Expr { ty: Ty::F64 | Ty::F32, .. })) {
             if v.is_poison() {
                 return Err(());
             }
             return self.reject(
-                "ExprCast(f64)",
-                format!("`as` to or from f64 (to {}); use @floatFromInt / @intFromFloat", to.name()),
+                if to == Ty::F32 || matches!(v, Val::E(Expr { ty: Ty::F32, .. })) { "ExprCast(f32)" } else { "ExprCast(f64)" },
+                format!("`as` to or from a float (to {}); use @floatFromInt / @intFromFloat / @floatCast", to.name()),
             );
         }
         let e = match v {
@@ -3291,11 +3309,12 @@ impl<'a> Lower<'a> {
             ("-", Val::Ct(c)) => Ok(Val::Ct(-c)),
             ("-", Val::Cf(f, exact)) => Ok(Val::Cf(-f, exact)),
             // Float negation flips the sign bit (of a NaN and of 0 too).
-            ("-", Val::E(e)) if e.ty == Ty::F64 => {
+            ("-", Val::E(e)) if e.ty.is_float() => {
+                let ty = e.ty;
                 if let ExprKind::Const(c) = e.kind {
-                    return Ok(Val::E(Expr { ty: Ty::F64, kind: ExprKind::Const(c ^ (1i128 << 63)) }));
+                    return Ok(Val::E(Expr { ty, kind: ExprKind::Const(c ^ (1i128 << (ty.bits() - 1))) }));
                 }
-                Ok(Val::E(Expr { ty: Ty::F64, kind: ExprKind::FNeg(Box::new(e)) }))
+                Ok(Val::E(Expr { ty, kind: ExprKind::FNeg(Box::new(e)) }))
             }
             ("-", Val::E(e)) => {
                 if !e.ty.is_int() || !e.ty.signed() {
@@ -3376,7 +3395,7 @@ impl<'a> Lower<'a> {
         if let Some(c) = cmp {
             return self.compare(c, a, b);
         }
-        let is_f = |v: &Val| matches!(v, Val::Cf(..) | Val::E(Expr { ty: Ty::F64, .. }));
+        let is_f = |v: &Val| matches!(v, Val::Cf(..) | Val::E(Expr { ty: Ty::F64 | Ty::F32, .. }));
         if is_f(&a) || is_f(&b) {
             return self.farith(op, a, b);
         }
@@ -3654,15 +3673,15 @@ impl<'a> Lower<'a> {
             return Ok(Val::Cf(r, exact));
         }
         let (x, y) = self.peer(a, b, op)?;
-        if x.ty != Ty::F64 {
+        if !x.ty.is_float() {
             return self.reject("type mismatch", format!("`{}` on {} and {}", op, x.ty.name(), y.ty.name()));
         }
+        let ty = x.ty;
         if let (ExprKind::Const(p), ExprKind::Const(q)) = (&x.kind, &y.kind) {
-            let r = fop.apply(f64_of(*p), f64_of(*q));
-            return Ok(Val::E(Expr { ty: Ty::F64, kind: ExprKind::Const(f64_bits(r)) }));
+            return Ok(Val::E(Expr { ty, kind: ExprKind::Const(fop.apply_bits(ty, *p, *q)) }));
         }
         Ok(Val::E(Expr {
-            ty: Ty::F64,
+            ty,
             kind: ExprKind::FArith { op: fop, lhs: Box::new(x), rhs: Box::new(y) },
         }))
     }
@@ -4442,6 +4461,9 @@ impl<'a> Lower<'a> {
         if let (NodeKind::ExprCall, "@floatFromInt" | "@intFromFloat", LTy::S(ty)) = (&n.kind, n.name.as_str(), want) {
             return self.convert(n, *ty);
         }
+        if let (NodeKind::ExprCall, "@floatCast", LTy::S(ty)) = (&n.kind, n.name.as_str(), want) {
+            return self.float_cast_call(n, *ty);
+        }
         if let (NodeKind::ExprCall, "@intFromEnum", LTy::S(ty)) = (&n.kind, n.name.as_str(), want) {
             let v = self.int_from_enum(n, TagUse::Want(*ty))?;
             return self.coerce_to(v, want);
@@ -4830,7 +4852,7 @@ impl<'a> Lower<'a> {
             return self.reject(&what, format!("{} arguments", n.children.len()));
         }
         let to_float = name == "@floatFromInt";
-        if to_float && ty != Ty::F64 {
+        if to_float && !ty.is_float() {
             return self.reject(&what, format!("result type {}", ty.name()));
         }
         if !to_float && !ty.is_int() {
@@ -4841,36 +4863,37 @@ impl<'a> Lower<'a> {
             return Err(());
         }
         if to_float {
-            return self.int_to_f64(v, &what);
+            return self.int_to_float(v, ty, &what);
         }
         let e = match v {
             v @ Val::Cf(_, true) => self.coerce(v, Ty::F64)?,
             Val::Cf(..) => {
                 return self.reject(&what, "of an inexact float literal (Zig converts the f128 value)".into())
             }
-            Val::E(e) if e.ty == Ty::F64 => e,
+            Val::E(e) if e.ty.is_float() => e,
             v => {
                 let d = match &v { Val::E(e) => e.ty.name().to_string(), _ => self.val_desc(&v) };
-                return self.reject(&what, format!("operand is {}, not an f64", d));
+                return self.reject(&what, format!("operand is {}, not a float", d));
             }
         };
         if let ExprKind::Const(c) = e.kind {
-            return match float_to_int(f64_of(c), ty) {
+            let x = float_of(c, e.ty);
+            return match float_to_int(x, ty) {
                 Some(r) => Ok(Val::E(Expr { ty, kind: ExprKind::Const(r) })),
-                None => self.reject(&what, format!("{} does not fit {} at compile time", f64_of(c), ty.name())),
+                None => self.reject(&what, format!("{} does not fit {} at compile time", x, ty.name())),
             };
         }
         let site = self.site(TrapKind::FloatToInt, format!("@intFromFloat to {}", ty.name()), ty);
         Ok(Val::E(Expr { ty, kind: ExprKind::FloatToInt { arg: Box::new(e), site } }))
     }
 
-    /// `@floatFromInt(v)` with result type f64: the integer operand `v`
-    /// converted, rounding to nearest. `what` names the construct in a
+    /// `@floatFromInt(v)` with float result type `to`: the integer operand
+    /// `v` converted, rounding to nearest. `what` names the construct in a
     /// rejection.
-    fn int_to_f64(&mut self, v: Val, what: &str) -> R<Val> {
+    fn int_to_float(&mut self, v: Val, to: Ty, what: &str) -> R<Val> {
         let e = match v {
             Val::Poison => return Err(()),
-            Val::Ct(c) => return Ok(Val::E(self.coerce(Val::Ct(c), Ty::F64)?)),
+            Val::Ct(c) => return Ok(Val::E(self.coerce(Val::Ct(c), to)?)),
             Val::E(e) if e.ty.is_int() => e,
             v => {
                 let d = self.val_desc(&v);
@@ -4879,10 +4902,12 @@ impl<'a> Lower<'a> {
             }
         };
         if let ExprKind::Const(c) = e.kind {
-            // i128 to f64 rounds to nearest, ties to even, as SCVTF does.
-            return Ok(Val::E(Expr { ty: Ty::F64, kind: ExprKind::Const(f64_bits(c as f64)) }));
+            // i128 to f64 / f32 rounds to nearest, ties to even, as SCVTF
+            // does (straight to f32: one rounding).
+            let bits = if to == Ty::F32 { f32_bits(c as f32) } else { f64_bits(c as f64) };
+            return Ok(Val::E(Expr { ty: to, kind: ExprKind::Const(bits) }));
         }
-        Ok(Val::E(Expr { ty: Ty::F64, kind: ExprKind::IntToFloat(Box::new(e)) }))
+        Ok(Val::E(Expr { ty: to, kind: ExprKind::IntToFloat(Box::new(e)) }))
     }
 
     /// A slice of type `t` (a `Slice` or `Str`) of all `len` elements at
