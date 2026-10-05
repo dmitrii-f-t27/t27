@@ -119,12 +119,12 @@ spec TernaryLogic {
     }
 
     // K3 AND is associatave
-    invariant k3_and_associative(a, b, c: Trit) {
+    invariant k3_and_associative {
         assert k3_and(k3_and(a, b), c) == k3_and(a, k3_and(b, c))
     }
 
     // K3 OR is associatave
-    invariant k3_or_associative(a, b, c: Trit) {
+    invariant k3_or_associative {
         assert k3_or(k3_or(a, b), c) == k3_or(a, k3_or(b, c))
     }
 
