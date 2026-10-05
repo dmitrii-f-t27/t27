@@ -68,6 +68,8 @@
 //! refused by name.
 //! `for (s) |x|` reads the slice's address and length once, before the loop.
 
+mod arraylit;
+
 use crate::codegen;
 use crate::compiler::{Node, NodeKind};
 use crate::ir::*;
@@ -587,6 +589,9 @@ fn lower_mode<'a>(
     let mut const_names: Vec<String> = l.const_nodes.keys().cloned().collect();
     const_names.sort();
     for name in const_names {
+        if l.unreferenced_tuple_const(&items, &name) {
+            continue;
+        }
         let _ = l.global(&name);
     }
     for node in std::mem::take(&mut l.var_nodes) {
@@ -1409,6 +1414,7 @@ impl<'a> Lower<'a> {
                 }
             }
         }
+        self.addr_lit_locals(body);
         self.scopes.clear();
         self.scopes.push(HashMap::new());
         self.loop_depth = 0;
@@ -1737,7 +1743,9 @@ impl<'a> Lower<'a> {
                         // Build the result in the caller's memory.
                         let sret = Expr { ty: Ty::Ptr, kind: ExprKind::Var(self.sret.unwrap()) };
                         let dst = Place { addr: sret.clone(), off: 0, ty: t, mutable: true, temp: None };
-                        self.init(c, dst, true, out)?;
+                        if !self.empty_slice_return(c, &dst, out)? {
+                            self.init(c, dst, true, out)?;
+                        }
                         out.push(Stmt::Return(Some(sret)));
                     }
                     (Some(t), Some(c)) => {
@@ -2128,6 +2136,9 @@ impl<'a> Lower<'a> {
             Some(i) => i,
             None => return self.reject("StmtLocal", format!("`{}` has neither type nor value", name)),
         };
+        if self.addr_lit_local(init, &name, out)?.is_some() {
+            return Ok(());
+        }
         if init.kind == NodeKind::ExprArrayLiteral {
             if let Some(elem) = self.slice_locals.get(&name).cloned() {
                 return self.slice_local(init, name, elem, out);
