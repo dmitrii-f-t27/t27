@@ -33,6 +33,8 @@
 
 module CiDeliveryMetrics;
 
+use compiler::theory::toolchain;
+
 /// Author kinds.
 pub const KIND_BEE : u8 = 0;
 pub const KIND_AGENT : u8 = 1;
@@ -167,12 +169,6 @@ pub fn bee_branch_class(commits_ahead: u32, diff_empty: bool, tip_by_bee: bool) 
     return RUN_WORK;
 }
 
-/// part / whole in permille, rounded down; an empty whole is 0.
-pub fn share_permille(part: u32, whole: u32) -> u32 {
-    if (whole == 0) { return 0; }
-    return (part * 1000) / whole;
-}
-
 /// Merges per day, times ten, over the window.
 pub fn merges_per_day_x10(merged: u32, days: u32) -> u32 {
     if (days == 0) { return 0; }
@@ -278,10 +274,10 @@ test change_failure_definition {
 }
 
 test today_change_failure_rate_is_under_its_alert {
-    var cfr : u32 = share_permille(M_REVERTED + M_FIX_NAMES_IT, M_MERGED);
+    var cfr : u32 = toolchain::per_mille(M_REVERTED + M_FIX_NAMES_IT, M_MERGED);
     assert cfr == 90;
     assert change_failure_alert(cfr) == false;
-    assert change_failure_alert(share_permille(67, M_MERGED));
+    assert change_failure_alert(toolchain::per_mille(67, M_MERGED));
 }
 
 test today_merges_per_day {
@@ -291,10 +287,10 @@ test today_merges_per_day {
 }
 
 test today_open_pull_requests_are_stale {
-    var stale : u32 = share_permille(M_OPEN_OLDER_THAN_7D, M_OPEN);
+    var stale : u32 = toolchain::per_mille(M_OPEN_OLDER_THAN_7D, M_OPEN);
     assert stale == 327;
     assert open_stale_alert(stale);
-    assert open_stale_alert(share_permille(14, M_OPEN)) == false;
+    assert open_stale_alert(toolchain::per_mille(14, M_OPEN)) == false;
 }
 
 test bee_branch_classes {
@@ -306,14 +302,14 @@ test bee_branch_classes {
 
 test today_most_bee_branches_end_with_no_diff {
     assert M_BEE_EMPTY_7D + M_BEE_LANDED_7D + M_BEE_WORK_7D == M_BEE_BRANCHES_7D;
-    var empty : u32 = share_permille(M_BEE_EMPTY_7D, M_BEE_BRANCHES_7D);
+    var empty : u32 = toolchain::per_mille(M_BEE_EMPTY_7D, M_BEE_BRANCHES_7D);
     assert empty == 559;
     assert bee_empty_alert(empty);
-    assert bee_empty_alert(share_permille(149, M_BEE_BRANCHES_7D)) == false;
+    assert bee_empty_alert(toolchain::per_mille(149, M_BEE_BRANCHES_7D)) == false;
 }
 
 test share_of_nothing_is_zero {
-    assert share_permille(5, 0) == 0;
+    assert toolchain::per_mille(5, 0) == 0;
     assert merges_per_day_x10(5, 0) == 0;
 }
 

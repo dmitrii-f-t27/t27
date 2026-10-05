@@ -84,7 +84,6 @@ bool next_red(bool prev_red, uint8_t c);
 uint32_t red_minutes_for_gap(bool red_during_gap, uint32_t gap_min);
 bool is_change_failure(bool reverted, bool fix_title, bool names_m, bool names_only_as_closes, uint32_t minutes_after_merge);
 uint8_t bee_branch_class(uint32_t commits_ahead, bool diff_empty, bool tip_by_bee);
-uint32_t share_permille(uint32_t part, uint32_t whole);
 uint32_t merges_per_day_x10(uint32_t merged, uint32_t days);
 bool lead_alert(uint32_t p90_min);
 bool required_red_alert(uint32_t red_min);
@@ -93,6 +92,7 @@ bool change_failure_alert(uint32_t permille);
 bool open_stale_alert(uint32_t permille);
 bool bee_empty_alert(uint32_t permille);
 bool merges_floor_alert(uint32_t per_day_x10);
+uint32_t per_mille(uint32_t part, uint32_t whole);
 
 /* -------------------------------------------------------
    Function implementations
@@ -197,13 +197,6 @@ uint8_t bee_branch_class(uint32_t commits_ahead, bool diff_empty, bool tip_by_be
     return RUN_WORK;
 }
 
-uint32_t share_permille(uint32_t part, uint32_t whole) {
-    if ((whole == 0)) {
-        return 0;
-    }
-    return ((part * 1000) / whole);
-}
-
 uint32_t merges_per_day_x10(uint32_t merged, uint32_t days) {
     if ((days == 0)) {
         return 0;
@@ -237,6 +230,13 @@ bool bee_empty_alert(uint32_t permille) {
 
 bool merges_floor_alert(uint32_t per_day_x10) {
     return (per_day_x10 < MERGES_PER_DAY_FLOOR_X10);
+}
+
+uint32_t per_mille(uint32_t part, uint32_t whole) {
+    if ((whole == 0)) {
+        return 0;
+    }
+    return ((part * 1000) / whole);
 }
 
 /* -------------------------------------------------------
@@ -348,10 +348,10 @@ void test_change_failure_definition(void) {
 }
 
 void test_today_change_failure_rate_is_under_its_alert(void) {
-    uint32_t cfr = share_permille((M_REVERTED + M_FIX_NAMES_IT), M_MERGED);
+    uint32_t cfr = per_mille((M_REVERTED + M_FIX_NAMES_IT), M_MERGED);
     assert((cfr == 90));
     assert((change_failure_alert(cfr) == false));
-    assert(change_failure_alert(share_permille(67, M_MERGED)));
+    assert(change_failure_alert(per_mille(67, M_MERGED)));
 }
 
 void test_today_merges_per_day(void) {
@@ -361,10 +361,10 @@ void test_today_merges_per_day(void) {
 }
 
 void test_today_open_pull_requests_are_stale(void) {
-    uint32_t stale = share_permille(M_OPEN_OLDER_THAN_7D, M_OPEN);
+    uint32_t stale = per_mille(M_OPEN_OLDER_THAN_7D, M_OPEN);
     assert((stale == 327));
     assert(open_stale_alert(stale));
-    assert((open_stale_alert(share_permille(14, M_OPEN)) == false));
+    assert((open_stale_alert(per_mille(14, M_OPEN)) == false));
 }
 
 void test_bee_branch_classes(void) {
@@ -376,14 +376,14 @@ void test_bee_branch_classes(void) {
 
 void test_today_most_bee_branches_end_with_no_diff(void) {
     assert((((M_BEE_EMPTY_7D + M_BEE_LANDED_7D) + M_BEE_WORK_7D) == M_BEE_BRANCHES_7D));
-    uint32_t empty = share_permille(M_BEE_EMPTY_7D, M_BEE_BRANCHES_7D);
+    uint32_t empty = per_mille(M_BEE_EMPTY_7D, M_BEE_BRANCHES_7D);
     assert((empty == 559));
     assert(bee_empty_alert(empty));
-    assert((bee_empty_alert(share_permille(149, M_BEE_BRANCHES_7D)) == false));
+    assert((bee_empty_alert(per_mille(149, M_BEE_BRANCHES_7D)) == false));
 }
 
 void test_share_of_nothing_is_zero(void) {
-    assert((share_permille(5, 0) == 0));
+    assert((per_mille(5, 0) == 0));
     assert((merges_per_day_x10(5, 0) == 0));
 }
 
