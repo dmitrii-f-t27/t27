@@ -1604,3 +1604,73 @@ test peers_and_temps {
         assert!(m.starts_with(&format!("t27b: unsupported construct {} at line", construct)), "{}: {}", body, m);
     }
 }
+
+#[test]
+fn char_literals_are_comptime_ints() {
+    let src = "module cl;
+
+fn is_digit(c: u8) bool {
+    return c >= '0' and c <= '9';
+}
+
+fn upper(c: u8) u8 {
+    return c - 'a' + 'A';
+}
+
+fn quoted(c: u8) bool {
+    return c == '\\'' or c == '\\\\' or c == '\"';
+}
+
+fn digit(c: u8) i32 {
+    const d: i32 = c - '0';
+    return d * 2;
+}
+
+fn bump(c: u8) u8 {
+    return c + 'z';
+}
+
+test digits_and_case {
+    assert(is_digit('5'));
+    assert(!is_digit('x'));
+    assert(upper('b') == 'B');
+    assert(digit('7') == 14);
+}
+
+test escapes {
+    assert('\\n' == 10);
+    assert('\\r' == 13);
+    assert('\\t' == 9);
+    assert(quoted('\\''));
+    assert(quoted('\\\\'));
+    assert(quoted('\"'));
+    assert(!quoted('a'));
+    const k = 'z';
+    assert(k == 122);
+    assert('a' << 2 == 388);
+    assert(-'a' == -97);
+}
+
+test overflow_traps {
+    assert(bump(200) == 66);
+}
+";
+    let r = run(src);
+    assert_eq!(
+        names_ok(&r),
+        vec![("digits_and_case", false, true), ("escapes", false, true), ("overflow_traps", false, false)]
+    );
+    let t = r.iter().find(|x| x.0 == "overflow_traps").unwrap();
+    assert_eq!(t.2, Err((TrapKind::Overflow, 21)));
+    // Zig has no `\\0` escape and no raw control byte in a char literal, and
+    // t27c prints `'a' << @intCast(k)`, a comptime_int shifted at run time.
+    let cases = [
+        ("fn f(k: u32) u32 { return '\\0' + k; }\n", "ExprLiteral(char escape)"),
+        ("fn f(k: u32) u32 { return '\t' + k; }\n", "ExprLiteral(char byte)"),
+        ("fn f(k: u32) u32 { return 'a' << k; }\n", "ExprBinary(char literal << >>)"),
+    ];
+    for (body, construct) in cases {
+        let m = rejected(&format!("module cr;\n\n{}test t {{ assert(f(1) == 1); }}\n", body));
+        assert!(m.starts_with(&format!("t27b: unsupported construct {} at line", construct)), "{}: {}", body, m);
+    }
+}

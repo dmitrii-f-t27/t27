@@ -705,6 +705,39 @@ fn kind_name(n: &Node) -> String {
 }
 
 /// Parse an integer literal: decimal, 0x, 0o, 0b, with `_` separators.
+/// The value of a char literal as the t27c parser leaves it: the quotes kept
+/// and the lexeme raw, either one byte or a backslash and one byte (the lexer
+/// reads anything longer as a string). t27c's Zig backend prints it back
+/// verbatim, so only what Zig itself accepts is a value here: a printable
+/// ASCII byte, or one of the escapes `\n \r \t \\ \' \"`. Zig rejects `'\0'`
+/// ("invalid escape character") and a raw control byte, so neither has a
+/// reference result to agree with.
+fn char_literal(s: &str) -> Result<i128, &'static str> {
+    let inner = s
+        .strip_prefix('\'')
+        .and_then(|r| r.strip_suffix('\''))
+        .ok_or("ExprLiteral(char literal)")?;
+    let b = inner.as_bytes();
+    match b {
+        [b'\\', e] => match e {
+            b'n' => Ok(10),
+            b'r' => Ok(13),
+            b't' => Ok(9),
+            b'\\' | b'\'' | b'"' => Ok(*e as i128),
+            _ => Err("ExprLiteral(char escape)"),
+        },
+        [c] if (0x20..0x7f).contains(c) => Ok(*c as i128),
+        [_] => Err("ExprLiteral(char byte)"),
+        _ => Err("ExprLiteral(char literal)"),
+    }
+}
+
+/// `n` is a char literal (`'a'`, `'\n'`): an untyped comptime_int in Zig that
+/// t27c's constant folder does not see as a literal.
+fn is_char_literal(n: &Node) -> bool {
+    n.kind == NodeKind::ExprLiteral && n.extra_kind != "string" && n.value.trim().starts_with('\'')
+}
+
 fn parse_int(s: &str) -> Option<i128> {
     let t: String = s.chars().filter(|c| *c != '_').collect();
     let (digits, radix) = if let Some(r) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
@@ -2354,7 +2387,18 @@ impl<'a> Lower<'a> {
                         format!("`* {}` on f64: t27c gen emits `<<` for it", y.value.trim()),
                     );
                 }
-                let a = if op == "<<" || op == ">>" {
+                let a = if (op == "<<" || op == ">>") && is_char_literal(x) {
+                    // t27c prints `'a' << @intCast(k)`: a comptime_int shifted
+                    // by a runtime amount, which Zig refuses. Only a shift by
+                    // an untyped constant stays comptime on both sides.
+                    if !matches!(b, Val::Ct(_)) {
+                        return self.reject(
+                            "ExprBinary(char literal << >>)",
+                            "char literal shifted by a typed or runtime amount".into(),
+                        );
+                    }
+                    a
+                } else if op == "<<" || op == ">>" {
                     match self.pin_shifted_literal(x, y, a, &b, op == "<<")? {
                         Ok(a) => a,
                         Err(done) => return Ok(done),
@@ -2603,7 +2647,13 @@ impl<'a> Lower<'a> {
                 let what = if n.extra_kind == "string" || s.starts_with('"') {
                     "string literal"
                 } else if s.starts_with('\'') {
-                    "char literal"
+                    // Zig types a char literal as comptime_int, the same as an
+                    // untyped integer literal (t27c's optimizer never folds or
+                    // propagates one: its `is_literal` reads integers only).
+                    return match char_literal(s) {
+                        Ok(v) => Ok(Val::Ct(v)),
+                        Err(what) => self.reject(what, format!("`{}`", s)),
+                    };
                 } else if s.contains('.') || (s.contains(['e', 'E']) && !s.starts_with("0x")) {
                     match parse_float(s) {
                         Ok((f, exact)) => {
