@@ -424,6 +424,35 @@ with tempfile.TemporaryDirectory() as tmp:
           and "reference bugs to file, not lanes" in p.stdout
           and p.stdout.index("Sole") < p.stdout.index("Wide") < p.stdout.index("RefBug"),
           f"next: the card ranks lanes, then lists reference bugs\n{p.stdout}")
+    # next says when the lab run lags origin/master (#6325)
+    check(n is not None and n.get("lab_behind") is None and "behind" not in p.stdout,
+          f"next: no master.txt is unknown, never a guessed lag ({n and n.get('lab_behind')})")
+    tip = "f" * 40
+
+    def next_with(name, files, *extra):
+        d = os.path.join(tmp, name)
+        write_fixture(d, {"lab.json": nl, **files})
+        return subprocess.run([sys.executable, TOOL, "next", *extra, "--fixture", d],
+                              capture_output=True, text=True)
+    p = next_with("fx-next-behind", {"master.txt": tip + "\n", "behind.txt": "7\n"})
+    first = p.stdout.splitlines()[0] if p.stdout else ""
+    check(p.returncode == 0 and first == f"lab run {MASTER[:9]} is 7 commits behind origin/master {tip[:9]}; "
+          "families fixed since may still rank -- prefer the last lane's fresh --reference list"
+          and p.stdout.index("behind") < p.stdout.index("next lane"),
+          f"next: a lagging lab run is said first, before the table\n{p.stdout[:400]}")
+    p = next_with("fx-next-behind", {}, "--json")
+    check(json.loads(p.stdout).get("lab_behind") == {"lab": MASTER, "master": tip, "commits": 7},
+          f"next: --json carries lab_behind ({p.stdout[-200:]})")
+    p = next_with("fx-next-unknown", {"master.txt": tip + "\n"})
+    check(p.stdout.startswith(f"lab run {MASTER[:9]} is behind (unknown count) origin/master {tip[:9]};"),
+          f"next: a lab sha absent from the clone is behind (unknown count)\n{p.stdout[:300]}")
+    p = next_with("fx-next-tip", {"master.txt": MASTER + "\n", "behind.txt": "7\n"}, "--json")
+    check(json.loads(p.stdout).get("lab_behind") is False,
+          f"control: a lab run at origin/master is not behind ({p.stdout[-120:]})")
+    p = next_with("fx-next-tip", {})
+    check("behind" not in p.stdout and p.stdout.startswith(f"lab run {MASTER[:9]} ("),
+          f"control: no lag line at the tip\n{p.stdout[:200]}")
+
     write_fixture(os.path.join(tmp, "fx-next-summary"), {"lab.json": lab()})
     p = subprocess.run([sys.executable, TOOL, "next", "--fixture", os.path.join(tmp, "fx-next-summary")],
                        capture_output=True, text=True)

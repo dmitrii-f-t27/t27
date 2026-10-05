@@ -265,6 +265,26 @@ class Sources:
         out = run(["git", "ls-remote", "origin", "refs/heads/master"], cwd=ROOT)
         return out.split()[0] if out.strip() else ""
 
+    def origin_master(self):
+        """This clone's origin/master, as last fetched -- no network (#6325)."""
+        if self.fixture:
+            return self._fx("master.txt").strip()
+        return run(["git", "rev-parse", "origin/master"], cwd=ROOT).strip()
+
+    def behind_count(self, sha, master):
+        """`git rev-list --count sha..master`, or None when sha is not in this
+        clone (fixture: behind.txt, absent = not present locally)."""
+        if self.fixture:
+            try:
+                return int(self._fx("behind.txt").strip())
+            except Unreadable:
+                return None
+        try:
+            run(["git", "cat-file", "-e", f"{sha}^{{commit}}"], cwd=ROOT)
+            return int(run(["git", "rev-list", "--count", f"{sha}..{master}"], cwd=ROOT).strip())
+        except (Unreadable, ValueError):
+            return None
+
     def prs(self):
         if self.fixture:
             prs = json.loads(self._fx("prs.json"))
@@ -1380,6 +1400,32 @@ def next_lanes(lab):
             "lanes": lanes, "reference_bugs": bugs}
 
 
+def lab_behind(src, commit):
+    """Is the lab run older than origin/master? (#6325) False when it is the
+    tip, None when either side is unknown, else {lab, master, commits} with
+    commits None when the lab sha is not in this clone. Informational only:
+    the ranking itself is unchanged, but families fixed on master since the
+    run may still rank first."""
+    try:
+        master = src.origin_master()
+    except Unreadable:
+        return None
+    if not commit or not master:
+        return None
+    if commit == master:
+        return False
+    return {"lab": commit, "master": master, "commits": src.behind_count(commit, master)}
+
+
+def behind_line(b):
+    if not b:
+        return None
+    n = b["commits"]
+    how = "behind (unknown count)" if n is None else f"{n} commit{'' if n == 1 else 's'} behind"
+    return (f"lab run {b['lab'][:9]} is {how} origin/master {b['master'][:9]}; families fixed since "
+            "may still rank -- prefer the last lane's fresh --reference list")
+
+
 def next_card(n, top):
     s = n["t27b"]
     out = [f"lab run {str(n['commit'])[:9]} ({n['ref']}), finished {n['finished']}",
@@ -1416,15 +1462,18 @@ def next_main(argv):
         args = ap.parse_args(argv)
     except SystemExit as e:
         return 2 if e.code else 0
+    src = Sources(fixture=args.fixture, lab=args.lab)
     try:
-        n = next_lanes(Sources(fixture=args.fixture, lab=args.lab).lab_json())
+        n = next_lanes(src.lab_json())
     except Unreadable as e:
         print(f"tri t27b next: UNREADABLE {e}")
         return 2
+    n["lab_behind"] = lab_behind(src, n["commit"])
     if args.json:
         print(json.dumps(n, indent=1))
     else:
-        print("\n".join(next_card(n, args.top)))
+        line = behind_line(n["lab_behind"])
+        print("\n".join(([line, ""] if line else []) + next_card(n, args.top)))
     return 0
 
 
