@@ -1946,7 +1946,15 @@ impl<'a> Lower<'a> {
     fn call_stmt(&mut self, c: &Node, out: &mut Vec<Stmt>) -> R<()> {
         self.see(c);
         match c.name.as_str() {
-            "assert" => {
+            // `@compileAssert` is not a separate construct in the reference:
+            // t27c's Zig backend lowers it through the very arm that lowers
+            // `assert` (`node.name == "@compileAssert" || node.name ==
+            // "assert"`), so both give the same `if (!(cond))` check. Inside
+            // an `invariant` that check sits in a `comptime` block and a false
+            // condition fails the reference's compile; here it fails the
+            // invariant when run. Either way the file does not pass, and the
+            // operands are held to the same comptime rules (`self.comptime`).
+            "assert" | "@compileAssert" => {
                 // `assert(cond, "msg")`: t27c's Zig backend emits
                 // `if (!(cond)) @panic("msg")` and never evaluates the
                 // message, so the verdict is the one-argument assert's. Only a
@@ -2457,6 +2465,14 @@ impl<'a> Lower<'a> {
     /// `@intCast`, and traps when the value is outside `to`. In Wrap mode every
     /// narrowing truncates, as a C cast does.
     fn cast(&mut self, v: Val, to: Ty) -> R<Val> {
+        // `x as f64` with an integer `x`: t27c's Zig backend emits
+        // `@as(f64, @floatFromInt(x))` (its `is_float_expr` says the operand
+        // is not a float), so this is exactly `@floatFromInt` with result
+        // type f64. A float operand (`@floatCast`) and f64 to an integer
+        // (`@intFromFloat`) stay refused below.
+        if to == Ty::F64 && (matches!(v, Val::Ct(_)) || matches!(&v, Val::E(e) if e.ty.is_int())) {
+            return self.int_to_f64(v, "ExprCast(f64)");
+        }
         if to == Ty::F64 || matches!(v, Val::Cf(..) | Val::E(Expr { ty: Ty::F64, .. })) {
             if v.is_poison() {
                 return Err(());
@@ -3759,20 +3775,7 @@ impl<'a> Lower<'a> {
             return Err(());
         }
         if to_float {
-            let e = match v {
-                Val::Ct(c) => return Ok(Val::E(self.coerce(Val::Ct(c), Ty::F64)?)),
-                Val::E(e) if e.ty.is_int() => e,
-                v => {
-                    let d = self.val_desc(&v);
-                    let d = match &v { Val::E(e) => e.ty.name().to_string(), _ => d };
-                    return self.reject(&what, format!("operand is {}, not an integer", d));
-                }
-            };
-            if let ExprKind::Const(c) = e.kind {
-                // i128 to f64 rounds to nearest, ties to even, as SCVTF does.
-                return Ok(Val::E(Expr { ty: Ty::F64, kind: ExprKind::Const(f64_bits(c as f64)) }));
-            }
-            return Ok(Val::E(Expr { ty: Ty::F64, kind: ExprKind::IntToFloat(Box::new(e)) }));
+            return self.int_to_f64(v, &what);
         }
         let e = match v {
             v @ Val::Cf(_, true) => self.coerce(v, Ty::F64)?,
@@ -3793,6 +3796,27 @@ impl<'a> Lower<'a> {
         }
         let site = self.site(TrapKind::FloatToInt, format!("@intFromFloat to {}", ty.name()), ty);
         Ok(Val::E(Expr { ty, kind: ExprKind::FloatToInt { arg: Box::new(e), site } }))
+    }
+
+    /// `@floatFromInt(v)` with result type f64: the integer operand `v`
+    /// converted, rounding to nearest. `what` names the construct in a
+    /// rejection.
+    fn int_to_f64(&mut self, v: Val, what: &str) -> R<Val> {
+        let e = match v {
+            Val::Poison => return Err(()),
+            Val::Ct(c) => return Ok(Val::E(self.coerce(Val::Ct(c), Ty::F64)?)),
+            Val::E(e) if e.ty.is_int() => e,
+            v => {
+                let d = self.val_desc(&v);
+                let d = match &v { Val::E(e) => e.ty.name().to_string(), _ => d };
+                return self.reject(what, format!("operand is {}, not an integer", d));
+            }
+        };
+        if let ExprKind::Const(c) = e.kind {
+            // i128 to f64 rounds to nearest, ties to even, as SCVTF does.
+            return Ok(Val::E(Expr { ty: Ty::F64, kind: ExprKind::Const(f64_bits(c as f64)) }));
+        }
+        Ok(Val::E(Expr { ty: Ty::F64, kind: ExprKind::IntToFloat(Box::new(e)) }))
     }
 
     /// A slice of type `t` (a `Slice` or `Str`) of all `len` elements at
