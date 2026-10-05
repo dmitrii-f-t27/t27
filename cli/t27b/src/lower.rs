@@ -543,20 +543,12 @@ fn lower_mode<'a>(
             // `use` declarations were already resolved by splicing the
             // imported declarations into the source (front::parse).
             NodeKind::UseDecl => {}
-            // The t27c parser reads a dotted `module a.b;` or `use a.b;` as
-            // `a` followed by a stray top-level expression `.b`, with no line.
-            NodeKind::StmtExpr
-                if matches!(item.children.first(), Some(c) if c.kind == NodeKind::ExprEnumValue) =>
-            {
-                let name = &item.children[0].name;
-                let _: R<()> = l.reject(
-                    "StmtExpr",
-                    format!(
-                        "stray `.{}` at top level; t27c parses a dotted `module a.b;` or `use a.b;` as `a` followed by `.b`",
-                        name
-                    ),
-                );
-            }
+            // A statement at top level: t27c's Zig backend (`gen_decl`) emits
+            // nothing for it, so the reference compiles the file without it.
+            // The common source is a dotted `module a.b;` or `use a.b;`, which
+            // the t27c parser reads as `a` followed by a stray `.b` (#6102); a
+            // test body the parser closed early leaves its tail here too.
+            NodeKind::StmtExpr => {}
             _ => {
                 let k = kind_name(item);
                 let detail = if k.starts_with("Stmt") || k.starts_with("Expr") {
@@ -6517,14 +6509,15 @@ fn misprinted_ifs(n: &Node, out: &mut HashSet<usize>) {
 /// `comptime` blocks; constants and vars), and a fn is reached when a reached
 /// body names it. `pub` does not make a fn a root, nor does `main`. A bench
 /// is not a root: t27c emits it as `fn bench_<name>() void`, which nothing
-/// calls, so neither its body nor a fn only it names is analyzed.
+/// calls, so neither its body nor a fn only it names is analyzed. Nor is a
+/// top-level statement, which t27c does not emit at all.
 fn analyzed_fns(items: &[&Node]) -> HashSet<String> {
     let mut bodies: HashMap<&str, Vec<&Node>> = HashMap::new();
     let mut work: HashSet<String> = HashSet::new();
     for item in items {
         if item.kind == NodeKind::FnDecl {
             bodies.entry(item.name.as_str()).or_default().push(item);
-        } else if item.kind != NodeKind::BenchBlock {
+        } else if !matches!(item.kind, NodeKind::BenchBlock | NodeKind::StmtExpr) {
             names_in(std::slice::from_ref(*item), &mut work);
         }
     }
