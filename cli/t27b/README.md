@@ -320,6 +320,13 @@ Options:
   process per file, with a timeout. It prints:
   * supported / rejected / front-end-error / failed / crash counts;
   * the 15 most common rejecting constructs.
+
+  A file that times out in the parallel pass is run once more, alone, after
+  it, with the same timeout; the retry's verdict is final, so a genuine
+  infinite loop stays a timeout. On the lab at `--jobs 24`, files that pass
+  natively in milliseconds timed out at 60 s under contention (#6063).
+  `--json` marks such a record `"retried_after_timeout": true` and counts them
+  in `totals.timeout_retried`; the other totals count the retry's verdict.
 * `corpus --json <path>`: also writes the same totals, every rejecting
   construct, and one record per file (`file`, `reference`, `t27b`: pass /
   pass_vacuous / fail / blocked / frontend / mismatch / codegen / timeout /

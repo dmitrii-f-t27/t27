@@ -495,6 +495,9 @@ def lab_run(sha, log):
             "t27b_fail": sum(1 for r in results if r["t27b"] == "fail"),
             "crash": sum(1 for r in results if r["t27b"] == "crash"),
             "timeout": sum(1 for r in results if r["t27b"] == "timeout"),
+            # Timed out under --jobs contention, then judged by a sequential
+            # retry (the verdicts above are the retry's).
+            "timeout_retried": sum(1 for r in results if r.get("retried_after_timeout")),
         }
         doc["top_blockers"] = corpus.get("top_blockers", [])[:30]
         doc["results"] = results

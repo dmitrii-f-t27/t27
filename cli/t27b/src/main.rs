@@ -757,13 +757,31 @@ fn cmd_corpus(dir: &Path, o: &Opts) -> ExitCode {
     let mut results = std::mem::take(&mut *results.lock().unwrap());
     results.sort_by_key(|r| r.0);
 
+    // A timeout in the parallel pass may be contention, not the file: on the
+    // lab at --jobs 24 a file that passes natively in 4 ms timed out at 60 s
+    // (#6063). Each one gets one sequential retry with the same timeout; the
+    // retry's verdict is final, and the record says it was retried.
+    let n_timeout = results.iter().filter(|r| matches!(r.1, Outcome::Timeout)).count();
+    if n_timeout > 0 {
+        errln!("t27b: retrying {} timed-out file(s) one at a time", n_timeout);
+    }
+    let retried = blockers::retry_timeouts_once(
+        &mut results,
+        |r| matches!(r.1, Outcome::Timeout),
+        |r| r.1 = run_one(&exe, &files[r.0], o),
+    );
+    let timeout_retried = retried.iter().filter(|x| **x).count();
+
     let (mut pass, mut pass_tests, mut pass_inv, mut pass_zero) = (0, 0usize, 0usize, 0);
     let mut pass_vacuous = 0usize;
     let (mut fail, mut unsup, mut fe, mut mism, mut cg, mut tout, mut crash) = (0, 0, 0, 0, 0, 0, 0);
     let mut first: HashMap<String, usize> = HashMap::new();
     let mut all: HashMap<String, usize> = HashMap::new();
-    for (i, r, _) in &results {
+    for ((i, r, _), again) in results.iter().zip(&retried) {
         let name = files[*i].display();
+        if *again {
+            outln!("RETRIED     {}: timeout, then {} on a sequential retry", name, r.label());
+        }
         match r {
             Outcome::Pass(n, inv, asserts) => {
                 if *asserts == Some(0) {
@@ -841,6 +859,10 @@ fn cmd_corpus(dir: &Path, o: &Opts) -> ExitCode {
     outln!("  codegen limit             : {}", cg);
     outln!("  {:26}: {}", format!("timeout ({} ms)", o.timeout_ms), tout);
     outln!("  crash                     : {}", crash);
+    outln!(
+        "  timed out, retried once   : {} ({} still timeout; the rows above count the retry)",
+        timeout_retried, tout
+    );
     outln!("top rejecting constructs (first rejection per file; all occurrences):");
     for (c, n) in top.iter().take(15) {
         outln!("  {:5} {:5}  {}", n, all.get(c).copied().unwrap_or(0), c);
@@ -864,7 +886,7 @@ fn cmd_corpus(dir: &Path, o: &Opts) -> ExitCode {
             concat!(
                 "{{\"pass\": {}, \"pass_vacuous\": {}, \"tests\": {}, \"invariants\": {}, \"pass_no_tests\": {}, ",
                 "\"fail\": {}, \"blocked\": {}, \"frontend\": {}, \"mismatch\": {}, ",
-                "\"codegen\": {}, \"timeout\": {}, \"crash\": {}, ",
+                "\"codegen\": {}, \"timeout\": {}, \"timeout_retried\": {}, \"crash\": {}, ",
                 "\"reference\": {{\"ran\": {}, \"pass\": {}, \"blocked\": {}, \"fail\": {}, ",
                 "\"timeout\": {}, \"skip\": {}}}}}"
             ),
@@ -879,6 +901,7 @@ fn cmd_corpus(dir: &Path, o: &Opts) -> ExitCode {
             mism,
             cg,
             tout,
+            timeout_retried,
             crash,
             reference.is_some(),
             r_pass,
@@ -900,7 +923,8 @@ fn cmd_corpus(dir: &Path, o: &Opts) -> ExitCode {
             .collect();
         let recs: Vec<String> = results
             .iter()
-            .map(|(i, r, rf)| {
+            .zip(&retried)
+            .map(|((i, r, rf), again)| {
                 let (tests, inv, asserts) = if let Outcome::Pass(n, inv, a) = r { (*n, *inv, *a) } else { (0, 0, None) };
                 // Each construct once, in the order the lowering reported them.
                 let mut blockers: Vec<&str> = Vec::new();
@@ -922,7 +946,7 @@ fn cmd_corpus(dir: &Path, o: &Opts) -> ExitCode {
                     }
                 };
                 format!(
-                    "{{\"file\": {}, \"reference\": \"{}\", \"reference_detail\": {}, \"t27b\": \"{}\", \"tests\": {}, \"invariants\": {}, \"asserts\": {}, \"blockers\": [{}], \"detail\": {}}}",
+                    "{{\"file\": {}, \"reference\": \"{}\", \"reference_detail\": {}, \"t27b\": \"{}\", \"tests\": {}, \"invariants\": {}, \"asserts\": {}, \"blockers\": [{}], \"detail\": {}{}}}",
                     json_str(&files[*i].display().to_string()),
                     rtag,
                     json_str(&rwhy),
@@ -931,7 +955,9 @@ fn cmd_corpus(dir: &Path, o: &Opts) -> ExitCode {
                     inv,
                     asserts.map_or("null".to_string(), |a| a.to_string()),
                     blockers.iter().map(|b| json_str(b)).collect::<Vec<_>>().join(", "),
-                    json_str(r.detail())
+                    json_str(r.detail()),
+                    // Only on a retried file, so other records stay byte-identical.
+                    if *again { ", \"retried_after_timeout\": true" } else { "" }
                 )
             })
             .collect();
