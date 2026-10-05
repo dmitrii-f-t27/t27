@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use t27b::blockers::{greedy, parse_test_report, replay, Reference};
+use t27b::blockers::{greedy, parse_test_report, replay, retry_timeouts_once, Reference};
 use t27b::ir::OverflowMode;
 use t27b::{front, lower};
 
@@ -124,4 +124,49 @@ fn reads_test_report_output() {
     for r in [Reference::Pass, Reference::Fail("1 of 2 tests fail".into()), Reference::Blocked("x\ty".into()), Reference::Timeout] {
         assert_eq!(Reference::decode(&r.encode()), Some(r));
     }
+}
+
+/// `corpus` retries a timed-out file once, sequentially (#6063). A runner that
+/// times out only on its first call (lab contention) ends in the retry's
+/// verdict; a file that hangs every time (a genuine infinite loop) stays a
+/// timeout; nothing is retried twice; a non-timeout is never re-run.
+#[test]
+fn a_timeout_is_retried_exactly_once_and_the_retry_decides() {
+    use std::collections::HashMap;
+    // (file, verdict of the parallel pass)
+    let mut items = vec![
+        ("contended.t27", "timeout"),
+        ("passes.t27", "pass"),
+        ("infinite_loop.t27", "timeout"),
+        ("blocked.t27", "blocked"),
+    ];
+    let mut calls: HashMap<&str, usize> = HashMap::new();
+    let retried = retry_timeouts_once(
+        &mut items,
+        |x| x.1 == "timeout",
+        |x| {
+            *calls.entry(x.0).or_default() += 1;
+            // The fake runner: the infinite loop hangs on every call, the
+            // contended file passes once it runs alone.
+            x.1 = if x.0 == "infinite_loop.t27" { "timeout" } else { "pass" };
+        },
+    );
+    assert_eq!(retried, vec![true, false, true, false]);
+    assert_eq!(
+        items,
+        vec![
+            ("contended.t27", "pass"),
+            ("passes.t27", "pass"),
+            ("infinite_loop.t27", "timeout"),
+            ("blocked.t27", "blocked"),
+        ]
+    );
+    assert_eq!(calls.get("contended.t27"), Some(&1));
+    assert_eq!(calls.get("infinite_loop.t27"), Some(&1), "a second timeout is final");
+    assert_eq!(calls.len(), 2, "only timeouts are re-run");
+
+    // Negative control: no timeout, no run, nothing marked.
+    let mut clean = vec![("a.t27", "pass"), ("b.t27", "fail")];
+    let r = retry_timeouts_once(&mut clean, |x| x.1 == "timeout", |_| panic!("re-ran a non-timeout"));
+    assert_eq!(r, vec![false, false]);
 }

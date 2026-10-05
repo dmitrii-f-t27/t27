@@ -100,6 +100,27 @@ pub fn fnv64(bytes: &[u8]) -> u64 {
     h
 }
 
+/// `t27b corpus`: give every file that timed out in the parallel pass exactly
+/// one more run, one file at a time and in corpus order, so the retry is not
+/// under the contention that may have caused the timeout (#6063: on the
+/// Railway lab at `--jobs 24`, files that pass natively in milliseconds timed
+/// out at 60 s). `rerun` replaces the item in place with the retry's verdict,
+/// which is final, timeout or not: a genuine infinite loop stays a timeout,
+/// and nothing is retried twice. Returns, per item, whether it was retried.
+pub fn retry_timeouts_once<T>(
+    items: &mut [T],
+    is_timeout: impl Fn(&T) -> bool,
+    mut rerun: impl FnMut(&mut T),
+) -> Vec<bool> {
+    let retried: Vec<bool> = items.iter().map(|x| is_timeout(x)).collect();
+    for (item, r) in items.iter_mut().zip(&retried) {
+        if *r {
+            rerun(item);
+        }
+    }
+    retried
+}
+
 /// What the reference path (t27c's Zig backend, `t27c test-report`) did with
 /// one spec.
 #[derive(Clone, Debug, PartialEq, Eq)]
