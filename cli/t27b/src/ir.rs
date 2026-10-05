@@ -388,6 +388,8 @@ pub enum TrapKind {
     /// never analyzes: no test reaches it, so this trap is never expected
     /// to fire.
     Stub = 10,
+    /// `x.?` where `x` is `null` (Zig's safety check on the unwrap).
+    Null = 11,
     // Memory lane: numbered from 16 so the scalar lane can add kinds below.
     /// An index at or past the length of an array, slice or string.
     Bounds = 16,
@@ -406,6 +408,7 @@ impl TrapKind {
             TrapKind::EnumTag => "invalid enum value",
             TrapKind::FloatToInt => "integer part of floating point value out of bounds",
             TrapKind::Bounds => "index out of bounds",
+            TrapKind::Null => "attempt to use null value",
             TrapKind::Stub => "reached a statement the reference never compiles (`undefined;` or an ignored value)",
         }
     }

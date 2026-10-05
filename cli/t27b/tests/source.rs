@@ -2257,3 +2257,255 @@ fn try_statements_the_reference_does_not_compile_are_refused() {
         assert!(m.starts_with(&format!("t27b: unsupported construct {}", want)), "{}", m);
     }
 }
+
+// ------------------------------------------------------------ optionals
+
+/// Verdicts confirmed under `t27c test-report`: every test passes but the
+/// two that unwrap `null` (Zig: "attempt to use null value") and the one
+/// that compares a `null` with a value.
+#[test]
+fn optionals_match_the_reference() {
+    let src = r#"module opt2;
+
+pub enum Color {
+    red,
+    green,
+}
+
+pub struct V {
+    x: i32,
+    y: i32,
+}
+
+pub struct Box2 {
+    name: ?[]const u8,
+    v: ?V,
+    c: ?Color,
+    ok: ?bool,
+    f: ?f64,
+}
+
+fn pick(n: u32) -> ?V {
+    if (n == 0) {
+        return null;
+    }
+    return V{ .x = 1, .y = 2 };
+}
+
+fn name_of(n: u32) -> ?[]const u8 {
+    if (n == 0) {
+        return null;
+    }
+    return "abc";
+}
+
+fn count(x: ?i32) -> i32 {
+    if (x == null) {
+        return -1;
+    }
+    return x.?;
+}
+
+pub struct Ctr {
+    n: i32,
+}
+
+fn next(c: *Ctr) ?i32 {
+    c.n = c.n + 1;
+    if (c.n > 2) {
+        return null;
+    }
+    return c.n;
+}
+
+test "struct opt" {
+    const a = pick(1);
+    assert(a != null);
+    assert(a.?.x == 1);
+    assert(a.?.y == 2);
+    const b = pick(0);
+    assert(b == null);
+}
+
+test "str opt" {
+    const s = name_of(1);
+    assert(s.?.len == 3);
+    assert(name_of(0) == null);
+}
+
+fn reassign() -> i32 {
+    var w: ?i32 = null;
+    if (count(w) != -1) {
+        return 1;
+    }
+    w = 9;
+    if (count(w) != 9) {
+        return 2;
+    }
+    if (w != 9) {
+        return 3;
+    }
+    if (w == 8) {
+        return 4;
+    }
+    w.? = 4;
+    if (w.? != 4) {
+        return 5;
+    }
+    w = null;
+    if (w != null) {
+        return 6;
+    }
+    return 0;
+}
+
+test "param opt" {
+    assert(count(null) == -1);
+    assert(count(7) == 7);
+    assert(reassign() == 0);
+}
+
+test "param opt old" {
+    var w: ?i32 = null;
+    assert(count(w) == -1);
+}
+
+test "compare call" {
+    var i = Ctr{ .n = 0 };
+    assert(next(&i) == 1);
+    assert(next(&i) == 2);
+    assert(next(&i) == null);
+    assert(next(&i) != 5);
+}
+
+fn boxes() -> i32 {
+    var bx = Box2{ .name = null, .v = null, .c = Color.green, .ok = true, .f = 2.5 };
+    if (bx.name != null) {
+        return 1;
+    }
+    if (bx.v != null) {
+        return 2;
+    }
+    if (bx.c.? != Color.green) {
+        return 3;
+    }
+    if (!bx.ok.?) {
+        return 4;
+    }
+    if (bx.f.? != 2.5) {
+        return 5;
+    }
+    bx.v = V{ .x = 3, .y = 4 };
+    if (bx.v.?.y != 4) {
+        return 6;
+    }
+    bx.name = "hi";
+    if (bx.name.?.len != 2) {
+        return 7;
+    }
+    const pv = &bx.v.?;
+    pv.x = 10;
+    if (bx.v.?.x != 10) {
+        return 8;
+    }
+    return 0;
+}
+
+test "box fields" {
+    assert(boxes() == 0);
+}
+
+test "unwrap null struct" {
+    const b = pick(0);
+    assert(b.?.x == 1);
+}
+
+test "null eq value" {
+    const w: ?i32 = null;
+    assert(w == 0);
+}
+"#;
+    let r = run(src);
+    let line_of = |needle: &str| src.lines().position(|l| l.contains(needle)).unwrap() as u32 + 1;
+    let got: Vec<(&str, Outcome)> = r.iter().map(|(n, _, o)| (n.as_str(), *o)).collect();
+    assert_eq!(
+        got,
+        vec![
+            ("struct opt", Ok(())),
+            ("str opt", Ok(())),
+            ("param opt", Ok(())),
+            ("param opt old", Ok(())),
+            ("compare call", Ok(())),
+            ("box fields", Ok(())),
+            ("unwrap null struct", Err((TrapKind::Null, line_of("assert(b.?.x == 1);")))),
+            ("null eq value", Err((TrapKind::Assert, line_of("assert(w == 0);")))),
+        ]
+    );
+    let src = r#"module opt1;
+
+pub struct P {
+    a: u32,
+    b: ?u32,
+}
+
+fn find(x: u32) -> ?u32 {
+    if (x > 3) {
+        return x * 2;
+    }
+    return null;
+}
+
+fn get(p: P) -> u32 {
+    if (p.b != null) {
+        return p.b.?;
+    }
+    return 0;
+}
+
+test "opt basic" {
+    const a = find(5);
+    const b = find(1);
+    assert(a != null);
+    assert(b == null);
+    assert(a.? == 10);
+    var p = P{ .a = 1, .b = null };
+    assert(get(p) == 0);
+    p.b = 4;
+    assert(get(p) == 4);
+}
+
+test "unwrap null" {
+    const b = find(1);
+    assert(b.? == 1);
+}
+"#;
+    let r = run(src);
+    let got: Vec<(&str, bool)> = r.iter().map(|(n, _, o)| (n.as_str(), o.is_ok())).collect();
+    assert_eq!(got, vec![("opt basic", true), ("unwrap null", false)]);
+    assert!(matches!(r[1].2, Err((TrapKind::Null, _))));
+}
+
+#[test]
+fn optionals_the_reference_does_not_match_are_refused() {
+    let cases: [(&str, &str); 3] = [
+        // BLOCKED under `t27c test-report`: the Zig backend drops the capture.
+        (
+            "module a;\n\nfn f(x: ?u32) -> u32 {\n    if (x) |v| {\n        return v;\n    }\n    return 0;\n}\n\ntest t {\n    assert(f(3) == 3);\n}\n",
+            "StmtIf(capture)",
+        ),
+        // These two pass under the reference; not lowered: two optionals
+        // compared, and a module-level optional.
+        (
+            "module b;\n\nfn f(x: ?u32) -> ?u32 {\n    return x;\n}\n\ntest t {\n    const a: ?u32 = 3;\n    assert(f(a) == f(a));\n}\n",
+            "ExprBinary(?T)",
+        ),
+        (
+            "module c;\n\nconst K: ?u32 = null;\n\ntest t {\n    assert(K == null);\n}\n",
+            "ConstDecl(?T)",
+        ),
+    ];
+    for (src, want) in cases {
+        let m = rejected(src);
+        assert!(m.starts_with(&format!("t27b: unsupported construct {}", want)), "{}", m);
+    }
+}
