@@ -1126,7 +1126,7 @@ fn enum_rejections_are_precise() {
         ("const E = enum(f32) { a, b };\ntest t { assert(E.a == E.a); }", "EnumDecl(tag type)", "`E` has tag type `f32`"),
         ("const E = enum(u8) { a = 300, b };\ntest t { assert(E.a == E.a); }", "EnumDecl", "`E.a` = 300 does not fit the tag type u8"),
         ("const E = enum(u8) { a = 1, b = 1 };\ntest t { assert(E.a == E.b); }", "EnumDecl", "`E.a` and `E.b` have the same tag 1"),
-        ("fn f(d: Dir) u8 {\n    return switch (d) {\n        .north => 1,\n        else => 2,\n    };\n}\ntest t { assert(f(.north) == 1); }", "ExprSwitch", ""),
+        ("fn f(d: Dir) u8 {\n    return switch (d) {\n        .north => 1,\n        .east => 1,\n        .south => 1,\n        .west => 1,\n        else => 2,\n    };\n}\ntest t { assert(f(.north) == 1); }", "ExprSwitch(unreachable else)", "after every value is listed"),
         ("fn f(a: Dir, b: Dir) bool { return a < b; }\ntest t { assert(f(.north, .east)); }", "ExprBinary(<) on enum", "two `Dir` values, which Zig does not order"),
         ("fn f(d: Dir) bool { return d < .west; }\ntest t { assert(f(.north)); }", "ExprBinary(<) on enum", "which Zig does not order"),
         ("test t { assert(Dir.north + 1 == 1); }", "ExprBinary(+) on enum", "arithmetic on an enum"),
@@ -1730,6 +1730,181 @@ test peers_and_temps {
         let m = rejected(&format!("module ir;\n\n{}test t {{ assert(f(true, 1, 2) == 1); }}\n", body));
         assert!(m.starts_with(&format!("t27b: unsupported construct {} at line", construct)), "{}: {}", body, m);
     }
+}
+
+#[test]
+fn switch_runs_only_the_taken_prong() {
+    // Verdicts match `t27c test-report` on the same source: five pass and
+    // `taken_prong_traps` fails on the `x - 10` overflow.
+    let src = "module sw;
+
+pub const NEG: i32 = -3;
+
+pub enum Trit {
+    neg,
+    zero,
+    pos,
+}
+
+fn negate(a: Trit) Trit {
+    return switch (a) {
+        .neg => .pos,
+        .zero => .zero,
+        .pos => .neg,
+    };
+}
+
+fn add(a: Trit, b: Trit) Trit {
+    return switch (a) {
+        .neg => switch (b) {
+            .neg => .neg,
+            .zero => .neg,
+            .pos => .zero,
+        },
+        .zero => b,
+        .pos => switch (b) {
+            .neg => .zero,
+            .zero => .pos,
+            .pos => .pos,
+        },
+    };
+}
+
+fn name(a: Trit) []const u8 {
+    return switch (a) {
+        .neg => \"neg\",
+        .zero => \"zero\",
+        .pos => \"pos\",
+    };
+}
+
+fn code(x: i32) u32 {
+    return switch (x) {
+        -1 => 10,
+        0 => 20,
+        7 => 30,
+        else => 40,
+    };
+}
+
+var calls: u32 = 0;
+
+fn bump(x: u8) u8 {
+    calls += 1;
+    return x;
+}
+
+fn once(x: u8) u32 {
+    return switch (bump(x)) {
+        1 => 100,
+        2 => 200,
+        else => 300,
+    };
+}
+
+fn sub(x: u32) u32 {
+    return switch (x) {
+        0 => 0,
+        else => x - 10,
+    };
+}
+
+fn peer(a: Trit, x: u8, w: u16) u16 {
+    const v = switch (a) {
+        .neg => x,
+        .zero => w,
+        else => 5,
+    };
+    return v;
+}
+
+test enum_switch {
+    assert(negate(.neg) == .pos);
+    assert(negate(.zero) == .zero);
+    assert(add(.pos, .pos) == .pos);
+    assert(add(.neg, .pos) == .zero);
+    assert(add(.zero, .neg) == .neg);
+    assert(name(.zero).len == 4);
+}
+
+test int_switch {
+    assert(code(-1) == 10);
+    assert(code(0) == 20);
+    assert(code(7) == 30);
+    assert(code(NEG) == 40);
+    assert(NEG == -3);
+}
+
+test operand_runs_once {
+    assert(once(2) == 200);
+    assert(once(9) == 300);
+    assert(calls == 2);
+}
+
+test peer_type {
+    assert(peer(.neg, 7, 1000) == 7);
+    assert(peer(.zero, 7, 1000) == 1000);
+    assert(peer(.pos, 7, 1000) == 5);
+}
+
+test untaken_prong_does_not_trap {
+    assert(sub(0) == 0);
+    assert(sub(12) == 2);
+}
+
+test taken_prong_traps {
+    assert(sub(3) == 0);
+}
+";
+    let r = run(src);
+    assert_eq!(
+        names_ok(&r),
+        vec![
+            ("enum_switch", false, true),
+            ("int_switch", false, true),
+            ("operand_runs_once", false, true),
+            ("peer_type", false, true),
+            ("untaken_prong_does_not_trap", false, true),
+            ("taken_prong_traps", false, false),
+        ]
+    );
+    // t27c gives expression nodes no line, so the trap lands on the
+    // statement that holds the switch, as it does for `if`.
+    assert_eq!(r[5].2, Err((TrapKind::Overflow, line_of(src, "fn sub") + 1)));
+    // Every shape below is BLOCKED in the reference too (Zig refuses it, or
+    // t27c misprints the prong), so each is refused under its own name.
+    let cases = [
+        ("a: Trit", "switch (a) { .neg => 1, .zero => 2, }", "ExprSwitch(not exhaustive)"),
+        ("x: u8", "switch (x) { 0 => 1, 1 => 2, }", "ExprSwitch(not exhaustive)"),
+        ("a: Trit", "switch (a) { .neg => 1, .zero => 2, .pos => 3, else => 4, }", "ExprSwitch(unreachable else)"),
+        ("x: u8", "switch (x) { 'a' => 1, else => 2, }", "ExprSwitch(char prong)"),
+        ("x: u8", "switch (x) { 1 => 1, 1 => 2, else => 3, }", "ExprSwitch(duplicate prong)"),
+        ("a: Trit", "switch (a) { .neg => 1, .zero => 2, .up => 3, }", "ExprSwitch(prong)"),
+        ("x: u8", "switch (x) { 300 => 1, else => 2, }", "ExprSwitch(prong)"),
+        ("a: Trit", "switch (a) { 0 => 1, else => 2, }", "ExprSwitch(prong)"),
+        ("x: u8", "switch (x) { zero => 1, else => 2, }", "ExprSwitch(prong)"),
+    ];
+    for (param, body, construct) in cases {
+        let m = rejected(&format!(
+            "module rj;\n\npub enum Trit {{\n    neg,\n    zero,\n    pos,\n}}\n\nfn f({}) u32 {{\n    return {};\n}}\n\ntest t {{ assert(f(0) == 1); }}\n",
+            param, body
+        ));
+        assert!(m.starts_with(&format!("t27b: unsupported construct {} at line", construct)), "{}: {}", body, m);
+    }
+}
+
+#[test]
+fn discarded_call_result_is_refused_where_reached() {
+    // t27c prints `g();` as is; Zig refuses the dropped u32 in a body it
+    // analyzes and ignores it in one nothing reaches: `never`, a bench (an
+    // uncalled `fn bench_b()` in the reference's Zig) and a fn only the bench
+    // names. Verdicts match `t27c test-report`: the first source passes, the
+    // second is BLOCKED.
+    let src = "module vi;\n\nvar n: u32 = 0;\n\nfn g() u32 {\n    n += 1;\n    return n;\n}\n\nfn h() void {\n    n += 1;\n}\n\nfn never() void {\n    g();\n}\n\nfn bench_only() void {\n    g();\n}\n\ntest void_call {\n    h();\n    assert(n == 1);\n}\n\nbench b {\n    g();\n    bench_only();\n}\n";
+    assert_eq!(names_ok(&run(src)), vec![("void_call", false, true)]);
+    let m = rejected("module vj;\n\nfn g() u32 {\n    return 1;\n}\n\ntest t {\n    g();\n    assert(true);\n}\n");
+    assert!(m.starts_with("t27b: unsupported construct ExprCall(value ignored) statement at line 8"), "{}", m);
+    assert!(m.contains("`g`, which returns u32"), "{}", m);
 }
 
 #[test]

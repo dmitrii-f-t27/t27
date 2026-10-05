@@ -1389,7 +1389,9 @@ impl<'a> Lower<'a> {
         }
         self.begin_body(&n.children);
         self.in_test = true;
-        self.unanalyzed_fn = false;
+        // A bench is an uncalled `fn bench_<name>() void` in the reference's
+        // Zig, so `zig test` never analyzes its body (see `analyzed_fns`).
+        self.unanalyzed_fn = self.in_bench;
         self.comptime = invariant;
         self.ret = None;
         self.ret_poison = false;
@@ -2252,7 +2254,20 @@ impl<'a> Lower<'a> {
                 Ok(())
             }
             _ => {
-                let (call, _, _) = self.call(c, None)?;
+                let (call, ret, _) = self.call(c, None)?;
+                // `f(x);` with a non-void `f`: t27c prints it as is, and Zig
+                // refuses it ("value of type 'bool' ignored") wherever it
+                // analyzes the body -- the same rule as `value_stmt`.
+                if let Some(t) = ret.filter(|_| !self.unanalyzed_fn) {
+                    let t = self.type_name(&t);
+                    return self.reject(
+                        "ExprCall(value ignored) statement",
+                        format!(
+                            "call to `{}`, which returns {}, as a statement where a test, invariant or bench reaches it: the reference's Zig does not compile it (value ignored)",
+                            c.name, t
+                        ),
+                    );
+                }
                 out.push(Stmt::Eval(call));
                 Ok(())
             }
@@ -2671,6 +2686,7 @@ impl<'a> Lower<'a> {
                 self.reject("ExprArrayLiteral", "array literal with no result type".into())
             }
             NodeKind::ExprIf => self.if_expr(n, None),
+            NodeKind::ExprSwitch => self.switch_expr(n, None),
             NodeKind::ExprStructLit => {
                 if n.name.is_empty() {
                     return self.reject("ExprStructLit", "anonymous `.{}` literal with no result type".into());
@@ -2858,8 +2874,16 @@ impl<'a> Lower<'a> {
                         }
                         Err(why) => return self.reject("ExprLiteral(float literal)", format!("`{}`: {}", s, why)),
                     }
-                } else if s.starts_with('-') && parse_int(&s[1..]).is_some() {
-                    "negative literal"
+                } else if let Some(v) = s.strip_prefix('-').and_then(parse_int) {
+                    // `const X: i32 = -1;`: the t27c parser folds the minus
+                    // into the literal, and its Zig backend prints it back
+                    // as written -- Zig's comptime_int `-1`.
+                    let suffix = n.extra_type.trim();
+                    if suffix.is_empty() {
+                        return Ok(Val::Ct(-v));
+                    }
+                    let ty = self.ty(suffix)?;
+                    return Ok(Val::E(self.coerce(Val::Ct(-v), ty)?));
                 } else {
                     "literal"
                 };
@@ -3992,9 +4016,10 @@ impl<'a> Lower<'a> {
     /// Evaluate `n` as a value of type `want`: a struct literal takes its
     /// type from here, so it may be anonymous (`.{ ... }`).
     fn expr_as(&mut self, n: &Node, want: &LTy) -> R<Val> {
-        if n.kind == NodeKind::ExprIf {
+        if n.kind == NodeKind::ExprIf || n.kind == NodeKind::ExprSwitch {
             self.see(n);
-            return match self.if_expr(n, Some(want)) {
+            let r = if n.kind == NodeKind::ExprIf { self.if_expr(n, Some(want)) } else { self.switch_expr(n, Some(want)) };
+            return match r {
                 Err(()) if self.recover => Ok(Val::Poison),
                 r => r,
             };
@@ -4125,6 +4150,14 @@ impl<'a> Lower<'a> {
         if a.is_poison() || b.is_poison() {
             return Err(());
         }
+        self.select_vals(cond, a, b, want, "ExprIf", "both arms are untyped literals")
+    }
+
+    /// `cond ? a : b` over two arms already lowered (to `want`, when there is
+    /// one): only the taken arm runs. With no result type, Zig's peer type of
+    /// the two; an aggregate selects the address of its arm. `what` names the
+    /// construct in a refusal.
+    fn select_vals(&mut self, cond: Expr, a: Val, b: Val, want: Option<&LTy>, what: &str, untyped: &str) -> R<Val> {
         let select = |cond: Expr, x: Expr, y: Expr| Expr {
             ty: x.ty,
             kind: ExprKind::Select { cond: Box::new(cond), then: Box::new(x), els: Box::new(y) },
@@ -4134,8 +4167,8 @@ impl<'a> Lower<'a> {
             Some(_) => (a, b),
             None if matches!(a, Val::Ct(_) | Val::Cf(..)) && matches!(b, Val::Ct(_) | Val::Cf(..)) => {
                 return self.reject(
-                    "ExprIf(comptime arms)",
-                    "both arms are untyped literals and the condition is runtime: Zig needs a result type".into(),
+                    &format!("{}(comptime arms)", what),
+                    format!("{} and the condition is runtime: Zig needs a result type", untyped),
                 )
             }
             // Peer type of strings (and of a string and a literal) is `[]const u8`.
@@ -4144,7 +4177,7 @@ impl<'a> Lower<'a> {
                 (Val::M(p), Val::M(q)) if p.ty == q.ty => (Val::M(p), Val::M(q)),
                 (Val::P(x, t), Val::P(y, u)) if t == u => (Val::P(x, t), Val::P(y, u)),
                 (a, b) => {
-                    let (x, y) = self.peer(a, b, "if")?;
+                    let (x, y) = self.peer(a, b, if what == "ExprIf" { "if" } else { "switch" })?;
                     return Ok(Val::E(select(cond, x, y)));
                 }
             },
@@ -4158,7 +4191,7 @@ impl<'a> Lower<'a> {
             (Val::E(x), Val::E(y)) if x.ty == y.ty => Ok(Val::E(select(cond, x, y))),
             (a, b) => {
                 let (a, b) = (self.val_desc(&a), self.val_desc(&b));
-                self.reject("ExprIf", format!("arms of different shapes: {} and {}", a, b))
+                self.reject(what, format!("arms of different shapes: {} and {}", a, b))
             }
         }
     }
@@ -4167,6 +4200,199 @@ impl<'a> Lower<'a> {
         match want {
             Some(t) => self.expr_as(n, t),
             None => self.expr(n),
+        }
+    }
+
+    /// `switch (x) { .a => v, 1 => w, else => u }` used as a value. The t27c
+    /// parser keeps one item per prong (`.name` or a bare name, an integer,
+    /// `-N`, a char literal, `else`) and its Zig backend prints each as
+    /// `.name`, the integer, or `else`. Zig's rules, refused where they would
+    /// not compile: an enum operand takes tag names, every tag or an `else`
+    /// but not both; an integer operand takes integers of its type and needs
+    /// an `else` unless every value is listed; no item twice. A
+    /// compile-time operand lowers only its prong (Zig does not analyze the
+    /// others). Otherwise every prong takes the result type `want` -- or,
+    /// with none, the peer type -- and only the taken one runs: a chain of
+    /// `ExprKind::Select` on `x == item`, the `else` prong (or, with none,
+    /// the last one) last. An operand with effects is evaluated once, into a
+    /// frame slot.
+    fn switch_expr(&mut self, n: &Node, want: Option<&LTy>) -> R<Val> {
+        let Some((operand, prongs)) = n.children.split_first() else {
+            return self.reject("ExprSwitch", "no operand".into());
+        };
+        if prongs.is_empty() {
+            return self.reject("ExprSwitch(no prongs)", "`switch` with no prongs".into());
+        }
+        for p in prongs {
+            if p.kind != NodeKind::ConstDecl || p.children.len() != 1 {
+                return self.reject("ExprSwitch", format!("prong of unexpected shape ({})", kind_name(p)));
+            }
+        }
+        let x = self.expr(operand)?;
+        if x.is_poison() {
+            // Recovery mode: still name what the prongs use.
+            for p in prongs {
+                let _ = self.if_arm(&p.children[0], want)?;
+            }
+            return Err(());
+        }
+        // The operand as a register expression of type `ty`, and the item
+        // values its prongs name (None: `else`).
+        let (e, ty, enum_id) = match x {
+            Val::P(e, LTy::Enum(id, _)) => {
+                let t = e.ty;
+                (e, t, Some(id))
+            }
+            Val::E(e) if e.ty.is_int() => {
+                let t = e.ty;
+                (e, t, None)
+            }
+            Val::Ct(_) => {
+                return self.reject(
+                    "ExprSwitch(on comptime_int)",
+                    "switch on an untyped integer literal".into(),
+                )
+            }
+            v => {
+                let d = match &v {
+                    Val::E(e) => e.ty.name().to_string(),
+                    v => self.val_desc(v),
+                };
+                return self.reject(&format!("ExprSwitch(on {})", d), format!("switch on {}", d));
+            }
+        };
+        let mut items: Vec<Option<i128>> = Vec::new();
+        for p in prongs {
+            let name = p.name.trim();
+            if name.is_empty() || name == "else" {
+                if items.contains(&None) {
+                    return self.reject("ExprSwitch(two else prongs)", "more than one `else` prong".into());
+                }
+                items.push(None);
+                continue;
+            }
+            if name.starts_with('\'') {
+                return self.reject(
+                    "ExprSwitch(char prong)",
+                    format!("t27c's Zig backend prints the prong `{}` as `.{}`, which Zig does not parse (#6329)", name, name),
+                );
+            }
+            let numeric = name.starts_with(|c: char| c.is_ascii_digit()) || (name.starts_with('-') && name.len() > 1);
+            let v = match (enum_id, numeric) {
+                (Some(id), false) => {
+                    let def = &self.enums[id as usize];
+                    match def.value(name) {
+                        Some(v) => v,
+                        None => {
+                            let en = def.name.clone();
+                            return self.reject("ExprSwitch(prong)", format!("`{}` has no variant `{}`", en, name));
+                        }
+                    }
+                }
+                (Some(id), true) => {
+                    let en = self.enums[id as usize].name.clone();
+                    return self.reject("ExprSwitch(prong)", format!("integer prong `{}` on enum `{}`", name, en));
+                }
+                (None, false) => {
+                    return self.reject(
+                        "ExprSwitch(prong)",
+                        format!("t27c prints the prong `{}` as `.{}`, an enum literal, on a {} operand", name, name, ty.name()),
+                    )
+                }
+                (None, true) => {
+                    let v = match name.strip_prefix('-') {
+                        Some(r) => parse_int(r).map(|v| -v),
+                        None => parse_int(name),
+                    };
+                    match v {
+                        Some(v) if ty.fits(v) => v,
+                        _ => {
+                            return self.reject(
+                                "ExprSwitch(prong)",
+                                format!("prong `{}` is not a {} value", name, ty.name()),
+                            )
+                        }
+                    }
+                }
+            };
+            if items.contains(&Some(v)) {
+                return self.reject("ExprSwitch(duplicate prong)", format!("the prong `{}` appears twice", name));
+            }
+            items.push(Some(v));
+        }
+        let listed = items.iter().filter(|i| i.is_some()).count() as i128;
+        let all = match enum_id {
+            Some(id) => self.enums[id as usize].variants.len() as i128,
+            None => ty.max() - ty.min() + 1,
+        };
+        let has_else = items.contains(&None);
+        if listed < all && !has_else {
+            return self.reject(
+                "ExprSwitch(not exhaustive)",
+                format!("{} of {} values listed and no `else` prong", listed, all),
+            );
+        }
+        if listed == all && has_else {
+            return self.reject(
+                "ExprSwitch(unreachable else)",
+                "an `else` prong after every value is listed, which Zig refuses".into(),
+            );
+        }
+        // The prong that runs when no listed item matched: `else`, or the
+        // last prong when every value is listed.
+        let fallback = items.iter().position(|i| i.is_none()).unwrap_or(items.len() - 1);
+        if let ExprKind::Const(k) = e.kind {
+            let i = items.iter().position(|i| *i == Some(k)).unwrap_or(fallback);
+            return self.if_arm(&prongs[i].children[0], want);
+        }
+        let mut vals = Vec::with_capacity(prongs.len());
+        for p in prongs {
+            vals.push(self.if_arm(&p.children[0], want)?);
+        }
+        if vals.iter().any(|v| v.is_poison()) {
+            return Err(());
+        }
+        let (stmts, key) = if matches!(e.kind, ExprKind::Var(_)) {
+            (Vec::new(), e)
+        } else {
+            let k = self.new_slot(&LTy::S(ty))?;
+            let store = Stmt::Store { addr: slot_expr(k), off: 0, value: e };
+            (vec![store], Expr { ty, kind: ExprKind::Load { addr: Box::new(slot_expr(k)), off: 0 } })
+        };
+        let mut vals: Vec<Option<Val>> = vals.into_iter().map(Some).collect();
+        let mut acc = vals[fallback].take().unwrap();
+        for i in (0..prongs.len()).rev() {
+            if i == fallback {
+                continue;
+            }
+            let Some(item) = items[i] else { unreachable!() };
+            let cond = Expr {
+                ty: Ty::Bool,
+                kind: ExprKind::Cmp {
+                    op: CmpOp::Eq,
+                    lhs: Box::new(key.clone()),
+                    rhs: Box::new(Expr { ty, kind: ExprKind::Const(item) }),
+                },
+            };
+            let v = vals[i].take().unwrap();
+            acc = self.select_vals(cond, v, acc, want, "ExprSwitch", "every prong is an untyped literal")?;
+        }
+        if stmts.is_empty() {
+            return Ok(acc);
+        }
+        let seq = |stmts: Vec<Stmt>, value: Expr| Expr { ty: value.ty, kind: ExprKind::Seq { stmts, value: Box::new(value) } };
+        match acc {
+            Val::E(x) => Ok(Val::E(seq(stmts, x))),
+            Val::P(x, t) => Ok(Val::P(seq(stmts, x), t)),
+            Val::M(mut p) => {
+                p.addr = seq(stmts, p.addr);
+                p.temp = None;
+                Ok(Val::M(p))
+            }
+            v => {
+                let d = self.val_desc(&v);
+                self.reject("ExprSwitch(one prong)", format!("a single prong giving {} after an operand with effects", d))
+            }
         }
     }
 
@@ -5746,10 +5972,6 @@ fn names_in(ns: &[Node], out: &mut HashSet<String>) {
     }
 }
 
-/// The fns Zig's lazy analysis may reach in `zig test`: the roots are every
-/// top-level item that is not a fn (tests; invariants, which t27c emits as
-/// `comptime` blocks; benches; constants and vars), and a fn is reached when
-/// a reached body names it. `pub` does not make a fn a root, nor does `main`.
 /// Collect the `if` expressions the reference prints unparenthesized where the
 /// source parenthesized them (see `Lower::misprinted_if`): the first child of
 /// a binary operator, a field access or an index. An `if` on the right of a
@@ -5767,13 +5989,19 @@ fn misprinted_ifs(n: &Node, out: &mut HashSet<usize>) {
     }
 }
 
+/// The fns Zig's lazy analysis may reach in `zig test`: the roots are every
+/// top-level item that is not a fn (tests; invariants, which t27c emits as
+/// `comptime` blocks; constants and vars), and a fn is reached when a reached
+/// body names it. `pub` does not make a fn a root, nor does `main`. A bench
+/// is not a root: t27c emits it as `fn bench_<name>() void`, which nothing
+/// calls, so neither its body nor a fn only it names is analyzed.
 fn analyzed_fns(items: &[&Node]) -> HashSet<String> {
     let mut bodies: HashMap<&str, Vec<&Node>> = HashMap::new();
     let mut work: HashSet<String> = HashSet::new();
     for item in items {
         if item.kind == NodeKind::FnDecl {
             bodies.entry(item.name.as_str()).or_default().push(item);
-        } else {
+        } else if item.kind != NodeKind::BenchBlock {
             names_in(std::slice::from_ref(*item), &mut work);
         }
     }
