@@ -266,7 +266,7 @@ pub struct RefRunner {
     pub timeout: Duration,
     pub scratch: PathBuf,
     pub cap_bytes: u64,
-    cache: Option<PathBuf>,
+    cache: Option<CacheWriter>,
     stamp: u64,
     known: Mutex<HashMap<u64, Reference>>,
 }
@@ -284,10 +284,83 @@ fn dir_bytes(p: &Path) -> u64 {
     n
 }
 
+/// The t27c binary's part of every reference-cache key: FNV-1a over its
+/// bytes, read once per run. Content, not mtime, so a byte-identical copy of
+/// the binary (the lanes keep fixed copies so they can rebuild while
+/// measuring) hits the same cache rows, and a rebuilt binary misses them
+/// (#6332). Caches written under the old size-and-mtime key are still read;
+/// their rows simply never match.
+pub fn binary_stamp(t27c: &Path) -> Result<u64, String> {
+    let bytes = std::fs::read(t27c).map_err(|e| format!("cannot read {}: {}", t27c.display(), e))?;
+    let mut b = Vec::with_capacity(bytes.len() + 16);
+    b.extend_from_slice(b"t27c-content\0");
+    b.extend_from_slice(&bytes);
+    Ok(fnv64(&b))
+}
+
+/// One reference-cache row, newline included: key, spec path, verdict, tab
+/// separated. Tabs and line breaks in the path, and line breaks in the
+/// verdict's reason, become spaces so a row is always exactly one line.
+pub fn cache_row(key: u64, file: &Path, r: &Reference) -> String {
+    let path = file.display().to_string().replace(['\t', '\n', '\r'], " ");
+    let why = r.encode().replace(['\n', '\r'], " ");
+    format!("{:016x}\t{}\t{}\n", key, path, why)
+}
+
+/// Every well-formed row of the cache file at `path` (none if it is missing).
+/// A damaged line is skipped.
+pub fn read_cache(path: &Path) -> HashMap<u64, Reference> {
+    let mut known = HashMap::new();
+    if let Ok(text) = std::fs::read_to_string(path) {
+        for l in text.lines() {
+            let mut it = l.splitn(3, '\t');
+            let (Some(k), Some(_path), Some(r)) = (it.next(), it.next(), it.next()) else { continue };
+            if k.len() != 16 {
+                continue;
+            }
+            if let (Ok(k), Some(r)) = (u64::from_str_radix(k, 16), Reference::decode(r)) {
+                known.insert(k, r);
+            }
+        }
+    }
+    known
+}
+
+/// The append side of the reference cache, shared by every worker. Each row
+/// is formatted into one buffer and written with a single `write_all` to a
+/// file opened once in append mode, under a lock, so rows from concurrent
+/// workers cannot interleave (#6332: `writeln!` could split one row into
+/// several writes, and one damaged line held two rows).
+pub struct CacheWriter {
+    path: PathBuf,
+    file: Mutex<Option<std::fs::File>>,
+}
+
+impl CacheWriter {
+    pub fn new(path: PathBuf) -> CacheWriter {
+        CacheWriter { path, file: Mutex::new(None) }
+    }
+
+    /// Append one row. A cache that cannot be opened or written is not an
+    /// error: the run goes on without it.
+    pub fn append(&self, key: u64, file: &Path, r: &Reference) {
+        use std::io::Write;
+        let row = cache_row(key, file, r);
+        let mut g = self.file.lock().unwrap_or_else(|e| e.into_inner());
+        if g.is_none() {
+            *g = std::fs::OpenOptions::new().create(true).append(true).open(&self.path).ok();
+        }
+        if let Some(f) = g.as_mut() {
+            let _ = f.write_all(row.as_bytes());
+        }
+    }
+}
+
 impl RefRunner {
     /// `cache`, when given, is a tab-separated file of earlier results keyed
-    /// by spec path, spec source, and the t27c binary's size and mtime; a
-    /// changed spec or a rebuilt t27c misses.
+    /// by spec path, spec source, and the content of the t27c binary
+    /// (`binary_stamp`); a changed spec or a rebuilt t27c misses, a copied
+    /// t27c hits.
     pub fn new(
         t27c: PathBuf,
         specs_dir: PathBuf,
@@ -296,25 +369,9 @@ impl RefRunner {
         cap_bytes: u64,
         cache: Option<PathBuf>,
     ) -> Result<RefRunner, String> {
-        let meta = std::fs::metadata(&t27c).map_err(|e| format!("cannot stat {}: {}", t27c.display(), e))?;
-        let mtime = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map_or(0, |d| d.as_nanos() as u64);
-        let stamp = fnv64(format!("{}:{}", meta.len(), mtime).as_bytes());
-        let mut known = HashMap::new();
-        if let Some(c) = &cache {
-            if let Ok(text) = std::fs::read_to_string(c) {
-                for l in text.lines() {
-                    let mut it = l.splitn(3, '\t');
-                    let (Some(k), Some(_path), Some(r)) = (it.next(), it.next(), it.next()) else { continue };
-                    if let (Ok(k), Some(r)) = (u64::from_str_radix(k, 16), Reference::decode(r)) {
-                        known.insert(k, r);
-                    }
-                }
-            }
-        }
+        let stamp = binary_stamp(&t27c)?;
+        let known = cache.as_deref().map(read_cache).unwrap_or_default();
+        let cache = cache.map(CacheWriter::new);
         Ok(RefRunner { t27c, specs_dir, timeout, scratch, cap_bytes, cache, stamp, known: Mutex::new(known) })
     }
 
@@ -367,11 +424,7 @@ impl RefRunner {
         };
         self.known.lock().unwrap().insert(key, r.clone());
         if let Some(c) = &self.cache {
-            use std::io::Write;
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(c) {
-                let why = r.encode().replace('\n', " ");
-                let _ = writeln!(f, "{:016x}\t{}\t{}", key, file.display(), why);
-            }
+            c.append(key, file, &r);
         }
         (r, false)
     }
