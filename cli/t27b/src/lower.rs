@@ -75,6 +75,7 @@ use std::collections::{HashMap, HashSet};
 
 #[path = "lower_float.rs"]
 mod float;
+mod tuple;
 
 /// A construct outside the supported subset (or a type error inside it).
 #[derive(Clone, Debug)]
@@ -1086,7 +1087,7 @@ impl<'a> Lower<'a> {
         let ret = if rt.is_empty() || rt == "void" {
             None
         } else {
-            Some(self.lty(rt)?)
+            Some(self.ret_lty(rt)?)
         };
         // A struct result is returned through a hidden pointer parameter.
         let total = n.params.len() + ret.as_ref().is_some_and(is_agg) as usize;
@@ -2020,6 +2021,9 @@ impl<'a> Lower<'a> {
 
     fn local(&mut self, n: &Node, out: &mut Vec<Stmt>) -> R<()> {
         let name = n.name.clone();
+        if name.is_empty() && !n.extra_field.trim().is_empty() {
+            return self.destructure_local(n, out);
+        }
         if name.is_empty() || name.contains(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
             return self.reject("StmtLocal", format!("binding `{}`", name));
         }
@@ -2232,6 +2236,9 @@ impl<'a> Lower<'a> {
         if matches!(target.kind, NodeKind::ExprFieldAccess | NodeKind::ExprIndex) {
             let dst = self.lvalue(target)?;
             return self.store(dst, op, &n.children[1], out);
+        }
+        if target.kind == NodeKind::ExprTuple {
+            return self.tuple_assign(n, out);
         }
         if target.kind != NodeKind::ExprIdentifier {
             let k = kind_name(target);
@@ -4466,7 +4473,10 @@ impl<'a> Lower<'a> {
             self.lit_type(n, want)?;
             return self.struct_temp(n, want.clone());
         }
-        if (n.kind == NodeKind::ExprArrayLiteral || is_repeat_op(n)) && matches!(want, LTy::Arr(..)) {
+        if (n.kind == NodeKind::ExprArrayLiteral || is_repeat_op(n) || n.kind == NodeKind::ExprTuple)
+            && matches!(want, LTy::Arr(..))
+            || n.kind == NodeKind::ExprTuple && matches!(want, LTy::Struct(_))
+        {
             self.see(n);
             return self.struct_temp(n, want.clone());
         }
@@ -5384,6 +5394,9 @@ impl<'a> Lower<'a> {
                 _ => Err(()),
             };
         }
+        if n.kind == NodeKind::ExprTuple {
+            return self.init_tuple_lit(n, dst, fresh, out);
+        }
         if matches!(t, LTy::Str | LTy::Slice(..)) && !in_place {
             let v = if t == LTy::Str && n.kind != NodeKind::ExprUnary { self.expr(n)? } else { self.expr_as(n, &t)? };
             return match v {
@@ -5679,6 +5692,10 @@ impl<'a> Lower<'a> {
                 return self.slice_index(p, idx).map(Ok);
             }
         }
+        let base = match self.tuple_index(base, &idx)? {
+            Ok(p) => return Ok(Ok(p)),
+            Err(b) => b,
+        };
         let p = match base {
             Val::A(t @ LTy::Arr(..), elems) => {
                 let c = match &idx {
