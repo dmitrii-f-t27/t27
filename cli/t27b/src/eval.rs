@@ -555,6 +555,13 @@ impl<'p> Interp<'p> {
                 }
                 self.expr(value, env)
             }
+            ExprKind::Select { cond, then, els } => {
+                if self.expr(cond, env)? != 0 {
+                    self.expr(then, env)
+                } else {
+                    self.expr(els, env)
+                }
+            }
         }
     }
 }

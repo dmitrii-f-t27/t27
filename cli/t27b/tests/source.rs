@@ -1467,3 +1467,140 @@ test calling_callee {
     let r = run(src);
     assert_eq!(names_ok(&r), vec![("leaf_callee", false, true), ("calling_callee", false, true)]);
 }
+
+// ------------------------------------------------------ if as a value
+
+/// `if (c) a else b` used as a value (t27c emits it as written): the arms
+/// take the result type (a return, a typed binding, a parameter) or, with
+/// none, their peer type; only the taken arm runs, so a trap in the other
+/// never fires; strings and structs select the arm's address; a condition
+/// known at compile time picks its arm and the other is not lowered; and an
+/// arm is evaluated with temps live around it.
+#[test]
+fn if_expression_runs_only_the_taken_arm() {
+    let src = "module ie;
+
+const PHI: f64 = 1.618;
+
+struct P {
+    x: u32,
+    y: u32,
+}
+
+fn relu(x: i32) i32 {
+    return if (x > 0) x else 0;
+}
+
+fn safe_div(n: u32, d: u32) u32 {
+    return if (d != 0) n / d else 0;
+}
+
+fn bump(x: u8) u8 {
+    return if (x < 100) x else x + 200;
+}
+
+fn sign(x: i32) i32 {
+    return if (x > 0) 1 else if (x < 0) -1 else 0;
+}
+
+fn absd(x: f64) f64 {
+    let d = if (x < PHI) PHI - x else x - PHI;
+    return d;
+}
+
+fn name(code: []const u8) []const u8 {
+    const n = if (code == \"A\") {
+        \"alfa\"
+    } else if (code == \"B\") {
+        \"bravo\"
+    } else {
+        \"unknown\"
+    };
+    return n;
+}
+
+fn pick(c: bool, a: P, b: P) u32 {
+    const p = if (c) a else b;
+    return p.x * 10 + p.y;
+}
+
+fn wide(a: u8, b: u32, c: bool) u32 {
+    return b + 2 * (if (c) a else b);
+}
+
+fn deep(a: u32, b: u32, c: u32, d: u32, e: u32, f: u32, g: u32, h: u32) u32 {
+    return a + (b + (c + (d + (e + (f + (g + (if (h > 4) h * 3 else h + 1)))))));
+}
+
+fn fixed() u32 {
+    const k = if (true) 7 else 9;
+    return k;
+}
+
+test relu_works {
+    assert(relu(5) == 5);
+    assert(relu(-3) == 0);
+}
+
+test untaken_arm_does_not_trap {
+    assert(safe_div(9, 0) == 0);
+    assert(safe_div(9, 3) == 3);
+    assert(bump(7) == 7);
+}
+
+test taken_arm_traps {
+    assert(bump(150) == 94);
+}
+
+test chain_and_float {
+    assert(sign(-4) == -1);
+    assert(sign(4) == 1);
+    assert(sign(0) == 0);
+    assert(absd(1.0) > 0.617);
+    assert(absd(1.0) < 0.619);
+    assert(absd(2.0) > 0.381);
+}
+
+test strings_and_structs {
+    assert(name(\"B\") == \"bravo\");
+    assert(name(\"Z\") == \"unknown\");
+    assert(name(\"A\").len == 4);
+    assert(pick(true, P { x: 1, y: 2 }, P { x: 3, y: 4 }) == 12);
+    assert(pick(false, P { x: 1, y: 2 }, P { x: 3, y: 4 }) == 34);
+}
+
+test peers_and_temps {
+    assert(wide(5, 100, true) == 110);
+    assert(wide(5, 100, false) == 300);
+    assert(deep(1, 1, 1, 1, 1, 1, 1, 5) == 22);
+    assert(deep(1, 1, 1, 1, 1, 1, 1, 2) == 10);
+    assert(fixed() == 7);
+}
+";
+    let r = run(src);
+    assert_eq!(
+        names_ok(&r),
+        vec![
+            ("relu_works", false, true),
+            ("untaken_arm_does_not_trap", false, true),
+            ("taken_arm_traps", false, false),
+            ("chain_and_float", false, true),
+            ("strings_and_structs", false, true),
+            ("peers_and_temps", false, true),
+        ]
+    );
+    let t = r.iter().find(|x| x.0 == "taken_arm_traps").unwrap();
+    assert_eq!(t.2, Err((TrapKind::Overflow, 19)));
+    // Refused under names of their own: Zig cannot type the first two, and
+    // the reference misprints the third.
+    let cases = [
+        ("fn f(c: bool, a: u32, b: u32) u32 { const k = if (c) 1 else 2; return k; }\n", "ExprIf(comptime arms)"),
+        ("fn f(c: bool, a: u32, b: u32) u32 { return 1 + if (c) 1 else 2; }\n", "ExprIf(comptime arms)"),
+        // Printed `if (c) a else b + 1`: the `+ 1` lands in the else arm.
+        ("fn f(c: bool, a: u32, b: u32) u32 { return (if (c) a else b) + 1; }\n", "ExprIf(left operand)"),
+    ];
+    for (body, construct) in cases {
+        let m = rejected(&format!("module ir;\n\n{}test t {{ assert(f(true, 1, 2) == 1); }}\n", body));
+        assert!(m.starts_with(&format!("t27b: unsupported construct {} at line", construct)), "{}: {}", body, m);
+    }
+}

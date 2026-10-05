@@ -302,6 +302,12 @@ struct Lower<'a> {
     /// Lowering a fn outside `analyzed`: Zig compiles a fn body only when
     /// something analyzed references it, so a body stub there is never seen.
     unanalyzed_fn: bool,
+    /// `if` expressions (by address) that the reference's Zig backend prints
+    /// without the parentheses the source has: the left operand of a binary
+    /// operator, or the base of a field access or index. `(if (c) a else b)
+    /// + 1` comes out as `if (c) a else b + 1`, which Zig reads with the `+ 1`
+    /// inside the else arm, so no lowering of the source agrees with it.
+    misprinted_if: HashSet<usize>,
 }
 
 /// Lower a parsed module. All rejected constructs are returned (at most one per
@@ -390,6 +396,7 @@ fn lower_mode<'a>(
         decl_int: None,
         analyzed: HashSet::new(),
         unanalyzed_fn: false,
+        misprinted_if: HashSet::new(),
     };
     let module = if ast.kind == NodeKind::Module {
         ast.name.clone()
@@ -414,6 +421,7 @@ fn lower_mode<'a>(
     }
 
     l.analyzed = analyzed_fns(&items);
+    misprinted_ifs(ast, &mut l.misprinted_if);
 
     // Pass 1: signatures and constant declarations.
     let mut fn_nodes: Vec<&Node> = Vec::new();
@@ -2117,6 +2125,10 @@ impl<'a> Lower<'a> {
 
     fn cond(&mut self, n: &Node) -> R<Expr> {
         let v = self.expr(n)?;
+        self.cond_val(v)
+    }
+
+    fn cond_val(&mut self, v: Val) -> R<Expr> {
         match v {
             // Recovery mode: stand in a constant so the branches are lowered.
             Val::Poison => Ok(Expr { ty: Ty::Bool, kind: ExprKind::Const(0) }),
@@ -2422,6 +2434,7 @@ impl<'a> Lower<'a> {
             NodeKind::ExprArrayLiteral => {
                 self.reject("ExprArrayLiteral", "array literal with no result type".into())
             }
+            NodeKind::ExprIf => self.if_expr(n, None),
             NodeKind::ExprStructLit => {
                 if n.name.is_empty() {
                     return self.reject("ExprStructLit", "anonymous `.{}` literal with no result type".into());
@@ -3709,6 +3722,13 @@ impl<'a> Lower<'a> {
     /// Evaluate `n` as a value of type `want`: a struct literal takes its
     /// type from here, so it may be anonymous (`.{ ... }`).
     fn expr_as(&mut self, n: &Node, want: &LTy) -> R<Val> {
+        if n.kind == NodeKind::ExprIf {
+            self.see(n);
+            return match self.if_expr(n, Some(want)) {
+                Err(()) if self.recover => Ok(Val::Poison),
+                r => r,
+            };
+        }
         if let Some(v) = self.enum_literal(n, want)? {
             return Ok(v);
         }
@@ -3752,6 +3772,84 @@ impl<'a> Lower<'a> {
         }
         let v = self.expr(n)?;
         self.coerce_to(v, want)
+    }
+
+    /// `if (c) a else b` used as a value; t27c's Zig backend emits it as
+    /// written. A condition known at compile time picks its arm and the other
+    /// is not lowered at all (Zig does not analyze it). Otherwise both arms
+    /// take the result type `want` -- or, with none, Zig's peer type -- and
+    /// only the taken one runs (`ExprKind::Select`); an aggregate (a string,
+    /// a slice, a struct, an array) selects the address of its arm.
+    fn if_expr(&mut self, n: &Node, want: Option<&LTy>) -> R<Val> {
+        if n.children.len() != 3 {
+            return self.reject("ExprIf(no else)", "`if` used as a value without `else`".into());
+        }
+        if self.misprinted_if.contains(&(n as *const Node as usize)) {
+            return self.reject(
+                "ExprIf(left operand)",
+                "the reference prints this `if` without its parentheses, so its last arm takes in what follows".into(),
+            );
+        }
+        let c = self.expr(&n.children[0])?;
+        if c.is_poison() {
+            // Recovery mode: still name what the arms use.
+            for a in &n.children[1..] {
+                let _ = self.if_arm(a, want)?;
+            }
+            return Err(());
+        }
+        let cond = self.cond_val(c)?;
+        if let ExprKind::Const(k) = cond.kind {
+            return self.if_arm(&n.children[if k != 0 { 1 } else { 2 }], want);
+        }
+        let a = self.if_arm(&n.children[1], want)?;
+        let b = self.if_arm(&n.children[2], want)?;
+        if a.is_poison() || b.is_poison() {
+            return Err(());
+        }
+        let select = |cond: Expr, x: Expr, y: Expr| Expr {
+            ty: x.ty,
+            kind: ExprKind::Select { cond: Box::new(cond), then: Box::new(x), els: Box::new(y) },
+        };
+        let in_memory = |v: &Val| matches!(v, Val::S(..)) || matches!(v, Val::M(p) if p.ty == LTy::Str);
+        let (a, b) = match want {
+            Some(_) => (a, b),
+            None if matches!(a, Val::Ct(_) | Val::Cf(..)) && matches!(b, Val::Ct(_) | Val::Cf(..)) => {
+                return self.reject(
+                    "ExprIf(comptime arms)",
+                    "both arms are untyped literals and the condition is runtime: Zig needs a result type".into(),
+                )
+            }
+            // Peer type of strings (and of a string and a literal) is `[]const u8`.
+            None if in_memory(&a) || in_memory(&b) => (self.coerce_to(a, &LTy::Str)?, self.coerce_to(b, &LTy::Str)?),
+            None => match (a, b) {
+                (Val::M(p), Val::M(q)) if p.ty == q.ty => (Val::M(p), Val::M(q)),
+                (Val::P(x, t), Val::P(y, u)) if t == u => (Val::P(x, t), Val::P(y, u)),
+                (a, b) => {
+                    let (x, y) = self.peer(a, b, "if")?;
+                    return Ok(Val::E(select(cond, x, y)));
+                }
+            },
+        };
+        match (a, b) {
+            (Val::M(p), Val::M(q)) if p.ty == q.ty => {
+                let addr = select(cond, addr_of(&p), addr_of(&q));
+                Ok(Val::M(Place { addr, off: 0, ty: p.ty, mutable: false, temp: None }))
+            }
+            (Val::P(x, t), Val::P(y, u)) if t == u && x.ty == y.ty => Ok(Val::P(select(cond, x, y), t)),
+            (Val::E(x), Val::E(y)) if x.ty == y.ty => Ok(Val::E(select(cond, x, y))),
+            (a, b) => {
+                let (a, b) = (self.val_desc(&a), self.val_desc(&b));
+                self.reject("ExprIf", format!("arms of different shapes: {} and {}", a, b))
+            }
+        }
+    }
+
+    fn if_arm(&mut self, n: &Node, want: Option<&LTy>) -> R<Val> {
+        match want {
+            Some(t) => self.expr_as(n, t),
+            None => self.expr(n),
+        }
     }
 
     /// `@floatFromInt(x)` / `@intFromFloat(x)` with result type `ty`, Zig's
@@ -5049,6 +5147,23 @@ fn names_in(ns: &[Node], out: &mut HashSet<String>) {
 /// top-level item that is not a fn (tests; invariants, which t27c emits as
 /// `comptime` blocks; benches; constants and vars), and a fn is reached when
 /// a reached body names it. `pub` does not make a fn a root, nor does `main`.
+/// Collect the `if` expressions the reference prints unparenthesized where the
+/// source parenthesized them (see `Lower::misprinted_if`): the first child of
+/// a binary operator, a field access or an index. An `if` on the right of a
+/// binary operator, or as a call argument, prints with the meaning it has.
+fn misprinted_ifs(n: &Node, out: &mut HashSet<usize>) {
+    if matches!(n.kind, NodeKind::ExprBinary | NodeKind::ExprFieldAccess | NodeKind::ExprIndex) {
+        if let Some(c) = n.children.first() {
+            if c.kind == NodeKind::ExprIf {
+                out.insert(c as *const Node as usize);
+            }
+        }
+    }
+    for c in &n.children {
+        misprinted_ifs(c, out);
+    }
+}
+
 fn analyzed_fns(items: &[&Node]) -> HashSet<String> {
     let mut bodies: HashMap<&str, Vec<&Node>> = HashMap::new();
     let mut work: HashSet<String> = HashSet::new();

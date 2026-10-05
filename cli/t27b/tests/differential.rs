@@ -295,6 +295,16 @@ impl<'r> Gen<'r> {
                 return e;
             }
         }
+        if r < 96 && self.rng.chance(50) {
+            // `if (c) a else b` as a value: only the taken arm may trap.
+            let cond = self.expr(Ty::Bool, depth - 1);
+            let then = self.expr(ty, depth - 1);
+            let els = self.expr(ty, depth - 1);
+            return Expr {
+                ty,
+                kind: ExprKind::Select { cond: Box::new(cond), then: Box::new(then), els: Box::new(els) },
+            };
+        }
         if r < 96 {
             return self.chain(ty);
         }
@@ -1126,6 +1136,9 @@ fn show_expr(p: &Program, f: &Func, e: &Expr) -> String {
             let mut b = String::new();
             show_block(p, f, stmts, 0, &mut b);
             format!("seq{{ {}; {} }}", b.trim().replace('\n', " "), show_expr(p, f, value))
+        }
+        ExprKind::Select { cond, then, els } => {
+            format!("(if {} {} else {})", show_expr(p, f, cond), show_expr(p, f, then), show_expr(p, f, els))
         }
     }
 }
