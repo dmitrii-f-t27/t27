@@ -151,6 +151,10 @@ enum LTy {
     /// A plain enum (index into `Lower::enums`): its tag, an integer of
     /// the register type given, in one register.
     Enum(u32, Ty),
+    /// `?T`: the payload (a `T`) at offset 0, then one byte, 1 when there
+    /// is a value and 0 for `null`, the whole rounded up to `T`'s
+    /// alignment. Lives in memory, like a struct.
+    Opt(Box<LTy>),
 }
 
 /// `ty` at `addr + off`. `addr` is evaluated exactly once by whatever
@@ -1163,6 +1167,9 @@ impl<'a> Lower<'a> {
                 LTy::Slice(..) => {
                     return self.reject("ConstDecl(slice)", format!("`{}` is a module-level slice", node.name))
                 }
+                LTy::Opt(_) => {
+                    return self.reject("ConstDecl(?T)", format!("`{}` is a module-level optional", node.name))
+                }
                 t @ LTy::Enum(..) => {
                     let v = self.expr_as(init, &t)?;
                     return match v {
@@ -1471,6 +1478,12 @@ impl<'a> Lower<'a> {
             NodeKind::StmtIf => {
                 if n.children.len() < 2 || n.children.len() > 3 {
                     return self.reject("StmtIf", "unexpected shape".into());
+                }
+                // t27c's Zig backend drops the capture, so the body names an
+                // undeclared identifier: no reference to agree with.
+                if !n.params.is_empty() {
+                    let names: Vec<&str> = n.params.iter().map(|(a, _)| a.as_str()).collect();
+                    return self.reject("StmtIf(capture)", format!("`|{}|`", names.join(", ")));
                 }
                 let cond = self.cond(&n.children[0])?;
                 let then = self.block(&n.children[1])?;
@@ -2745,10 +2758,16 @@ impl<'a> Lower<'a> {
                     };
                     return Ok(Val::E(Expr { ty: Ty::Bool, kind }));
                 }
+                if (op == "==" || op == "!=") && (self.is_null(&n.children[0]) || self.is_null(&n.children[1])) {
+                    return self.null_compare(&op, n);
+                }
                 let (x, y) = (&n.children[0], &n.children[1]);
                 let lit = |n: &Node| n.kind == NodeKind::ExprEnumValue;
                 let ordered = (self.names_variant(x) || self.names_variant(y)) && !lit(x) && !lit(y);
                 let (a, b) = self.operands(x, y)?;
+                if let Some(v) = self.opt_compare(&op, &a, &b)? {
+                    return Ok(v);
+                }
                 if let Some(v) = self.enum_compare(&op, &a, &b, ordered)? {
                     return Ok(v);
                 }
@@ -3493,6 +3512,13 @@ impl<'a> Lower<'a> {
     /// pointer is only named, so a struct may point to itself.
     fn lty_in(&mut self, name: &str, by_value: bool) -> R<LTy> {
         let t = name.trim();
+        if let Some(rest) = t.strip_prefix('?') {
+            let inner = self.lty_in(rest, by_value)?;
+            if matches!(inner, LTy::Opt(_)) {
+                return self.reject("type ?T(??T)", format!("`{}`: an optional of an optional", t));
+            }
+            return Ok(LTy::Opt(Box::new(inner)));
+        }
         if let Some(rest) = t.strip_prefix('*') {
             let rest = rest.trim_start();
             let (inner, mutable) = match rest.strip_prefix("const ") {
@@ -4138,6 +4164,11 @@ impl<'a> Lower<'a> {
             LTy::Ptr(..) => Ok((8, 8)),
             LTy::Enum(_, ty) => Ok((ty.bytes(), ty.bytes())),
             LTy::Str | LTy::Slice(..) => Ok((16, 8)),
+            LTy::Opt(inner) => {
+                let (s, a) = self.size_align(inner)?;
+                let a = a.max(1);
+                Ok(((s + 1).div_ceil(a) * a, a))
+            }
             LTy::Struct(id) => {
                 self.layout(*id)?;
                 let sd = &self.structs[*id as usize];
@@ -4165,6 +4196,7 @@ impl<'a> Lower<'a> {
             LTy::Str => "str".to_string(),
             LTy::Arr(inner, n) => format!("[{}]{}", n, self.type_name(inner)),
             LTy::Slice(inner, m) => format!("[]{}{}", if *m { "" } else { "const " }, self.type_name(inner)),
+            LTy::Opt(inner) => format!("?{}", self.type_name(inner)),
         }
     }
 
@@ -4190,6 +4222,21 @@ impl<'a> Lower<'a> {
                 Err(()) if self.recover => Ok(Val::Poison),
                 r => r,
             };
+        }
+        if let LTy::Opt(inner) = want {
+            if self.is_null(n) {
+                self.see(n);
+                return self.opt_temp(want, None);
+            }
+            // A literal or builtin takes its type from the payload's.
+            let typed = matches!(
+                n.kind,
+                NodeKind::ExprStructLit | NodeKind::ExprArrayLiteral | NodeKind::ExprEnumValue | NodeKind::ExprUnary
+            ) || is_repeat_op(n)
+                || (n.kind == NodeKind::ExprCall && n.name.starts_with('@'));
+            let inner = (**inner).clone();
+            let v = if typed { self.expr_as(n, &inner)? } else { self.expr(n)? };
+            return self.coerce_to(v, want);
         }
         if let Some(v) = self.enum_literal(n, want)? {
             return Ok(v);
@@ -4666,6 +4713,170 @@ impl<'a> Lower<'a> {
         Ok(())
     }
 
+    /// `null` as a value: the identifier, unless a local shadows it.
+    fn is_null(&self, n: &Node) -> bool {
+        n.kind == NodeKind::ExprIdentifier && n.name == "null" && self.lookup("null").is_none()
+    }
+
+    /// A fresh `?T` temporary (`want` is `?T`): `null` when `payload` is
+    /// None, else holding `payload`, a value already of type `T`.
+    fn opt_temp(&mut self, want: &LTy, payload: Option<Val>) -> R<Val> {
+        let LTy::Opt(inner) = want else { unreachable!() };
+        let inner = (**inner).clone();
+        let (s, _) = self.size_align(&inner)?;
+        let k = self.new_slot(want)?;
+        let mut stmts = Vec::new();
+        let has = payload.is_some();
+        if let Some(v) = payload {
+            if reg_ty(&inner).is_some() {
+                let value = self.reg(v)?;
+                stmts.push(Stmt::Store { addr: slot_expr(k), off: 0, value });
+            } else {
+                match v {
+                    Val::M(src) if s > 0 => stmts.push(Stmt::Copy { dst: slot_expr(k), src: addr_of(&src), size: s }),
+                    Val::M(src) => {
+                        if !pure_addr(&src.addr) {
+                            stmts.push(Stmt::Eval(src.addr));
+                        }
+                    }
+                    Val::Poison => return Err(()),
+                    v => {
+                        let d = self.val_desc(&v);
+                        return self.reject("type mismatch", format!("internal: optional payload {} not in memory", d));
+                    }
+                }
+            }
+        }
+        let flag = Expr { ty: Ty::Bool, kind: ExprKind::Const(has as i128) };
+        stmts.push(Stmt::Store { addr: slot_expr(k), off: s, value: flag });
+        let addr = Expr { ty: Ty::Ptr, kind: ExprKind::Seq { stmts, value: Box::new(slot_expr(k)) } };
+        Ok(Val::M(Place { addr, off: 0, ty: want.clone(), mutable: false, temp: Some(k) }))
+    }
+
+    /// `x == null` / `x != null` (`n`, one operand the literal `null`):
+    /// the has-value flag of the optional `x`.
+    fn null_compare(&mut self, op: &str, n: &Node) -> R<Val> {
+        let (x, y) = (&n.children[0], &n.children[1]);
+        if self.is_null(x) && self.is_null(y) {
+            return self.reject("ExprBinary(null)", format!("`null {} null`", op));
+        }
+        let (other, lit) = if self.is_null(x) { (y, x) } else { (x, y) };
+        self.see(lit);
+        let p = match self.expr(other)? {
+            Val::M(p) if matches!(p.ty, LTy::Opt(_)) => p,
+            Val::Poison => return Err(()),
+            v => {
+                let d = match &v {
+                    Val::M(p) => self.type_name(&p.ty),
+                    _ => self.val_desc(&v),
+                };
+                return self.reject("ExprBinary(null)", format!("`{}` compares {} with null", op, d));
+            }
+        };
+        let LTy::Opt(inner) = &p.ty else { unreachable!() };
+        let inner = (**inner).clone();
+        let (s, _) = self.size_align(&inner)?;
+        let flag = Expr { ty: Ty::Bool, kind: ExprKind::Load { addr: Box::new(p.addr), off: p.off + s } };
+        let e = if op == "==" { Expr { ty: Ty::Bool, kind: ExprKind::Not(Box::new(flag)) } } else { flag };
+        Ok(Val::E(e))
+    }
+
+    /// `x == v` / `x != v` with `x` a `?T` (`T` a scalar) and `v` a `T`,
+    /// either way round: Zig's comparison of an optional with a payload,
+    /// equal only when `x` holds a value equal to `v`. None when neither
+    /// operand is an optional.
+    fn opt_compare(&mut self, op: &str, a: &Val, b: &Val) -> R<Option<Val>> {
+        let is_opt = |v: &Val| matches!(v, Val::M(p) if matches!(p.ty, LTy::Opt(_)));
+        if !is_opt(a) && !is_opt(b) {
+            return Ok(None);
+        }
+        let what = "ExprBinary(?T)";
+        if is_opt(a) && is_opt(b) {
+            return self.reject(what, format!("`{}` of two optionals", op));
+        }
+        if op != "==" && op != "!=" {
+            return self.reject(what, format!("`{}` on an optional", op));
+        }
+        let left = is_opt(a);
+        let (p, other) = if left { (a.clone(), b.clone()) } else { (b.clone(), a.clone()) };
+        let Val::M(p) = p else { unreachable!() };
+        // The payload is read only when there is one, so the other operand
+        // is evaluated inside the check: it must have no effect.
+        match &other {
+            Val::Ct(_) | Val::Cf(..) => {}
+            Val::E(e) | Val::P(e, _) if matches!(e.kind, ExprKind::Const(_) | ExprKind::Var(_)) => {}
+            Val::Poison => return Err(()),
+            _ => return self.reject(what, "an optional compared with a value that has effects".into()),
+        }
+        let LTy::Opt(inner) = p.ty.clone() else { unreachable!() };
+        if !matches!(*inner, LTy::S(_)) {
+            let t = self.type_name(&p.ty);
+            return self.reject(what, format!("`{}` on {}", op, t));
+        }
+        let (s, _) = self.size_align(&inner)?;
+        let mut stmts = Vec::new();
+        let (addr, off) = if pure_addr(&p.addr) {
+            (p.addr.clone(), p.off)
+        } else {
+            let k = self.new_slot(&LTy::Ptr(Box::new(LTy::S(Ty::U8)), false))?;
+            stmts.push(Stmt::Store { addr: slot_expr(k), off: 0, value: addr_of(&p) });
+            (Expr { ty: Ty::Ptr, kind: ExprKind::Load { addr: Box::new(slot_expr(k)), off: 0 } }, 0)
+        };
+        let flag = Expr { ty: Ty::Bool, kind: ExprKind::Load { addr: Box::new(addr.clone()), off: off + s } };
+        let payload = self.place_value(Place { addr, off, ty: *inner, mutable: false, temp: None })?;
+        let (l, r) = if left { (payload, other) } else { (other, payload) };
+        let cmp = self.binary(op, l, r)?;
+        let cmp = self.coerce(cmp, Ty::Bool)?;
+        let els = Expr { ty: Ty::Bool, kind: ExprKind::Const((op == "!=") as i128) };
+        let e = Expr { ty: Ty::Bool, kind: ExprKind::Select { cond: Box::new(flag), then: Box::new(cmp), els: Box::new(els) } };
+        if stmts.is_empty() {
+            return Ok(Some(Val::E(e)));
+        }
+        Ok(Some(Val::E(Expr { ty: Ty::Bool, kind: ExprKind::Seq { stmts, value: Box::new(e) } })))
+    }
+
+    /// `x.?` (`base` is `x`): the payload of optional `x`, after a check
+    /// that traps like Zig's "attempt to use null value".
+    fn unwrap(&mut self, base: &Node) -> R<Place> {
+        let p = match self.expr(base)? {
+            Val::M(p) if matches!(p.ty, LTy::Opt(_)) => p,
+            Val::Poison => return Err(()),
+            v => {
+                let d = self.val_desc(&v);
+                return self.reject("ExprFieldAccess(.?)", format!("`.?` of {}, not an optional", d));
+            }
+        };
+        let LTy::Opt(inner) = p.ty.clone() else { unreachable!() };
+        let (s, _) = self.size_align(&inner)?;
+        let mut stmts = Vec::new();
+        // The address is read twice (flag, payload): pin it when it has
+        // effects.
+        let (addr, off) = if pure_addr(&p.addr) {
+            (p.addr.clone(), p.off)
+        } else {
+            let k = self.new_slot(&LTy::Ptr(Box::new(LTy::S(Ty::U8)), false))?;
+            stmts.push(Stmt::Store { addr: slot_expr(k), off: 0, value: addr_of(&p) });
+            (Expr { ty: Ty::Ptr, kind: ExprKind::Load { addr: Box::new(slot_expr(k)), off: 0 } }, 0)
+        };
+        let flag = Expr { ty: Ty::Bool, kind: ExprKind::Load { addr: Box::new(addr.clone()), off: off + s } };
+        let what = format!("`.?` of {}", self.type_name(&p.ty));
+        let site = self.site(TrapKind::Null, what, Ty::U64);
+        let check = Expr {
+            ty: Ty::U64,
+            kind: ExprKind::Bounds {
+                idx: Box::new(Expr { ty: Ty::U64, kind: ExprKind::Const(0) }),
+                len: Box::new(Expr { ty: Ty::U64, kind: ExprKind::Widen(Box::new(flag)) }),
+                site,
+            },
+        };
+        stmts.push(Stmt::Eval(check));
+        let addr = Expr { ty: Ty::Ptr, kind: ExprKind::Seq { stmts, value: Box::new(addr) } };
+        if let LTy::Struct(id) = *inner {
+            self.layout(id)?;
+        }
+        Ok(Place { addr, off, ty: *inner, mutable: p.mutable && p.temp.is_none(), temp: None })
+    }
+
     fn coerce_to(&mut self, v: Val, want: &LTy) -> R<Val> {
         if v.is_poison() {
             // Recovery mode: the caller decides what an unknown value costs.
@@ -4748,6 +4959,18 @@ impl<'a> Lower<'a> {
                 v => {
                     let (a, b) = (self.type_name(want), self.val_desc(&v));
                     self.reject("type mismatch", format!("expected {}, found {}", a, b))
+                }
+            },
+            // A `T` coerces to `?T`: the value, in a temporary, with the flag
+            // set.
+            LTy::Opt(inner) => match v {
+                Val::M(p) if &p.ty == want => Ok(Val::M(p)),
+                v => {
+                    let inner = (**inner).clone();
+                    match self.coerce_to(v, &inner)? {
+                        Val::Poison => Ok(Val::Poison),
+                        v => self.opt_temp(want, Some(v)),
+                    }
                 }
             },
             LTy::Struct(_) => match v {
@@ -4919,6 +5142,24 @@ impl<'a> Lower<'a> {
             && fresh
             && is_agg(&t)
             && self.sigs.get(&n.name).is_some_and(|s| s.ret == Some(t.clone()));
+        if let LTy::Opt(inner) = &t {
+            if self.is_null(n) {
+                let (s, _) = self.size_align(inner)?;
+                let flag = Expr { ty: Ty::Bool, kind: ExprKind::Const(0) };
+                out.push(Stmt::Store { addr: dst.addr, off: dst.off + s, value: flag });
+                return Ok(());
+            }
+            if in_place {
+                let (call, _, _) = self.call(n, Some(addr_of(&dst)))?;
+                out.push(Stmt::Eval(call));
+                return Ok(());
+            }
+            // Built aside first: the value may read `dst`.
+            return match self.expr_as(n, &t)? {
+                Val::M(src) => self.copy(&dst, src, out),
+                _ => Err(()),
+            };
+        }
         if matches!(t, LTy::Str | LTy::Slice(..)) && !in_place {
             let v = if t == LTy::Str && n.kind != NodeKind::ExprUnary { self.expr(n)? } else { self.expr_as(n, &t)? };
             return match v {
@@ -5364,6 +5605,9 @@ impl<'a> Lower<'a> {
             return self.reject("ExprFieldAccess", "unexpected shape".into());
         }
         let base = &n.children[0];
+        if n.name == "?" {
+            return self.unwrap(base).map(Ok);
+        }
         if n.name == "*" {
             return match self.expr(base)? {
                 Val::P(e, LTy::Ptr(inner, m)) => {
@@ -5426,6 +5670,10 @@ impl<'a> Lower<'a> {
             }
             let kind = ExprKind::Seq { stmts: vec![Stmt::Eval(p.addr)], value: Box::new(c) };
             return Ok(Err(Val::E(Expr { ty: Ty::U64, kind })));
+        }
+        if let LTy::Opt(_) = p.ty {
+            let t = self.type_name(&p.ty);
+            return self.reject("ExprFieldAccess(?T)", format!("`.{}` of a {} without `.?`", n.name, t));
         }
         let LTy::Struct(id) = p.ty else { unreachable!() };
         let fields = self.fields(id)?;
@@ -5573,6 +5821,7 @@ impl<'a> Lower<'a> {
             },
             LTy::Struct(_) | LTy::Arr(..) if self.holds_str(t)? => self.const_agg(c, t),
             LTy::Struct(_) | LTy::Arr(..) => self.rodata(c, t.clone()),
+            LTy::Opt(_) => self.reject("ConstDecl(?T)", "an optional in a module-level constant".into()),
             LTy::S(ty) => {
                 let v = self.expr_as(c, t)?;
                 let e = self.coerce(v, *ty)?;
@@ -5798,6 +6047,7 @@ impl<'a> Lower<'a> {
             return Ok(());
         }
         match t {
+            LTy::Opt(_) => self.reject("ConstDecl(?T)", "an optional in a module-level constant".into()),
             LTy::S(ty) => {
                 let v = self.expr(n)?;
                 let e = self.coerce(v, *ty)?;
@@ -5985,14 +6235,14 @@ fn reg_ty(t: &LTy) -> Option<Ty> {
         LTy::S(ty) => Some(*ty),
         LTy::Ptr(..) => Some(Ty::Ptr),
         LTy::Enum(_, ty) => Some(*ty),
-        LTy::Struct(_) | LTy::Str | LTy::Arr(..) | LTy::Slice(..) => None,
+        LTy::Struct(_) | LTy::Str | LTy::Arr(..) | LTy::Slice(..) | LTy::Opt(_) => None,
     }
 }
 
 /// Lives in memory and is passed by reference: a struct, a `str`, an
 /// array or a slice.
 fn is_agg(t: &LTy) -> bool {
-    matches!(t, LTy::Struct(_) | LTy::Str | LTy::Arr(..) | LTy::Slice(..))
+    matches!(t, LTy::Struct(_) | LTy::Str | LTy::Arr(..) | LTy::Slice(..) | LTy::Opt(_))
 }
 
 /// The place of element `i` (a constant) of array place `p`.
