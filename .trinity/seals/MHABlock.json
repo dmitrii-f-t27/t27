@@ -5,7 +5,10 @@
   "gen_hash_zig": "sha256:829649544e996d6986645dffed4097197b62405ab44e46e6b41f17f8e85ea078",
   "module": "MHABlock",
   "ring": 12,
-  "sealed_at": "2026-10-02T11:02:51Z",
+  "sealed_at": "2026-10-05T15:27:58Z",
   "spec_hash": "sha256:0e44425fdc3c0e0263e73e02eef7da13d93681f879467a4bfe90bfd7785c4aa9",
-  "spec_path": "specs/ml/transformer/mha_block.t27"
+  "spec_path": "specs/ml/transformer/mha_block.t27",
+  "tests": {
+    "blocked": "does not compile: /tmp/t27c-test-report-mha_block-2906244/spec.zig:61:19: error: use of undeclared identifier 'norm'"
+  }
 }
