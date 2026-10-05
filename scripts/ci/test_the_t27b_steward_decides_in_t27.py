@@ -51,7 +51,7 @@ def runs_tests(src: Path) -> tuple[int, str]:
 
 
 code, out = runs_tests(GEN)
-check(code == 0 and "104 tests passed" in out, f"the generated C passes the spec's tests ({code}: {out})")
+check(code == 0 and "111 tests passed" in out, f"the generated C passes the spec's tests ({code}: {out})")
 
 text = GEN.read_text()
 needle = "return (((in_ref * 1000) + (reference / 2)) / reference);"
@@ -139,6 +139,12 @@ check((r.check_effect("FAILURE", "SUCCESS", False), r.check_effect("FAILURE", "F
       "ready: a non-required red blocks only if master is green; a required check must be SUCCESS (#6244)")
 check(r.check_effect("FAILURE", "PENDING", False) == "WAIT",
       "ready: a non-required red waits while master's newest run of it is still going (Q29)")
+check((r.master_state(False, "SUCCESS"), r.master_state(False, "FAILURE"), r.master_state(False, "ABSENT"),
+       r.master_state(True, "FAILURE"), r.master_state(True, "SUCCESS"), r.master_state(True, "ABSENT"))
+      == ("SUCCESS", "FAILURE", "ABSENT", "FAILURE", "PENDING", "PENDING"),
+      "ready: past a running master tip red stays red; green or no verdict is PENDING (#6334)")
+check(r.pr_ready(True, "MERGEABLE", True, [None], ["WAIT"]) == "WAIT",
+      "ready: a non-required WAIT holds the PR -- #6333 merged on 'master PENDING' (#6334)")
 check((r.pr_ready(True, "MERGEABLE", True, [None, None], [None]), r.pr_ready(True, "MERGEABLE", True, [None], ["BLOCK"]),
        r.pr_ready(True, "CONFLICTING", True, ["BLOCK"], []), r.pr_ready(False, "MERGEABLE", True, [], []))
       == ("READY", "BLOCKED", "CONFLICT", "CLOSED"), "ready: the spec folds the effects into one verdict")

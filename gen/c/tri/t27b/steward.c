@@ -38,6 +38,7 @@ uint8_t checkout_code(bool ok, bool recloned);
 bool cap_rise_is_new(uint32_t not_pass, uint32_t old_cap, uint32_t new_not_pass);
 bool is_alarm(uint8_t t, uint8_t reference);
 uint8_t check_effect(uint8_t state, uint8_t master, bool required);
+uint8_t master_state(bool running, uint8_t last);
 uint8_t effect_fold(uint8_t acc, uint8_t e);
 uint8_t pr_ready(bool open, uint8_t mergeable, bool base_master, uint8_t required, uint8_t other);
 uint8_t watch_action(uint8_t verdict, uint8_t parent);
@@ -315,6 +316,16 @@ uint8_t check_effect(uint8_t state, uint8_t master, bool required) {
     return 0;
 }
 
+uint8_t master_state(bool running, uint8_t last) {
+    if ((running == false)) {
+        return last;
+    }
+    if ((last == 2)) {
+        return 2;
+    }
+    return 1;
+}
+
 uint8_t effect_fold(uint8_t acc, uint8_t e) {
     if ((e > acc)) {
         return e;
@@ -339,6 +350,9 @@ uint8_t pr_ready(bool open, uint8_t mergeable, bool base_master, uint8_t require
         return 5;
     }
     if ((required == 1)) {
+        return 1;
+    }
+    if ((other == 1)) {
         return 1;
     }
     if ((mergeable != 0)) {
@@ -711,6 +725,32 @@ void test_gate_other_red_master_running_waits(void) {
     assert_eq(check_effect(2, 1, false), 1);
 }
 
+void test_gate_master_settled_is_its_verdict(void) {
+    assert_eq(master_state(false, 0), 0);
+    assert_eq(master_state(false, 2), 2);
+    assert_eq(master_state(false, 3), 3);
+}
+
+void test_gate_master_running_red_below_stays_red(void) {
+    assert_eq(master_state(true, 2), 2);
+}
+
+void test_gate_master_running_green_below_is_pending(void) {
+    assert_eq(master_state(true, 0), 1);
+}
+
+void test_gate_master_running_no_verdict_is_pending(void) {
+    assert_eq(master_state(true, 3), 1);
+}
+
+void test_gate_other_red_master_running_no_verdict_waits(void) {
+    assert_eq(check_effect(2, master_state(true, 3), false), 1);
+}
+
+void test_gate_other_red_master_red_below_running_passes(void) {
+    assert_eq(check_effect(2, master_state(true, 2), false), 0);
+}
+
 void test_gate_fold(void) {
     assert_eq(effect_fold(effect_fold(effect_fold(0, 1), 0), 2), 2);
     assert_eq(effect_fold(effect_fold(0, 0), 1), 1);
@@ -742,6 +782,10 @@ void test_gate_waits_on_required(void) {
 
 void test_gate_closed_first(void) {
     assert_eq(pr_ready(false, 1, false, 2, 2), 6);
+}
+
+void test_gate_waits_on_other_wait(void) {
+    assert_eq(pr_ready(true, 0, true, 0, 1), 1);
 }
 
 void test_gate_waits_on_mergeable_unknown(void) {
@@ -920,6 +964,12 @@ int main(void) {
     test_gate_other_red_absent_on_master_passes();
     test_gate_other_pending_never_waits();
     test_gate_other_red_master_running_waits();
+    test_gate_master_settled_is_its_verdict();
+    test_gate_master_running_red_below_stays_red();
+    test_gate_master_running_green_below_is_pending();
+    test_gate_master_running_no_verdict_is_pending();
+    test_gate_other_red_master_running_no_verdict_waits();
+    test_gate_other_red_master_red_below_running_passes();
     test_gate_fold();
     test_gate_ready();
     test_gate_conflict_first();
@@ -928,6 +978,7 @@ int main(void) {
     test_gate_blocked_by_other();
     test_gate_waits_on_required();
     test_gate_closed_first();
+    test_gate_waits_on_other_wait();
     test_gate_waits_on_mergeable_unknown();
     test_watch_merges_ready();
     test_watch_waits();
@@ -952,7 +1003,7 @@ int main(void) {
     test_next_score_value();
     test_next_with_tests();
     test_next_with_tests_never_wraps();
-    printf("All %d tests passed.\n", 104);
+    printf("All %d tests passed.\n", 111);
     return 0;
 }
 #endif /* T27_TEST_MAIN */
