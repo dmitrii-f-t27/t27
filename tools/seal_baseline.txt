@@ -2,7 +2,9 @@
 # Remove the line when the seal is fixed; the gate then holds it fixed.
 Binary16.json | dangling | specs/numeric/binary16.t27
 BuildVerify.json | stale | specs/fpga/verification/build_verify.t27 -- tests fail (#5577); seal restored to pre-#5578 by #5580
+ClockDomain_Testbench.json | tests-fail | specs/fpga/testbench/clock_domain_tb.t27 -- compiles since #6315; its tests hang (#6560)
 D2D_Conformance.json | phantom | specs/network/d2d_conformance.t27
+GF16_Accel_Testbench.json | tests-fail | specs/fpga/testbench/gf16_accel_tb.t27 -- compiles since #6315; its tests fail (#6560)
 HuberLoss.json | stale | specs/ml/loss/huber_loss.t27 -- tests fail (#5577); seal restored to pre-#5578 by #5580
 Int4.json | dangling | specs/numeric/int4.t27
 Int8.json | dangling | specs/numeric/int8.t27
@@ -68,6 +70,7 @@ gf16-to-posit16.json | dangling | specs/fpga/gf16_to_posit16.t27
 gf32-to-fp32.json | dangling | specs/fpga/gf32_to_fp32.t27
 graph_TriBellmanFord.json | stale | specs/tri/graph/bellman_ford.t27 -- tests fail (#5577); seal restored to pre-#5578 by #5580
 gwt_model.json | dangling | specs/brain/gwt_model.t27
+isa_Tri27Machine.json | tests-fail | specs/isa/tri27_machine.t27 -- compiles since #6315; 1 of 10 tests fails, u32->i32 @intCast (#6560)
 layers_Residual.json | stale | specs/ml/layers/residual_connection.t27 -- tests fail (#5577); seal restored to pre-#5578 by #5580
 loss_HuberLoss.json | stale | specs/ml/loss/huber_loss.t27 -- tests fail (#5577); seal restored to pre-#5578 by #5580
 loss_KlDivergence.json | stale | specs/ml/loss/kl_divergence.t27 -- tests fail (#5577); seal restored to pre-#5578 by #5580
@@ -111,6 +114,8 @@ simulation_tri-net-system-sim.json | phantom | specs/simulation/tri_net_system_s
 sort_TriMergeSort.json | stale | specs/tri/sort/merge_sort.t27 -- tests fail (#5577); seal restored to pre-#5578 by #5580
 specs_test_array_literal_inline.json | phantom | specs/test_array_literal_inline.t27
 specs_test_ternary_hir.json | phantom | specs/test_ternary_hir.t27
+testbench_ClockDomain_Testbench.json | tests-fail | specs/fpga/testbench/clock_domain_tb.t27 -- compiles since #6315; its tests hang (#6560)
+testbench_GF16_Accel_Testbench.json | tests-fail | specs/fpga/testbench/gf16_accel_tb.t27 -- compiles since #6315; its tests fail (#6560)
 testbench_Timing_Testbench.json | stale | specs/fpga/testbench/timing_tb.t27 -- tests fail (#5577); seal restored to pre-#5578 by #5580
 testbench_tri-net-tb.json | phantom | specs/testbench/tri_net_tb.t27
 transformer_MultiHeadAttn.json | stale | specs/ml/transformer/multi_head_attention.t27 -- tests fail (#5577); seal restored to pre-#5578 by #5580
