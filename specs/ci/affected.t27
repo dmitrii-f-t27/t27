@@ -38,6 +38,8 @@
 
 module CiAffected;
 
+use policy::own_language;
+
 /// select_affected() returns this instead of a count when the answer is "run every spec".
 pub const RUN_ALL : u32 = 0xFFFFFFFF;
 
@@ -89,37 +91,6 @@ pub fn in_list(list: []const u8, s: []const u8, from: usize, to: usize) -> bool 
     return false;
 }
 
-/// Does s[from..to] start with one entry of `list`? Case-sensitive: paths are.
-pub fn has_prefix(list: []const u8, s: []const u8, from: usize, to: usize) -> bool {
-    var i : usize = 0;
-    while (list[i] != LIST_END) {
-        var k : usize = from;
-        var ok : bool = true;
-        while (list[i] != LIST_SEP and list[i] != LIST_END) {
-            if (k >= to) {
-                ok = false;
-            } else {
-                if (s[k] != list[i]) { ok = false; }
-            }
-            k += 1;
-            i += 1;
-        }
-        if (ok) { return true; }
-        if (list[i] == LIST_SEP) { i += 1; }
-    }
-    return false;
-}
-
-/// Is `c` one of the letters of a '$'-terminated letter list?
-pub fn is_letter_of(list: []const u8, c: u8) -> bool {
-    var i : usize = 0;
-    while (list[i] != LIST_END) {
-        if (list[i] == c) { return true; }
-        i += 1;
-    }
-    return false;
-}
-
 /// Index of the extension's dot in the file name of s[from..to], or `to` when there is none. A leading
 /// dot (.gitignore) names the file; it does not start an extension.
 pub fn ext_dot(s: []const u8, from: usize, to: usize) -> usize {
@@ -142,7 +113,7 @@ pub fn ext_dot(s: []const u8, from: usize, to: usize) -> usize {
 pub fn path_class(s: []const u8, from: usize, to: usize) -> u8 {
     if (to <= from) { return C_ALL_UNREADABLE; }
     if (s[from] == '"') { return C_ALL_UNREADABLE; }
-    if (has_prefix(SPECS_ROOT, s, from, to) == false) { return C_ALL_OUTSIDE; }
+    if (own_language::has_prefix(SPECS_ROOT, s, from, to) == false) { return C_ALL_OUTSIDE; }
     const d : usize = ext_dot(s, from, to);
     if (d < to) {
         if (in_list(SPEC_EXTS, s, d + 1, to)) { return C_SEED; }
@@ -210,7 +181,7 @@ pub fn last_tab(buf: []const u8, s: usize, t: usize) -> usize {
 /// What one diff line buf[s..t] asks for: the worse of its paths (a rename or copy has two).
 pub fn diff_class(buf: []const u8, s: usize, t: usize) -> u8 {
     if (t <= s) { return C_NOTHING; }
-    if (is_letter_of(KINDS, buf[s]) == false) { return C_ALL_UNREADABLE; }
+    if (own_language::is_letter_of(KINDS, buf[s]) == false) { return C_ALL_UNREADABLE; }
     const p1 : usize = first_tab(buf, s, t);
     if (p1 >= t) { return C_ALL_UNREADABLE; }
     const p2 : usize = last_tab(buf, s, t);

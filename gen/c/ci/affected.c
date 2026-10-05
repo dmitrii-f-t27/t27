@@ -33,6 +33,9 @@
 #define MARK_CORPUS "--corpus$"
 #define LIST_END 36
 #define LIST_SEP 44
+#define ALLOW 0
+#define DENY 1
+#define DENY_FROM 16
 
 /* -------------------------------------------------------
    Function prototypes
@@ -40,8 +43,6 @@
 
 uint8_t lower(uint8_t c);
 bool in_list(uint8_t* list, uint8_t* s, size_t from, size_t to);
-bool has_prefix(uint8_t* list, uint8_t* s, size_t from, size_t to);
-bool is_letter_of(uint8_t* list, uint8_t c);
 size_t ext_dot(uint8_t* s, size_t from, size_t to);
 uint8_t path_class(uint8_t* s, size_t from, size_t to);
 size_t line_end(uint8_t* buf, size_t s, size_t n);
@@ -58,6 +59,9 @@ size_t set_add(uint8_t* set, size_t sn, size_t scap, uint8_t* s, size_t f, size_
 size_t closure(uint8_t* buf, size_t n, uint8_t* set, size_t scap);
 size_t put(uint8_t* out, size_t w, size_t cap, uint8_t c);
 uint32_t select_affected(uint8_t* buf, size_t n, uint8_t* set, size_t scap, uint8_t* out, size_t cap);
+bool has_prefix(uint8_t* list, uint8_t* s, size_t from, size_t to);
+bool is_letter_of(uint8_t* list, uint8_t c);
+uint8_t verdict(uint8_t r);
 
 /* -------------------------------------------------------
    Function implementations
@@ -90,41 +94,6 @@ bool in_list(uint8_t* list, uint8_t* s, size_t from, size_t to) {
         if ((list[i] == LIST_SEP)) {
             i += 1;
         }
-    }
-    return false;
-}
-
-bool has_prefix(uint8_t* list, uint8_t* s, size_t from, size_t to) {
-    size_t i = 0;
-    while ((list[i] != LIST_END)) {
-        size_t k = from;
-        bool ok = true;
-        while (((list[i] != LIST_SEP) && (list[i] != LIST_END))) {
-            if ((k >= to)) {
-                ok = false;
-            } else if ((s[k] != list[i])) {
-                ok = false;
-            }
-            k += 1;
-            i += 1;
-        }
-        if (ok) {
-            return true;
-        }
-        if ((list[i] == LIST_SEP)) {
-            i += 1;
-        }
-    }
-    return false;
-}
-
-bool is_letter_of(uint8_t* list, uint8_t c) {
-    size_t i = 0;
-    while ((list[i] != LIST_END)) {
-        if ((list[i] == c)) {
-            return true;
-        }
-        i += 1;
     }
     return false;
 }
@@ -405,6 +374,48 @@ uint32_t select_affected(uint8_t* buf, size_t n, uint8_t* set, size_t scap, uint
         return RUN_ALL;
     }
     return count;
+}
+
+bool has_prefix(uint8_t* list, uint8_t* s, size_t from, size_t to) {
+    size_t i = 0;
+    while ((list[i] != LIST_END)) {
+        size_t k = from;
+        bool ok = true;
+        while (((list[i] != LIST_SEP) && (list[i] != LIST_END))) {
+            if ((k >= to)) {
+                ok = false;
+            } else if ((s[k] != list[i])) {
+                ok = false;
+            }
+            k += 1;
+            i += 1;
+        }
+        if (ok) {
+            return true;
+        }
+        if ((list[i] == LIST_SEP)) {
+            i += 1;
+        }
+    }
+    return false;
+}
+
+bool is_letter_of(uint8_t* list, uint8_t c) {
+    size_t i = 0;
+    while ((list[i] != LIST_END)) {
+        if ((list[i] == c)) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+uint8_t verdict(uint8_t r) {
+    if ((r >= DENY_FROM)) {
+        return DENY;
+    }
+    return ALLOW;
 }
 
 /* -------------------------------------------------------
