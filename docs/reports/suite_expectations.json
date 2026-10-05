@@ -2,7 +2,7 @@
   "schema_version": 1,
   "generated_by": "t27c suite --bless-expectations",
   "max_gate_failures": 2,
-  "max_entries": 84,
+  "max_entries": 77,
   "entries": [
     {
       "path": "specs/api/sdk_contract.t27",
@@ -101,13 +101,6 @@
       "discard_by_channel": {
         "bdd-block-fallback": 11
       }
-    },
-    {
-      "path": "specs/git/diff.t27",
-      "phase": "typecheck",
-      "reason": "typecheck refuses a Rust `match` block (#5949): 21 of them, in 8 of the 15 fns and 8 of the 18 tests, match `Ok(..)` / `Err(..)` on the result of `Command::new(\"git\")` -- constructs t27 does not have. The parser kept each block as text and every backend lowered it to nothing, so those fns returned nothing and those tests asserted nothing, with every gate green. Rewrite the module in t27, not the rule.",
-      "issue": 5949,
-      "expires": "2026-11-30"
     },
     {
       "path": "specs/igla/coder/_tmp_pipeline_import.t27",
@@ -725,41 +718,6 @@
       }
     },
     {
-      "path": "specs/numeric/gft1024.t27",
-      "phase": "typecheck",
-      "reason": "EXP_OFFSET and OFFSET_MAX declare u32 and carry values 12 to 187 digits wide. Newly DETECTED, not newly broken: the constants are unchanged and three backends still emit them verbatim -- only cc ever said so. The header says E_t = round((N-1)/phi^2) = 391, so which number is meant is a question about the format, not the compiler.",
-      "issue": 2925,
-      "expires": "2026-11-30"
-    },
-    {
-      "path": "specs/numeric/gft128.t27",
-      "phase": "typecheck",
-      "reason": "EXP_OFFSET and OFFSET_MAX declare u32 and carry values 12 to 187 digits wide. Newly DETECTED, not newly broken: the constants are unchanged and three backends still emit them verbatim -- only cc ever said so. The header says E_t = round((N-1)/phi^2) = 391, so which number is meant is a question about the format, not the compiler.",
-      "issue": 2925,
-      "expires": "2026-11-30"
-    },
-    {
-      "path": "specs/numeric/gft256.t27",
-      "phase": "typecheck",
-      "reason": "EXP_OFFSET and OFFSET_MAX declare u32 and carry values 12 to 187 digits wide. Newly DETECTED, not newly broken: the constants are unchanged and three backends still emit them verbatim -- only cc ever said so. The header says E_t = round((N-1)/phi^2) = 391, so which number is meant is a question about the format, not the compiler.",
-      "issue": 2925,
-      "expires": "2026-11-30"
-    },
-    {
-      "path": "specs/numeric/gft512.t27",
-      "phase": "typecheck",
-      "reason": "EXP_OFFSET and OFFSET_MAX declare u32 and carry values 12 to 187 digits wide. Newly DETECTED, not newly broken: the constants are unchanged and three backends still emit them verbatim -- only cc ever said so. The header says E_t = round((N-1)/phi^2) = 391, so which number is meant is a question about the format, not the compiler.",
-      "issue": 2925,
-      "expires": "2026-11-30"
-    },
-    {
-      "path": "specs/numeric/gft64.t27",
-      "phase": "typecheck",
-      "reason": "EXP_OFFSET and OFFSET_MAX declare u32 and carry values 12 to 187 digits wide. Newly DETECTED, not newly broken: the constants are unchanged and three backends still emit them verbatim -- only cc ever said so. The header says E_t = round((N-1)/phi^2) = 391, so which number is meant is a question about the format, not the compiler.",
-      "issue": 2925,
-      "expires": "2026-11-30"
-    },
-    {
       "path": "specs/numeric/phi_ratio.t27",
       "phase": "parse-no-discard",
       "reason": "parser reaches EOF but DISCARDS top-level tokens (forall-quantified properties)",
@@ -808,13 +766,6 @@
       "path": "specs/port/scripts/tri-issue-create.t27",
       "phase": "gen-verilog",
       "reason": "ported spec merged in the 2026-10-04 batch (#5755) while this gate was red on an earlier step; the port is to be redone (#5549). gen-verilog refuses the local string array `argv : [5][]const u8` (line 80): 2-D array-of-aggregate lowering is not implemented (docs/reports/W469_2D_STRUCT_ARRAY_DESIGN.md).",
-      "issue": 5549,
-      "expires": "2026-11-30"
-    },
-    {
-      "path": "specs/port/tools/check_conflict_markers.t27",
-      "phase": "typecheck",
-      "reason": "parses whole now; the parse-no-discard failure (SKIP_SUFFIX written as a Zig array) hid a typecheck failure that was always there: staged_files calls the fixed-arity stub _git(root, arg1, arg2, binary) with seven arguments, where the Python original takes *args. Re-keyed, not newly broken; the port is to be redone (#5549).",
       "issue": 5549,
       "expires": "2026-11-30"
     },
