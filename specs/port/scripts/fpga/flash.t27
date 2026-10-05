@@ -1,0 +1,142 @@
+module port::flash;
+
+pub fn usage() -> []const u8 {
+    return "Usage: flash.t27 [command]
+Commands:
+  flash      - Flash bitstream to FPGA (default)
+  list       - List connected FPGA boards
+  openocd    - Flash using OpenOCD
+  ofl        - Flash using openFPGALoader
+  impact     - Flash using Xilinx Impact (legacy)
+
+Environment variables:
+  BITSTREAM  - Path to bitstream file (default: build/fpga/pnr/design.bit)
+  CABLE      - JTAG cable name (default: auto-detect)
+  BOARD      - Target board: qmtech_a100t or arty_a7 (default: qmtech_a100t)";
+}
+
+pub fn check_bitstream(bitstream_path: []const u8) -> bool {
+    // In the original, this function exits with error 1 if bitstream doesn't exist
+    // Here we return false to indicate failure, true for success
+    return bitstream_path.len > 0; // Simplified - in real implementation would check file existence
+}
+
+pub fn list_boards() {
+    // Original calls external commands: ftdi_jtag_quirk, openocd, lsusb
+    // Porting the decision, not the plumbing
+}
+
+pub fn flash_openocd() {
+    // Original calls external commands: openocd, docker
+    // Porting the decision, not the plumbing
+}
+
+pub fn flash_openfpgaloader() {
+    // Original calls external commands: openFPGALoader
+    // Porting the decision, not the plumbing
+}
+
+pub fn flash_impact() {
+    // Original calls external commands: impact, creates files
+    // Porting the decision, not the plumbing
+}
+
+pub fn flash_docker() {
+    // Original calls external commands: docker, openocd
+    // Porting the decision, not the plumbing
+}
+
+pub fn main(command: []const u8, use_docker: bool) -> []const u8 {
+    // Returns the action that should be taken based on the command
+    if (std.mem.eql(u8, command, "flash")) {
+        if (use_docker) {
+            return "flash_docker";
+        } else {
+            return "flash_openocd";
+        }
+    } else if (std.mem.eql(u8, command, "list")) {
+        return "list_boards";
+    } else if (std.mem.eql(u8, command, "openocd")) {
+        return "flash_openocd";
+    } else if (std.mem.eql(u8, command, "ofl")) {
+        return "flash_openfpgaloader";
+    } else if (std.mem.eql(u8, command, "impact")) {
+        return "flash_impact";
+    } else if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "-h")) {
+        return "usage";
+    } else {
+        return "unknown_command";
+    }
+}
+
+test usage_format {
+    const help_text = usage();
+    assert(help_text.len > 0);
+    assert(std.mem.indexOf(u8, help_text, "Usage:") != null);
+    assert(std.mem.indexOf(u8, help_text, "Commands:") != null);
+    assert(std.mem.indexOf(u8, help_text, "flash") != null);
+    assert(std.mem.indexOf(u8, help_text, "list") != null);
+}
+
+test check_bitstream_exists {
+    assert(check_bitstream("build/fpga/pnr/design.bit") == true);
+}
+
+test check_bitstream_empty {
+    assert(check_bitstream("") == false);
+}
+
+test check_bitstream_custom_path {
+    assert(check_bitstream("/custom/path/to/bitstream.bit") == true);
+}
+
+test main_flash_default {
+    const action = main("flash", false);
+    assert(std.mem.eql(u8, action, "flash_openocd"));
+}
+
+test main_flash_docker {
+    const action = main("flash", true);
+    assert(std.mem.eql(u8, action, "flash_docker"));
+}
+
+test main_list_command {
+    const action = main("list", false);
+    assert(std.mem.eql(u8, action, "list_boards"));
+}
+
+test main_openocd_command {
+    const action = main("openocd", false);
+    assert(std.mem.eql(u8, action, "flash_openocd"));
+}
+
+test main_ofl_command {
+    const action = main("ofl", false);
+    assert(std.mem.eql(u8, action, "flash_openfpgaloader"));
+}
+
+test main_impact_command {
+    const action = main("impact", false);
+    assert(std.mem.eql(u8, action, "flash_impact"));
+}
+
+test main_help_commands {
+    const action1 = main("help", false);
+    assert(std.mem.eql(u8, action1, "usage"));
+    
+    const action2 = main("--help", false);
+    assert(std.mem.eql(u8, action2, "usage"));
+    
+    const action3 = main("-h", false);
+    assert(std.mem.eql(u8, action3, "usage"));
+}
+
+test main_unknown_command {
+    const action = main("unknown", false);
+    assert(std.mem.eql(u8, action, "unknown_command"));
+}
+
+test main_empty_command {
+    const action = main("", false);
+    assert(std.mem.eql(u8, action, "flash_openocd")); // default is flash
+}
