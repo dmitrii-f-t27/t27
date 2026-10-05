@@ -7,6 +7,8 @@ Three halves:
      "no priority" 0 ahead of "urgent" 1), the fourth critical runs as high, a
      blocked issue is skipped, aged low work loses the tie to real high work,
      and conflicting labels take the more urgent level;
+  0. no file in scripts/tri_loop is named like a stdlib module (#6378; the
+     first name of tri priority was queue.py and broke tri stranded);
   3. mutation control: a copy of the C whose outranks compares the wrong way
      must fail half 2, or half 2 proves nothing.
 No network, no t27c.
@@ -70,10 +72,30 @@ def fixtures():
           order([issue(1, ["priority/low"]), issue(2)]) == [2, 1])
     check("conflicting labels take the more urgent level",
           q.LEVELS[q.rank([issue(1, ["P3", "priority/high"])], NOW)[0]["base"]] == "HIGH")
+    check("a clean listing has no anomaly", q.anomalies(q.rank([issue(1, ["P0"]), issue(2), issue(3, ["P1"])], NOW)) == [])
+    found = q.anomalies(q.rank([issue(n, ["P0"]) for n in (1, 2, 3, 4)]
+                               + [issue(5, ["P3", "priority/high"]), issue(6, ["P1"], blocked=2)], NOW))
+    kinds = [line.split()[1] for line in found]
+    check("each anomaly kind is reported once", kinds == ["over-cap:", "two-levels:", "blocked-labelled:"])
     return failed
 
 
+def stdlib_shadows():
+    """Loop tools whose file name is a stdlib module: running any tool from scripts/tri_loop
+    puts that directory first on sys.path, so such a file replaces the stdlib for all of them."""
+    names = {p.stem for p in (ROOT / "scripts" / "tri_loop").glob("*.py")}
+    return sorted(names & set(sys.stdlib_module_names))
+
+
 def main():
+    shadows = stdlib_shadows()
+    if shadows:
+        print(f"FAIL  scripts/tri_loop shadows stdlib module(s): {', '.join(shadows)} (#6378)")
+        return 1
+    if "queue" not in sys.stdlib_module_names:
+        print("FAIL  stdlib guard control: sys.stdlib_module_names does not know queue")
+        return 1
+    print("ok    no loop tool shadows a stdlib module")
     gen = q.GEN
     with tempfile.TemporaryDirectory() as tmp:
         exe = Path(tmp) / "priority_tests"

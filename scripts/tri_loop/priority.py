@@ -14,7 +14,11 @@ Not reproduced: the Queen's other skips (a live claim, landed work, a body
 without a boundary, a held boundary). An issue shown first here can still be
 skipped by the Queen for one of those.
 
-  tri priority [--repo OWNER/NAME] [--top N] [--json]
+  tri priority [--repo OWNER/NAME] [--top N] [--json] [--check]
+
+--check prints label anomalies and exits 1 when there is one (#6378): more
+criticals than the cap (the extras run as HIGH), labels of two levels on one
+issue, a labelled issue with an open blocker.
 """
 
 import argparse
@@ -111,7 +115,8 @@ def rank(issues, now):
         eff = so.effective_level(level, labelled, age)
         blockers = int((it.get("issue_dependencies_summary") or {}).get("blocked_by") or 0)
         rows.append({"number": it["number"], "title": it["title"], "index": index, "age_days": age,
-                     "labels": [n for n in names if n in vocab], "base": base, "level": level, "eff": eff,
+                     "labels": [n for n in names if n in vocab], "label_levels": sorted({vocab[n] for n in names if n in vocab}),
+                     "base": base, "level": level, "eff": eff,
                      "blocked_by": blockers, "eligible": bool(so.eligible(blockers)),
                      "why": WHYS[so.why(base, level, eff, labelled, blockers)]})
 
@@ -123,6 +128,20 @@ def rank(issues, now):
         return 0
 
     return sorted(rows, key=functools.cmp_to_key(cmp))
+
+
+def anomalies(ranked):
+    """One line per label anomaly, in listing order. Reporting only; the levels are the spec's."""
+    out = []
+    for r in sorted(ranked, key=lambda r: r["index"]):
+        if r["why"] == "capped":
+            out.append(f"#{r['number']} over-cap: critical label, runs as {LEVELS[r['level']]} "
+                       f"(more criticals listed before it than the cap)")
+        if len(r["label_levels"]) > 1:
+            out.append(f"#{r['number']} two-levels: {', '.join(r['labels'])} -> runs as {LEVELS[r['base']]}")
+        if r["labels"] and not r["eligible"]:
+            out.append(f"#{r['number']} blocked-labelled: {LEVELS[r['base']]} but blocked by {r['blocked_by']} open issue(s)")
+    return out
 
 
 def open_issues(repo):
@@ -139,6 +158,7 @@ def main(argv=None):
     ap.add_argument("--repo", default="gHashTag/t27")
     ap.add_argument("--top", type=int, default=15)
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--check", action="store_true", help="print label anomalies; exit 1 when there is one")
     a = ap.parse_args(argv)
     try:
         rules()
@@ -146,6 +166,12 @@ def main(argv=None):
         sys.exit(f"tri priority: {e}")
     issues = open_issues(a.repo)
     ranked = rank(issues, datetime.now(timezone.utc))
+    if a.check:
+        found = anomalies(ranked)
+        for line in found:
+            print(f"tri priority --check: {line}")
+        print(f"tri priority --check: {a.repo}: {len(found)} anomaly(ies) in {len(ranked)} open issues")
+        return 1 if found else 0
     if a.json:
         print(json.dumps(ranked, indent=1))
         return 0
