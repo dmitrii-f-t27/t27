@@ -17,7 +17,7 @@ fn flag(x: u8) -> bool {
     return x as bool;
 }
 fn named(x: u32) -> u32 {
-    const s = 'a';
+    const s = '\0';
     return x;
 }
 fn ok(x: u32) -> u32 {
@@ -43,7 +43,7 @@ fn blockers_lists_every_construct() {
     let parsed = front::parse(Path::new("blockers_fixture.t27"), SRC).expect("fixture parses");
     let all = lower::blockers(&parsed.ast, OverflowMode::Trap);
     let got = constructs(&all);
-    let want: BTreeSet<String> = ["type f32", "ExprCast(to bool)", "ExprLiteral(char literal)"].iter().map(|s| s.to_string()).collect();
+    let want: BTreeSet<String> = ["type f32", "ExprCast(to bool)", "ExprLiteral(char escape)"].iter().map(|s| s.to_string()).collect();
     assert_eq!(got, want, "every construct, once each kind: {:#?}", all);
     // Cascades are suppressed: the calls to `half` (whose signature was
     // rejected) and the `f32` local do not add rejections of their own beyond
