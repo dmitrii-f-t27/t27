@@ -58,7 +58,12 @@ ANOMALY CODES (doctor exits 1 when any is printed, 0 when none, 2 on usage)
                       means the deploy predates #6220 or the remote is broken
   LAB-RECLONED        the lab healed a broken clone with a fresh one: the run
                       counts, but say so in the report (skill rule Q18)
-  LAB-MISMATCH        mismatch > 0: a stop and a report, never a skip
+  LAB-MISMATCH        jit_interp_mismatch (alias mismatch) > 0: t27b's JIT
+                      against t27b's own interpreter, same IR; a stop and a
+                      report, never a skip
+  LAB-REF-DISAGREE    reference_disagree > 0: t27b against the reference
+                      (t27c + zig), test by test (#6441); stops the lanes the
+                      same way, one issue per root cause
   LAB-OUTSIDE-REF     t27b passes where the reference does not: a reference
                       defect or a vacuous pass; either way not in the number
   LAB-ERROR           lab_error, crash, timeout or t27b fail > 0
@@ -108,6 +113,7 @@ WHAT THIS DOES NOT ESTABLISH
     tri t27b doctor --json         # the same, machine-readable
     tri t27b delta                 # what moved per spec since the previous lab run
     tri t27b gen-check             # is gen/c/tri/t27b/steward.c what master's t27c emits?
+    tri t27b diff SPEC [--run R]   # t27b's per-test verdicts beside the reference's (#6441)
     tri t27b ready [N ...]         # may each open t27b PR merge now? (never merges)
 
 READY (#6244): the steward's merge gate, decided in steward.t27
@@ -450,7 +456,13 @@ def honest(lab):
     if in_ref is None and s.get("t27b_pass") is not None:
         in_ref = s["t27b_pass"] - outside
     h = {"in_ref": in_ref, "reference": s.get("reference_pass"), "outside": outside,
-         "mismatch": s.get("mismatch"), "checked": None, "compile_only": None, "frontend": []}
+         "mismatch": s.get("mismatch"),
+         "jit_interp_mismatch": s.get("jit_interp_mismatch", s.get("mismatch")),
+         # None: the run did not compare per test (a lab or t27b before #6441).
+         "reference_disagree": s.get("reference_disagree"),
+         "reference_disagree_tests": s.get("reference_disagree_tests"),
+         "reference_compared": s.get("reference_compared"),
+         "checked": None, "compile_only": None, "frontend": []}
     results = lab.get("results")
     if isinstance(results, list) and results:
         ok = [x for x in results if x.get("t27b") == "pass" and x.get("reference") == "pass"]
@@ -534,8 +546,15 @@ def anomalies(d, args):
                 word = "finished" if lab.get("finished") else "updated (no finished run)"
                 add("LAB-STALE", f"last run {word} {age / 60:.1f} h ago", "check /status.json and the Railway deploy logs")
         s = lab.get("summary") or {}
-        if s.get("mismatch", 0):
-            add("LAB-MISMATCH", f"mismatch {s['mismatch']}", "stop the lanes; reduce and report each mismatch (runs/<sha>.json)")
+        hh = honest(lab)
+        jim, rd = hh["jit_interp_mismatch"] or 0, hh["reference_disagree"] or 0
+        if rules().lanes_stop(jim, rd):
+            if jim:
+                add("LAB-MISMATCH", f"jit/interp mismatch {jim}", "stop the lanes; reduce and report each mismatch (runs/<sha>.json)")
+            if rd:
+                add("LAB-REF-DISAGREE",
+                    f"reference disagree {rd} file(s), {hh['reference_disagree_tests']} test(s), of {hh['reference_compared']} compared",
+                    "stop the lanes; one issue per root cause, from each record's reference_disagree (runs/<sha>.json)")
         if s.get("t27b_pass_where_reference_does_not", 0):
             add("LAB-OUTSIDE-REF", f"t27b passes {s['t27b_pass_where_reference_does_not']} spec(s) the reference fails",
                 "list them; a reference defect or a vacuous t27b pass, not coverage")
@@ -543,7 +562,8 @@ def anomalies(d, args):
         if isinstance(lab.get("results"), list):
             # Per-spec records: a fail or timeout the reference shares is not an alarm (#6237).
             alarms = [x for x in lab["results"]
-                      if rules().is_alarm(x.get("t27b") or "missing", x.get("reference") or "missing")]
+                      if rules().is_alarm_tests(x.get("t27b") or "missing", x.get("reference") or "missing",
+                                                "reference_disagree" in x, len(x.get("reference_disagree") or []))]
             errs = {k: v for k, v in errs.items() if k == "reference_lab_error"}
             for k, want in (("crash", "crash"), ("timeout", "timeout"), ("t27b_fail", "fail")):
                 n = sum(1 for x in alarms if x.get("t27b") == want)
@@ -660,6 +680,12 @@ def lab_card(lab):
     lines = [f"lab        ref {lab.get('ref')} @ {str(lab.get('commit', ''))[:9]}, finished {lab.get('finished')}",
              f"           t27b passes {h['in_ref']} of the {h['reference']} specs the reference passes{pct}, "
              f"mismatch {h['mismatch']}  ({s.get('files')} files)"]
+    if h["reference_disagree"] is None:
+        lines.append(f"           jit/interp mismatch {h['jit_interp_mismatch']}, reference disagree not measured "
+                     "(the run has no per-test reference verdicts)")
+    else:
+        lines.append(f"           jit/interp mismatch {h['jit_interp_mismatch']}, reference disagree {h['reference_disagree']} "
+                     f"file(s) / {h['reference_disagree_tests']} test(s) (of {h['reference_compared']} compared per test)")
     if h["checked"] is not None:
         lines.append(f"           of those {h['checked']} ran a test or invariant, {h['compile_only']} compile-only")
     lines.append(f"           not counted: {h['outside']} t27b pass(es) where the reference fails, "
@@ -1515,7 +1541,62 @@ def next_main(argv):
     return 0
 
 
+# --- diff (#6441): one spec's verdicts, test by test, both sides ------------
+
+def diff_rows(rec):
+    """(name, t27b, reference, differs) per test name, sorted; a side without
+    the test reads "-". Verdicts are "pass"/"fail"."""
+    t = rec.get("test_verdicts") or {}
+    r = rec.get("reference_tests") or {}
+    word = lambda v: "-" if v is None else ("pass" if v else "fail")  # noqa: E731
+    return [(n, word(t.get(n)), word(r.get(n)), t.get(n) != r.get(n)) for n in sorted(set(t) | set(r))]
+
+
+def diff_main(argv):
+    ap = argparse.ArgumentParser(prog="tri t27b diff",
+                                 description="t27b's per-test verdicts beside the reference's for one spec (#6441)")
+    ap.add_argument("spec")
+    ap.add_argument("--run", default=LAB + "/latest.json",
+                    help="lab run JSON or `t27b corpus --reference --json` output: a path or a URL")
+    ap.add_argument("--json", action="store_true")
+    try:
+        args = ap.parse_args(argv)
+    except SystemExit as e:
+        return 2 if e.code else 0
+    try:
+        doc = read_run(args.run)
+    except Unreadable as e:
+        print(f"tri t27b diff: UNREADABLE {e}")
+        return 2
+    want = args.spec.rstrip("/")
+    recs = [x for x in doc["results"] if (x.get("file") or "") == want or (x.get("file") or "").endswith("/" + want)]
+    if len(recs) != 1:
+        print(f"tri t27b diff: {len(recs)} record(s) match {want!r} in {args.run}")
+        return 2
+    rec = recs[0]
+    rows = diff_rows(rec)
+    if args.json:
+        print(json.dumps({"file": rec.get("file"), "t27b": rec.get("t27b"), "reference": rec.get("reference"),
+                          "tests": [{"name": n, "t27b": a, "reference": b, "differs": d} for n, a, b, d in rows]},
+                         indent=1))
+        return 1 if any(d for *_, d in rows) else 0
+    print(f"{rec.get('file')}: t27b {rec.get('t27b')}, reference {rec.get('reference')}")
+    if "test_verdicts" not in rec or "reference_tests" not in rec:
+        print("  not compared per test: the run has no "
+              + " and no ".join(k for k in ("test_verdicts", "reference_tests") if k not in rec))
+        return 2
+    w = max([len(n) for n, *_ in rows] + [4])
+    print(f"  {'test':<{w}}  t27b  reference")
+    for n, a, b, d in rows:
+        print(f"  {n:<{w}}  {a:<4}  {b:<9}{'  DIFFERS' if d else ''}".rstrip())
+    k = sum(1 for *_, d in rows if d)
+    print(f"  {k} of {len(rows)} test(s) differ")
+    return 1 if k else 0
+
+
 def main(argv):
+    if argv[:1] == ["diff"]:
+        return diff_main(argv[1:])
     if argv[:1] == ["next"]:
         return next_main(argv[1:])
     if argv[:1] == ["watch"]:
@@ -1527,7 +1608,7 @@ def main(argv):
     if argv[:1] == ["gen-check"]:
         return gen_check_main(argv[1:])
     ap = argparse.ArgumentParser(prog="tri t27b", description=__doc__.split("\n")[0])
-    ap.add_argument("action", choices=("status", "doctor", "delta", "ratchet", "gen-check", "ready", "watch", "next"))
+    ap.add_argument("action", choices=("status", "doctor", "delta", "ratchet", "gen-check", "ready", "watch", "next", "diff"))
     ap.add_argument("--from", dest="from_", help="delta: the earlier lab run's sha (default: the run before --to)")
     ap.add_argument("--to", default="latest", help="delta: the later run's sha (default: latest.json)")
     ap.add_argument("--fixture", help="read every source from this directory (tests)")

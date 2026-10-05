@@ -112,6 +112,10 @@ def _build():
     so.cap_rise_is_new.restype = ctypes.c_bool
     so.is_alarm.argtypes = [ctypes.c_uint8, ctypes.c_uint8]
     so.is_alarm.restype = ctypes.c_bool
+    so.is_alarm_tests.argtypes = [ctypes.c_uint8, ctypes.c_uint8, ctypes.c_bool, ctypes.c_uint32]
+    so.is_alarm_tests.restype = ctypes.c_bool
+    so.lanes_stop.argtypes = [ctypes.c_uint32, ctypes.c_uint32]
+    so.lanes_stop.restype = ctypes.c_bool
     so.check_effect.argtypes = [ctypes.c_uint8, ctypes.c_uint8, ctypes.c_bool]
     so.check_effect.restype = ctypes.c_uint8
     so.master_state.argtypes = [ctypes.c_bool, ctypes.c_uint8]
@@ -233,6 +237,19 @@ def is_alarm(t27b, reference):
     """True when a run record is a lab alarm: a mismatch or crash always, a fail or
     timeout only where the reference passes."""
     return bool(lib().is_alarm(verdict(t27b), verdict(reference)))
+
+
+def is_alarm_tests(t27b, reference, compared, disagree):
+    """is_alarm judged test by test (#6441): with the per-test differential
+    (`compared`), a fail the reference shares is an alarm when other tests fail,
+    and a pass is one when any test's verdict differs."""
+    return bool(lib().is_alarm_tests(verdict(t27b), verdict(reference), bool(compared), int(disagree or 0)))
+
+
+def lanes_stop(jit_interp_mismatch, reference_disagree):
+    """True when the lanes stop (#6441): t27b's JIT against its own interpreter
+    disagrees, or t27b against the reference disagrees on some test."""
+    return bool(lib().lanes_stop(int(jit_interp_mismatch or 0), int(reference_disagree or 0)))
 
 
 def check_state(s):

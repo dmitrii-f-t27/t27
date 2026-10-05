@@ -269,7 +269,52 @@ def parse_test_report(stdout):
     return "blocked", "unreadable test-report output"
 
 
-def reference_one(worker, file):
+def parse_test_verdicts(stdout):
+    """Per-test verdicts of `t27c test-report <spec> --verbose` as {name: passed},
+    or None when the list could be partial (blocked, no --verbose, a count that
+    does not match `tests`). The same reading as cli/t27b/src/blockers.rs
+    parse_test_verdicts (#6441)."""
+    lines = stdout.splitlines()
+    try:
+        start = next(i for i, l in enumerate(lines) if l.startswith("--- test report:"))
+    except StopIteration:
+        return None
+    out = {}
+    for line in lines[start + 1:]:
+        t = line.lstrip()
+        if not t:
+            break
+        if t.startswith("pass  "):
+            out[t[6:]] = True
+        elif t.startswith("FAIL  "):
+            out[t[6:]] = False
+        else:
+            return None
+    total = next((int(m.group(1)) for m in (re.match(r"\s*tests\s+(\d+)\s*$", l) for l in lines) if m), None)
+    return out if total == len(out) else None
+
+
+def disagreements(t27b, reference):
+    """One line per test whose verdict differs, or that only one side ran, in
+    name order: the definition is cli/t27b/src/blockers.rs `disagreements`
+    (#6441). t27b's names already carry t27c's __dupN suffix."""
+    word = lambda ok: "pass" if ok else "FAIL"  # noqa: E731
+    out = []
+    for n in sorted(set(t27b) | set(reference)):
+        a, b = t27b.get(n), reference.get(n)
+        if a is not None and b is not None:
+            if a != b:
+                out.append("%s: t27b %s, reference %s" % (n, word(a), word(b)))
+        elif a is not None:
+            out.append("%s: t27b %s, reference has no such test" % (n, word(a)))
+        else:
+            out.append("%s: t27b has no such test, reference %s" % (n, word(b)))
+    return out
+
+
+def reference_one(worker, file, tests=None):
+    """The reference verdict (tag, reason). With a dict `tests`, the per-test
+    verdicts are stored into it under `file` when the run produced them."""
     scratch = WORK / "reference" / ("w%d" % worker)
     tmp = scratch / "tmp"
     tmp.mkdir(parents=True, exist_ok=True)
@@ -280,7 +325,7 @@ def reference_one(worker, file):
     for attempt in range(3):
         try:
             out = subprocess.run(
-                [str(T27C), "test-report", file, "--specs-dir", CORPUS_DIR],
+                [str(T27C), "test-report", file, "--specs-dir", CORPUS_DIR, "--verbose"],
                 cwd=CLONE, env=env, capture_output=True, text=True, errors="replace",
                 timeout=REF_TIMEOUT_S,
             )
@@ -297,10 +342,15 @@ def reference_one(worker, file):
     if out.returncode != 0:
         why = (out.stderr.strip().splitlines() or [""])[0]
         return "blocked", ("t27c test-report exited %d: %s" % (out.returncode, why))[:300]
-    return parse_test_report(out.stdout)
+    verdict = parse_test_report(out.stdout)
+    if tests is not None and verdict[0] in ("pass", "fail"):
+        got = parse_test_verdicts(out.stdout)
+        if got is not None:
+            tests[file] = got
+    return verdict
 
 
-def reference_all(files, log):
+def reference_all(files, log, tests=None):
     shutil.rmtree(WORK / "reference", ignore_errors=True)
     results = {}
     lock = threading.Lock()
@@ -312,7 +362,7 @@ def reference_all(files, log):
         if not hasattr(local, "w"):
             with lock:
                 local.w = next(ids)
-        r = reference_one(local.w, f)
+        r = reference_one(local.w, f, tests)
         with lock:
             results[f] = r
             done[0] += 1
@@ -429,17 +479,20 @@ def lab_run(sha, log):
         step("t27b_corpus", t27b_corpus)
 
     reference = {}
+    ref_tests = {}
 
     def reference_path():
         if corpus.get("totals", {}).get("reference", {}).get("ran"):
             for r in corpus["results"]:
                 reference[r["file"]] = (r["reference"], r.get("reference_detail", ""))
+                if isinstance(r.get("reference_tests"), dict):
+                    ref_tests[r["file"]] = r["reference_tests"]
             return {"source": "t27b corpus (reference verdicts in its JSON)"}
         if corpus.get("results"):
             files = [r["file"] for r in corpus["results"]]
         else:
             files = sorted(str(p.relative_to(CLONE)) for p in (CLONE / CORPUS_DIR).rglob("*.t27"))
-        reference.update(reference_all(files, log))
+        reference.update(reference_all(files, log, ref_tests))
         tot = {}
         for v, _ in reference.values():
             tot[v] = tot.get(v, 0) + 1
@@ -474,6 +527,11 @@ def lab_run(sha, log):
             rec["reference"], why = reference[r["file"]]
             if why:
                 rec["reference_detail"] = why
+        # #6441: test by test, where both sides ran the file's tests.
+        if r["file"] in ref_tests:
+            rec["reference_tests"] = ref_tests[r["file"]]
+            if isinstance(r.get("test_verdicts"), dict):
+                rec["reference_disagree"] = disagreements(r["test_verdicts"], ref_tests[r["file"]])
         results.append(rec)
     if results:
         ref_pass = [r for r in results if r["reference"] == "pass"]
@@ -491,7 +549,18 @@ def lab_run(sha, log):
             if reference else None,
             "t27b_pass_where_reference_does_not": sum(1 for r in results if r["t27b"] == "pass" and r["reference"] != "pass")
             if reference else None,
+            # `mismatch` is t27b's JIT against t27b's own interpreter (same IR),
+            # kept under its old name; `jit_interp_mismatch` says so.
             "mismatch": sum(1 for r in results if r["t27b"] == "mismatch"),
+            "jit_interp_mismatch": sum(1 for r in results if r["t27b"] == "mismatch"),
+            # #6441: t27b against the reference, test by test. None when this
+            # run compared nothing per test (a t27b without test_verdicts):
+            # not measured is not 0.
+            "reference_compared": sum(1 for r in results if "reference_disagree" in r),
+            "reference_disagree": sum(1 for r in results if r.get("reference_disagree"))
+            if any("reference_disagree" in r for r in results) else None,
+            "reference_disagree_tests": sum(len(r.get("reference_disagree") or []) for r in results)
+            if any("reference_disagree" in r for r in results) else None,
             "t27b_fail": sum(1 for r in results if r["t27b"] == "fail"),
             "crash": sum(1 for r in results if r["t27b"] == "crash"),
             "timeout": sum(1 for r in results if r["t27b"] == "timeout"),

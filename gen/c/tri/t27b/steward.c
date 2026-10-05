@@ -37,6 +37,8 @@ bool ledger_quiet(uint32_t age_min, uint32_t limit_min);
 uint8_t checkout_code(bool ok, bool recloned);
 bool cap_rise_is_new(uint32_t not_pass, uint32_t old_cap, uint32_t new_not_pass);
 bool is_alarm(uint8_t t, uint8_t reference);
+bool is_alarm_tests(uint8_t t, uint8_t reference, bool compared, uint32_t disagree);
+bool lanes_stop(uint32_t jit_interp_mismatch, uint32_t reference_disagree);
 uint8_t check_effect(uint8_t state, uint8_t master, bool required);
 uint8_t master_state(bool running, uint8_t last);
 uint8_t effect_fold(uint8_t acc, uint8_t e);
@@ -295,6 +297,28 @@ bool is_alarm(uint8_t t, uint8_t reference) {
     return false;
 }
 
+bool is_alarm_tests(uint8_t t, uint8_t reference, bool compared, uint32_t disagree) {
+    if (is_alarm(t, reference)) {
+        return true;
+    }
+    if (compared) {
+        if ((disagree > 0)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool lanes_stop(uint32_t jit_interp_mismatch, uint32_t reference_disagree) {
+    if ((jit_interp_mismatch > 0)) {
+        return true;
+    }
+    if ((reference_disagree > 0)) {
+        return true;
+    }
+    return false;
+}
+
 uint8_t check_effect(uint8_t state, uint8_t master, bool required) {
     if (required) {
         if ((state == 0)) {
@@ -413,6 +437,9 @@ uint32_t with_tests(uint32_t reference, uint32_t vacuous) {
 /* -------------------------------------------------------
    Invariants (compile-time assertions)
    ------------------------------------------------------- */
+
+/* invariant: reference_disagree_always_stops */
+/* invariant reference_disagree_always_stops is not a C constant expression: lanes_stop(0, 1) */
 
 /* invariant: gained_never_red */
 /* invariant gained_never_red is not a C constant expression: (delta_is_red(delta_code(0, 0, 2, 0, 0, 1)) == false) */
@@ -685,6 +712,44 @@ void test_alarm_blocked_never(void) {
     assert((is_alarm(2, 0) == false));
 }
 
+void test_alarm_shared_fail_same_tests(void) {
+    assert((is_alarm_tests(5, 5, true, 0) == false));
+}
+
+void test_alarm_shared_fail_other_tests(void) {
+    assert(is_alarm_tests(5, 5, true, 1));
+}
+
+void test_alarm_shared_fail_not_compared(void) {
+    assert((is_alarm_tests(5, 5, false, 0) == false));
+}
+
+void test_alarm_pass_disagrees(void) {
+    assert(is_alarm_tests(0, 0, true, 2));
+}
+
+void test_alarm_pass_agrees(void) {
+    assert((is_alarm_tests(0, 0, true, 0) == false));
+}
+
+void test_alarm_tests_keeps_is_alarm(void) {
+    assert(is_alarm_tests(5, 0, true, 0));
+    assert(is_alarm_tests(6, 2, false, 0));
+    assert((is_alarm_tests(2, 0, false, 0) == false));
+}
+
+void test_stop_on_mismatch(void) {
+    assert(lanes_stop(1, 0));
+}
+
+void test_stop_on_reference_disagree(void) {
+    assert(lanes_stop(0, 3));
+}
+
+void test_stop_neither(void) {
+    assert((lanes_stop(0, 0) == false));
+}
+
 void test_gate_required_green(void) {
     assert_eq(check_effect(0, 3, true), 0);
 }
@@ -954,6 +1019,15 @@ int main(void) {
     test_alarm_crash_always();
     test_alarm_mismatch_always();
     test_alarm_blocked_never();
+    test_alarm_shared_fail_same_tests();
+    test_alarm_shared_fail_other_tests();
+    test_alarm_shared_fail_not_compared();
+    test_alarm_pass_disagrees();
+    test_alarm_pass_agrees();
+    test_alarm_tests_keeps_is_alarm();
+    test_stop_on_mismatch();
+    test_stop_on_reference_disagree();
+    test_stop_neither();
     test_gate_required_green();
     test_gate_required_pending_waits();
     test_gate_required_absent_waits();
@@ -1003,7 +1077,7 @@ int main(void) {
     test_next_score_value();
     test_next_with_tests();
     test_next_with_tests_never_wraps();
-    printf("All %d tests passed.\n", 111);
+    printf("All %d tests passed.\n", 120);
     return 0;
 }
 #endif /* T27_TEST_MAIN */
