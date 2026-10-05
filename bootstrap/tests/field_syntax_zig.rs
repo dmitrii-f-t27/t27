@@ -3,9 +3,9 @@
 //! master 03362c1da: 17 + 11 + 7 + 8 specs with one of them as first error).
 //!
 //! 1. A postfix optional type, `id: OrgID?`, is now `?OrgID`.
-//! 2. A field named for a Zig keyword is escaped where it is initialised
-//!    (`.@"error" = ...`) and read (`r.@"error"`), as it already was where
-//!    it is declared.
+//! 2. A field, fn or parameter named for a Zig keyword is escaped where it
+//!    is initialised (`.@"error" = ...`), read (`r.@"error"`) and declared
+//!    (`fn fail(@"error": ...)`), as other references already were.
 //! 3. An array repeat literal `[0i32; 2]` is now `[_]i32{ 0 } ** 2`.
 
 use std::process::Command;
@@ -42,8 +42,9 @@ const SPEC: &str = "module field_syntax;\n\
 struct Res { ok: bool, note: str?, error: str }\n\
 fn make(ok: bool) -> Res { return Res { ok: ok, note: null, error: \"none\" }; }\n\
 fn err_of(r: Res) -> str { return r.error; }\n\
+fn fail(error: str) -> Res { return Res { ok: false, note: null, error: error }; }\n\
 fn sum_two() -> i32 { var xs: [i32; 2] = [0i32; 2]; xs[1] = 5; return xs[0] + xs[1]; }\n\
-test optional_and_keyword { const r = make(true); assert(r.ok); assert(r.note == null); assert(err_of(r).len == 4); }\n\
+test optional_and_keyword { const r = make(true); assert(r.ok); assert(r.note == null); assert(err_of(r).len == 4); assert(!fail("x").ok); }\n\
 test repeat { assert(sum_two() == 5); }\n";
 
 #[test]
@@ -58,6 +59,7 @@ fn a_keyword_field_is_escaped_where_it_is_named() {
     let z = gen_zig(SPEC);
     assert!(z.contains(".@\"error\" = "), "initialiser:\n{z}");
     assert!(z.contains("r.@\"error\""), "field access:\n{z}");
+    assert!(z.contains("fn fail(@\"error\": "), "parameter:\n{z}");
 }
 
 #[test]

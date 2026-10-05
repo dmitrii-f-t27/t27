@@ -8982,7 +8982,10 @@ impl Codegen {
             self.param_renames.entry(l.clone()).or_insert(format!("{}_lv", l));
         }
 
-        self.write(&format!("fn {}(", node.name));
+        // #6451: a fn or parameter named for a Zig keyword (`fn error(..)`,
+        // `error: StreamError`) is escaped where it is declared, as every
+        // reference to it already was.
+        self.write(&format!("fn {}(", Self::zig_ident(&node.name)));
         for (i, (pname, ptype)) in node.params.iter().enumerate() {
             if i > 0 {
                 self.write(", ");
@@ -8997,7 +9000,7 @@ impl Codegen {
             let arg_ident = if Self::zig_is_primitive(&arg_name) {
                 Self::zig_binding_ident(&arg_name)
             } else {
-                arg_name
+                Self::zig_ident(&arg_name)
             };
             self.write(&format!("{}: {}", arg_ident, Self::t27_array_type_to_zig(ptype)));
         }
