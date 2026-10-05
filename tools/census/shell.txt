@@ -5,7 +5,7 @@ WHICH INTERPRETER EACH GATE STEP IS HANDED TO, AND WHO SAYS SO
   run: steps                    289
 
   who names the shell:
-    the runner does             267   no container, so bash -eo pipefail
+    the runner does             268   no container, so bash -eo pipefail
     a `shell:` key does         6
     NOBODY                      15   a container and no `shell:` key
 
