@@ -37,7 +37,14 @@
 //! is the constant N. `for (a) |x|` walks the elements with a hidden index. A
 //! module constant array of strings cannot live in read-only data (it holds
 //! addresses), so it stays a compile-time value (`Val::A`) and is written into
-//! a frame temporary only where memory is needed.
+//! a frame temporary only where memory is needed. t27's own `[T; N]` is
+//! `[N]T`, as in t27c's `t27_array_type_to_zig`. A repeat -- `[v; n]`, whose
+//! element the parser keeps as the text `v;n`, or `[_]T{ a, b } ** n` -- is
+//! `.{ ... } ** n` in the reference: its elements are evaluated once, then
+//! the filled prefix is copied forward. Element text the parser kept (`[v;
+//! n]`, and a list like `[s1]`) is parsed back only when it is a literal, a
+//! name, a call or a field access, the shapes that mean the same pasted into
+//! Zig.
 //!
 //! Slices: `[]T` and `[]const T` are Zig's slices, laid out like `str` (which
 //! is exactly `[]const u8`): a 16-byte aggregate, the address of the first
@@ -48,6 +55,12 @@
 //! against the end, both as `index out of bounds`. Indexing a slice or a
 //! string is checked against its runtime length. `*[N]T` coerces to `[]T` and
 //! `[]const T`, `[]T` to `[]const T`, and `&[_]T{ ... }` to `[]const T`.
+//! t27's `[T]` is the mutable slice `[]T`. An array literal passed where a
+//! callee declares a slice is `@constCast(&[_]T{ ... })` in the reference (a
+//! temporary that outlives the call), unless the element is itself an array
+//! or a slice; an untyped local bound to an array literal and passed so is a
+//! `[_]T` array of the callee's element type, passed by address (t27c's
+//! `slice_locals`). `[*]T` and the map `[K:V]` are refused by name.
 //! `for (s) |x|` reads the slice's address and length once, before the loop.
 
 use crate::codegen;
@@ -266,6 +279,11 @@ struct Lower<'a> {
     /// Names whose address is taken somewhere in the body (`&x`): such a
     /// scalar lives in a frame slot instead of a register.
     addr_taken: HashSet<String>,
+    /// Untyped locals bound to an array literal and passed where a callee
+    /// declares a slice, with that slice's element type: t27c's Zig backend
+    /// makes each a `var x = [_]T{ ... }` array and passes `&x`
+    /// (`collect_slice_locals`).
+    slice_locals: HashMap<String, LTy>,
     /// The hidden result pointer of a function returning a struct.
     sret: Option<VarId>,
     scopes: Vec<HashMap<String, Binding>>,
@@ -380,6 +398,7 @@ fn lower_mode<'a>(
         ltys: Vec::new(),
         slots: Vec::new(),
         addr_taken: HashSet::new(),
+        slice_locals: HashMap::new(),
         sret: None,
         scopes: Vec::new(),
         loop_depth: 0,
@@ -417,6 +436,12 @@ fn lower_mode<'a>(
         }
         if item.kind == NodeKind::EnumDecl && !item.name.is_empty() {
             l.enum_nodes.insert(item.name.clone(), item);
+        }
+        // Constants too, before any signature: a top-level Zig declaration
+        // is visible above its own line, and a length like `[N]T` in a
+        // signature may name a constant `use` spliced in after it.
+        if item.kind == NodeKind::ConstDecl && !item.extra_mutable && !is_tagged_union(item) {
+            l.const_nodes.insert(item.name.clone(), item);
         }
     }
 
@@ -1190,6 +1215,26 @@ impl<'a> Lower<'a> {
         self.sret = None;
         self.addr_taken.clear();
         scan_addr_taken(body, &mut self.addr_taken);
+        self.slice_locals.clear();
+        let mut arrays = HashSet::new();
+        array_locals(body, &mut arrays);
+        if !arrays.is_empty() {
+            let mut calls = Vec::new();
+            calls_in(body, &mut calls);
+            for c in calls {
+                let Some(sig) = self.sigs.get(&c.name) else { continue };
+                for (i, a) in c.children.iter().enumerate() {
+                    if a.kind != NodeKind::ExprIdentifier || !arrays.contains(&a.name) {
+                        continue;
+                    }
+                    if let Some(LTy::Slice(elem, _)) = sig.params.get(i) {
+                        if **elem == LTy::Str || !has_brackets(elem) {
+                            self.slice_locals.insert(a.name.clone(), (**elem).clone());
+                        }
+                    }
+                }
+            }
+        }
         self.scopes.clear();
         self.scopes.push(HashMap::new());
         self.loop_depth = 0;
@@ -1690,6 +1735,28 @@ impl<'a> Lower<'a> {
         r
     }
 
+    /// `given xs = [a, b]` where `xs` is later passed as a slice: an array
+    /// of the callee's element type, as t27c's Zig backend declares it
+    /// (`var xs = [_]T{ a, b }`).
+    fn slice_local(&mut self, init: &Node, name: String, elem: LTy, out: &mut Vec<Stmt>) -> R<()> {
+        self.see(init);
+        if init.children.is_empty() && init.extra_type.trim().is_empty() && init.extra_size.contains(';') {
+            // The reference pastes `v;n` between `[_]T{` and `}`.
+            return self.reject(
+                "ExprArrayLiteral(repeat to slice)",
+                format!("`{}` = `[{}]` is passed where a slice is declared", name, init.extra_size.trim()),
+            );
+        }
+        let text = self.text_lit(init)?;
+        let lit = text.as_ref().unwrap_or(init);
+        let t = LTy::Arr(Box::new(elem), lit.children.len() as u32);
+        let k = self.new_slot(&t)?;
+        let dst = Place { addr: slot_expr(k), off: 0, ty: t, mutable: true, temp: None };
+        self.init_array(lit, &dst, out)?;
+        self.bind(&name, Binding::Mem(dst));
+        Ok(())
+    }
+
     fn local_with(&mut self, n: &Node, name: String, ann: String, out: &mut Vec<Stmt>) -> R<()> {
         let mutable = n.extra_mutable;
         let init = n.children.first().filter(|i| !is_undefined(i));
@@ -1735,6 +1802,11 @@ impl<'a> Lower<'a> {
             Some(i) => i,
             None => return self.reject("StmtLocal", format!("`{}` has neither type nor value", name)),
         };
+        if init.kind == NodeKind::ExprArrayLiteral {
+            if let Some(elem) = self.slice_locals.get(&name).cloned() {
+                return self.slice_local(init, name, elem, out);
+            }
+        }
         let v = self.expr(init)?;
         match v {
             Val::Poison => self.bind(&name, Binding::Const(Val::Poison)),
@@ -2127,7 +2199,7 @@ impl<'a> Lower<'a> {
         }
         let mut args = Vec::new();
         for (i, a) in c.children.iter().enumerate() {
-            let v = self.expr_as(a, &params[i])?;
+            let v = self.arg_as(a, &params[i])?;
             args.push(match v {
                 // By reference; the callee never writes it.
                 Val::M(p) => addr_of(&p),
@@ -3153,6 +3225,34 @@ impl<'a> Lower<'a> {
             }
             return Ok(LTy::Struct(id));
         }
+        // t27's own spellings, mapped the way t27c's Zig backend maps them
+        // (`t27_array_type_to_zig`): `[T; N]` is `[N]T`, and `[T]` -- one
+        // bracket pair around the whole type, no `;` -- is the mutable slice
+        // `[]T`.
+        if let Some(inner) = t.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
+            if close_of_open(t) == Some(t.len() - 1) {
+                let inner = inner.trim();
+                if inner == "*" || inner.starts_with('*') {
+                    return self.reject("type [*]T", format!("`{}`: a many-item pointer", t));
+                }
+                if let Some(semi) = inner.rfind(';') {
+                    let (elem, len) = (inner[..semi].trim(), inner[semi + 1..].trim());
+                    if !elem.is_empty() && !len.is_empty() {
+                        let n = self.array_len(t, len)?;
+                        let elem = self.lty_in(elem, by_value)?;
+                        return Ok(LTy::Arr(Box::new(elem), n));
+                    }
+                } else if inner.contains(':') {
+                    return self.reject("type [K:V]", format!("`{}`: a map", t));
+                } else if !inner.is_empty() {
+                    let elem = self.lty_in(inner, false)?;
+                    return Ok(LTy::Slice(Box::new(elem), true));
+                }
+            }
+        }
+        if t.starts_with("[*]") {
+            return self.reject("type [*]T", format!("`{}`: a many-item pointer", t));
+        }
         // `[N]T`, N a literal or the name of a compile-time integer.
         if let Some((len, elem)) = t.strip_prefix('[').and_then(|r| r.split_once(']')) {
             let (len, elem) = (len.trim(), elem.trim());
@@ -3794,7 +3894,7 @@ impl<'a> Lower<'a> {
             self.lit_type(n, want)?;
             return self.struct_temp(n, want.clone());
         }
-        if n.kind == NodeKind::ExprArrayLiteral && matches!(want, LTy::Arr(..)) {
+        if (n.kind == NodeKind::ExprArrayLiteral || is_repeat_op(n)) && matches!(want, LTy::Arr(..)) {
             self.see(n);
             return self.struct_temp(n, want.clone());
         }
@@ -3822,6 +3922,54 @@ impl<'a> Lower<'a> {
         }
         let v = self.expr(n)?;
         self.coerce_to(v, want)
+    }
+
+    /// A call argument. Beyond `expr_as`: an array literal where the callee
+    /// declares a slice, which t27c's Zig backend writes as
+    /// `@constCast(&[_]T{ ... })` -- the literal in a temporary that outlives
+    /// the call, and a slice of all of it. The reference does that only when
+    /// the element type is not itself an array, a slice or a tuple
+    /// (`slice_element_type`); otherwise the literal stays `.{ ... }`, which
+    /// Zig refuses.
+    fn arg_as(&mut self, n: &Node, want: &LTy) -> R<Val> {
+        if n.kind == NodeKind::ExprIdentifier && self.slice_locals.contains_key(&n.name) {
+            if let (LTy::Slice(elem, _), Some(Binding::Mem(p))) = (want, self.lookup(&n.name)) {
+                if let LTy::Arr(e, len) = &p.ty {
+                    if e == elem {
+                        self.see(n);
+                        return self.slice_of(addr_of(&p), *len, want.clone());
+                    }
+                }
+            }
+        }
+        if n.kind != NodeKind::ExprArrayLiteral {
+            return self.expr_as(n, want);
+        }
+        let LTy::Slice(elem, _) = want else {
+            return self.expr_as(n, want);
+        };
+        self.see(n);
+        if !(**elem == LTy::Str || !has_brackets(elem)) {
+            return self.reject(
+                "ExprArrayLiteral(to slice)",
+                "an array literal passed where a slice of arrays or slices is declared".into(),
+            );
+        }
+        if n.children.is_empty() && n.extra_type.trim().is_empty() && n.extra_size.contains(';') {
+            // t27c pastes `v;n` between the braces of `[_]T{ ... }`.
+            return self.reject(
+                "ExprArrayLiteral(repeat to slice)",
+                format!("`[{}]` passed where a slice is declared", n.extra_size.trim()),
+            );
+        }
+        if let Some(lit) = self.text_lit(n)? {
+            return self.arg_as(&lit, want);
+        }
+        let len = n.children.len() as u32;
+        let Val::M(arr) = self.struct_temp(n, LTy::Arr(elem.clone(), len))? else {
+            return Err(());
+        };
+        self.slice_of(addr_of(&arr), len, want.clone())
     }
 
     /// `if (c) a else b` used as a value; t27c's Zig backend emits it as
@@ -4272,7 +4420,7 @@ impl<'a> Lower<'a> {
             };
         }
         if let LTy::Arr(..) = t {
-            if n.kind == NodeKind::ExprArrayLiteral {
+            if n.kind == NodeKind::ExprArrayLiteral || is_repeat_op(n) {
                 if fresh && pure_addr(&dst.addr) {
                     return self.init_array(n, &dst, out);
                 }
@@ -4336,6 +4484,12 @@ impl<'a> Lower<'a> {
     /// checked: t27c's Zig backend writes every array literal as an
     /// anonymous `.{ ... }`, which takes the type of its destination.
     fn init_array(&mut self, n: &Node, dst: &Place, out: &mut Vec<Stmt>) -> R<()> {
+        if let Some((elems, count)) = self.repeat_lit(n, &dst.ty)? {
+            return self.init_repeat(&elems, count, dst, out);
+        }
+        if let Some(lit) = self.text_lit(n)? {
+            return self.init_array(&lit, dst, out);
+        }
         self.array_count(n, &dst.ty)?;
         let LTy::Arr(elem, _) = &dst.ty else { unreachable!() };
         let elem = (**elem).clone();
@@ -4809,6 +4963,9 @@ impl<'a> Lower<'a> {
 
     /// A module-level struct constant: its bytes in read-only data.
     fn rodata(&mut self, n: &Node, t: LTy) -> R<Val> {
+        if let Some(lit) = self.expand_repeat(n, &t)? {
+            return self.rodata(&lit, t);
+        }
         if n.kind != NodeKind::ExprStructLit && n.kind != NodeKind::ExprArrayLiteral {
             let v = self.expr_as(n, &t)?;
             return match v {
@@ -4832,6 +4989,9 @@ impl<'a> Lower<'a> {
     /// memory is needed (`materialize`).
     fn const_agg(&mut self, n: &Node, t: &LTy) -> R<Val> {
         self.see(n);
+        if let Some(lit) = self.expand_repeat(n, t)? {
+            return self.const_agg(&lit, t);
+        }
         let literal = match t {
             LTy::Arr(..) => n.kind == NodeKind::ExprArrayLiteral,
             _ => n.kind == NodeKind::ExprStructLit,
@@ -4939,6 +5099,12 @@ impl<'a> Lower<'a> {
     /// An array literal's element count must be the array's length.
     fn array_count(&mut self, n: &Node, t: &LTy) -> R<()> {
         let LTy::Arr(_, len) = t else { unreachable!() };
+        if n.children.is_empty() && n.extra_type.trim().is_empty() && !n.extra_size.trim().is_empty() {
+            return self.reject(
+                "ExprArrayLiteral(text form)",
+                format!("`[{}]`: elements kept as text", n.extra_size.trim()),
+            );
+        }
         if n.children.len() != *len as usize {
             let a = self.type_name(t);
             return self.reject(
@@ -4949,8 +5115,172 @@ impl<'a> Lower<'a> {
         Ok(())
     }
 
+    /// A repeated array literal, for array type `t`: `[v; n]` (whose element
+    /// the parser keeps as the text `v;n`) or `[_]T{ a, b } ** n`. t27c's
+    /// Zig backend writes both as `.{ ... } ** n`, so the elements are
+    /// evaluated once and the result holds them `n` times over. Returns the
+    /// elements and `n`; `None` when `n` is not a repeat.
+    fn repeat_lit(&mut self, n: &Node, t: &LTy) -> R<Option<(Vec<Node>, u32)>> {
+        let LTy::Arr(_, len) = t else { return Ok(None) };
+        let tn = self.type_name(t);
+        let (elems, count) = if is_repeat_op(n) {
+            let lhs = &n.children[0];
+            if lhs.children.is_empty() {
+                return self.reject(
+                    "ExprArrayLiteral(repeat)",
+                    "`** n` applied to an empty or text-form array literal".into(),
+                );
+            }
+            let c = &n.children[1];
+            let text = match c.kind {
+                NodeKind::ExprLiteral => c.value.clone(),
+                NodeKind::ExprIdentifier => c.name.clone(),
+                _ => return self.reject("ExprArrayLiteral(repeat count)", "`** n` with `n` not a literal or a name".into()),
+            };
+            let k = self.array_len(&tn, text.trim())?;
+            (lhs.children.clone(), k)
+        } else if n.kind == NodeKind::ExprArrayLiteral && n.children.is_empty() && n.extra_type.trim().is_empty() {
+            let txt = n.extra_size.trim();
+            let Some((v, c)) = txt.rsplit_once(';') else { return Ok(None) };
+            let k = self.array_len(&tn, c.trim())?;
+            let e = self.text_elem(v.trim(), txt)?;
+            (vec![e], k)
+        } else {
+            return Ok(None);
+        };
+        if count == 0 {
+            return self.reject("ExprArrayLiteral(repeat count)", "an array literal repeated zero times".into());
+        }
+        let total = elems.len() as u64 * count as u64;
+        if total != *len as u64 {
+            return self.reject("ExprArrayLiteral", format!("{} elements for `{}`", total, tn));
+        }
+        Ok(Some((elems, count)))
+    }
+
+    /// A list literal whose elements the parser kept as text (`[s1]` comes
+    /// back with no children and `extra_size` "s1"): the elements parsed
+    /// back, split on top-level commas as t27c's Zig backend splits them.
+    /// `None` for a literal with children, an empty one, or a repeat.
+    fn text_lit(&mut self, n: &Node) -> R<Option<Node>> {
+        let txt = n.extra_size.trim();
+        // `[_]T{}` keeps its dimension, not elements, in the same field.
+        let typed = !n.extra_type.trim().is_empty();
+        if n.kind != NodeKind::ExprArrayLiteral || !n.children.is_empty() || typed || txt.is_empty() || txt.contains(';') {
+            return Ok(None);
+        }
+        if txt.contains('{') || txt.contains("][") {
+            return self.reject("ExprArrayLiteral(text form)", format!("`[{}]`: elements kept as text", txt));
+        }
+        let mut parts = Vec::new();
+        let (mut depth, mut cur) = (0i32, String::new());
+        for ch in txt.chars() {
+            match ch {
+                '(' | '[' => depth += 1,
+                ')' | ']' => depth -= 1,
+                _ => {}
+            }
+            if ch == ',' && depth == 0 {
+                parts.push(std::mem::take(&mut cur));
+            } else {
+                cur.push(ch);
+            }
+        }
+        if !cur.trim().is_empty() {
+            parts.push(cur);
+        }
+        let mut lit = Node::new(NodeKind::ExprArrayLiteral);
+        lit.line = n.line;
+        for p in parts {
+            let e = self.text_elem(p.trim(), txt)?;
+            lit.children.push(e);
+        }
+        Ok(Some(lit))
+    }
+
+    /// One element of a literal the parser kept as text (`whole`), parsed
+    /// back from `text`. The reference pastes the text into Zig unchanged,
+    /// so only shapes that mean the same in both languages are taken:
+    /// literals, names, field access, calls of those, and a negated literal.
+    /// A name must also mean the same: t27c renames a local that shadows a
+    /// module-level name, and the pasted text would then see the
+    /// module-level one.
+    fn text_elem(&mut self, text: &str, whole: &str) -> R<Node> {
+        let src = format!("module r {{ const r = {}; }}", text);
+        let parsed = crate::compiler::Compiler::parse_ast_strict(&src).ok();
+        let mut e = parsed.as_ref().and_then(|a| find_const(a, "r")).cloned();
+        let ok = e.as_ref().is_some_and(simple_repeat_elem);
+        let Some(mut e) = e.take().filter(|_| ok) else {
+            return self.reject(
+                "ExprArrayLiteral(text element)",
+                format!("`[{}]`: element `{}` is not a literal, a name or a call (the reference pastes its text)", whole, text),
+            );
+        };
+        let mut names = Vec::new();
+        repeat_names(&e, &mut names);
+        for nm in names {
+            let module_level = self.const_nodes.contains_key(&nm)
+                || self.mod_vars.contains_key(&nm)
+                || self.sigs.contains_key(&nm);
+            if module_level && self.lookup(&nm).is_some() {
+                return self.reject(
+                    "ExprArrayLiteral(text element)",
+                    format!("`[{}]`: `{}` shadows a module-level name (the reference renames it, or Zig refuses the shadow)", whole, nm),
+                );
+            }
+        }
+        zero_lines(&mut e);
+        Ok(e)
+    }
+
+    /// The elements of a repeat, into `dst` (whose address is pure): each
+    /// one once, then the filled prefix copied forward, doubling.
+    fn init_repeat(&mut self, elems: &[Node], count: u32, dst: &Place, out: &mut Vec<Stmt>) -> R<()> {
+        let LTy::Arr(elem, _) = &dst.ty else { unreachable!() };
+        let elem = (**elem).clone();
+        let (esize, _) = self.size_align(&elem)?;
+        for (i, c) in elems.iter().enumerate() {
+            let p = elem_place(dst, &elem, esize, i as u32);
+            self.init(c, p, true, out)?;
+        }
+        let total = elems.len() as u32 * count;
+        let mut have = elems.len() as u32;
+        while have < total && esize > 0 {
+            let n = have.min(total - have);
+            let d = elem_place(dst, &elem, esize, have);
+            let s = elem_place(dst, &elem, esize, 0);
+            out.push(Stmt::Copy { dst: addr_of(&d), src: addr_of(&s), size: n * esize });
+            have += n;
+        }
+        Ok(())
+    }
+
+    /// The literal `n` for array type `t` with a repeat written out, for the
+    /// compile-time paths, which evaluate every element anyway.
+    fn expand_repeat(&mut self, n: &Node, t: &LTy) -> R<Option<Node>> {
+        if !matches!(t, LTy::Arr(..)) {
+            return Ok(None);
+        }
+        if let Some(lit) = self.text_lit(n)? {
+            return Ok(Some(lit));
+        }
+        let Some((elems, count)) = self.repeat_lit(n, t)? else { return Ok(None) };
+        if elems.len() as u64 * count as u64 > MAX_CONST_REPEAT {
+            return self.reject("ExprArrayLiteral(repeat)", format!("a constant repeat of {} elements", elems.len() as u64 * count as u64));
+        }
+        let mut lit = Node::new(NodeKind::ExprArrayLiteral);
+        lit.line = n.line;
+        for _ in 0..count {
+            lit.children.extend(elems.iter().cloned());
+        }
+        Ok(Some(lit))
+    }
+
     fn const_fill(&mut self, n: &Node, t: &LTy, buf: &mut [u8], off: usize) -> R<()> {
         self.see(n);
+        if let Some(lit) = self.expand_repeat(n, t)? {
+            return self.const_fill(&lit, t, buf, off);
+        }
         if is_undefined(n) {
             return Ok(());
         }
@@ -5034,6 +5364,109 @@ impl<'a> Lower<'a> {
 }
 
 /// The register type of a scalar or pointer; None for a struct.
+/// The byte index of the `]` that closes the `[` at index 0 of `t`.
+fn close_of_open(t: &str) -> Option<usize> {
+    let mut depth = 0i32;
+    for (i, c) in t.char_indices() {
+        match c {
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Whether `t` spells a `[` in Zig: an array, a slice, a string, or a
+/// pointer to one.
+fn has_brackets(t: &LTy) -> bool {
+    match t {
+        LTy::Arr(..) | LTy::Slice(..) | LTy::Str => true,
+        LTy::Ptr(inner, _) => has_brackets(inner),
+        _ => false,
+    }
+}
+
+/// Elements a constant repeat may expand to.
+const MAX_CONST_REPEAT: u64 = 1 << 16;
+
+/// `[_]T{ ... } ** n`, which the parser builds as a `**` binary node.
+fn is_repeat_op(n: &Node) -> bool {
+    n.kind == NodeKind::ExprBinary
+        && n.extra_op == "**"
+        && n.children.len() == 2
+        && n.children[0].kind == NodeKind::ExprArrayLiteral
+}
+
+fn find_const<'n>(n: &'n Node, name: &str) -> Option<&'n Node> {
+    if n.kind == NodeKind::ConstDecl && n.name == name && n.children.len() == 1 {
+        return Some(&n.children[0]);
+    }
+    n.children.iter().find_map(|c| find_const(c, name))
+}
+
+/// Whether a repeat element parsed back from its text is one of the shapes
+/// `repeat_elem` takes.
+fn simple_repeat_elem(n: &Node) -> bool {
+    match n.kind {
+        NodeKind::ExprLiteral | NodeKind::ExprIdentifier | NodeKind::ExprEnumValue => n.children.is_empty(),
+        NodeKind::ExprFieldAccess | NodeKind::ExprCall => n.children.iter().all(simple_repeat_elem),
+        NodeKind::ExprUnary => {
+            n.extra_op == "-" && n.children.len() == 1 && n.children[0].kind == NodeKind::ExprLiteral
+        }
+        _ => false,
+    }
+}
+
+/// The names a repeat element reads (the first segment of a dotted path).
+fn repeat_names(n: &Node, out: &mut Vec<String>) {
+    if n.kind == NodeKind::ExprIdentifier {
+        if let Some(h) = n.name.split(['.', ':']).next() {
+            out.push(h.to_string());
+        }
+    }
+    for c in &n.children {
+        repeat_names(c, out);
+    }
+}
+
+/// Parsed from text, a node has no line of its own; `see` then keeps the
+/// line of the literal it came from.
+fn zero_lines(n: &mut Node) {
+    n.line = 0;
+    for c in &mut n.children {
+        zero_lines(c);
+    }
+}
+
+/// Names a statement list binds to an array literal (`collect_array_locals`
+/// in t27c).
+fn array_locals(ns: &[Node], out: &mut HashSet<String>) {
+    for n in ns {
+        if matches!(n.kind, NodeKind::StmtLocal | NodeKind::StmtAssign)
+            && !n.name.is_empty()
+            && n.children.first().is_some_and(|c| c.kind == NodeKind::ExprArrayLiteral)
+        {
+            out.insert(n.name.clone());
+        }
+        array_locals(&n.children, out);
+    }
+}
+
+fn calls_in<'n>(ns: &'n [Node], out: &mut Vec<&'n Node>) {
+    for n in ns {
+        if n.kind == NodeKind::ExprCall {
+            out.push(n);
+        }
+        calls_in(&n.children, out);
+    }
+}
+
 fn reg_ty(t: &LTy) -> Option<Ty> {
     match t {
         LTy::S(ty) => Some(*ty),
