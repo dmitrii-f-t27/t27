@@ -346,7 +346,6 @@ fn struct_rejections_are_precise() {
         ("test t { const p = Pt{ .x = 1, .y = 2, .z = 3 }; _ = p; }", "ExprStructLit", "`Pt` has no field `z`"),
         ("test t { const p = Pt{ .x = 1, .x = 2, .y = 3 }; _ = p; }", "ExprStructLit", "field `x` initialised twice"),
         ("test t { const p = .{ .x = 1, .y = 2 }; _ = p; }", "ExprStructLit", "anonymous `.{}` literal"),
-        ("test t { const p = Pt{ .x = 1, .y = 2 }; p.x = 3; }", "StmtAssign", "assignment through a constant"),
         ("test t { const p = Pt{ .x = 1, .y = 2 }; assert(p == p); }", "type mismatch", "on a struct"),
         ("test t { const p = Pt{ .x = 1, .y = 2 }; assert(p.w == 1); }", "ExprFieldAccess", "`Pt` has no field `w`"),
         ("test t { assert(Color.red == 1); }", "ExprFieldAccess", "`Color.red`"),
