@@ -31,6 +31,9 @@ on:
       - "contrib/railway/t27b-lab/lab.py"
       - "scripts/ci/test_the_t27b_lab_heals_its_clone.py"
       - "scripts/ci/test_a_page_is_measured_at_both_widths.py"
+      - "scripts/ci/test_the_queen_ranks_by_priority_t27.py"
+      - "specs/queen/priority.t27"
+      - "gen/c/queen/priority.c"
       - ".github/workflows/loop-tools-gate.yml"
   push:
     branches: [master]
@@ -52,6 +55,9 @@ on:
       - "contrib/railway/t27b-lab/lab.py"
       - "scripts/ci/test_the_t27b_lab_heals_its_clone.py"
       - "scripts/ci/test_a_page_is_measured_at_both_widths.py"
+      - "scripts/ci/test_the_queen_ranks_by_priority_t27.py"
+      - "specs/queen/priority.t27"
+      - "gen/c/queen/priority.c"
   # Without this the missing reading cannot be taken on purpose: a gate with
   # a `paths:` filter that nothing has matched in months is unmeasured, not
   # passing, and there was no way to fire it at the default branch and find
@@ -195,6 +201,14 @@ jobs:
         # lab stands in here (no network); a same-length one-byte change must be
         # DIFFERS, and a copy that compares lengths only is the mutation control.
         run: python3 scripts/ci/test_the_t27b_gen_check_asks_the_lab.py
+
+      - name: The Queen's priority is decided in t27
+        # #6366. tri queue ranks open issues only through gen/c/queen/priority.c
+        # (t27c gen-c of specs/queen/priority.t27). The system cc builds the
+        # spec's own tests; fixtures cover every rule, including the stokowski
+        # bug (no priority sorted ahead of urgent); a reversed outranks is the
+        # mutation control. No network, no t27c.
+        run: python3 scripts/ci/test_the_queen_ranks_by_priority_t27.py
 
       - name: The dispatcher runs its helpers without a built compiler
         # tri triage and tri damage read the tracker and the spec text and have no
