@@ -70,6 +70,7 @@
 //! refused by name.
 //! `for (s) |x|` reads the slice's address and length once, before the loop.
 
+mod lencall;
 mod stdmem;
 
 use crate::codegen;
@@ -3047,6 +3048,9 @@ impl<'a> Lower<'a> {
             }
             NodeKind::ExprCall => {
                 if let Some(v) = self.std_mem_call(n)? {
+                    return Ok(v);
+                }
+                if let Some(v) = self.len_call(n)? {
                     return Ok(v);
                 }
                 let (call, ret, temp) = self.call(n, None)?;
