@@ -98,52 +98,89 @@ pub fn classify(text: []const u8) SourceKind {
             i += 1;
         }
         
-        var line: []const u8 = text[line_start..line_end];
+        // Process the line character by character
+        var pos: usize = line_start;
+        var is_all_space: bool = true;
         
-        // Trim leading whitespace
-        var trim_start: usize = 0;
-        while (trim_start < line.len and line[trim_start] == ' ') {
-            trim_start += 1;
+        // Skip leading spaces
+        while (pos < line_end and text[pos] == ' ') {
+            pos += 1;
         }
-        var trimmed: []const u8 = line[trim_start..];
+        
+        // Check if line is empty or all whitespace
+        if (pos >= line_end) {
+            line_count += 1;
+            continue;
+        }
+        
+        is_all_space = false;
         
         // Check for "pub " prefix
-        var after_pub: []const u8 = trimmed;
-        if (trimmed.len >= 4 and trimmed[0..4] == "pub ") {
-            after_pub = trimmed[4..];
+        var after_pub_start: usize = pos;
+        if (pos + 3 < line_end and 
+            text[pos] == 'p' and text[pos + 1] == 'u' and text[pos + 2] == 'b' and text[pos + 3] == ' ') {
+            after_pub_start = pos + 4;
         }
         
         // Check for module
-        if (after_pub.len >= 7 and after_pub[0..7] == "module ") {
-            var rest: []const u8 = after_pub[7..];
-            if (rest.len > 0) {
-                if (rest[rest.len-1] == ';' || containsChar(rest, '{')) {
-                    has_module = true;
+        if (after_pub_start + 6 < line_end and
+            text[after_pub_start] == 'm' and text[after_pub_start + 1] == 'o' and 
+            text[after_pub_start + 2] == 'd' and text[after_pub_start + 3] == 'u' and
+            text[after_pub_start + 4] == 'l' and text[after_pub_start + 5] == 'e' and
+            text[after_pub_start + 6] == ' ') {
+            // Check for semicolon or brace after "module "
+            var has_semicolon: bool = false;
+            var has_brace: bool = false;
+            var k: usize = after_pub_start + 7;
+            while (k < line_end) {
+                if (text[k] == ';') {
+                    has_semicolon = true;
                 }
+                if (text[k] == '{') {
+                    has_brace = true;
+                }
+                k += 1;
+            }
+            if (has_semicolon or has_brace) {
+                has_module = true;
             }
         }
         
         // Check for spec
-        if (trimmed.len >= 5 and trimmed[0..5] == "spec ") {
-            var rest: []const u8 = trimmed[5..];
-            if (containsChar(rest, '{')) {
+        if (pos + 4 < line_end and
+            text[pos] == 's' and text[pos + 1] == 'p' and 
+            text[pos + 2] == 'e' and text[pos + 3] == 'c' and
+            text[pos + 4] == ' ') {
+            // Check for brace after "spec "
+            var has_brace: bool = false;
+            var k: usize = pos + 5;
+            while (k < line_end) {
+                if (text[k] == '{') {
+                    has_brace = true;
+                    break;
+                }
+                k += 1;
+            }
+            if (has_brace) {
                 has_spec = true;
             }
         }
         
         // Check for markdown headings
-        if (trimmed.len > 3) {
-            if (trimmed[0..2] == "# ") {
+        if (pos + 1 < line_end) {
+            if (text[pos] == '#' and text[pos + 1] == ' ') {
                 md = true;
-            } else if (trimmed.len > 4 and trimmed[0..3] == "## ") {
+            } else if (pos + 2 < line_end and text[pos] == '#' and text[pos + 1] == '#' and text[pos + 2] == ' ') {
                 md = true;
-            } else if (trimmed.len > 5 and trimmed[0..4] == "### ") {
+            } else if (pos + 3 < line_end and text[pos] == '#' and text[pos + 1] == '#' and text[pos + 2] == '#' and text[pos + 3] == ' ') {
                 md = true;
             }
         }
         
         // Check for fn
-        if (after_pub.len >= 3 and after_pub[0..3] == "fn ") {
+        if (after_pub_start + 2 < line_end and
+            text[after_pub_start] == 'f' and text[after_pub_start + 1] == 'n' and
+            text[after_pub_start + 2] == ' ') {
             has_fn = true;
         }
         
@@ -161,15 +198,6 @@ pub fn classify(text: []const u8) SourceKind {
     } else {
         return SourceKind.Unclassified;
     }
-}
-
-fn containsChar(s: []const u8, c: u8) bool {
-    for (s) |char| {
-        if (char == c) {
-            return true;
-        }
-    }
-    return false;
 }
 
 test a_module_is_source {
