@@ -451,6 +451,7 @@ fn lower_mode<'a>(
 
     l.analyzed = analyzed_fns(&items);
     misprinted_ifs(ast, &mut l.misprinted_if);
+    l.reference_defects(ast);
 
     // Pass 1: signatures and constant declarations.
     let mut fn_nodes: Vec<&Node> = Vec::new();
@@ -882,6 +883,111 @@ impl<'a> Lower<'a> {
     fn see(&mut self, n: &Node) {
         if n.line != 0 {
             self.line = n.line;
+        }
+    }
+
+    /// Shapes the reference path (`t27c test-report`: t27c's Zig backend,
+    /// then `zig test`) cannot compile, refused here so t27b never passes a
+    /// file the reference cannot back (#6358). Each is a deterministic t27c
+    /// defect, and each is a Zig parse or AstGen error, which fires whether
+    /// or not anything calls the code. The checks read the AST after the
+    /// same `optimize` call `Compiler::compile` makes, since that is the
+    /// tree the reference emits.
+    fn reference_defects(&mut self, ast: &Node) {
+        let mut opt = ast.clone();
+        crate::compiler::optimize(
+            &mut opt,
+            &crate::compiler::OptConfig {
+                keep_call_discards: true,
+                ..crate::compiler::OptConfig::default()
+            },
+        );
+        let items: Vec<&Node> = if opt.kind == NodeKind::Module {
+            opt.children.iter().collect()
+        } else {
+            vec![&opt]
+        };
+        let declared: HashSet<&str> = items.iter().map(|n| n.name.as_str()).filter(|s| !s.is_empty()).collect();
+        let mut found: Vec<(u32, &'static str, String)> = Vec::new();
+        for item in &items {
+            match item.kind {
+                NodeKind::StructDecl => {
+                    for f in &item.children {
+                        if let Some(b) = undeclared_field_type(&f.extra_type, &declared) {
+                            let line = self.src.and_then(|s| decl_line(s, &item.name)).unwrap_or(item.line);
+                            found.push((
+                                line,
+                                "StructDecl(reference undeclared field type)",
+                                format!(
+                                    "field `{}.{}` has type `{}`; t27c's Zig backend emits `{}`, which Zig does not declare",
+                                    item.name, f.name, f.extra_type.trim(), b
+                                ),
+                            ));
+                        }
+                    }
+                }
+                NodeKind::FnDecl => {
+                    if let Some(name) = cse_hoist_defect(item) {
+                        found.push((
+                            item.line,
+                            "FnDecl(reference CSE hoist)",
+                            format!(
+                                "fn `{}`: t27c's optimizer hoists a common subexpression over the local `{}` above its declaration",
+                                item.name, name
+                            ),
+                        ));
+                    }
+                    let mut muts = HashSet::new();
+                    ref_mutable_names(&item.children, &mut muts);
+                    for (p, _) in &item.params {
+                        if p != "self" && muts.contains(p) && !zig_mutates(&item.children, p) {
+                            found.push((
+                                item.line,
+                                "FnDecl(reference var param)",
+                                format!(
+                                    "fn `{}`: parameter `{}` is only written through `{}.*`; t27c's Zig backend rebinds it as `var {} = {}_arg;`, which Zig rejects as never mutated",
+                                    item.name, p, p, p, p
+                                ),
+                            ));
+                        }
+                    }
+                }
+                NodeKind::TestBlock => {
+                    let mut locals: HashSet<&str> = HashSet::new();
+                    let mut bound: HashSet<&str> = HashSet::new();
+                    for s in &item.children {
+                        if s.kind == NodeKind::StmtLocal && !s.name.is_empty() {
+                            locals.insert(s.name.as_str());
+                        }
+                        if s.kind == NodeKind::StmtAssign
+                            && s.children.len() >= 2
+                            && s.children[0].kind == NodeKind::ExprIdentifier
+                            && !s.children[0].name.is_empty()
+                        {
+                            let name = s.children[0].name.as_str();
+                            if bound.insert(name) && locals.contains(name) {
+                                found.push((
+                                    if s.line != 0 { s.line } else { item.line },
+                                    "StmtAssign(reference redeclares)",
+                                    format!(
+                                        "test `{}`: the first top-level assignment to the local `{}` is emitted by t27c's Zig backend as a fresh `const {} = ..`, a redeclaration",
+                                        item.name, name, name
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        zig_syntax_defects(&opt.children, 0, &mut found);
+        found.sort_by_key(|f| f.0);
+        for (line, construct, detail) in found {
+            if line != 0 {
+                self.line = line;
+            }
+            let _: R<()> = self.reject(construct, detail);
         }
     }
 
@@ -6499,4 +6605,231 @@ fn is_prose_clause(n: &Node) -> bool {
         && n.name.len() > 1
         && n.name.ends_with(':')
         && n.name[..n.name.len() - 1].chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+// ------------------------------------------------- reference-path defects
+
+/// Zig keywords: t27c's `zig_ident` escapes these as `@"kw"` in a struct
+/// declaration, but its struct literal and field access write them bare.
+const ZIG_KEYWORDS: &[&str] = &[
+    "align", "allowzero", "and", "anyframe", "anytype", "asm", "async", "await", "break", "callconv",
+    "catch", "comptime", "const", "continue", "defer", "else", "enum", "errdefer", "error", "export",
+    "extern", "fn", "for", "if", "inline", "linksection", "noalias", "noinline", "nosuspend", "opaque",
+    "or", "orelse", "packed", "pub", "resume", "return", "struct", "suspend", "switch", "test",
+    "threadlocal", "try", "union", "unreachable", "usingnamespace", "var", "volatile", "while",
+];
+
+/// A struct field type the reference emits as a name Zig cannot resolve: a
+/// generic `List<T>` (a parse error) or a bare identifier that is neither a
+/// Zig primitive, nor one t27c's type mapper rewrites, nor a top-level
+/// declaration. Returns the offending base name. Anything else (dotted or
+/// scoped paths, `@This()`, function types) is left alone.
+fn undeclared_field_type(ty: &str, declared: &HashSet<&str>) -> Option<String> {
+    let base = type_base(ty)?;
+    if base.is_empty() {
+        return None;
+    }
+    if base.contains('<') {
+        return Some(base.to_string());
+    }
+    let ident = base.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && base.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if !ident || declared.contains(base) || zig_type_name(base) {
+        return None;
+    }
+    if matches!(base, "str" | "string" | "float" | "double" | "int" | "uint" | "GF16" | "gf16") {
+        return None;
+    }
+    Some(base.to_string())
+}
+
+/// The element name under `?`, `&`, `*`, `const`, and the array and slice
+/// forms of both t27 (`[T]`, `[T; N]`) and Zig (`[]T`, `[N]T`). `None` for a
+/// map type `[K:V]`, which is not a name.
+fn type_base(ty: &str) -> Option<&str> {
+    let t = ty.trim();
+    if let Some(r) = t.strip_prefix('?').or_else(|| t.strip_prefix('&')).or_else(|| t.strip_prefix('*')) {
+        return type_base(r);
+    }
+    if let Some(r) = t.strip_prefix("const ") {
+        return type_base(r);
+    }
+    if t.starts_with('[') {
+        let mut depth = 0i32;
+        let mut close = None;
+        for (i, c) in t.char_indices() {
+            match c {
+                '[' => depth += 1,
+                ']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let close = close?;
+        if close == t.len() - 1 {
+            let inner = &t[1..close];
+            if inner.contains(':') {
+                return None;
+            }
+            let elem = match inner.rfind(';') {
+                Some(s) => &inner[..s],
+                None => inner,
+            };
+            return type_base(elem);
+        }
+        return type_base(&t[close + 1..]);
+    }
+    Some(t)
+}
+
+/// A type name Zig declares itself.
+fn zig_type_name(n: &str) -> bool {
+    matches!(
+        n,
+        "bool" | "void" | "type" | "anyerror" | "anyframe" | "anyopaque" | "noreturn" | "usize" | "isize"
+            | "comptime_int" | "comptime_float" | "c_char" | "c_short" | "c_ushort" | "c_int" | "c_uint"
+            | "c_long" | "c_ulong" | "c_longlong" | "c_ulonglong" | "c_longdouble"
+    ) || (n.len() >= 2
+        && (n.starts_with('u') || n.starts_with('i') || n.starts_with('f'))
+        && n[1..].chars().all(|c| c.is_ascii_digit()))
+}
+
+/// t27c's Zig backend writes every `_cse*` temporary the optimizer made at
+/// the very top of the fn body. One that reads a local of the body then
+/// names it before its declaration: "use of undeclared identifier".
+fn cse_hoist_defect(f: &Node) -> Option<String> {
+    fn locals<'n>(ns: &'n [Node], out: &mut HashSet<&'n str>) {
+        for n in ns {
+            if n.kind == NodeKind::StmtLocal && !n.name.starts_with("_cse") && !n.name.is_empty() {
+                out.insert(n.name.as_str());
+            }
+            locals(&n.children, out);
+        }
+    }
+    fn first_ident<'n>(ns: &'n [Node], names: &HashSet<&str>) -> Option<&'n str> {
+        ns.iter().find_map(|n| {
+            if n.kind == NodeKind::ExprIdentifier && names.contains(n.name.as_str()) {
+                Some(n.name.as_str())
+            } else {
+                first_ident(&n.children, names)
+            }
+        })
+    }
+    let mut ls = HashSet::new();
+    locals(&f.children, &mut ls);
+    for (p, _) in &f.params {
+        ls.remove(p.as_str());
+    }
+    f.children
+        .iter()
+        .filter(|s| s.kind == NodeKind::StmtLocal && s.name.starts_with("_cse"))
+        .find_map(|s| first_ident(&s.children, &ls))
+        .map(str::to_string)
+}
+
+/// The reference's `collect_mutable_names`, exactly: assignment targets that
+/// are a name, or whose immediate base (index or field) is one, looking into
+/// `if`/`while`/`for` bodies and nowhere else.
+fn ref_mutable_names(ns: &[Node], out: &mut HashSet<String>) {
+    for n in ns {
+        match n.kind {
+            NodeKind::StmtAssign if !n.children.is_empty() => {
+                let t = &n.children[0];
+                if t.kind == NodeKind::ExprIdentifier {
+                    out.insert(t.name.clone());
+                }
+                if matches!(t.kind, NodeKind::ExprIndex | NodeKind::ExprFieldAccess) {
+                    if let Some(b) = t.children.first() {
+                        if b.kind == NodeKind::ExprIdentifier {
+                            out.insert(b.name.clone());
+                        }
+                    }
+                }
+            }
+            NodeKind::StmtIf | NodeKind::StmtWhile | NodeKind::StmtFor | NodeKind::StmtForRange => {
+                for c in &n.children {
+                    if c.kind == NodeKind::Module {
+                        ref_mutable_names(&c.children, out);
+                    } else {
+                        ref_mutable_names(std::slice::from_ref(c), out);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Does Zig count `var name` as mutated anywhere in `ns`? An assignment whose
+/// target reaches `name` through fields and indexes but no `.*`, `&` of such
+/// a path, or a method call on it. Errs toward yes: a yes refuses nothing.
+fn zig_mutates(ns: &[Node], name: &str) -> bool {
+    fn rooted(t: &Node, name: &str) -> bool {
+        match t.kind {
+            NodeKind::ExprIdentifier => t.name == name,
+            NodeKind::ExprFieldAccess if t.name == "*" => false,
+            NodeKind::ExprFieldAccess | NodeKind::ExprIndex => t.children.first().is_some_and(|b| rooted(b, name)),
+            _ => false,
+        }
+    }
+    ns.iter().any(|n| {
+        let hit = match n.kind {
+            NodeKind::StmtAssign => n.children.first().is_some_and(|t| rooted(t, name)),
+            NodeKind::ExprUnary if n.extra_op == "&" => n.children.first().is_some_and(|t| rooted(t, name)),
+            NodeKind::ExprCall => n.name.split('.').next() == Some(name) && n.name.contains('.'),
+            _ => false,
+        };
+        hit || zig_mutates(&n.children, name)
+    })
+}
+
+/// Syntax the reference prints that Zig cannot parse: a keyword field name
+/// left bare in a struct literal or field access, and a childless typed
+/// array literal (`[_]T{}`), whose dimension t27c prints as its element.
+fn zig_syntax_defects(ns: &[Node], line: u32, found: &mut Vec<(u32, &'static str, String)>) {
+    for n in ns {
+        // Expressions carry no line; report the enclosing statement's.
+        let at = if n.line != 0 { n.line } else { line };
+        match n.kind {
+            NodeKind::ExprStructLit => {
+                for f in &n.children {
+                    if ZIG_KEYWORDS.contains(&f.name.as_str()) {
+                        found.push((
+                            at,
+                            "ExprStructLit(zig keyword field)",
+                            format!("field `.{}` is a Zig keyword; t27c's Zig backend does not escape it in a struct literal", f.name),
+                        ));
+                    }
+                }
+            }
+            NodeKind::ExprFieldAccess if ZIG_KEYWORDS.contains(&n.name.as_str()) => {
+                found.push((
+                    at,
+                    "ExprFieldAccess(zig keyword field)",
+                    format!("field `.{}` is a Zig keyword; t27c's Zig backend does not escape it in a field access", n.name),
+                ));
+            }
+            NodeKind::ExprArrayLiteral
+                if n.children.is_empty() && !n.extra_type.trim().is_empty() && !n.extra_size.trim().is_empty() =>
+            {
+                found.push((
+                    at,
+                    "ExprArrayLiteral(reference empty typed)",
+                    format!(
+                        "`[{}]{}{{}}`: t27c's Zig backend prints the dimension `{}` as the literal's only element",
+                        n.extra_size.trim(),
+                        n.extra_type.trim(),
+                        n.extra_size.trim()
+                    ),
+                ));
+            }
+            _ => {}
+        }
+        zig_syntax_defects(&n.children, at, found);
+    }
 }

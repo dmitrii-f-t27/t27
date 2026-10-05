@@ -219,10 +219,6 @@ fn bump(p: *Pt) void {
     p.*.y = 2;
 }
 
-fn incr(c: *u32) void {
-    c.* += 1;
-}
-
 fn wrap(t: u8) Box {
     return Box{ .a = mk(5, 6), .tag = t };
 }
@@ -245,7 +241,7 @@ test literals_and_fields {
 
 test results_and_copies {
     var p = mk(1, 2);
-    p = swap(p);
+    if (true) { p = swap(p); }
     assert(p.x == 2 and p.y == 1);
     var w = wrap(9);
     assert(w.a.x == 5 and w.tag == 9);
@@ -261,8 +257,8 @@ test results_and_copies {
 
 test addresses {
     var n: u32 = 4;
-    incr(&n);
-    incr(&n);
+    const np = &n;
+    np.* += 2;
     assert(n == 6);
     const tail = Node{ .v = 2, .next = undefined };
     const head = Node{ .v = 1, .next = &tail };
@@ -291,7 +287,7 @@ test overflow_through_a_field {
     );
     assert_eq!(r[3].2.unwrap_err().0, TrapKind::Overflow);
     let prog = lower_src(src).unwrap();
-    // mk, swap, sum, wrap take or return a struct; bump and incr take pointers.
+    // mk, swap, sum, wrap take or return a struct; bump takes a pointer.
     let internal: Vec<&str> = prog.internal_abi.iter().map(|&i| prog.funcs[i as usize].name.as_str()).collect();
     assert_eq!(internal, vec!["mk", "swap", "sum", "wrap"]);
 }
@@ -416,15 +412,15 @@ test runtime_compare {
 test locals_and_fields {
     var s: str = \"abc\";
     const t = s;
-    s = \"tab\\tq\";
+    if (true) { s = \"tab\\tq\"; }
     assert(s.len == 5 and t.len == 3);
     assert(t == \"abc\" and s == \"tab\\tq\");
     var p = Pin{ .name = \"T9\", .num = 9 };
     assert(p.name == \"T9\");
     p.name = NAME;
     assert(pin_name(p) == NAME and pin_name(p).len == 3);
-    var u = \"lit\";
-    u = \"other\";
+    var u: str = \"lit\";
+    if (true) { u = \"other\"; }
     assert(u.len == 5);
 }
 
@@ -909,7 +905,7 @@ test strings_index_and_slice {
 
 test slice_literals_and_fields {
     assert(sum(&[_]u32{ 10, 20 }) == 30);
-    assert(sum(&[_]u32{}) == 0);
+    assert(sum(&[_]u32{ 0 }) == 0);
     const p = Pair{ .xs = &[_]u32{ 3, 4 }, .tag = 1 };
     assert(p.xs.len == 2 and p.xs[1] == 4 and sum(p.xs) == 7);
 }
@@ -2508,4 +2504,52 @@ fn optionals_the_reference_does_not_match_are_refused() {
         let m = rejected(src);
         assert!(m.starts_with(&format!("t27b: unsupported construct {}", want)), "{}", m);
     }
+}
+
+/// Shapes t27c's Zig backend cannot compile (#6358): each source below is
+/// BLOCKED under `t27c test-report`, so t27b must not pass it either.
+#[test]
+fn shapes_the_reference_cannot_compile_are_refused() {
+    let cases: [(&str, &str); 6] = [
+        // `var w = 1; w = 9;` at the top of a test: the reference emits the
+        // assignment as `const w = 9;`, a redeclaration.
+        (
+            "module a;\n\ntest t {\n    var w: u32 = 1;\n    w = 9;\n    assert(w == 9);\n}\n",
+            "StmtAssign(reference redeclares)",
+        ),
+        // A pointer param written only through `p.*`: the reference rebinds
+        // it `var p = p_arg;`, which Zig rejects as never mutated.
+        (
+            "module b;\n\nfn set(p: *u32) {\n    p.* = 5;\n}\n\ntest t {\n    var x: u32 = 1;\n    set(&x);\n    assert(x == 5);\n}\n",
+            "FnDecl(reference var param)",
+        ),
+        // `count + 1` twice: CSE hoists `_cse0 = count + 1` above `count`.
+        (
+            "module c;\n\nfn cnt(n: u32) -> u32 {\n    var count: u32 = n;\n    var x: u32 = count + 1;\n    var y: u32 = count + 1;\n    return x + y;\n}\n\ntest t {\n    assert(cnt(1) == 4);\n}\n",
+            "FnDecl(reference CSE hoist)",
+        ),
+        // A Zig keyword as a field name, unescaped in the literal.
+        (
+            "module d;\n\nconst S = struct { align: u32, n: u32 };\n\nfn f() -> u32 {\n    const s: S = S{ .align = 4, .n = 1 };\n    return s.n;\n}\n\ntest t {\n    assert(f() == 1);\n}\n",
+            "ExprStructLit(zig keyword field)",
+        ),
+        // `[_]u8{}`: the reference prints `.{ _ }`.
+        (
+            "module e;\n\ntest t {\n    var c: [0]u8 = [_]u8{};\n    assert(1 == 1);\n}\n",
+            "ExprArrayLiteral(reference empty typed)",
+        ),
+        // A field of a type nothing declares, in a struct nothing uses.
+        (
+            "module g;\n\nconst S = struct { name: String, n: u32 };\n\ntest t {\n    assert(1 == 1);\n}\n",
+            "StructDecl(reference undeclared field type)",
+        ),
+    ];
+    for (src, want) in cases {
+        let m = rejected(src);
+        assert!(m.starts_with(&format!("t27b: unsupported construct {}", want)), "{}", m);
+    }
+    // The near misses still run: a param the body assigns directly (the
+    // reference's `var n = n_arg;` is then mutated) and a mapped field type.
+    let r = run("module h;\n\nconst S = struct { name: str, xs: [u32; 2] };\n\nfn inc(n: u32) -> u32 {\n    n = n + 1;\n    return n;\n}\n\ntest t {\n    assert(inc(1) == 2);\n}\n");
+    assert_eq!(names_ok(&r), vec![("t", false, true)]);
 }
