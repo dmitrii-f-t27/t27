@@ -7682,9 +7682,56 @@ impl Codegen {
             if !cur.trim().is_empty() {
                 parts.push(cur.trim().to_string());
             }
+            // #6451: the REPEAT form `[v; n]` arrives as the text `v;n`, and
+            // was emitted as `{ v;n }` -- "expected ',' after initializer".
+            // Zig spells it `{ v } ** n`; every caller writes the `[_]T` in
+            // front, so `[_]T{ v } ** n` is the whole value. A Rust width
+            // suffix on the value (`0i32`, `0.0f64`) is not Zig either; the
+            // element type already carries the width.
+            if parts.len() == 1 {
+                let mut d = 0i32;
+                let mut semi = None;
+                for (i, ch) in parts[0].char_indices() {
+                    match ch {
+                        '(' | '[' | '{' => d += 1,
+                        ')' | ']' | '}' => d -= 1,
+                        ';' if d == 0 => semi = Some(i),
+                        _ => {}
+                    }
+                }
+                if let Some(i) = semi {
+                    let v = parts[0][..i].trim().to_string();
+                    let n = parts[0][i + 1..].trim().to_string();
+                    if !v.is_empty() && !n.is_empty() {
+                        self.write(&format!("{} }} ** {}", Self::strip_rust_num_suffix(&v), n));
+                        return;
+                    }
+                }
+            }
             self.write(&parts.join(", "));
         }
         self.write(" }");
+    }
+
+    /// `0i32` -> `0`, `1.5f64` -> `1.5`, `7usize` -> `7`; anything that is not
+    /// a numeric literal with a Rust width suffix is returned unchanged.
+    fn strip_rust_num_suffix(v: &str) -> String {
+        for suf in [
+            "usize", "isize", "u128", "i128", "u64", "i64", "u32", "i32", "u16", "i16", "f64",
+            "f32", "u8", "i8",
+        ] {
+            if let Some(num) = v.strip_suffix(suf) {
+                let num = num.strip_suffix('_').unwrap_or(num);
+                let body = num.strip_prefix('-').unwrap_or(num);
+                if !body.is_empty()
+                    && body.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
+                    && body.chars().all(|c| c.is_ascii_digit() || c == '.' || c == '_')
+                {
+                    return num.to_string();
+                }
+            }
+        }
+        v.to_string()
     }
 
     /// Locals a block declares with one of the given explicit types.
@@ -8603,6 +8650,16 @@ impl Codegen {
 
     fn t27_array_type_to_zig(ty: &str) -> String {
         let t = ty.trim();
+        // #6451: t27 also spells an optional Rust/TypeScript-style, AFTER the
+        // type -- `OrgID?`, `str?`. Zig spells it `?T`; the suffix reached the
+        // output verbatim and Zig answered "expected ',' after field" at the
+        // struct declaration, before reading anything else in the file.
+        if let Some(inner) = t.strip_suffix('?') {
+            let inner = inner.trim();
+            if !inner.is_empty() && !inner.starts_with('?') {
+                return format!("?{}", Self::t27_array_type_to_zig(inner));
+            }
+        }
         // W590: a slice OF a mapped scalar -- `[]string`, `[]str`. The scalar
         // mapping below only ever saw the whole type, so `string` was mapped
         // and `[]string` was not, and Zig received `[]string` -> "use of
@@ -8925,7 +8982,10 @@ impl Codegen {
             self.param_renames.entry(l.clone()).or_insert(format!("{}_lv", l));
         }
 
-        self.write(&format!("fn {}(", node.name));
+        // #6451: a fn or parameter named for a Zig keyword (`fn error(..)`,
+        // `error: StreamError`) is escaped where it is declared, as every
+        // reference to it already was.
+        self.write(&format!("fn {}(", Self::zig_ident(&node.name)));
         for (i, (pname, ptype)) in node.params.iter().enumerate() {
             if i > 0 {
                 self.write(", ");
@@ -8940,7 +9000,7 @@ impl Codegen {
             let arg_ident = if Self::zig_is_primitive(&arg_name) {
                 Self::zig_binding_ident(&arg_name)
             } else {
-                arg_name
+                Self::zig_ident(&arg_name)
             };
             self.write(&format!("{}: {}", arg_ident, Self::t27_array_type_to_zig(ptype)));
         }
@@ -10558,6 +10618,12 @@ impl Codegen {
                     // Tuple index: Zig tuple fields are named "0"/"1"/...,
                     // reachable only through the @"" identifier syntax.
                     self.write(&format!("@\"{}\"", node.name));
+                } else if !node.name.contains("::") {
+                    // #6451: a field named for a Zig keyword (`r.error`) is
+                    // declared escaped (`@"error": T`) and must be read the
+                    // same way, or Zig stops at "expected pointer dereference,
+                    // optional unwrap, or field access, found 'error'".
+                    self.write(&Self::zig_ident(&node.name));
                 } else {
                     self.write(&node.name);
                 }
@@ -10661,7 +10727,13 @@ impl Codegen {
                     return;
                 }
                 if let Some((val, count)) = txt.rsplit_once(';') {
-                    self.write(&format!(".{{ {} }} ** {}", val.trim(), count.trim()));
+                    // #6451: `[0i32; 2]` kept the Rust width suffix -- "number
+                    // '0i32' has leading zero"; the target type carries it.
+                    self.write(&format!(
+                        ".{{ {} }} ** {}",
+                        Self::strip_rust_num_suffix(val.trim()),
+                        count.trim()
+                    ));
                 } else {
                     // Split on TOP-LEVEL commas only -- elements may be calls
                     // with their own commas.
@@ -10705,7 +10777,9 @@ impl Codegen {
                     if i > 0 {
                         self.write(", ");
                     }
-                    self.write(&format!(".{} = ", field.name));
+                    // #6451: `.error = ""` is a keyword where Zig wants a
+                    // field name ("expected field initializer").
+                    self.write(&format!(".{} = ", Self::zig_ident(&field.name)));
                     if !field.children.is_empty() {
                         // W609: an array literal assigned to a SLICE-typed field
                         // needs the same lowering W607 gave slice RETURNS --

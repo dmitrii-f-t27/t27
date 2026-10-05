@@ -2,13 +2,13 @@
   "gen_hash_c": "sha256:03edc5bc564a4469a1ea26651d99eadeaf8d5ebeb1681bb763b45803a5f39038",
   "gen_hash_rust": "sha256:efe9600385e9d5d761d3767c065899c728578db0d54384f2cfec330f47025056",
   "gen_hash_verilog": "sha256:3cea55ffd82685902350528e780c9ad95becb6ee6abf4f53ab0d80a98d27ff44",
-  "gen_hash_zig": "sha256:b15fa499d0d8de949e8d09cc58a131d35219dd628468a13560715b7ec4972187",
+  "gen_hash_zig": "sha256:35c2ac17e78d86d601a7a3c3a8c428904d8905b4a8bf82fd204495da96e55d75",
   "module": "runtime-process",
   "ring": 12,
-  "sealed_at": "2026-10-05T16:15:31Z",
+  "sealed_at": "2026-10-05T17:54:36Z",
   "spec_hash": "sha256:6d279c1d2f4cd74b1b890b70aa4a9f955f0a2c941b6d83e19e11ee17200407a4",
   "spec_path": "specs/runtime/process.t27",
   "tests": {
-    "blocked": "does not compile: /tmp/t27c-test-report-process-3304568/spec.zig:96:38: error: expected '}', found ']'"
+    "blocked": "does not compile: /tmp/t27c-test-report-process-36845/spec.zig:96:38: error: expected '}', found ']'"
   }
 }
