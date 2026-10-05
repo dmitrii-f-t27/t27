@@ -1476,6 +1476,7 @@ impl<'a> Lower<'a> {
                 Some(c) if c.kind == NodeKind::ExprCall => self.call_stmt(c, out),
                 Some(c) if c.kind == NodeKind::ExprReturn => self.stmt(c, out),
                 Some(c) if c.kind == NodeKind::ExprIdentifier && c.name == "undefined" => self.undefined_stmt(c, out),
+                Some(c) if is_value_stmt(c) => self.value_stmt(c, out),
                 Some(c) => {
                     self.see(c);
                     let k = if c.kind == NodeKind::ExprUnary && !c.extra_op.is_empty() {
@@ -1909,6 +1910,35 @@ impl<'a> Lower<'a> {
             );
         }
         let site = self.site(TrapKind::Stub, "undefined;".into(), Ty::Bool);
+        out.push(Stmt::Assert { cond: Expr { ty: Ty::Bool, kind: ExprKind::Const(0) }, site });
+        Ok(())
+    }
+
+    /// An expression statement whose value nothing uses: a Rust-style tail
+    /// expression (`fn f(v: u8) -> u32 { v }`, `color | rgb`), a brace-form
+    /// invariant (`invariant i { N == 3 }`), a bare comparison. t27c's Zig
+    /// backend emits it as is (`expr;`), with no implicit return, and Zig
+    /// rejects it ("value of type 'bool' ignored") wherever it analyzes the
+    /// body. The same rule as `undefined;` (`undefined_stmt`) then decides:
+    /// in a fn nothing analyzed reaches, the reference compiles the file and
+    /// the statement lowers to a trap no test can hit; in a test, an
+    /// invariant (a `comptime` block) or a reachable fn, the reference does
+    /// not compile, so the file is refused, not matched.
+    fn value_stmt(&mut self, c: &Node, out: &mut Vec<Stmt>) -> R<()> {
+        self.see(c);
+        if !self.unanalyzed_fn {
+            let k = format!("{}(value ignored) statement", kind_name(c));
+            let op = c.extra_op.trim();
+            let what = if op.is_empty() { kind_name(c) } else { format!("{} `{}`", kind_name(c), op) };
+            return self.reject(
+                &k,
+                format!(
+                    "{} as a statement where a test, invariant or bench reaches it: t27c emits it as `expr;` (no implicit return) and the reference's Zig does not compile it (value ignored)",
+                    what
+                ),
+            );
+        }
+        let site = self.site(TrapKind::Stub, "ignored value".into(), Ty::Bool);
         out.push(Stmt::Assert { cond: Expr { ty: Ty::Bool, kind: ExprKind::Const(0) }, site });
         Ok(())
     }
@@ -4939,6 +4969,23 @@ fn analyzed_fns(items: &[&Node]) -> HashSet<String> {
         stack.extend(more.into_iter().filter(|m| !reached.contains(m)));
     }
     reached
+}
+
+/// An expression whose value Zig refuses to drop when it is a statement
+/// (`value of type ... ignored`). Calls, `return`, `try`, `if`, `switch` and
+/// `undefined` have their own rules and are not in this set.
+fn is_value_stmt(c: &Node) -> bool {
+    match c.kind {
+        NodeKind::ExprBinary
+        | NodeKind::ExprLiteral
+        | NodeKind::ExprCast
+        | NodeKind::ExprFieldAccess
+        | NodeKind::ExprIndex
+        | NodeKind::ExprStructLit
+        | NodeKind::ExprArrayLiteral => true,
+        NodeKind::ExprIdentifier => c.name != "undefined",
+        _ => false,
+    }
 }
 
 fn mentions(ns: &[Node], name: &str) -> bool {
