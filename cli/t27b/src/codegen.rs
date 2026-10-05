@@ -117,6 +117,35 @@ pub fn canon(c: i128, ty: Ty) -> u64 {
     }
 }
 
+/// Move the register image of float `ty` from general register `rn` to FP
+/// register `rd`: `fmov dd, xn` for F64, `fmov sd, wn` for F32.
+fn fp_in(ty: Ty, rd: Reg, rn: Reg) -> u32 {
+    if ty == Ty::F32 {
+        a64::fmov_s_w(rd, rn)
+    } else {
+        a64::fmov_d_x(rd, rn)
+    }
+}
+
+/// Move float `ty` from FP register `rn` to general register `rd`, in
+/// canonical form (an F32 zero-extended, like a u32).
+fn fp_out(ty: Ty, rd: Reg, rn: Reg) -> u32 {
+    if ty == Ty::F32 {
+        a64::fmov_w_s(rd, rn)
+    } else {
+        a64::fmov_x_d(rd, rn)
+    }
+}
+
+/// A double-precision FP instruction `w` in the precision of float `ty`.
+fn fp_op(ty: Ty, w: u32) -> u32 {
+    if ty == Ty::F32 {
+        a64::single(w)
+    } else {
+        w
+    }
+}
+
 fn narrow_ext(ty: Ty) -> Option<Ext> {
     match ty {
         Ty::U8 | Ty::Bool => Some(Ext::Uxtb),
@@ -128,7 +157,7 @@ fn narrow_ext(ty: Ty) -> Option<Ext> {
 }
 
 fn cond_for(op: CmpOp, ty: Ty) -> Cond {
-    if ty == Ty::F64 {
+    if ty.is_float() {
         return fcond_for(op);
     }
     let s = ty.signed();
@@ -627,10 +656,14 @@ impl<'a> Gen<'a> {
                 continue;
             }
             if fp {
-                // AAPCS64: the k-th F64 argument is in d_k.
+                // AAPCS64: the k-th float argument is in d_k (an F32 in s_k).
                 match self.homes[p] {
                     Home::None => {}
-                    Home::Reg(h) => pro.push(a64::fmov_x_d(h, k as Reg)),
+                    Home::Reg(h) => pro.push(fp_out(ty, h, k as Reg)),
+                    Home::Slot(off) if ty == Ty::F32 => {
+                        pro.push(a64::fmov_w_s(X16, k as Reg));
+                        pro.push(a64::str_x(X16, SP, off));
+                    }
                     Home::Slot(off) => pro.push(a64::str_d(k as Reg, SP, off)),
                 }
                 continue;
@@ -803,9 +836,9 @@ impl<'a> Gen<'a> {
             Stmt::Return(e) => {
                 if let Some(e) = e {
                     self.eval_into(e, X0);
-                    if e.ty == Ty::F64 {
-                        // AAPCS64 returns an F64 in d0.
-                        self.emit(a64::fmov_d_x(0, X0));
+                    if e.ty.is_float() {
+                        // AAPCS64 returns an F64 in d0, an F32 in s0.
+                        self.emit(fp_in(e.ty, 0, X0));
                     }
                 }
                 self.ret_jumps.push(self.code.len());
@@ -830,11 +863,11 @@ impl<'a> Gen<'a> {
                 let b = self.eval(rhs);
                 let ra = self.use_(a, X16, ty);
                 let rb = self.use_(b, X17, ty);
-                if ty == Ty::F64 {
+                if ty.is_float() {
                     // IEEE equality: NaN is unequal to itself, -0.0 == 0.0.
-                    self.emit(a64::fmov_d_x(D16, ra));
-                    self.emit(a64::fmov_d_x(D17, rb));
-                    self.emit(a64::fcmp(D16, D17));
+                    self.emit(fp_in(ty, D16, ra));
+                    self.emit(fp_in(ty, D17, rb));
+                    self.emit(fp_op(ty, a64::fcmp(D16, D17)));
                 } else {
                     self.emit(a64::cmp(ty.is64(), ra, rb));
                 }
@@ -1066,28 +1099,44 @@ impl<'a> Gen<'a> {
                 let b = self.eval(rhs);
                 let ra = self.use_(a, X16, ty);
                 let rb = self.use_(b, X17, ty);
-                self.emit(a64::fmov_d_x(D16, ra));
-                self.emit(a64::fmov_d_x(D17, rb));
-                self.emit(match op {
-                    FOp::Add => a64::fadd(D16, D16, D17),
-                    FOp::Sub => a64::fsub(D16, D16, D17),
-                    FOp::Mul => a64::fmul(D16, D16, D17),
-                    FOp::Div => a64::fdiv(D16, D16, D17),
-                });
+                self.emit(fp_in(ty, D16, ra));
+                self.emit(fp_in(ty, D17, rb));
+                self.emit(fp_op(
+                    ty,
+                    match op {
+                        FOp::Add => a64::fadd(D16, D16, D17),
+                        FOp::Sub => a64::fsub(D16, D16, D17),
+                        FOp::Mul => a64::fmul(D16, D16, D17),
+                        FOp::Div => a64::fdiv(D16, D16, D17),
+                    },
+                ));
                 self.release(b);
                 self.release(a);
                 let (d, t) = self.dest(dst);
-                self.emit(a64::fmov_x_d(d, D16));
+                self.emit(fp_out(ty, d, D16));
                 self.done(d, t)
             }
             ExprKind::FNeg(x) => {
                 let v = self.eval(x);
                 let ra = self.use_(v, X16, ty);
-                self.emit(a64::fmov_d_x(D16, ra));
-                self.emit(a64::fneg(D16, D16));
+                self.emit(fp_in(ty, D16, ra));
+                self.emit(fp_op(ty, a64::fneg(D16, D16)));
                 self.release(v);
                 let (d, t) = self.dest(dst);
-                self.emit(a64::fmov_x_d(d, D16));
+                self.emit(fp_out(ty, d, D16));
+                self.done(d, t)
+            }
+            ExprKind::FloatCast(x) => {
+                // F32 -> F64 is exact; F64 -> F32 rounds to nearest, ties to
+                // even (FPCR.RMode is RN), an overflow giving an infinity.
+                let from = x.ty;
+                let v = self.eval(x);
+                let ra = self.use_(v, X16, from);
+                self.emit(fp_in(from, D16, ra));
+                self.emit(if ty == Ty::F32 { a64::fcvt_s_d(D16, D16) } else { a64::fcvt_d_s(D16, D16) });
+                self.release(v);
+                let (d, t) = self.dest(dst);
+                self.emit(fp_out(ty, d, D16));
                 self.done(d, t)
             }
             ExprKind::IntToFloat(x) => {
@@ -1096,14 +1145,16 @@ impl<'a> Gen<'a> {
                 let from = x.ty;
                 let v = self.eval(x);
                 let ra = self.use_(v, X16, from);
+                // An F32 result converts straight from the integer: one
+                // rounding, as Zig's @floatFromInt.
                 if from.signed() {
-                    self.emit(a64::scvtf(from.is64(), D16, ra));
+                    self.emit(fp_op(ty, a64::scvtf(from.is64(), D16, ra)));
                 } else {
-                    self.emit(a64::ucvtf(from.is64(), D16, ra));
+                    self.emit(fp_op(ty, a64::ucvtf(from.is64(), D16, ra)));
                 }
                 self.release(v);
                 let (d, t) = self.dest(dst);
-                self.emit(a64::fmov_x_d(d, D16));
+                self.emit(fp_out(ty, d, D16));
                 self.done(d, t)
             }
             ExprKind::FloatToInt { arg, site } => {
@@ -1113,9 +1164,14 @@ impl<'a> Gen<'a> {
                 // unordered FCMP (NZCV = 0011), so a NaN does not trap and
                 // FCVTZ* turns it into 0 -- what Zig 0.16 Debug does. FCVTZ*
                 // truncates toward zero, giving the canonical W form.
+                // An F32 operand is widened to F64 first, exactly, so the
+                // bounds and the truncation below are the same.
                 let v = self.eval(arg);
-                let ra = self.use_(v, X16, Ty::F64);
-                self.emit(a64::fmov_d_x(D16, ra));
+                let ra = self.use_(v, X16, arg.ty);
+                self.emit(fp_in(arg.ty, D16, ra));
+                if arg.ty == Ty::F32 {
+                    self.emit(a64::fcvt_d_s(D16, D16));
+                }
                 self.release(v);
                 let l = self.stub_site(*site);
                 let (lo, lo_incl) = if ty == Ty::I64 {
@@ -1374,12 +1430,12 @@ impl<'a> Gen<'a> {
         let s = ty.is64();
         let a = self.eval(lhs);
         let b = self.eval(rhs);
-        if ty == Ty::F64 {
+        if ty.is_float() {
             let rx = self.use_(a, X16, ty);
             let ry = self.use_(b, X17, ty);
-            self.emit(a64::fmov_d_x(D16, rx));
-            self.emit(a64::fmov_d_x(D17, ry));
-            self.emit(a64::fcmp(D16, D17));
+            self.emit(fp_in(ty, D16, rx));
+            self.emit(fp_in(ty, D17, ry));
+            self.emit(fp_op(ty, a64::fcmp(D16, D17)));
             self.release(b);
             self.release(a);
             return fcond_for(op);
@@ -1469,7 +1525,7 @@ impl<'a> Gen<'a> {
         let callee = &self.prog.funcs[func as usize];
         let regs = Program::arg_regs(callee);
         let (stack, nstack) = Program::stack_args(&regs);
-        let ret_f64 = callee.ret == Some(Ty::F64);
+        let ret_fp = callee.ret.filter(|t| t.is_float());
         // Register arguments first (they touch only x0-x7, d0-d7 and x16),
         // then the stack ones, below sp: x9-x15 still hold the temps.
         for (j, &(v, ty)) in vals.iter().enumerate() {
@@ -1478,9 +1534,9 @@ impl<'a> Gen<'a> {
                 continue;
             }
             if fp {
-                // AAPCS64: the k-th F64 argument goes in d_k.
+                // AAPCS64: the k-th float argument goes in d_k (an F32 in s_k).
                 let r = self.use_(v, X16, ty);
-                self.emit(a64::fmov_d_x(k as Reg, r));
+                self.emit(fp_in(ty, k as Reg, r));
                 continue;
             }
             let rj = k as Reg;
@@ -1533,8 +1589,8 @@ impl<'a> Gen<'a> {
         }
         let out = if want {
             let (d, t) = self.dest(dst);
-            if ret_f64 {
-                self.emit(a64::fmov_x_d(d, 0));
+            if let Some(rt) = ret_fp {
+                self.emit(fp_out(rt, d, 0));
             } else if d != X0 {
                 self.emit(a64::mov(true, d, X0));
             }
@@ -1897,7 +1953,7 @@ fn weigh_expr(e: &Expr, unit: u64, w: &mut [u64], has_call: &mut bool) {
             weigh_expr(b, unit, w, has_call);
         }
         ExprKind::Not(a) | ExprKind::BitNot(a) | ExprKind::Widen(a) => weigh_expr(a, unit, w, has_call),
-        ExprKind::FNeg(a) | ExprKind::IntToFloat(a) => weigh_expr(a, unit, w, has_call),
+        ExprKind::FNeg(a) | ExprKind::IntToFloat(a) | ExprKind::FloatCast(a) => weigh_expr(a, unit, w, has_call),
         ExprKind::FArith { lhs, rhs, .. } => {
             weigh_expr(lhs, unit, w, has_call);
             weigh_expr(rhs, unit, w, has_call);

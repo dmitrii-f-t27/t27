@@ -25,7 +25,9 @@
 //! sit in read-only data; it is written into memory only where a `str` place
 //! needs it. `==` and `!=` on strings compare contents, as t27c's Zig backend
 //! does with `std.mem.eql`: two literals fold, anything else calls one
-//! synthesized IR function, `__t27b_str_eql`.
+//! synthesized IR function, `__t27b_str_eql`. `std.mem.eql(u8, a, b)` is the
+//! same comparison, and `std.mem.indexOf(u8, h, n)` compared with `null`
+//! calls a second one, `__t27b_str_contains` (`lower/stdmem.rs`).
 //!
 //! Arrays: `[N]T` (N a literal or an integer constant) is N elements of T back
 //! to back in memory, an aggregate like a struct: copied on assignment, passed
@@ -68,11 +70,20 @@
 //! refused by name.
 //! `for (s) |x|` reads the slice's address and length once, before the loop.
 
+mod arraylit;
+mod formulti;
+mod lencall;
+mod stdmem;
+mod unanalyzed;
+
 use crate::codegen;
 use crate::compiler::{Node, NodeKind};
 use crate::ir::*;
 use std::collections::{HashMap, HashSet};
 
+#[path = "lower_float.rs"]
+mod float;
+mod refvars;
 mod tuple;
 
 /// A construct outside the supported subset (or a type error inside it).
@@ -282,6 +293,8 @@ struct Lower<'a> {
     nfuncs: FuncId,
     /// `__t27b_str_eql` is called somewhere.
     eql_used: bool,
+    /// `__t27b_str_contains` is called somewhere (`stdmem`).
+    contains_used: bool,
     // Per-function state.
     vars: Vec<Var>,
     /// The source type of each variable (parallel to `vars`).
@@ -290,6 +303,8 @@ struct Lower<'a> {
     /// Names whose address is taken somewhere in the body (`&x`): such a
     /// scalar lives in a frame slot instead of a register.
     addr_taken: HashSet<String>,
+    /// Names the reference makes a `var` in this body (`refvars`).
+    ref_vars: HashSet<String>,
     /// Untyped locals bound to an array literal and passed where a callee
     /// declares a slice, with that slice's element type: t27c's Zig backend
     /// makes each a `var x = [_]T{ ... }` array and passes `&x`
@@ -414,10 +429,12 @@ fn lower_mode<'a>(
         strings: HashMap::new(),
         nfuncs: 0,
         eql_used: false,
+        contains_used: false,
         vars: Vec::new(),
         ltys: Vec::new(),
         slots: Vec::new(),
         addr_taken: HashSet::new(),
+        ref_vars: HashSet::new(),
         slice_locals: HashMap::new(),
         tuple_locals: HashMap::new(),
         dead_lits: HashSet::new(),
@@ -585,6 +602,9 @@ fn lower_mode<'a>(
     let mut const_names: Vec<String> = l.const_nodes.keys().cloned().collect();
     const_names.sort();
     for name in const_names {
+        if l.unreferenced_tuple_const(&items, &name) {
+            continue;
+        }
         let _ = l.global(&name);
     }
     for node in std::mem::take(&mut l.var_nodes) {
@@ -660,12 +680,7 @@ fn lower_mode<'a>(
     if !l.errors.is_empty() {
         return Err(l.errors);
     }
-    if l.eql_used {
-        // Source fns are ids 0..nfuncs and come first in `funcs`, in order.
-        let site = l.site(TrapKind::NoReturn, format!("end of fn {}", STR_EQL), Ty::Bool);
-        funcs.insert(l.nfuncs as usize, str_eql_func(site));
-        l.internal_abi.push(l.nfuncs);
-    }
+    l.synthesized(&mut funcs);
     // More than 8 parameters of a class: the rest are passed on the stack
     // in t27b's own convention (`Program::stack_args`), never exported.
     for (id, f) in funcs.iter().enumerate() {
@@ -1082,7 +1097,7 @@ impl<'a> Lower<'a> {
             }
         }
         let rt = n.extra_return_type.trim();
-        let ret = if rt.is_empty() || rt == "void" {
+        let ret = if rt.is_empty() || rt == "void" || self.unanalyzed_undefined_ret(n) {
             None
         } else {
             Some(self.ret_lty(rt)?)
@@ -1338,6 +1353,7 @@ impl<'a> Lower<'a> {
         self.sret = None;
         self.addr_taken.clear();
         scan_addr_taken(body, &mut self.addr_taken);
+        self.collect_ref_vars(body);
         self.slice_locals.clear();
         self.tuple_locals.clear();
         self.dead_lits.clear();
@@ -1407,6 +1423,7 @@ impl<'a> Lower<'a> {
                 }
             }
         }
+        self.addr_lit_locals(body);
         self.scopes.clear();
         self.scopes.push(HashMap::new());
         self.loop_depth = 0;
@@ -1455,6 +1472,7 @@ impl<'a> Lower<'a> {
                 // A struct or str argument is the caller's memory, read-only.
                 t if is_agg(t) => {
                     let p = Place { addr: var, off: 0, ty: params[i].clone(), mutable: false, temp: None };
+                    let p = self.param_place(pname, p, &mut body)?;
                     self.bind(pname, Binding::Mem(p));
                 }
                 t if self.addr_taken.contains(pname) => {
@@ -1560,6 +1578,9 @@ impl<'a> Lower<'a> {
             );
         }
         self.begin_body(&n.children);
+        if invariant || self.in_bench {
+            self.ref_vars.clear();
+        }
         self.in_test = true;
         // A bench is an uncalled `fn bench_<name>() void` in the reference's
         // Zig, so `zig test` never analyzes its body (see `analyzed_fns`).
@@ -1735,7 +1756,9 @@ impl<'a> Lower<'a> {
                         // Build the result in the caller's memory.
                         let sret = Expr { ty: Ty::Ptr, kind: ExprKind::Var(self.sret.unwrap()) };
                         let dst = Place { addr: sret.clone(), off: 0, ty: t, mutable: true, temp: None };
-                        self.init(c, dst, true, out)?;
+                        if !self.empty_slice_return(c, &dst, out)? {
+                            self.init(c, dst, true, out)?;
+                        }
                         out.push(Stmt::Return(Some(sret)));
                     }
                     (Some(t), Some(c)) => {
@@ -1804,21 +1827,21 @@ impl<'a> Lower<'a> {
         if !n.name.is_empty() && !in_form {
             return self.reject("StmtFor", format!("labelled loop `{}`", n.name));
         }
-        if n.children.len() > 2 {
-            // `for (xs, ys) |x, y|`: Zig checks the lengths are equal (a
-            // compile error when both are comptime-known, a panic otherwise).
-            return self.reject(
-                "StmtFor(multi-object)",
-                format!("{} iterables in one loop", n.children.len() - 1),
-            );
+        if n.children.len() < 2 || n.params.is_empty() {
+            return self.reject("StmtFor", "no iterable or no capture".into());
         }
-        if n.children.len() != 2 || n.params.len() != 1 {
-            return self.reject("StmtFor", "more than one iterable or capture".into());
-        }
-        let (iter, body_node) = (&n.children[0], &n.children[1]);
+        let k = n.children.len() - 1;
+        let body_node = &n.children[k];
         if body_node.kind != NodeKind::Module || body_node.name != "body" {
             return self.reject("StmtFor", "unexpected body shape".into());
         }
+        if k > 1 {
+            return self.for_multi(&n.children[..k], &n.params, body_node, out);
+        }
+        if n.params.len() != 1 {
+            return self.reject("StmtFor", "more than one capture for one iterable".into());
+        }
+        let iter = &n.children[0];
         if iter.kind == NodeKind::ExprBinary && iter.extra_op == ".." {
             if iter.children.len() != 2 {
                 return self.reject("StmtFor(range)", "range without two bounds".into());
@@ -1826,6 +1849,15 @@ impl<'a> Lower<'a> {
             let capture = n.params[0].0.trim().to_string();
             return self.for_range("StmtFor(range)", &capture, &iter.children[0], &iter.children[1], body_node, out);
         }
+        let (elem, base, len) = self.for_iterable(iter, out)?;
+        let capture = n.params[0].0.trim().to_string();
+        self.for_objects(vec![(capture, elem, base)], len, body_node, out)
+    }
+
+    /// One iterable of a `for` over memory (an array, a slice or a string):
+    /// its element type, the base address and the length, read once into
+    /// hidden variables before the loop where they are not constants.
+    fn for_iterable(&mut self, iter: &Node, out: &mut Vec<Stmt>) -> R<(LTy, Expr, Expr)> {
         let p = match self.expr(iter)? {
             Val::Poison => return Err(()),
             Val::M(p) if matches!(p.ty, LTy::Arr(..)) => p,
@@ -1843,14 +1875,9 @@ impl<'a> Lower<'a> {
                 return self.reject("StmtFor", format!("`for` over {}", d));
             }
         };
-        let capture = n.params[0].0.trim().to_string();
-        self.no_var_shadow(&capture)?;
-        if capture.starts_with('*') || capture.contains(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
-            return self.reject("StmtFor", format!("capture `{}`", capture));
-        }
         // The base address and the length: constants and the array for an
         // array; for a slice, both read from its header before the loop.
-        let (elem, base, len) = match p.ty.clone() {
+        Ok(match p.ty.clone() {
             LTy::Arr(elem, len) => {
                 let mut base = addr_of(&p);
                 if !pure_addr(&base) {
@@ -1876,55 +1903,7 @@ impl<'a> Lower<'a> {
                 out.push(Stmt::Assign { var: hl, value: n });
                 (elem, Expr { ty: Ty::Ptr, kind: ExprKind::Var(hb) }, Expr { ty: Ty::U64, kind: ExprKind::Var(hl) })
             }
-        };
-        let (esize, _) = self.size_align(&elem)?;
-        let i = self.hidden_var("%for_i", LTy::S(Ty::U64));
-        let var_i = Expr { ty: Ty::U64, kind: ExprKind::Var(i) };
-        out.push(Stmt::Assign { var: i, value: Expr { ty: Ty::U64, kind: ExprKind::Const(0) } });
-        let at = Expr {
-            ty: Ty::Ptr,
-            kind: ExprKind::Offset { base: Box::new(base), idx: Box::new(var_i.clone()), scale: esize },
-        };
-        let mut body = Vec::new();
-        self.scopes.push(HashMap::new());
-        if capture != "_" {
-            match reg_ty(&elem) {
-                Some(ty) => {
-                    let value = Expr { ty, kind: ExprKind::Load { addr: Box::new(at), off: 0 } };
-                    let x = self.new_lvar(&capture, elem.clone(), false);
-                    body.push(Stmt::Assign { var: x, value });
-                }
-                None => {
-                    let place = Place { addr: at, off: 0, ty: elem.clone(), mutable: false, temp: None };
-                    self.bind(&capture, Binding::Mem(place));
-                }
-            }
-        }
-        self.loop_depth += 1;
-        let r = self.stmts(&body_node.children);
-        self.loop_depth -= 1;
-        self.scopes.pop();
-        body.extend(r?);
-        let cond = Expr {
-            ty: Ty::Bool,
-            kind: ExprKind::Cmp {
-                op: CmpOp::Lt,
-                lhs: Box::new(var_i.clone()),
-                rhs: Box::new(len),
-            },
-        };
-        // i < len < 2^64, so i + 1 cannot wrap.
-        let next = Expr {
-            ty: Ty::U64,
-            kind: ExprKind::Arith {
-                op: ArithOp::AddW,
-                lhs: Box::new(var_i),
-                rhs: Box::new(Expr { ty: Ty::U64, kind: ExprKind::Const(1) }),
-                site: 0,
-            },
-        };
-        out.push(Stmt::While { cond, body, step: vec![Stmt::Assign { var: i, value: next }] });
-        Ok(())
+        })
     }
 
     /// `for (lo..hi) |i| { ... }` as Zig runs it: both bounds are `usize`,
@@ -2089,6 +2068,7 @@ impl<'a> Lower<'a> {
             if is_agg(&t) || self.addr_taken.contains(&name) {
                 // In memory; the name is bound only after its initializer.
                 let k = self.new_slot(&t)?;
+                let mutable = mutable || self.ref_var_agg(&t, &name);
                 let dst = Place { addr: slot_expr(k), off: 0, ty: t, mutable, temp: None };
                 match init {
                     Some(i) => self.init(i, dst.clone(), true, out)?,
@@ -2126,6 +2106,9 @@ impl<'a> Lower<'a> {
             Some(i) => i,
             None => return self.reject("StmtLocal", format!("`{}` has neither type nor value", name)),
         };
+        if self.addr_lit_local(init, &name, out)?.is_some() {
+            return Ok(());
+        }
         if init.kind == NodeKind::ExprArrayLiteral {
             if let Some(elem) = self.slice_locals.get(&name).cloned() {
                 return self.slice_local(init, name, elem, out);
@@ -2159,7 +2142,10 @@ impl<'a> Lower<'a> {
                 }
                 self.bind(&name, Binding::Const(Val::Cf(f, exact)));
             }
-            v => self.bind_value(&name, v, mutable, out)?,
+            v => {
+                let mutable = mutable || matches!(&v, Val::M(p) if self.ref_var_agg(&p.ty, &name));
+                self.bind_value(&name, v, mutable, out)?
+            }
         }
         Ok(())
     }
@@ -2278,7 +2264,7 @@ impl<'a> Lower<'a> {
                     return self.reject("StmtAssign", format!("assignment to constant `{}`", name));
                 }
                 let ty = self.vars[id as usize].ty;
-                let conv = |c: &Node| c.kind == NodeKind::ExprCall && matches!(c.name.as_str(), "@floatFromInt" | "@intFromFloat");
+                let conv = |c: &Node| c.kind == NodeKind::ExprCall && matches!(c.name.as_str(), "@floatFromInt" | "@intFromFloat" | "@floatCast");
                 let rhs = if (op.is_empty() || op == "=") && conv(&n.children[1]) {
                     self.expr_as(&n.children[1], &LTy::S(ty))?
                 } else {
@@ -2456,10 +2442,13 @@ impl<'a> Lower<'a> {
         // Zig's peer type of the three: f64 if any is a typed f64, and a
         // compile error if any other typed operand takes part or none is
         // typed (two comptime_floats).
-        let mut typed = false;
+        let mut typed: Option<Ty> = None;
         for v in &vals {
             match v {
-                Val::E(e) if e.ty == Ty::F64 => typed = true,
+                // f32 with f64 peers to f64 (Zig widens f32 implicitly).
+                Val::E(e) if e.ty.is_float() => {
+                    typed = Some(if typed == Some(Ty::F64) { Ty::F64 } else { e.ty })
+                }
                 Val::Ct(_) | Val::Cf(..) => {}
                 v => {
                     let d = match v {
@@ -2473,23 +2462,23 @@ impl<'a> Lower<'a> {
                 }
             }
         }
-        if !typed {
+        let Some(fty) = typed else {
             return self.reject(
                 &format!("ExprCall({}) on comptime floats", WHAT),
-                "no operand is a typed f64: the reference's Zig refuses it (Cannot approximately compare two comptime_float values)".into(),
+                "no operand is a typed float: the reference's Zig refuses it (Cannot approximately compare two comptime_float values)".into(),
             );
-        }
+        };
         // Each operand once, in order, into a temporary unless it is a
         // variable or a constant already.
         let mut ops = Vec::with_capacity(3);
         for v in vals {
-            let e = self.coerce(v, Ty::F64)?;
+            let e = self.coerce(v, fty)?;
             let e = if matches!(e.kind, ExprKind::Var(_) | ExprKind::Const(_)) {
                 e
             } else {
-                let k = self.new_slot(&LTy::S(Ty::F64))?;
+                let k = self.new_slot(&LTy::S(fty))?;
                 out.push(Stmt::Store { addr: slot_expr(k), off: 0, value: e });
-                Expr { ty: Ty::F64, kind: ExprKind::Load { addr: Box::new(slot_expr(k)), off: 0 } }
+                Expr { ty: fty, kind: ExprKind::Load { addr: Box::new(slot_expr(k)), off: 0 } }
             };
             ops.push(e);
         }
@@ -2499,10 +2488,10 @@ impl<'a> Lower<'a> {
             kind: ExprKind::Cmp { op, lhs: Box::new(l), rhs: Box::new(r) },
         };
         let sub = |l: Expr, r: Expr| Expr {
-            ty: Ty::F64,
+            ty: fty,
             kind: ExprKind::FArith { op: FOp::Sub, lhs: Box::new(l), rhs: Box::new(r) },
         };
-        let zero = Expr { ty: Ty::F64, kind: ExprKind::Const(0) };
+        let zero = Expr { ty: fty, kind: ExprKind::Const(0) };
         let site = self.site(TrapKind::Assert, format!("{}: tolerance >= 0", WHAT), Ty::Bool);
         out.push(Stmt::Assert { cond: cmp(CmpOp::Ge, tol.clone(), zero), site });
         // |x - y| <= tol as (x - y <= tol) and (y - x <= tol): y - x is
@@ -2781,6 +2770,7 @@ impl<'a> Lower<'a> {
                 Ok(Expr { ty: to, kind: ExprKind::Const(f64_bits(f)) })
             }
             Val::Cf(f, _) if to == Ty::F64 => Ok(Expr { ty: to, kind: ExprKind::Const(f64_bits(f)) }),
+            Val::Ct(_) | Val::Cf(..) if to == Ty::F32 => self.comptime_to_f32(v),
             Val::Cf(..) => self.reject(
                 "type mismatch",
                 format!("expected {}, found a float literal", to.name()),
@@ -2803,6 +2793,9 @@ impl<'a> Lower<'a> {
             Val::E(e) => {
                 if e.ty == to {
                     return Ok(e);
+                }
+                if to == Ty::F64 && e.ty == Ty::F32 {
+                    return Ok(float::float_cast(e, to));
                 }
                 if to.can_widen_from(e.ty) {
                     if let ExprKind::Const(c) = e.kind {
@@ -2854,6 +2847,13 @@ impl<'a> Lower<'a> {
             (Val::E(x), Val::E(y)) => {
                 if x.ty == y.ty {
                     return Ok((x, y));
+                }
+                // f32 with f64: Zig's peer type is f64 (exact widening).
+                if x.ty == Ty::F64 && y.ty == Ty::F32 {
+                    return Ok((x, float::float_cast(y, Ty::F64)));
+                }
+                if x.ty == Ty::F32 && y.ty == Ty::F64 {
+                    return Ok((float::float_cast(x, Ty::F64), y));
                 }
                 if x.ty.can_widen_from(y.ty) {
                     let t = x.ty;
@@ -2972,10 +2972,10 @@ impl<'a> Lower<'a> {
                 // t27c's Zig backend rewrites `x * 2^k` as `x << k`, which
                 // does not compile for a float `x`: no reference to agree with
                 // (t27c issue #6284).
-                if op == "*" && pow2_literal(y) && matches!(a, Val::Cf(..) | Val::E(Expr { ty: Ty::F64, .. })) {
+                if op == "*" && pow2_literal(y) && matches!(&a, Val::Cf(..) | Val::E(Expr { ty: Ty::F64 | Ty::F32, .. })) {
                     return self.reject(
                         "ExprBinary(f64 * 2^k)",
-                        format!("`* {}` on f64: t27c gen emits `<<` for it", y.value.trim()),
+                        format!("`* {}` on a float: t27c gen emits `<<` for it", y.value.trim()),
                     );
                 }
                 let a = if (op == "<<" || op == ">>") && is_char_literal(x) {
@@ -3016,7 +3016,7 @@ impl<'a> Lower<'a> {
                 self.unary(&op, v)
             }
             NodeKind::ExprCall if n.name == "@intFromEnum" => self.int_from_enum(n, TagUse::Value),
-            NodeKind::ExprCall if n.name == "@floatFromInt" || n.name == "@intFromFloat" => {
+            NodeKind::ExprCall if n.name == "@floatFromInt" || n.name == "@intFromFloat" || n.name == "@floatCast" => {
                 self.reject(&format!("ExprCall({})", n.name), "with no result type".into())
             }
             NodeKind::ExprCall if n.name == "@enumFromInt" => {
@@ -3028,6 +3028,12 @@ impl<'a> Lower<'a> {
                 self.expr_as(&n.children[1], &t)
             }
             NodeKind::ExprCall => {
+                if let Some(v) = self.std_mem_call(n)? {
+                    return Ok(v);
+                }
+                if let Some(v) = self.len_call(n)? {
+                    return Ok(v);
+                }
                 let (call, ret, temp) = self.call(n, None)?;
                 match ret {
                     Some(t) if is_agg(&t) => {
@@ -3120,16 +3126,18 @@ impl<'a> Lower<'a> {
         // is not a float), so this is exactly `@floatFromInt` with result
         // type f64. A float operand (`@floatCast`) and f64 to an integer
         // (`@intFromFloat`) stay refused below.
-        if to == Ty::F64 && (matches!(v, Val::Ct(_)) || matches!(&v, Val::E(e) if e.ty.is_int())) {
-            return self.int_to_f64(v, "ExprCast(f64)");
+        // `x as f32` likewise (`@as(f32, @floatFromInt(x))`).
+        if to.is_float() && (matches!(v, Val::Ct(_)) || matches!(&v, Val::E(e) if e.ty.is_int())) {
+            let what = format!("ExprCast({})", to.name());
+            return self.int_to_float(v, to, &what);
         }
-        if to == Ty::F64 || matches!(v, Val::Cf(..) | Val::E(Expr { ty: Ty::F64, .. })) {
+        if to.is_float() || matches!(v, Val::Cf(..) | Val::E(Expr { ty: Ty::F64 | Ty::F32, .. })) {
             if v.is_poison() {
                 return Err(());
             }
             return self.reject(
-                "ExprCast(f64)",
-                format!("`as` to or from f64 (to {}); use @floatFromInt / @intFromFloat", to.name()),
+                if to == Ty::F32 || matches!(v, Val::E(Expr { ty: Ty::F32, .. })) { "ExprCast(f32)" } else { "ExprCast(f64)" },
+                format!("`as` to or from a float (to {}); use @floatFromInt / @intFromFloat / @floatCast", to.name()),
             );
         }
         let e = match v {
@@ -3291,11 +3299,12 @@ impl<'a> Lower<'a> {
             ("-", Val::Ct(c)) => Ok(Val::Ct(-c)),
             ("-", Val::Cf(f, exact)) => Ok(Val::Cf(-f, exact)),
             // Float negation flips the sign bit (of a NaN and of 0 too).
-            ("-", Val::E(e)) if e.ty == Ty::F64 => {
+            ("-", Val::E(e)) if e.ty.is_float() => {
+                let ty = e.ty;
                 if let ExprKind::Const(c) = e.kind {
-                    return Ok(Val::E(Expr { ty: Ty::F64, kind: ExprKind::Const(c ^ (1i128 << 63)) }));
+                    return Ok(Val::E(Expr { ty, kind: ExprKind::Const(c ^ (1i128 << (ty.bits() - 1))) }));
                 }
-                Ok(Val::E(Expr { ty: Ty::F64, kind: ExprKind::FNeg(Box::new(e)) }))
+                Ok(Val::E(Expr { ty, kind: ExprKind::FNeg(Box::new(e)) }))
             }
             ("-", Val::E(e)) => {
                 if !e.ty.is_int() || !e.ty.signed() {
@@ -3376,7 +3385,7 @@ impl<'a> Lower<'a> {
         if let Some(c) = cmp {
             return self.compare(c, a, b);
         }
-        let is_f = |v: &Val| matches!(v, Val::Cf(..) | Val::E(Expr { ty: Ty::F64, .. }));
+        let is_f = |v: &Val| matches!(v, Val::Cf(..) | Val::E(Expr { ty: Ty::F64 | Ty::F32, .. }));
         if is_f(&a) || is_f(&b) {
             return self.farith(op, a, b);
         }
@@ -3654,15 +3663,15 @@ impl<'a> Lower<'a> {
             return Ok(Val::Cf(r, exact));
         }
         let (x, y) = self.peer(a, b, op)?;
-        if x.ty != Ty::F64 {
+        if !x.ty.is_float() {
             return self.reject("type mismatch", format!("`{}` on {} and {}", op, x.ty.name(), y.ty.name()));
         }
+        let ty = x.ty;
         if let (ExprKind::Const(p), ExprKind::Const(q)) = (&x.kind, &y.kind) {
-            let r = fop.apply(f64_of(*p), f64_of(*q));
-            return Ok(Val::E(Expr { ty: Ty::F64, kind: ExprKind::Const(f64_bits(r)) }));
+            return Ok(Val::E(Expr { ty, kind: ExprKind::Const(fop.apply_bits(ty, *p, *q)) }));
         }
         Ok(Val::E(Expr {
-            ty: Ty::F64,
+            ty,
             kind: ExprKind::FArith { op: fop, lhs: Box::new(x), rhs: Box::new(y) },
         }))
     }
@@ -4442,6 +4451,9 @@ impl<'a> Lower<'a> {
         if let (NodeKind::ExprCall, "@floatFromInt" | "@intFromFloat", LTy::S(ty)) = (&n.kind, n.name.as_str(), want) {
             return self.convert(n, *ty);
         }
+        if let (NodeKind::ExprCall, "@floatCast", LTy::S(ty)) = (&n.kind, n.name.as_str(), want) {
+            return self.float_cast_call(n, *ty);
+        }
         if let (NodeKind::ExprCall, "@intFromEnum", LTy::S(ty)) = (&n.kind, n.name.as_str(), want) {
             let v = self.int_from_enum(n, TagUse::Want(*ty))?;
             return self.coerce_to(v, want);
@@ -4830,7 +4842,7 @@ impl<'a> Lower<'a> {
             return self.reject(&what, format!("{} arguments", n.children.len()));
         }
         let to_float = name == "@floatFromInt";
-        if to_float && ty != Ty::F64 {
+        if to_float && !ty.is_float() {
             return self.reject(&what, format!("result type {}", ty.name()));
         }
         if !to_float && !ty.is_int() {
@@ -4841,36 +4853,37 @@ impl<'a> Lower<'a> {
             return Err(());
         }
         if to_float {
-            return self.int_to_f64(v, &what);
+            return self.int_to_float(v, ty, &what);
         }
         let e = match v {
             v @ Val::Cf(_, true) => self.coerce(v, Ty::F64)?,
             Val::Cf(..) => {
                 return self.reject(&what, "of an inexact float literal (Zig converts the f128 value)".into())
             }
-            Val::E(e) if e.ty == Ty::F64 => e,
+            Val::E(e) if e.ty.is_float() => e,
             v => {
                 let d = match &v { Val::E(e) => e.ty.name().to_string(), _ => self.val_desc(&v) };
-                return self.reject(&what, format!("operand is {}, not an f64", d));
+                return self.reject(&what, format!("operand is {}, not a float", d));
             }
         };
         if let ExprKind::Const(c) = e.kind {
-            return match float_to_int(f64_of(c), ty) {
+            let x = float_of(c, e.ty);
+            return match float_to_int(x, ty) {
                 Some(r) => Ok(Val::E(Expr { ty, kind: ExprKind::Const(r) })),
-                None => self.reject(&what, format!("{} does not fit {} at compile time", f64_of(c), ty.name())),
+                None => self.reject(&what, format!("{} does not fit {} at compile time", x, ty.name())),
             };
         }
         let site = self.site(TrapKind::FloatToInt, format!("@intFromFloat to {}", ty.name()), ty);
         Ok(Val::E(Expr { ty, kind: ExprKind::FloatToInt { arg: Box::new(e), site } }))
     }
 
-    /// `@floatFromInt(v)` with result type f64: the integer operand `v`
-    /// converted, rounding to nearest. `what` names the construct in a
+    /// `@floatFromInt(v)` with float result type `to`: the integer operand
+    /// `v` converted, rounding to nearest. `what` names the construct in a
     /// rejection.
-    fn int_to_f64(&mut self, v: Val, what: &str) -> R<Val> {
+    fn int_to_float(&mut self, v: Val, to: Ty, what: &str) -> R<Val> {
         let e = match v {
             Val::Poison => return Err(()),
-            Val::Ct(c) => return Ok(Val::E(self.coerce(Val::Ct(c), Ty::F64)?)),
+            Val::Ct(c) => return Ok(Val::E(self.coerce(Val::Ct(c), to)?)),
             Val::E(e) if e.ty.is_int() => e,
             v => {
                 let d = self.val_desc(&v);
@@ -4879,10 +4892,12 @@ impl<'a> Lower<'a> {
             }
         };
         if let ExprKind::Const(c) = e.kind {
-            // i128 to f64 rounds to nearest, ties to even, as SCVTF does.
-            return Ok(Val::E(Expr { ty: Ty::F64, kind: ExprKind::Const(f64_bits(c as f64)) }));
+            // i128 to f64 / f32 rounds to nearest, ties to even, as SCVTF
+            // does (straight to f32: one rounding).
+            let bits = if to == Ty::F32 { f32_bits(c as f32) } else { f64_bits(c as f64) };
+            return Ok(Val::E(Expr { ty: to, kind: ExprKind::Const(bits) }));
         }
-        Ok(Val::E(Expr { ty: Ty::F64, kind: ExprKind::IntToFloat(Box::new(e)) }))
+        Ok(Val::E(Expr { ty: to, kind: ExprKind::IntToFloat(Box::new(e)) }))
     }
 
     /// A slice of type `t` (a `Slice` or `Str`) of all `len` elements at
@@ -4971,6 +4986,9 @@ impl<'a> Lower<'a> {
         }
         let (other, lit) = if self.is_null(x) { (y, x) } else { (x, y) };
         self.see(lit);
+        if let Some(v) = self.index_of_null(op, other)? {
+            return Ok(v);
+        }
         let p = match self.expr(other)? {
             Val::M(p) if matches!(p.ty, LTy::Opt(_)) => p,
             Val::Poison => return Err(()),

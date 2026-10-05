@@ -346,7 +346,6 @@ fn struct_rejections_are_precise() {
         ("test t { const p = Pt{ .x = 1, .y = 2, .z = 3 }; _ = p; }", "ExprStructLit", "`Pt` has no field `z`"),
         ("test t { const p = Pt{ .x = 1, .x = 2, .y = 3 }; _ = p; }", "ExprStructLit", "field `x` initialised twice"),
         ("test t { const p = .{ .x = 1, .y = 2 }; _ = p; }", "ExprStructLit", "anonymous `.{}` literal"),
-        ("test t { const p = Pt{ .x = 1, .y = 2 }; p.x = 3; }", "StmtAssign", "assignment through a constant"),
         ("test t { const p = Pt{ .x = 1, .y = 2 }; assert(p == p); }", "type mismatch", "on a struct"),
         ("test t { const p = Pt{ .x = 1, .y = 2 }; assert(p.w == 1); }", "ExprFieldAccess", "`Pt` has no field `w`"),
         ("test t { assert(Color.red == 1); }", "ExprFieldAccess", "`Color.red`"),
@@ -2059,13 +2058,12 @@ test reversed_range_traps {
         vec![("ranges", false, true), ("nested_ranges", false, true), ("reversed_range_traps", false, false)]
     );
     assert_eq!(r[2].2, Err((TrapKind::Overflow, 12)));
-    // Each a compile error in the reference (`zig test` on t27c's output),
-    // except the multi-object loop, which t27b does not lower yet.
+    // Each a compile error in the reference (`zig test` on t27c's output).
+    // The multi-object loop is lowered now (tests/formulti.rs).
     let cases = [
         ("for (0..n) |i| { s += i; }", "n: i32", "type mismatch", "expected u64, found i32"),
         ("for (3..1) |i| { s += i; }", "n: usize", "StmtFor(range)", "range 3..1 runs backwards"),
         ("for i in -1..n { s += i; }", "n: usize", "literal out of range", "-1 does not fit in u64"),
-        ("const a: [2]usize = [1, 2]; for (a, a) |x, y| { s += x * y; }", "n: usize", "StmtFor(multi-object)", "2 iterables"),
     ];
     for (body, param, construct, detail) in cases {
         let m = rejected(&format!(
