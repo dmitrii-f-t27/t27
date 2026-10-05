@@ -10727,7 +10727,13 @@ impl Codegen {
                     return;
                 }
                 if let Some((val, count)) = txt.rsplit_once(';') {
-                    self.write(&format!(".{{ {} }} ** {}", val.trim(), count.trim()));
+                    // #6451: `[0i32; 2]` kept the Rust width suffix -- "number
+                    // '0i32' has leading zero"; the target type carries it.
+                    self.write(&format!(
+                        ".{{ {} }} ** {}",
+                        Self::strip_rust_num_suffix(val.trim()),
+                        count.trim()
+                    ));
                 } else {
                     // Split on TOP-LEVEL commas only -- elements may be calls
                     // with their own commas.
