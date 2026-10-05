@@ -11,7 +11,3 @@
 # An entry names the pull request or chat message that approved it, e.g.
 #   cli/t27b/src/lower.rs
 # with a comment line above it: "# owner 2026-10-05, PR #NNNN: <the approval, in English>".
-
-# owner 2026-10-05 ~16:00Z, PR #6554 (Refs #6443): "fix it and do not stop, do what is best" -- lab checkout retry
-contrib/railway/t27b-lab/lab.py
-scripts/ci/test_the_t27b_lab_heals_its_clone.py

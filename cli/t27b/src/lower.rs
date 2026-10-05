@@ -25,7 +25,9 @@
 //! sit in read-only data; it is written into memory only where a `str` place
 //! needs it. `==` and `!=` on strings compare contents, as t27c's Zig backend
 //! does with `std.mem.eql`: two literals fold, anything else calls one
-//! synthesized IR function, `__t27b_str_eql`.
+//! synthesized IR function, `__t27b_str_eql`. `std.mem.eql(u8, a, b)` is the
+//! same comparison, and `std.mem.indexOf(u8, h, n)` compared with `null`
+//! calls a second one, `__t27b_str_contains` (`lower/stdmem.rs`).
 //!
 //! Arrays: `[N]T` (N a literal or an integer constant) is N elements of T back
 //! to back in memory, an aggregate like a struct: copied on assignment, passed
@@ -67,6 +69,12 @@
 //! named struct literal is an empty slice. `[*]T` and the map `[K:V]` are
 //! refused by name.
 //! `for (s) |x|` reads the slice's address and length once, before the loop.
+
+mod arraylit;
+mod formulti;
+mod lencall;
+mod stdmem;
+mod unanalyzed;
 
 use crate::codegen;
 use crate::compiler::{Node, NodeKind};
@@ -285,6 +293,8 @@ struct Lower<'a> {
     nfuncs: FuncId,
     /// `__t27b_str_eql` is called somewhere.
     eql_used: bool,
+    /// `__t27b_str_contains` is called somewhere (`stdmem`).
+    contains_used: bool,
     // Per-function state.
     vars: Vec<Var>,
     /// The source type of each variable (parallel to `vars`).
@@ -419,6 +429,7 @@ fn lower_mode<'a>(
         strings: HashMap::new(),
         nfuncs: 0,
         eql_used: false,
+        contains_used: false,
         vars: Vec::new(),
         ltys: Vec::new(),
         slots: Vec::new(),
@@ -591,6 +602,9 @@ fn lower_mode<'a>(
     let mut const_names: Vec<String> = l.const_nodes.keys().cloned().collect();
     const_names.sort();
     for name in const_names {
+        if l.unreferenced_tuple_const(&items, &name) {
+            continue;
+        }
         let _ = l.global(&name);
     }
     for node in std::mem::take(&mut l.var_nodes) {
@@ -666,12 +680,7 @@ fn lower_mode<'a>(
     if !l.errors.is_empty() {
         return Err(l.errors);
     }
-    if l.eql_used {
-        // Source fns are ids 0..nfuncs and come first in `funcs`, in order.
-        let site = l.site(TrapKind::NoReturn, format!("end of fn {}", STR_EQL), Ty::Bool);
-        funcs.insert(l.nfuncs as usize, str_eql_func(site));
-        l.internal_abi.push(l.nfuncs);
-    }
+    l.synthesized(&mut funcs);
     // More than 8 parameters of a class: the rest are passed on the stack
     // in t27b's own convention (`Program::stack_args`), never exported.
     for (id, f) in funcs.iter().enumerate() {
@@ -1088,7 +1097,7 @@ impl<'a> Lower<'a> {
             }
         }
         let rt = n.extra_return_type.trim();
-        let ret = if rt.is_empty() || rt == "void" {
+        let ret = if rt.is_empty() || rt == "void" || self.unanalyzed_undefined_ret(n) {
             None
         } else {
             Some(self.ret_lty(rt)?)
@@ -1414,6 +1423,7 @@ impl<'a> Lower<'a> {
                 }
             }
         }
+        self.addr_lit_locals(body);
         self.scopes.clear();
         self.scopes.push(HashMap::new());
         self.loop_depth = 0;
@@ -1746,7 +1756,9 @@ impl<'a> Lower<'a> {
                         // Build the result in the caller's memory.
                         let sret = Expr { ty: Ty::Ptr, kind: ExprKind::Var(self.sret.unwrap()) };
                         let dst = Place { addr: sret.clone(), off: 0, ty: t, mutable: true, temp: None };
-                        self.init(c, dst, true, out)?;
+                        if !self.empty_slice_return(c, &dst, out)? {
+                            self.init(c, dst, true, out)?;
+                        }
                         out.push(Stmt::Return(Some(sret)));
                     }
                     (Some(t), Some(c)) => {
@@ -1815,21 +1827,21 @@ impl<'a> Lower<'a> {
         if !n.name.is_empty() && !in_form {
             return self.reject("StmtFor", format!("labelled loop `{}`", n.name));
         }
-        if n.children.len() > 2 {
-            // `for (xs, ys) |x, y|`: Zig checks the lengths are equal (a
-            // compile error when both are comptime-known, a panic otherwise).
-            return self.reject(
-                "StmtFor(multi-object)",
-                format!("{} iterables in one loop", n.children.len() - 1),
-            );
+        if n.children.len() < 2 || n.params.is_empty() {
+            return self.reject("StmtFor", "no iterable or no capture".into());
         }
-        if n.children.len() != 2 || n.params.len() != 1 {
-            return self.reject("StmtFor", "more than one iterable or capture".into());
-        }
-        let (iter, body_node) = (&n.children[0], &n.children[1]);
+        let k = n.children.len() - 1;
+        let body_node = &n.children[k];
         if body_node.kind != NodeKind::Module || body_node.name != "body" {
             return self.reject("StmtFor", "unexpected body shape".into());
         }
+        if k > 1 {
+            return self.for_multi(&n.children[..k], &n.params, body_node, out);
+        }
+        if n.params.len() != 1 {
+            return self.reject("StmtFor", "more than one capture for one iterable".into());
+        }
+        let iter = &n.children[0];
         if iter.kind == NodeKind::ExprBinary && iter.extra_op == ".." {
             if iter.children.len() != 2 {
                 return self.reject("StmtFor(range)", "range without two bounds".into());
@@ -1837,6 +1849,15 @@ impl<'a> Lower<'a> {
             let capture = n.params[0].0.trim().to_string();
             return self.for_range("StmtFor(range)", &capture, &iter.children[0], &iter.children[1], body_node, out);
         }
+        let (elem, base, len) = self.for_iterable(iter, out)?;
+        let capture = n.params[0].0.trim().to_string();
+        self.for_objects(vec![(capture, elem, base)], len, body_node, out)
+    }
+
+    /// One iterable of a `for` over memory (an array, a slice or a string):
+    /// its element type, the base address and the length, read once into
+    /// hidden variables before the loop where they are not constants.
+    fn for_iterable(&mut self, iter: &Node, out: &mut Vec<Stmt>) -> R<(LTy, Expr, Expr)> {
         let p = match self.expr(iter)? {
             Val::Poison => return Err(()),
             Val::M(p) if matches!(p.ty, LTy::Arr(..)) => p,
@@ -1854,14 +1875,9 @@ impl<'a> Lower<'a> {
                 return self.reject("StmtFor", format!("`for` over {}", d));
             }
         };
-        let capture = n.params[0].0.trim().to_string();
-        self.no_var_shadow(&capture)?;
-        if capture.starts_with('*') || capture.contains(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
-            return self.reject("StmtFor", format!("capture `{}`", capture));
-        }
         // The base address and the length: constants and the array for an
         // array; for a slice, both read from its header before the loop.
-        let (elem, base, len) = match p.ty.clone() {
+        Ok(match p.ty.clone() {
             LTy::Arr(elem, len) => {
                 let mut base = addr_of(&p);
                 if !pure_addr(&base) {
@@ -1887,55 +1903,7 @@ impl<'a> Lower<'a> {
                 out.push(Stmt::Assign { var: hl, value: n });
                 (elem, Expr { ty: Ty::Ptr, kind: ExprKind::Var(hb) }, Expr { ty: Ty::U64, kind: ExprKind::Var(hl) })
             }
-        };
-        let (esize, _) = self.size_align(&elem)?;
-        let i = self.hidden_var("%for_i", LTy::S(Ty::U64));
-        let var_i = Expr { ty: Ty::U64, kind: ExprKind::Var(i) };
-        out.push(Stmt::Assign { var: i, value: Expr { ty: Ty::U64, kind: ExprKind::Const(0) } });
-        let at = Expr {
-            ty: Ty::Ptr,
-            kind: ExprKind::Offset { base: Box::new(base), idx: Box::new(var_i.clone()), scale: esize },
-        };
-        let mut body = Vec::new();
-        self.scopes.push(HashMap::new());
-        if capture != "_" {
-            match reg_ty(&elem) {
-                Some(ty) => {
-                    let value = Expr { ty, kind: ExprKind::Load { addr: Box::new(at), off: 0 } };
-                    let x = self.new_lvar(&capture, elem.clone(), false);
-                    body.push(Stmt::Assign { var: x, value });
-                }
-                None => {
-                    let place = Place { addr: at, off: 0, ty: elem.clone(), mutable: false, temp: None };
-                    self.bind(&capture, Binding::Mem(place));
-                }
-            }
-        }
-        self.loop_depth += 1;
-        let r = self.stmts(&body_node.children);
-        self.loop_depth -= 1;
-        self.scopes.pop();
-        body.extend(r?);
-        let cond = Expr {
-            ty: Ty::Bool,
-            kind: ExprKind::Cmp {
-                op: CmpOp::Lt,
-                lhs: Box::new(var_i.clone()),
-                rhs: Box::new(len),
-            },
-        };
-        // i < len < 2^64, so i + 1 cannot wrap.
-        let next = Expr {
-            ty: Ty::U64,
-            kind: ExprKind::Arith {
-                op: ArithOp::AddW,
-                lhs: Box::new(var_i),
-                rhs: Box::new(Expr { ty: Ty::U64, kind: ExprKind::Const(1) }),
-                site: 0,
-            },
-        };
-        out.push(Stmt::While { cond, body, step: vec![Stmt::Assign { var: i, value: next }] });
-        Ok(())
+        })
     }
 
     /// `for (lo..hi) |i| { ... }` as Zig runs it: both bounds are `usize`,
@@ -2138,6 +2106,9 @@ impl<'a> Lower<'a> {
             Some(i) => i,
             None => return self.reject("StmtLocal", format!("`{}` has neither type nor value", name)),
         };
+        if self.addr_lit_local(init, &name, out)?.is_some() {
+            return Ok(());
+        }
         if init.kind == NodeKind::ExprArrayLiteral {
             if let Some(elem) = self.slice_locals.get(&name).cloned() {
                 return self.slice_local(init, name, elem, out);
@@ -3057,6 +3028,12 @@ impl<'a> Lower<'a> {
                 self.expr_as(&n.children[1], &t)
             }
             NodeKind::ExprCall => {
+                if let Some(v) = self.std_mem_call(n)? {
+                    return Ok(v);
+                }
+                if let Some(v) = self.len_call(n)? {
+                    return Ok(v);
+                }
                 let (call, ret, temp) = self.call(n, None)?;
                 match ret {
                     Some(t) if is_agg(&t) => {
@@ -5009,6 +4986,9 @@ impl<'a> Lower<'a> {
         }
         let (other, lit) = if self.is_null(x) { (y, x) } else { (x, y) };
         self.see(lit);
+        if let Some(v) = self.index_of_null(op, other)? {
+            return Ok(v);
+        }
         let p = match self.expr(other)? {
             Val::M(p) if matches!(p.ty, LTy::Opt(_)) => p,
             Val::Poison => return Err(()),
