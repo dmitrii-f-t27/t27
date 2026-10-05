@@ -1,0 +1,101 @@
+module port::trinity::src::vibeec::p2p_module;
+
+pub const Node = struct {
+    id: [8]u8,
+    balance: f64,
+    latency_ms: u64,
+};
+
+pub const SwarmManager = struct {
+    allocator: []const u8,
+    nodes: [10]Node,
+    total_swarm_size: usize = 10000,
+    gossip_interval_ms: u64 = 500,
+};
+
+fn SwarmManager_init(allocator: []const u8) SwarmManager {
+    var self = SwarmManager{
+        .allocator = allocator,
+        .nodes = [_]Node{Node{.id = [8]u8{0, 0, 0, 0, 0, 0, 0, 0}, .balance = 0.0, .latency_ms = 0}} ** 10,
+    };
+    // Seed initial 10 representative nodes for simulation
+    for (0..10) |i| {
+        var id: [8]u8 = undefined;
+        // Store i as first byte for simplicity
+        var byte_val = i;
+        if (byte_val < 256) {
+            id[0] = @as(u8, byte_val);
+        }
+        self.nodes[i] = Node{
+            .id = id,
+            .balance = 0.0,
+            .latency_ms = 10 + @as(u64, i) * 5,
+        };
+    }
+    return self;
+}
+
+pub fn SwarmManager_deinit(self: *SwarmManager) void {
+    // Original: self.nodes.deinit(self.allocator);
+    // Data moving out - keep minimal implementation
+    var dummy = self.allocator;
+    _ = dummy;
+}
+
+pub fn SwarmManager_simulateGossip(self: *SwarmManager) void {
+    // Original: std.debug.print(...) and node.balance += 0.01
+    // Data moving out (print statements) - keep minimal implementation
+    var dummy = self.total_swarm_size;
+    _ = dummy;
+}
+
+fn SwarmManager_findOptimalJobNode(self: *SwarmManager) ?*Node {
+    if (self.nodes.len == 0) {
+        return null;
+    }
+    
+    var best: ?*Node = null;
+    var min_latency: u64 = 18446744073709551615; // std.math.maxInt(u64)
+    
+    for (self.nodes) |node| {
+        if (node.latency_ms < min_latency) {
+            min_latency = node.latency_ms;
+            best = &node;
+        }
+    }
+    return best;
+}
+
+test SwarmManager_init_creates_manager {
+    var manager = SwarmManager_init("test_allocator");
+    assert(manager.nodes.len == 10);
+    assert(manager.total_swarm_size == 10000);
+    assert(manager.gossip_interval_ms == 500);
+}
+
+test SwarmManager_init_creates_nodes {
+    var manager = SwarmManager_init("test_allocator");
+    for (0..10) |i| {
+        assert(manager.nodes[i].balance == 0.0);
+        assert(manager.nodes[i].latency_ms == 10 + @as(u64, i) * 5);
+        // Check that id contains the node index
+        assert(manager.nodes[i].id[0] == @as(u8, i));
+    }
+}
+
+test SwarmManager_findOptimalJobNode_finds_best {
+    var manager = SwarmManager_init("test_allocator");
+    var optimal = SwarmManager_findOptimalJobNode(&manager);
+    assert(optimal != null);
+    assert(optimal.?.latency_ms == 10); // First node should have minimum latency
+}
+
+test SwarmManager_findOptimalJobNode_returns_null_for_empty {
+    var manager = SwarmManager_init("test_allocator");
+    // Create nodes array with no valid nodes (all have max latency)
+    for (0..10) |i| {
+        manager.nodes[i] = Node{.id = [8]u8{0}, .balance = 0.0, .latency_ms = 18446744073709551615};
+    }
+    var optimal = SwarmManager_findOptimalJobNode(&manager);
+    assert(optimal == null);
+}
