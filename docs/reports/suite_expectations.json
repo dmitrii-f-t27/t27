@@ -2,7 +2,7 @@
   "schema_version": 1,
   "generated_by": "t27c suite --bless-expectations",
   "max_gate_failures": 2,
-  "max_entries": 109,
+  "max_entries": 77,
   "entries": [
     {
       "path": "specs/api/sdk_contract.t27",
@@ -101,13 +101,6 @@
       "discard_by_channel": {
         "bdd-block-fallback": 11
       }
-    },
-    {
-      "path": "specs/git/diff.t27",
-      "phase": "typecheck",
-      "reason": "typecheck refuses a Rust `match` block (#5949): 21 of them, in 8 of the 15 fns and 8 of the 18 tests, match `Ok(..)` / `Err(..)` on the result of `Command::new(\"git\")` -- constructs t27 does not have. The parser kept each block as text and every backend lowered it to nothing, so those fns returned nothing and those tests asserted nothing, with every gate green. Rewrite the module in t27, not the rule.",
-      "issue": 5949,
-      "expires": "2026-11-30"
     },
     {
       "path": "specs/igla/coder/_tmp_pipeline_import.t27",
@@ -652,27 +645,6 @@
       }
     },
     {
-      "path": "specs/ml/layers/conv2d_layer.t27",
-      "phase": "typecheck",
-      "reason": "typecheck refuses a struct field with no type or a literal type (#5923, defect #3225): `PaddingMode` `values` has no type -- a list-valued declaration the parser does not implement was recovered as a field, and gen-rust writes it unparseable. The defect was always present and `tri misread` counted it; generation does not run typecheck, so the output is unchanged. Fix the declaration, not the rule.",
-      "issue": 3225,
-      "expires": "2026-11-30"
-    },
-    {
-      "path": "specs/ml/layers/dense_layer.t27",
-      "phase": "typecheck",
-      "reason": "typecheck refuses a struct field with no type or a literal type (#5923, defect #3225): `ActivationType` `values` has no type -- a list-valued declaration the parser does not implement was recovered as a field, and gen-rust writes it unparseable. The defect was always present and `tri misread` counted it; generation does not run typecheck, so the output is unchanged. Fix the declaration, not the rule.",
-      "issue": 3225,
-      "expires": "2026-11-30"
-    },
-    {
-      "path": "specs/ml/loss/cross_entropy_loss.t27",
-      "phase": "typecheck",
-      "reason": "typecheck refuses a struct field with no type or a literal type (#5923, defect #3225): `ReductionType` `values` has no type -- a list-valued declaration the parser does not implement was recovered as a field, and gen-rust writes it unparseable. The defect was always present and `tri misread` counted it; generation does not run typecheck, so the output is unchanged. Fix the declaration, not the rule.",
-      "issue": 3225,
-      "expires": "2026-11-30"
-    },
-    {
       "path": "specs/ml/transformer/feed_forward.t27",
       "phase": "parse-no-discard",
       "reason": "top-level drop-recovery discards tokens; parser reaches EOF so `parse` reports success (T42). Reached this phase for the first time when the generic-application parse landed -- previously this spec failed `parse` outright.",
@@ -683,13 +655,6 @@
         "brace-body": 4,
         "top-level-resync": 58
       }
-    },
-    {
-      "path": "specs/ml/transformer/mha_block.t27",
-      "phase": "typecheck",
-      "reason": "typecheck refuses a struct field with no type or a literal type (#5923, defect #3225): `ActivationType` `values` has no type -- a list-valued declaration the parser does not implement was recovered as a field, and gen-rust writes it unparseable. The defect was always present and `tri misread` counted it; generation does not run typecheck, so the output is unchanged. Fix the declaration, not the rule.",
-      "issue": 3225,
-      "expires": "2026-11-30"
     },
     {
       "path": "specs/ml/transformer/multi_head_attn.t27",
@@ -753,41 +718,6 @@
       }
     },
     {
-      "path": "specs/numeric/gft1024.t27",
-      "phase": "typecheck",
-      "reason": "EXP_OFFSET and OFFSET_MAX declare u32 and carry values 12 to 187 digits wide. Newly DETECTED, not newly broken: the constants are unchanged and three backends still emit them verbatim -- only cc ever said so. The header says E_t = round((N-1)/phi^2) = 391, so which number is meant is a question about the format, not the compiler.",
-      "issue": 2925,
-      "expires": "2026-11-30"
-    },
-    {
-      "path": "specs/numeric/gft128.t27",
-      "phase": "typecheck",
-      "reason": "EXP_OFFSET and OFFSET_MAX declare u32 and carry values 12 to 187 digits wide. Newly DETECTED, not newly broken: the constants are unchanged and three backends still emit them verbatim -- only cc ever said so. The header says E_t = round((N-1)/phi^2) = 391, so which number is meant is a question about the format, not the compiler.",
-      "issue": 2925,
-      "expires": "2026-11-30"
-    },
-    {
-      "path": "specs/numeric/gft256.t27",
-      "phase": "typecheck",
-      "reason": "EXP_OFFSET and OFFSET_MAX declare u32 and carry values 12 to 187 digits wide. Newly DETECTED, not newly broken: the constants are unchanged and three backends still emit them verbatim -- only cc ever said so. The header says E_t = round((N-1)/phi^2) = 391, so which number is meant is a question about the format, not the compiler.",
-      "issue": 2925,
-      "expires": "2026-11-30"
-    },
-    {
-      "path": "specs/numeric/gft512.t27",
-      "phase": "typecheck",
-      "reason": "EXP_OFFSET and OFFSET_MAX declare u32 and carry values 12 to 187 digits wide. Newly DETECTED, not newly broken: the constants are unchanged and three backends still emit them verbatim -- only cc ever said so. The header says E_t = round((N-1)/phi^2) = 391, so which number is meant is a question about the format, not the compiler.",
-      "issue": 2925,
-      "expires": "2026-11-30"
-    },
-    {
-      "path": "specs/numeric/gft64.t27",
-      "phase": "typecheck",
-      "reason": "EXP_OFFSET and OFFSET_MAX declare u32 and carry values 12 to 187 digits wide. Newly DETECTED, not newly broken: the constants are unchanged and three backends still emit them verbatim -- only cc ever said so. The header says E_t = round((N-1)/phi^2) = 391, so which number is meant is a question about the format, not the compiler.",
-      "issue": 2925,
-      "expires": "2026-11-30"
-    },
-    {
       "path": "specs/numeric/phi_ratio.t27",
       "phase": "parse-no-discard",
       "reason": "parser reaches EOF but DISCARDS top-level tokens (forall-quantified properties)",
@@ -836,13 +766,6 @@
       "path": "specs/port/scripts/tri-issue-create.t27",
       "phase": "gen-verilog",
       "reason": "ported spec merged in the 2026-10-04 batch (#5755) while this gate was red on an earlier step; the port is to be redone (#5549). gen-verilog refuses the local string array `argv : [5][]const u8` (line 80): 2-D array-of-aggregate lowering is not implemented (docs/reports/W469_2D_STRUCT_ARRAY_DESIGN.md).",
-      "issue": 5549,
-      "expires": "2026-11-30"
-    },
-    {
-      "path": "specs/port/tools/check_conflict_markers.t27",
-      "phase": "typecheck",
-      "reason": "parses whole now; the parse-no-discard failure (SKIP_SUFFIX written as a Zig array) hid a typecheck failure that was always there: staged_files calls the fixed-arity stub _git(root, arg1, arg2, binary) with seven arguments, where the Python original takes *args. Re-keyed, not newly broken; the port is to be redone (#5549).",
       "issue": 5549,
       "expires": "2026-11-30"
     },
@@ -919,20 +842,6 @@
       }
     },
     {
-      "path": "specs/tools/registry.t27",
-      "phase": "typecheck",
-      "reason": "typecheck refuses a struct field with no type or a literal type (#5923, defect #3225): `ParameterSchema` `any` has no type -- enum variants or list items written inside a struct body were recovered as fields, and gen-rust writes it unparseable. The defect was always present and `tri misread` counted it; generation does not run typecheck, so the output is unchanged. Fix the declaration, not the rule.",
-      "issue": 3225,
-      "expires": "2026-11-30"
-    },
-    {
-      "path": "specs/tools/schema.t27",
-      "phase": "typecheck",
-      "reason": "typecheck refuses a struct field with no type or a literal type (#5923, defect #3225): `ParameterSchema` `any` has no type -- enum variants or list items written inside a struct body were recovered as fields, and gen-rust writes it unparseable. The defect was always present and `tri misread` counted it; generation does not run typecheck, so the output is unchanged. Fix the declaration, not the rule.",
-      "issue": 3225,
-      "expires": "2026-11-30"
-    },
-    {
       "path": "specs/tools/tri_to_t27_converter.t27",
       "phase": "parse-no-discard",
       "reason": "top-level drop-recovery discards tokens; parser reaches EOF so `parse` reports success (T42)",
@@ -942,132 +851,6 @@
       "discard_by_channel": {
         "bdd-block-fallback": 48
       }
-    },
-    {
-      "path": "specs/tri/agent/autonomous_lifecycle.t27",
-      "phase": "typecheck",
-      "reason": "typecheck refuses a struct field with no type or a literal type (#5923, defect #3225): `LifecycleState` `variants` has no type; `TaskType` `variants` has no type; `TaskStatus` `variants` has no type -- a list-valued declaration the parser does not implement was recovered as a field, and gen-rust writes it unparseable. The defect was always present and `tri misread` counted it; generation does not run typecheck, so the output is unchanged. Fix the declaration, not the rule.",
-      "issue": 3225,
-      "expires": "2026-11-30"
-    },
-    {
-      "path": "specs/tri/agent/eternal_monitor.t27",
-      "phase": "typecheck",
-      "reason": "typecheck refuses a struct field with no type or a literal type (#5923, defect #3225): `Severity` `variants` has no type; `HealthStatus` `variants` has no type -- a list-valued declaration the parser does not implement was recovered as a field, and gen-rust writes it unparseable. The defect was always present and `tri misread` counted it; generation does not run typecheck, so the output is unchanged. Fix the declaration, not the rule.",
-      "issue": 3225,
-      "expires": "2026-11-30"
-    },
-    {
-      "path": "specs/tri/agent/faculty_board.t27",
-      "phase": "typecheck",
-      "reason": "typecheck refuses a struct field with no type or a literal type (#5923, defect #3225): `Lang` `variants` has no type; `Agent` `variants` has no type; `AgentStatusKind` `variants` has no type -- a list-valued declaration the parser does not implement was recovered as a field, and gen-rust writes it unparseable. The defect was always present and `tri misread` counted it; generation does not run typecheck, so the output is unchanged. Fix the declaration, not the rule.",
-      "issue": 3225,
-      "expires": "2026-11-30"
-    },
-    {
-      "path": "specs/tri/agent/swarm_agents.t27",
-      "phase": "typecheck",
-      "reason": "typecheck refuses a struct field with no type or a literal type (#5923, defect #3225): `AgentType` `variants` has no type; `AgentStatus` `variants` has no type; `TaskStatus` `variants` has no type; `CoordinationMode` `variants` has no type; `ConsensusStatus` `variants` has no type; `MessageType` `variants` has no type; `SacredFormula` `Math`, `sacredFormula` have no type -- enum variants or list items written inside a struct body were recovered as fields, and gen-rust writes it unparseable. The defect was always present and `tri misread` counted it; generation does not run typecheck, so the output is unchanged. Fix the declaration, not the rule.",
-      "issue": 3225,
-      "expires": "2026-11-30"
-    },
-    {
-      "path": "specs/tri/collections/namespace.t27",
-      "phase": "typecheck",
-      "reason": "typecheck refuses a struct field with no type or a literal type (#5923, defect #3225): `Namespace` `variants` has no type; `ParsedCommand` `variants`, `namespaced`, `flat` have no type -- enum variants or list items written inside a struct body were recovered as fields, and gen-rust writes it unparseable. The defect was always present and `tri misread` counted it; generation does not run typecheck, so the output is unchanged. Fix the declaration, not the rule.",
-      "issue": 3225,
-      "expires": "2026-11-30"
-    },
-    {
-      "path": "specs/tri/encoding/bson.t27",
-      "phase": "typecheck",
-      "reason": "typecheck refuses a struct field with no type or a literal type (#5923, defect #3225): `BsonValue` `Double`, `String`, `Document`, `Array`, `Binary`, `ObjectId`, `Boolean`, `DateTime`, `Null`, `Int32`, `Int64` have no type -- enum variants or list items written inside a struct body were recovered as fields, and gen-rust writes it unparseable. The defect was always present and `tri misread` counted it; generation does not run typecheck, so the output is unchanged. Fix the declaration, not the rule.",
-      "issue": 3225,
-      "expires": "2026-11-30"
-    },
-    {
-      "path": "specs/tri/encoding/json.t27",
-      "phase": "typecheck",
-      "reason": "typecheck refuses a struct field with no type or a literal type (#5923, defect #3225): `JsonType` `Null`, `Bool`, `Number`, `String`, `Array`, `Object` have no type -- enum variants or list items written inside a struct body were recovered as fields, and gen-rust writes it unparseable. The defect was always present and `tri misread` counted it; generation does not run typecheck, so the output is unchanged. Fix the declaration, not the rule.",
-      "issue": 3225,
-      "expires": "2026-11-30"
-    },
-    {
-      "path": "specs/tri/encoding/msgpack.t27",
-      "phase": "typecheck",
-      "reason": "typecheck refuses a struct field with no type or a literal type (#5923, defect #3225): `MsgPackType` `Nil`, `Bool`, `Int`, `Uint`, `Float`, `Str`, `Bin`, `Array`, `Map` have no type -- enum variants or list items written inside a struct body were recovered as fields, and gen-rust writes it unparseable. The defect was always present and `tri misread` counted it; generation does not run typecheck, so the output is unchanged. Fix the declaration, not the rule.",
-      "issue": 3225,
-      "expires": "2026-11-30"
-    },
-    {
-      "path": "specs/tri/net/async_stream.t27",
-      "phase": "typecheck",
-      "reason": "typecheck refuses a struct field with no type or a literal type (#5923, defect #3225): `StreamState` `Ready`, `Pending`, `Done` have no type -- enum variants or list items written inside a struct body were recovered as fields, and gen-rust writes it unparseable. The defect was always present and `tri misread` counted it; generation does not run typecheck, so the output is unchanged. Fix the declaration, not the rule.",
-      "issue": 3225,
-      "expires": "2026-11-30"
-    },
-    {
-      "path": "specs/tri/net/http.t27",
-      "phase": "typecheck",
-      "reason": "typecheck refuses a struct field with no type or a literal type (#5923, defect #3225): `HttpMethod` `GET`, `POST`, `PUT`, `DELETE`, `PATCH`, `HEAD`, `OPTIONS` have no type -- enum variants or list items written inside a struct body were recovered as fields, and gen-rust writes it unparseable. The defect was always present and `tri misread` counted it; generation does not run typecheck, so the output is unchanged. Fix the declaration, not the rule.",
-      "issue": 3225,
-      "expires": "2026-11-30"
-    },
-    {
-      "path": "specs/tri/pipeline/batch_runner.t27",
-      "phase": "typecheck",
-      "reason": "typecheck refuses a struct field with no type or a literal type (#5923, defect #3225): `CompileStatus` `variants` has no type; `FilterMode` `variants` has no type -- a list-valued declaration the parser does not implement was recovered as a field, and gen-rust writes it unparseable. The defect was always present and `tri misread` counted it; generation does not run typecheck, so the output is unchanged. Fix the declaration, not the rule.",
-      "issue": 3225,
-      "expires": "2026-11-30"
-    },
-    {
-      "path": "specs/tri/pipeline/pipeline_parallel.t27",
-      "phase": "typecheck",
-      "reason": "typecheck refuses a struct field with no type or a literal type (#5923, defect #3225): `JobStatus` `pending`, `running`, `completed`, `failed`, `skipped` have no type -- enum variants or list items written inside a struct body were recovered as fields, and gen-rust writes it unparseable. The defect was always present and `tri misread` counted it; generation does not run typecheck, so the output is unchanged. Fix the declaration, not the rule.",
-      "issue": 3225,
-      "expires": "2026-11-30"
-    },
-    {
-      "path": "specs/tri/search/regex_advanced.t27",
-      "phase": "typecheck",
-      "reason": "typecheck refuses a struct field with no type or a literal type (#5923, defect #3225): `RegexFlags` `IgnoreCase`, `Multiline`, `DotAll` have no type -- enum variants or list items written inside a struct body were recovered as fields, and gen-rust writes it unparseable. The defect was always present and `tri misread` counted it; generation does not run typecheck, so the output is unchanged. Fix the declaration, not the rule.",
-      "issue": 3225,
-      "expires": "2026-11-30"
-    },
-    {
-      "path": "specs/tri/sort/sort.t27",
-      "phase": "typecheck",
-      "reason": "typecheck refuses a struct field with no type or a literal type (#5923, defect #3225): `SortOrder` `Ascending`, `Descending` have no type -- enum variants or list items written inside a struct body were recovered as fields, and gen-rust writes it unparseable. The defect was always present and `tri misread` counted it; generation does not run typecheck, so the output is unchanged. Fix the declaration, not the rule.",
-      "issue": 3225,
-      "expires": "2026-11-30"
-    },
-    {
-      "path": "specs/tri/utils/color.t27",
-      "phase": "typecheck",
-      "reason": "typecheck refuses a struct field with no type or a literal type (#5923, defect #3225): `ColorSpace` `RGB`, `HSV`, `HSL`, `LAB` have no type -- enum variants or list items written inside a struct body were recovered as fields, and gen-rust writes it unparseable. The defect was always present and `tri misread` counted it; generation does not run typecheck, so the output is unchanged. Fix the declaration, not the rule.",
-      "issue": 3225,
-      "expires": "2026-11-30"
-    },
-    {
-      "path": "specs/tri/utils/exit_codes.t27",
-      "phase": "typecheck",
-      "reason": "typecheck refuses a struct field with no type or a literal type (#5923, defect #3225): `ExitCode` `variants` has no type; `ExitCode` `success`, `command_error`, `validation_error`, `runtime_error`, `timeout`, `job_failed`, `artifact_failed`, `internal_error` each have an integer literal for a type -- enum variants or list items written inside a struct body were recovered as fields, and gen-rust writes it unparseable. The defect was always present and `tri misread` counted it; generation does not run typecheck, so the output is unchanged. Fix the declaration, not the rule.",
-      "issue": 3225,
-      "expires": "2026-11-30"
-    },
-    {
-      "path": "specs/tri/utils/logger.t27",
-      "phase": "typecheck",
-      "reason": "typecheck refuses a struct field with no type or a literal type (#5923, defect #3225): `Level` `Trace`, `Debug`, `Info`, `Warn`, `Error`, `Fatal` have no type -- enum variants or list items written inside a struct body were recovered as fields, and gen-rust writes it unparseable. The defect was always present and `tri misread` counted it; generation does not run typecheck, so the output is unchanged. Fix the declaration, not the rule.",
-      "issue": 3225,
-      "expires": "2026-11-30"
-    },
-    {
-      "path": "specs/tri/utils/logging.t27",
-      "phase": "typecheck",
-      "reason": "typecheck refuses a struct field with no type or a literal type (#5923, defect #3225): `LogLevel` `debug`, `info`, `warn`, `error` have no type -- enum variants or list items written inside a struct body were recovered as fields, and gen-rust writes it unparseable. The defect was always present and `tri misread` counted it; generation does not run typecheck, so the output is unchanged. Fix the declaration, not the rule.",
-      "issue": 3225,
-      "expires": "2026-11-30"
     },
     {
       "path": "specs/vm/jit_semantics.t27",
@@ -1103,13 +886,6 @@
         "bdd-block-fallback": 26,
         "brace-body/in-fallback": 14
       }
-    },
-    {
-      "path": "specs/vsa/sequence_hdc.t27",
-      "phase": "typecheck",
-      "reason": "typecheck refuses a struct field with no type or a literal type (#5923, defect #3225): `LanguageDetector` `PackedBigInt` has no type -- enum variants or list items written inside a struct body were recovered as fields, and gen-rust writes it unparseable. The defect was always present and `tri misread` counted it; generation does not run typecheck, so the output is unchanged. Fix the declaration, not the rule.",
-      "issue": 3225,
-      "expires": "2026-11-30"
     }
   ],
   "_why_entries_fell": "113 -> 109 (2026-10-05, #6437): four specs whose files were Rust-flavoured pseudo-t27 (a `loop`/`break` with `..` ranges, a `type Trit = Trit` self-alias, `format!`, `for (k, v)` and `if let`) were rewritten in t27 and now pass every phase -- ar/datalog_engine, ar/ternary_logic, test_framework/graph_drift_detection, test_framework/verilog_bench_harness. The ratchet reported each as an UNEXPECTED PASS; nothing else moved. The cap follows the count down. 113 -> 111 (2026-10-04, #6186): typecheck now resolves Zig's prefix optional `?T` (it only knew `T?`) and lets an optional accept its payload, so `specs/pins/parser.t27` (line 330, `cannot assign U32 to ?u32`) and `specs/port/scripts/gen_w378.t27` pass every phase; the ratchet reported both as UNEXPECTED PASS and nothing else moved. The cap follows the count down. 151 -> 133 (2026-10-02, #5497): 51 entries whose specs now pass every phase were removed (the ratchet reported each as an UNEXPECTED PASS); 6 specs that parse now and fail one phase later were re-keyed to that phase; 5 discard pins moved DOWN or only re-split their channels; 33 failures of ported specs merged while the gate was red were added under #5549, whose ports are to be redone. The cap follows the count down so nothing can hide in the slack. 29 core specs that began discarding tokens after bee edits were repaired, not recorded (#5572, #5575).",

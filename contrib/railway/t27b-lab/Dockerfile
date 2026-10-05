@@ -35,7 +35,12 @@ ENV PATH=/opt/zig:$PATH \
 # A warm, blobless clone; lab.py fetches T27_REF before every run.
 RUN git clone --filter=blob:none --no-checkout "$T27_REPO" /work/t27
 
-COPY lab.py /opt/t27b-lab/lab.py
+# lab.py publishes the git blob sha of both files and the build time as
+# `image` in status.json and every run (#6443), so `tri t27b doctor` can tell
+# a stale deploy (LAB-IMAGE-STALE). image-built is written after both COPYs:
+# a changed file always gets a new time.
+COPY lab.py Dockerfile /opt/t27b-lab/
+RUN date -u +%Y-%m-%dT%H:%M:%SZ > /opt/t27b-lab/image-built
 
 WORKDIR /work
 CMD ["python3", "-u", "/opt/t27b-lab/lab.py"]

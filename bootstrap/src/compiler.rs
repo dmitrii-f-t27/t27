@@ -7353,6 +7353,10 @@ pub struct Codegen {
     /// shadow one; t27 permits it (W734: fanout, clock_cfg, slack, diff_text
     /// each name a parameter after a FUNCTION in the same module).
     module_decl_names: std::collections::HashSet<String>,
+    /// #6295: the module-level `var`s among `module_decl_names`. A test block
+    /// that writes `rx_ready = false;` to one of these sets module state; it
+    /// does not bind a new local.
+    module_var_names: std::collections::HashSet<String>,
     /// Parameter renames in force for the function being emitted. The `_arg`
     /// re-binding used for MUTABLE parameters cannot serve the shadow case --
     /// `var fanout = fanout_arg;` recreates the very collision it was meant to
@@ -7447,6 +7451,7 @@ impl Codegen {
             mut_names: std::collections::HashSet::new(),
             discarded_by_ref: std::collections::HashSet::new(),
             module_decl_names: std::collections::HashSet::new(),
+            module_var_names: std::collections::HashSet::new(),
             param_renames: std::collections::HashMap::new(),
             zig_value_names: std::collections::HashSet::new(),
             declared_fns: std::collections::HashSet::new(),
@@ -7682,9 +7687,56 @@ impl Codegen {
             if !cur.trim().is_empty() {
                 parts.push(cur.trim().to_string());
             }
+            // #6451: the REPEAT form `[v; n]` arrives as the text `v;n`, and
+            // was emitted as `{ v;n }` -- "expected ',' after initializer".
+            // Zig spells it `{ v } ** n`; every caller writes the `[_]T` in
+            // front, so `[_]T{ v } ** n` is the whole value. A Rust width
+            // suffix on the value (`0i32`, `0.0f64`) is not Zig either; the
+            // element type already carries the width.
+            if parts.len() == 1 {
+                let mut d = 0i32;
+                let mut semi = None;
+                for (i, ch) in parts[0].char_indices() {
+                    match ch {
+                        '(' | '[' | '{' => d += 1,
+                        ')' | ']' | '}' => d -= 1,
+                        ';' if d == 0 => semi = Some(i),
+                        _ => {}
+                    }
+                }
+                if let Some(i) = semi {
+                    let v = parts[0][..i].trim().to_string();
+                    let n = parts[0][i + 1..].trim().to_string();
+                    if !v.is_empty() && !n.is_empty() {
+                        self.write(&format!("{} }} ** {}", Self::strip_rust_num_suffix(&v), n));
+                        return;
+                    }
+                }
+            }
             self.write(&parts.join(", "));
         }
         self.write(" }");
+    }
+
+    /// `0i32` -> `0`, `1.5f64` -> `1.5`, `7usize` -> `7`; anything that is not
+    /// a numeric literal with a Rust width suffix is returned unchanged.
+    fn strip_rust_num_suffix(v: &str) -> String {
+        for suf in [
+            "usize", "isize", "u128", "i128", "u64", "i64", "u32", "i32", "u16", "i16", "f64",
+            "f32", "u8", "i8",
+        ] {
+            if let Some(num) = v.strip_suffix(suf) {
+                let num = num.strip_suffix('_').unwrap_or(num);
+                let body = num.strip_prefix('-').unwrap_or(num);
+                if !body.is_empty()
+                    && body.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
+                    && body.chars().all(|c| c.is_ascii_digit() || c == '.' || c == '_')
+                {
+                    return num.to_string();
+                }
+            }
+        }
+        v.to_string()
     }
 
     /// Locals a block declares with one of the given explicit types.
@@ -8249,7 +8301,11 @@ impl Codegen {
     /// silently shadow one. Called once per module walk.
     fn collect_module_decl_names(&mut self, decls: &[Node]) {
         self.module_decl_names.clear();
+        self.module_var_names.clear();
         for d in decls {
+            if d.kind == NodeKind::ConstDecl && d.extra_mutable && !d.name.is_empty() {
+                self.module_var_names.insert(d.name.clone());
+            }
             if matches!(
                 d.kind,
                 NodeKind::FnDecl | NodeKind::ConstDecl | NodeKind::StructDecl | NodeKind::EnumDecl
@@ -8603,6 +8659,16 @@ impl Codegen {
 
     fn t27_array_type_to_zig(ty: &str) -> String {
         let t = ty.trim();
+        // #6451: t27 also spells an optional Rust/TypeScript-style, AFTER the
+        // type -- `OrgID?`, `str?`. Zig spells it `?T`; the suffix reached the
+        // output verbatim and Zig answered "expected ',' after field" at the
+        // struct declaration, before reading anything else in the file.
+        if let Some(inner) = t.strip_suffix('?') {
+            let inner = inner.trim();
+            if !inner.is_empty() && !inner.starts_with('?') {
+                return format!("?{}", Self::t27_array_type_to_zig(inner));
+            }
+        }
         // W590: a slice OF a mapped scalar -- `[]string`, `[]str`. The scalar
         // mapping below only ever saw the whole type, so `string` was mapped
         // and `[]string` was not, and Zig received `[]string` -> "use of
@@ -8925,7 +8991,10 @@ impl Codegen {
             self.param_renames.entry(l.clone()).or_insert(format!("{}_lv", l));
         }
 
-        self.write(&format!("fn {}(", node.name));
+        // #6451: a fn or parameter named for a Zig keyword (`fn error(..)`,
+        // `error: StreamError`) is escaped where it is declared, as every
+        // reference to it already was.
+        self.write(&format!("fn {}(", Self::zig_ident(&node.name)));
         for (i, (pname, ptype)) in node.params.iter().enumerate() {
             if i > 0 {
                 self.write(", ");
@@ -8940,7 +9009,7 @@ impl Codegen {
             let arg_ident = if Self::zig_is_primitive(&arg_name) {
                 Self::zig_binding_ident(&arg_name)
             } else {
-                arg_name
+                Self::zig_ident(&arg_name)
             };
             self.write(&format!("{}: {}", arg_ident, Self::t27_array_type_to_zig(ptype)));
         }
@@ -9080,7 +9149,13 @@ impl Codegen {
                     self.gen_stmt(stmt);
                 }
             }
-            for stmt in node.children.iter() {
+            // #6315: a non-void body's tail expression is its return value.
+            let ret_ty = node.extra_return_type.trim();
+            let mut body: Vec<Node> = node.children.clone();
+            if !ret_ty.is_empty() && ret_ty != "void" && ret_ty != "noreturn" && ret_ty != "()" {
+                Self::zig_tail_returns(&mut body);
+            }
+            for stmt in body.iter() {
                 if !(stmt.kind == NodeKind::StmtLocal && stmt.name.starts_with("_cse")) {
                     self.gen_stmt(stmt);
                 }
@@ -9105,6 +9180,54 @@ impl Codegen {
             self.string_names.remove(n);
         }
         self.zig_value_names.clear();
+    }
+
+    /// #6295: the renames a test or bench block needs, set up the way
+    /// `gen_fn_decl` sets up W736. A `StmtLocal` named like a module
+    /// declaration, and a first `name = ...` binding named like a module
+    /// declaration that is NOT a module `var`, are new locals and get `_lv`.
+    /// A write to a module `var` is left alone: it is an assignment.
+    fn block_shadow_renames(&mut self, children: &[Node]) {
+        self.param_renames.clear();
+        let mut shadow_locals: Vec<String> = Vec::new();
+        Self::collect_shadowing_locals(children, &self.module_decl_names, &mut shadow_locals);
+        for stmt in children {
+            if stmt.kind == NodeKind::StmtAssign
+                && stmt.children.len() >= 2
+                && stmt.children[0].kind == NodeKind::ExprIdentifier
+            {
+                let n = &stmt.children[0].name;
+                if self.module_decl_names.contains(n.as_str())
+                    && !self.module_var_names.contains(n.as_str())
+                    && !shadow_locals.contains(n)
+                {
+                    shadow_locals.push(n.clone());
+                }
+            }
+        }
+        for l in shadow_locals {
+            self.param_renames.entry(l.clone()).or_insert(format!("{}_lv", l));
+        }
+    }
+
+    /// #6295: is this top-level block statement the FIRST binding of a name?
+    /// A name the block already declared with `var`/`let` is not, and neither
+    /// is a write to a module `var` (unless a block local shadows it).
+    fn block_fresh_binding(
+        &self,
+        stmt: &Node,
+        bound: &mut std::collections::HashSet<String>,
+    ) -> bool {
+        if stmt.kind == NodeKind::StmtLocal && !stmt.name.is_empty() {
+            bound.insert(stmt.name.clone());
+        }
+        stmt.kind == NodeKind::StmtAssign
+            && stmt.children.len() >= 2
+            && stmt.children[0].kind == NodeKind::ExprIdentifier
+            && !stmt.children[0].name.is_empty()
+            && !(self.module_var_names.contains(stmt.children[0].name.as_str())
+                && !self.param_renames.contains_key(&stmt.children[0].name))
+            && bound.insert(stmt.children[0].name.clone())
     }
 
     fn gen_test_block(&mut self, node: &Node) {
@@ -9169,13 +9292,25 @@ impl Codegen {
         let mut assign_counts: std::collections::HashMap<String, u32> =
             std::collections::HashMap::new();
         count_ident_assigns(&node.children, &mut assign_counts);
+
+        // #6295: a test sees the module's declarations the way a fn body does,
+        // and Zig rejects the same three things in it:
+        //   * `cover_hit = false;` where `cover_hit` is a module `var` is a
+        //     write to module state. Binding it as `const cover_hit` shadowed
+        //     the declaration.
+        //   * `var rx_ready = false;` where `rx_ready` is a module `var`, or
+        //     `pack_frac = ...` where `pack_frac` is a module fn, IS a new
+        //     local. It gets the W736 `_lv` rename that fn bodies already get,
+        //     at the binding site and at every reference.
+        //   * `var ok: bool = f(10); ... ok = f(20);` reassigns the local the
+        //     test declared. The first `ok = ...` was bound a second time
+        //     (`const ok`), because only assignments were tracked as bound.
+        // The renames are cleared at both ends: before this, the last fn's
+        // renames leaked into every test emitted after it.
+        self.block_shadow_renames(&node.children);
         let mut bound: std::collections::HashSet<String> = std::collections::HashSet::new();
         for stmt in &node.children {
-            let fresh_binding = stmt.kind == NodeKind::StmtAssign
-                && stmt.children.len() >= 2
-                && stmt.children[0].kind == NodeKind::ExprIdentifier
-                && !stmt.children[0].name.is_empty()
-                && bound.insert(stmt.children[0].name.clone());
+            let fresh_binding = self.block_fresh_binding(stmt, &mut bound);
             let tuple_binding = stmt.kind == NodeKind::StmtAssign
                 && stmt.children.len() >= 2
                 && stmt.children[0].kind == NodeKind::ExprTuple
@@ -9191,7 +9326,7 @@ impl Codegen {
                     "const"
                 };
                 self.write_indent();
-                self.write(&format!("{} {} = ", kw, Self::zig_binding_ident(name)));
+                self.write(&format!("{} {} = ", kw, Self::zig_binding_ident(&self.renamed(name))));
                 self.gen_expr(&stmt.children[1]);
                 self.write_line(";");
                 if stmt.children[0].kind == NodeKind::ExprIdentifier {
@@ -9215,7 +9350,7 @@ impl Codegen {
                             // binding would be an "unused local constant".
                             "_".to_string()
                         } else {
-                            format!("const {}", Self::zig_binding_ident(&e.name))
+                            format!("const {}", Self::zig_binding_ident(&self.renamed(&e.name)))
                         }
                     })
                     .collect();
@@ -9254,6 +9389,7 @@ impl Codegen {
             self.string_names.remove(n);
         }
         self.zig_value_names.clear();
+        self.param_renames.clear();
     }
 
     fn gen_invariant_block(&mut self, node: &Node) {
@@ -9264,6 +9400,22 @@ impl Codegen {
         self.write_line(&format!("// invariant: {}", node.name));
 
         for stmt in &node.children {
+            // #6315: a brace invariant states its predicate as a bare
+            // expression -- `invariant i { MAX == 59049 }` -- and emitting it
+            // verbatim inside `comptime {}` is "value of type 'bool' ignored",
+            // which kills the whole file. Check it the way the clause form
+            // `invariant i: expr;` already does: as an assertion.
+            if let Some(pred) = self.invariant_predicate(stmt) {
+                let mut call = Node::new(NodeKind::ExprCall);
+                call.name = "assert".to_string();
+                call.line = stmt.line;
+                call.children.push(pred.clone());
+                let mut wrapped = Node::new(NodeKind::StmtExpr);
+                wrapped.line = stmt.line;
+                wrapped.children.push(call);
+                self.gen_stmt(&wrapped);
+                continue;
+            }
             self.gen_stmt(stmt);
         }
 
@@ -9290,6 +9442,75 @@ impl Codegen {
 
         self.dedent();
         self.write_line("}");
+    }
+
+    /// #6315: the expression of a brace-invariant statement that is a
+    /// predicate (a value, not an action), or None. A call is a predicate only
+    /// when it is a module fn declared to return `bool`; any other call is an
+    /// action and keeps its statement form.
+    fn invariant_predicate<'a>(&self, stmt: &'a Node) -> Option<&'a Node> {
+        if stmt.kind != NodeKind::StmtExpr || stmt.children.len() != 1 {
+            return None;
+        }
+        let e = &stmt.children[0];
+        match e.kind {
+            NodeKind::ExprBinary | NodeKind::ExprUnary | NodeKind::ExprIdentifier
+            | NodeKind::ExprIndex | NodeKind::ExprFieldAccess => Some(e),
+            NodeKind::ExprLiteral if e.value == "true" || e.value == "false" => Some(e),
+            NodeKind::ExprCall
+                if self.declared_fn_returns.get(&e.name).map(|r| r.trim() == "bool").unwrap_or(false) =>
+            {
+                Some(e)
+            }
+            _ => None,
+        }
+    }
+
+    /// #6315: does a declared module fn return a value (so a bare call to it
+    /// is a value Zig refuses to ignore)?
+    fn call_returns_value(&self, e: &Node) -> bool {
+        e.kind == NodeKind::ExprCall
+            && self
+                .declared_fn_returns
+                .get(&e.name)
+                .map(|r| {
+                    let r = r.trim();
+                    !r.is_empty() && r != "void" && r != "noreturn" && r != "()"
+                })
+                .unwrap_or(false)
+    }
+
+    /// #6315: a Rust-style tail expression is the fn's return value. Rewrite
+    /// the LAST statement of a non-void body (and, through an if/else that
+    /// is last, the last statement of each branch) into a `return`, as
+    /// gen-verilog already does (t27#1948). Zig has no tail expressions, so
+    /// `fn f(v: u8) -> u32 { v }` emitted `v;`: "value ignored".
+    fn zig_tail_returns(stmts: &mut Vec<Node>) {
+        let Some(last) = stmts.last_mut() else { return };
+        match last.kind {
+            NodeKind::StmtExpr if last.children.len() == 1 => {
+                let e = &last.children[0];
+                let action = match e.kind {
+                    NodeKind::ExprReturn => true,
+                    NodeKind::ExprCall => matches!(
+                        e.name.as_str(),
+                        "assert" | "assert_eq" | "panic" | "unreachable" | "print" | "println"
+                    ),
+                    _ => false,
+                };
+                if !action {
+                    let mut ret = Node::new(NodeKind::ExprReturn);
+                    ret.line = last.line;
+                    ret.children.push(last.children[0].clone());
+                    *last = ret;
+                }
+            }
+            NodeKind::StmtIf if last.children.len() == 3 => {
+                Self::zig_tail_returns(&mut last.children[1].children);
+                Self::zig_tail_returns(&mut last.children[2].children);
+            }
+            _ => {}
+        }
     }
 
     fn gen_bench_block(&mut self, node: &Node) {
@@ -9323,13 +9544,15 @@ impl Codegen {
 
         // Same first-assignment-as-const lowering as gen_test_block: bench
         // bindings parse as StmtAssign and would reference undeclared names.
+        // #6295: the same shadow and rebinding rules as gen_test_block; a
+        // reassigned binding is `var`, as it is there.
+        self.block_shadow_renames(&node.children);
+        let mut assign_counts: std::collections::HashMap<String, u32> =
+            std::collections::HashMap::new();
+        count_ident_assigns(&node.children, &mut assign_counts);
         let mut bound: std::collections::HashSet<String> = std::collections::HashSet::new();
         for stmt in &node.children {
-            let fresh_binding = stmt.kind == NodeKind::StmtAssign
-                && stmt.children.len() >= 2
-                && stmt.children[0].kind == NodeKind::ExprIdentifier
-                && !stmt.children[0].name.is_empty()
-                && bound.insert(stmt.children[0].name.clone());
+            let fresh_binding = self.block_fresh_binding(stmt, &mut bound);
             let tuple_binding = stmt.kind == NodeKind::StmtAssign
                 && stmt.children.len() >= 2
                 && stmt.children[0].kind == NodeKind::ExprTuple
@@ -9358,7 +9581,13 @@ impl Codegen {
                     }
                     self.write("_ = ");
                 } else {
-                    self.write(&format!("const {} = ", Self::zig_binding_ident(&stmt.children[0].name)));
+                    let name = &stmt.children[0].name;
+                    let kw = if assign_counts.get(name).copied().unwrap_or(0) >= 2 {
+                        "var"
+                    } else {
+                        "const"
+                    };
+                    self.write(&format!("{} {} = ", kw, Self::zig_binding_ident(&self.renamed(name))));
                 }
                 self.gen_expr(&stmt.children[1]);
                 self.write_line(";");
@@ -9379,7 +9608,7 @@ impl Codegen {
                         if e.name == "_" {
                             "_".to_string()
                         } else {
-                            format!("const {}", Self::zig_binding_ident(&e.name))
+                            format!("const {}", Self::zig_binding_ident(&self.renamed(&e.name)))
                         }
                     })
                     .collect();
@@ -9406,6 +9635,7 @@ impl Codegen {
         self.dedent();
         self.write_line("}");
         self.zig_value_names.clear();
+        self.param_renames.clear();
     }
 
     fn gen_stmt(&mut self, node: &Node) {
@@ -9803,6 +10033,14 @@ impl Codegen {
                     return;
                 }
                 self.write_indent();
+                // #6315: a bare call to a module fn that returns a value is a
+                // value Zig refuses to ignore ("value of type 'bool'
+                // ignored"). The spec discards it, as Rust does; say so.
+                if node.children.first().map(|c| self.call_returns_value(c)).unwrap_or(false)
+                    && !rendered.trim_start().starts_with("_ =")
+                {
+                    self.write("_ = ");
+                }
                 self.write(&rendered);
                 self.write_line(";");
             }
@@ -10459,6 +10697,12 @@ impl Codegen {
                     // Tuple index: Zig tuple fields are named "0"/"1"/...,
                     // reachable only through the @"" identifier syntax.
                     self.write(&format!("@\"{}\"", node.name));
+                } else if !node.name.contains("::") {
+                    // #6451: a field named for a Zig keyword (`r.error`) is
+                    // declared escaped (`@"error": T`) and must be read the
+                    // same way, or Zig stops at "expected pointer dereference,
+                    // optional unwrap, or field access, found 'error'".
+                    self.write(&Self::zig_ident(&node.name));
                 } else {
                     self.write(&node.name);
                 }
@@ -10562,7 +10806,13 @@ impl Codegen {
                     return;
                 }
                 if let Some((val, count)) = txt.rsplit_once(';') {
-                    self.write(&format!(".{{ {} }} ** {}", val.trim(), count.trim()));
+                    // #6451: `[0i32; 2]` kept the Rust width suffix -- "number
+                    // '0i32' has leading zero"; the target type carries it.
+                    self.write(&format!(
+                        ".{{ {} }} ** {}",
+                        Self::strip_rust_num_suffix(val.trim()),
+                        count.trim()
+                    ));
                 } else {
                     // Split on TOP-LEVEL commas only -- elements may be calls
                     // with their own commas.
@@ -10606,7 +10856,9 @@ impl Codegen {
                     if i > 0 {
                         self.write(", ");
                     }
-                    self.write(&format!(".{} = ", field.name));
+                    // #6451: `.error = ""` is a keyword where Zig wants a
+                    // field name ("expected field initializer").
+                    self.write(&format!(".{} = ", Self::zig_ident(&field.name)));
                     if !field.children.is_empty() {
                         // W609: an array literal assigned to a SLICE-typed field
                         // needs the same lowering W607 gave slice RETURNS --

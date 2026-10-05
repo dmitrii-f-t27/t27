@@ -83,6 +83,8 @@ pub struct PostBlock {
     text: str,
 }
 
+; Key of this post in a specs/i18n bundle (specs/i18n/blog-ru.t27).
+pub const ID: str = "blog/t27b-against-other-second-backends";
 pub const SLUG: str = "t27b-against-other-second-backends";
 pub const TITLE: str = "t27b against other second backends, and the road to 100%";
 pub const SUMMARY: str = "[one lab run on one commit; the suites differ, so the percentages are not the same quantity; competitor figures are their own publications] t27b, the native AArch64 backend of t27, passes with runtime checks 380 of the 723 specs its reference path passes (52.6%), 661 with the vacuous ones (91.4%). By coverage it is third of three backends with published numbers, by speed of growth and by automation it is first, by depth of checking it is last. The post says what each issue fixes, and it is updated as the lab moves.";
@@ -135,7 +137,7 @@ pub const body: [24]PostBlock = [
     PostBlock { kind: "h", text: "Where we stand: four rankings" },
     PostBlock { kind: "p", text: "The suites differ, so the percentages below are not the same quantity. Ours is 723 t27 specs; Zig's are its own behavior tests. Each number says where one backend is on its own road." },
     PostBlock { kind: "p", text: "By coverage we are 3rd of 3 with published numbers. 1st: Zig's self-hosted x86_64 backend, about 100% (1987 tests passed against LLVM's 1980, of 2084, devlog 2025-06). 2nd: Zig's self-hosted aarch64 backend, 79% (1547 of 1960, devlog 2025-07). 3rd: t27b, 52.6% checked, 91.4% with the vacuous passes." },
-    PostBlock { kind: "p", text: "By speed of growth we are 1st. t27b went from 47 lab passes to 380 checked in about a day; Zig's backends took years, from 41% and 64% in 0.10.0 (2022) to the 2025 numbers." },
+    PostBlock { kind: "p", text: "By speed of growth we are 1st. t27b went from 21 to 380 checked specs in about a day; Zig's backends took years, from 41% and 64% in 0.10.0 (2022) to the 2025 numbers." },
     PostBlock { kind: "p", text: "By automation we are 1st. tri t27b next picks the next lane from the lab's blocker grid with a rule written in t27, a steward loop merges green pull requests, and the lab's results are public JSON. We found no such loop published by Zig, rustc_codegen_cranelift, Go's SSA backend or QBE." },
     PostBlock { kind: "p", text: "By depth of checking we are last. The others compare with their reference per test; Go hunted its SSA bugs with hash bisection, QBE and cg_clif fuzz the ABI. t27b compares per file, has no fuzzer and no reducer, and its CI runs under qemu, not on arm64." },
     PostBlock { kind: "h", text: "What stands between t27b and 100%" },

@@ -5,7 +5,7 @@ Issue #6071, epic #6063. One process does three things:
 
 * serves T27_SRV (default /srv) over HTTP on $PORT: /latest.json,
   /runs/<sha>.json, /runs/<sha>.log, /status.json;
-* on start, and then every T27_POLL_SECONDS (default 1800) if
+* on start, and then every T27_POLL_SECONDS (default 600) if
   origin/<T27_REF> moved, runs the lab once on that commit;
 * never writes anywhere but its own disk. The repository is public and is
   cloned anonymously; there are no secrets in this service.
@@ -32,11 +32,17 @@ One run, in order:
 
 A step that fails is recorded with its error and the run is still published;
 no number is filled in that a command did not produce.
+
+Every run JSON and status.json carry `image` (#6443): the git blob sha of the
+lab.py and Dockerfile this container runs, the image build time and the
+Railway deployment id, so `tri t27b doctor` can say LAB-IMAGE-STALE when the
+deployed lab is not master's contrib/railway/t27b-lab.
 """
 
 import concurrent.futures
 import datetime
 import functools
+import hashlib
 import http.server
 import json
 import os
@@ -52,7 +58,7 @@ from pathlib import Path
 REPO = os.environ.get("T27_REPO", "https://github.com/gHashTag/t27")
 REF = os.environ.get("T27_REF", "master")
 PORT = int(os.environ.get("PORT", "8080"))
-POLL = int(os.environ.get("T27_POLL_SECONDS", "1800"))
+POLL = int(os.environ.get("T27_POLL_SECONDS", "600"))
 SRV = Path(os.environ.get("T27_SRV", "/srv"))
 WORK = Path(os.environ.get("T27_WORK", "/work"))
 
@@ -94,8 +100,35 @@ TARGET_DIR = WORK / "target"
 T27C = TARGET_DIR / "release" / "t27c"
 T27B = TARGET_DIR / TARGET / "release" / "t27b"
 
+def git_blob_sha(path):
+    """The sha git gives this file's bytes (`git hash-object`), or None."""
+    try:
+        data = Path(path).read_bytes()
+    except OSError:
+        return None
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def image_identity():
+    """What this container runs (#6443). The Dockerfile copies itself and
+    lab.py next to each other and writes image-built after both, so a
+    rebuilt image always has a new time; a field the image lacks is None."""
+    here = Path(__file__).resolve().parent
+    try:
+        built = (here / "image-built").read_text().strip() or None
+    except OSError:
+        built = None
+    return {
+        "lab_py_sha": git_blob_sha(Path(__file__).resolve()),
+        "dockerfile_sha": git_blob_sha(here / "Dockerfile"),
+        "image_built": built,
+        "railway_deployment": os.environ.get("RAILWAY_DEPLOYMENT_ID"),
+    }
+
+
+IMAGE = image_identity()
 _status_lock = threading.Lock()
-_status = {"phase": "starting", "ref": REF, "repo": REPO}
+_status = {"phase": "starting", "ref": REF, "repo": REPO, "image": IMAGE}
 
 
 def now():
@@ -269,7 +302,52 @@ def parse_test_report(stdout):
     return "blocked", "unreadable test-report output"
 
 
-def reference_one(worker, file):
+def parse_test_verdicts(stdout):
+    """Per-test verdicts of `t27c test-report <spec> --verbose` as {name: passed},
+    or None when the list could be partial (blocked, no --verbose, a count that
+    does not match `tests`). The same reading as cli/t27b/src/blockers.rs
+    parse_test_verdicts (#6441)."""
+    lines = stdout.splitlines()
+    try:
+        start = next(i for i, l in enumerate(lines) if l.startswith("--- test report:"))
+    except StopIteration:
+        return None
+    out = {}
+    for line in lines[start + 1:]:
+        t = line.lstrip()
+        if not t:
+            break
+        if t.startswith("pass  "):
+            out[t[6:]] = True
+        elif t.startswith("FAIL  "):
+            out[t[6:]] = False
+        else:
+            return None
+    total = next((int(m.group(1)) for m in (re.match(r"\s*tests\s+(\d+)\s*$", l) for l in lines) if m), None)
+    return out if total == len(out) else None
+
+
+def disagreements(t27b, reference):
+    """One line per test whose verdict differs, or that only one side ran, in
+    name order: the definition is cli/t27b/src/blockers.rs `disagreements`
+    (#6441). t27b's names already carry t27c's __dupN suffix."""
+    word = lambda ok: "pass" if ok else "FAIL"  # noqa: E731
+    out = []
+    for n in sorted(set(t27b) | set(reference)):
+        a, b = t27b.get(n), reference.get(n)
+        if a is not None and b is not None:
+            if a != b:
+                out.append("%s: t27b %s, reference %s" % (n, word(a), word(b)))
+        elif a is not None:
+            out.append("%s: t27b %s, reference has no such test" % (n, word(a)))
+        else:
+            out.append("%s: t27b has no such test, reference %s" % (n, word(b)))
+    return out
+
+
+def reference_one(worker, file, tests=None):
+    """The reference verdict (tag, reason). With a dict `tests`, the per-test
+    verdicts are stored into it under `file` when the run produced them."""
     scratch = WORK / "reference" / ("w%d" % worker)
     tmp = scratch / "tmp"
     tmp.mkdir(parents=True, exist_ok=True)
@@ -280,7 +358,7 @@ def reference_one(worker, file):
     for attempt in range(3):
         try:
             out = subprocess.run(
-                [str(T27C), "test-report", file, "--specs-dir", CORPUS_DIR],
+                [str(T27C), "test-report", file, "--specs-dir", CORPUS_DIR, "--verbose"],
                 cwd=CLONE, env=env, capture_output=True, text=True, errors="replace",
                 timeout=REF_TIMEOUT_S,
             )
@@ -297,12 +375,138 @@ def reference_one(worker, file):
     if out.returncode != 0:
         why = (out.stderr.strip().splitlines() or [""])[0]
         return "blocked", ("t27c test-report exited %d: %s" % (out.returncode, why))[:300]
-    return parse_test_report(out.stdout)
+    verdict = parse_test_report(out.stdout)
+    if tests is not None and verdict[0] in ("pass", "fail"):
+        got = parse_test_verdicts(out.stdout)
+        if got is not None:
+            tests[file] = got
+    return verdict
 
 
-def reference_all(files, log):
+# ------------------------------------------------------------ reference cache
+#
+# #6443: a t27c reference verdict is a function of the spec's bytes, the bytes
+# of every spec it imports with `use` (t27c splices them in), the t27c binary
+# and the zig that compiles its output. The cache lives on the volume
+# (REF_CACHE), so a run whose t27c did not change only re-runs the specs whose
+# import closure changed. A timeout or a lab error says something about the
+# lab that minute, not about the spec, so it is never cached; neither is a
+# t27c killed by a signal.
+
+REF_CACHE = SRV / "refcache.json"
+
+
+def specs_root(path):
+    """bootstrap/src/use_resolve.rs find_specs_root, for an absolute path."""
+    d = path.parent
+    while True:
+        if (d / "specs").is_dir():
+            return d / "specs"
+        if d.name == "specs" and d.is_dir():
+            return d
+        if d.parent == d:
+            return None
+        d = d.parent
+
+
+def use_targets(text, root):
+    """bootstrap/src/use_resolve.rs use_targets: `use a::b::c;` -> root/a/b/c.t27."""
+    out = []
+    for line in text.splitlines():
+        t = line.strip()
+        if not t.startswith("use "):
+            continue
+        rest = t[4:].split("//", 1)[0].strip().rstrip(";").strip()
+        segs = [x for part in rest.split("::") for x in part.split(".")]
+        if not segs or not all(segs):
+            continue
+        p = root.joinpath(*segs).with_suffix(".t27")
+        if p.is_file():
+            out.append(p)
+    return out
+
+
+def use_closure(path):
+    """The spec and everything it imports, transitively, in a stable order."""
+    seen, todo = [], [path]
+    while todo:
+        p = todo.pop()
+        if p in seen:
+            continue
+        seen.append(p)
+        root = specs_root(p)
+        if root is None:
+            continue
+        try:
+            text = p.read_text(errors="replace")
+        except OSError:
+            continue
+        todo.extend(reversed(use_targets(text, root)))
+    return [seen[0]] + sorted(seen[1:])
+
+
+def reference_stamp():
+    """The t27c binary and the zig version: the toolchain half of every key."""
+    h = hashlib.sha256(T27C.read_bytes()).hexdigest()
+    return "t27c %s zig %s" % (h, first_line(["zig", "version"]))
+
+
+def reference_key(stamp, file):
+    h = hashlib.sha256(b"t27b-lab-ref-v1\0" + stamp.encode() + b"\0")
+    for p in use_closure((CLONE / file).resolve()):
+        try:
+            data = p.read_bytes()
+        except OSError:
+            data = b"\0missing"
+        h.update(os.path.relpath(p, CLONE.resolve()).encode())
+        h.update(b"\0%d\0" % len(data))
+        h.update(data)
+    return h.hexdigest()
+
+
+def reference_cacheable(verdict, detail):
+    if verdict in ("pass", "fail"):
+        return True
+    return verdict == "blocked" and not detail.startswith("t27c test-report exited -")
+
+
+def read_ref_cache():
+    try:
+        doc = json.loads(REF_CACHE.read_text())
+    except (OSError, ValueError):
+        return {}
+    return doc.get("entries", {}) if isinstance(doc, dict) else {}
+
+
+def write_ref_cache(entries):
+    tmp = REF_CACHE.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"version": 1, "entries": entries}, sort_keys=True))
+    os.replace(tmp, REF_CACHE)
+
+
+def reference_all(files, log, tests=None):
     shutil.rmtree(WORK / "reference", ignore_errors=True)
+    stamp = reference_stamp()
+    known = read_ref_cache()
+    keep, stats = {}, {"hits": 0, "misses": 0, "not_cached": 0}
+    keys = {f: reference_key(stamp, f) for f in files}
     results = {}
+    for f in files:
+        hit = known.get(keys[f])
+        if not hit or len(hit) < 2 or not reference_cacheable(hit[0], hit[1]):
+            continue
+        got = hit[2] if len(hit) > 2 else None
+        # #6441: a pass or fail cached without per-test verdicts cannot be
+        # compared test by test, so when they are wanted it is a miss.
+        if tests is not None and hit[0] in ("pass", "fail") and got is None:
+            continue
+        results[f] = (hit[0], hit[1])
+        if tests is not None and got is not None:
+            tests[f] = got
+        keep[keys[f]] = hit
+        stats["hits"] += 1
+    files = [f for f in files if f not in results]
+    log("reference cache: %d hits, %d to run (%s)" % (stats["hits"], len(files), stamp))
     lock = threading.Lock()
     done = [0]
     local = threading.local()
@@ -312,7 +516,7 @@ def reference_all(files, log):
         if not hasattr(local, "w"):
             with lock:
                 local.w = next(ids)
-        r = reference_one(local.w, f)
+        r = reference_one(local.w, f, tests)
         with lock:
             results[f] = r
             done[0] += 1
@@ -323,7 +527,18 @@ def reference_all(files, log):
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=REF_JOBS) as ex:
         list(ex.map(job, files))
-    return results
+    for f in files:
+        v, d = results[f]
+        if reference_cacheable(v, d):
+            keep[keys[f]] = [v, d, (tests or {}).get(f)]
+            stats["misses"] += 1
+        else:
+            stats["not_cached"] += 1
+    try:
+        write_ref_cache(keep)
+    except OSError as e:
+        log("reference cache not written: %s" % e)
+    return results, stats
 
 
 # ------------------------------------------------------------ cargo test
@@ -353,6 +568,7 @@ def lab_run(sha, log):
         "commit": sha,
         "started": now(),
         "finished": None,
+        "image": IMAGE,
         "toolchain": toolchain(),
         "steps": {},
     }
@@ -429,17 +645,21 @@ def lab_run(sha, log):
         step("t27b_corpus", t27b_corpus)
 
     reference = {}
+    ref_tests = {}
 
     def reference_path():
         if corpus.get("totals", {}).get("reference", {}).get("ran"):
             for r in corpus["results"]:
                 reference[r["file"]] = (r["reference"], r.get("reference_detail", ""))
+                if isinstance(r.get("reference_tests"), dict):
+                    ref_tests[r["file"]] = r["reference_tests"]
             return {"source": "t27b corpus (reference verdicts in its JSON)"}
         if corpus.get("results"):
             files = [r["file"] for r in corpus["results"]]
         else:
             files = sorted(str(p.relative_to(CLONE)) for p in (CLONE / CORPUS_DIR).rglob("*.t27"))
-        reference.update(reference_all(files, log))
+        results, cache = reference_all(files, log, ref_tests)
+        reference.update(results)
         tot = {}
         for v, _ in reference.values():
             tot[v] = tot.get(v, 0) + 1
@@ -447,6 +667,7 @@ def lab_run(sha, log):
             "source": "t27c test-report <file> --specs-dir %s (t27c gen + zig test), natively, %d workers, %d s timeout"
             % (CORPUS_DIR, REF_JOBS, REF_TIMEOUT_S),
             "totals": tot,
+            "cache": cache,
         }
 
     if have_t27c:
@@ -474,6 +695,11 @@ def lab_run(sha, log):
             rec["reference"], why = reference[r["file"]]
             if why:
                 rec["reference_detail"] = why
+        # #6441: test by test, where both sides ran the file's tests.
+        if r["file"] in ref_tests:
+            rec["reference_tests"] = ref_tests[r["file"]]
+            if isinstance(r.get("test_verdicts"), dict):
+                rec["reference_disagree"] = disagreements(r["test_verdicts"], ref_tests[r["file"]])
         results.append(rec)
     if results:
         ref_pass = [r for r in results if r["reference"] == "pass"]
@@ -491,7 +717,18 @@ def lab_run(sha, log):
             if reference else None,
             "t27b_pass_where_reference_does_not": sum(1 for r in results if r["t27b"] == "pass" and r["reference"] != "pass")
             if reference else None,
+            # `mismatch` is t27b's JIT against t27b's own interpreter (same IR),
+            # kept under its old name; `jit_interp_mismatch` says so.
             "mismatch": sum(1 for r in results if r["t27b"] == "mismatch"),
+            "jit_interp_mismatch": sum(1 for r in results if r["t27b"] == "mismatch"),
+            # #6441: t27b against the reference, test by test. None when this
+            # run compared nothing per test (a t27b without test_verdicts):
+            # not measured is not 0.
+            "reference_compared": sum(1 for r in results if "reference_disagree" in r),
+            "reference_disagree": sum(1 for r in results if r.get("reference_disagree"))
+            if any("reference_disagree" in r for r in results) else None,
+            "reference_disagree_tests": sum(len(r.get("reference_disagree") or []) for r in results)
+            if any("reference_disagree" in r for r in results) else None,
             "t27b_fail": sum(1 for r in results if r["t27b"] == "fail"),
             "crash": sum(1 for r in results if r["t27b"] == "crash"),
             "timeout": sum(1 for r in results if r["t27b"] == "timeout"),
@@ -594,17 +831,27 @@ def serve():
     httpd.serve_forever()
 
 
+def run_done(doc):
+    """Whether a published run settles its commit. A run whose checkout failed
+    (2026-10-05 16:35Z, 18a240eca: a fresh container's `git clone` got
+    "fatal: expected 'packfile'") measured nothing, so the next poll tries
+    the same commit again instead of waiting for master to move."""
+    return ((doc or {}).get("steps") or {}).get("checkout", {}).get("ok") is not False
+
+
 def main():
     SRV.mkdir(parents=True, exist_ok=True)
     (SRV / "runs").mkdir(exist_ok=True)
     set_status(phase="starting", toolchain=toolchain())
     threading.Thread(target=serve, daemon=True).start()
-    print("t27b lab: serving %s on :%d, ref %s, poll %d s" % (SRV, PORT, REF, POLL), flush=True)
+    print("t27b lab: serving %s on :%d, ref %s, poll %d s, lab.py %s" % (SRV, PORT, REF, POLL, IMAGE["lab_py_sha"]),
+          flush=True)
     last = None
     latest = SRV / "latest.json"
     if latest.exists():
         try:
-            last = json.loads(latest.read_text()).get("commit")
+            doc = json.loads(latest.read_text())
+            last = doc.get("commit") if run_done(doc) else None
         except ValueError:
             pass
     while True:
@@ -613,13 +860,15 @@ def main():
             if sha != last:
                 log = Log(SRV / "runs" / ("%s.log" % sha))
                 log("t27b lab run: %s %s @ %s" % (REPO, REF, sha))
+                log("image: lab.py %s Dockerfile %s built %s deployment %s" % (
+                    IMAGE["lab_py_sha"], IMAGE["dockerfile_sha"], IMAGE["image_built"], IMAGE["railway_deployment"]))
                 set_status(phase="running", commit=sha, started=now(), progress=None)
                 doc = lab_run(sha, log)
                 publish(doc, sha)
                 log("published /runs/%s.json: %s" % (sha, json.dumps(doc.get("summary"))))
                 log.close()
-                last = sha
-            set_status(phase="idle", commit=last, next_poll_in_s=POLL)
+                last = sha if run_done(doc) else None
+            set_status(phase="idle", commit=sha, next_poll_in_s=POLL, retry=last is None)
         except Exception as e:
             print("lab loop error: %s" % e, flush=True)
             set_status(phase="error", error=str(e))
