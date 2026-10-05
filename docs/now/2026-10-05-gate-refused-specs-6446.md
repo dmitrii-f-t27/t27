@@ -10,3 +10,7 @@
 - Ledger: the 7 `typecheck` entries for these specs are removed from `docs/reports/suite_expectations.json` (84 -> 77, and the cap follows). ar/composition keeps its `verilog-no-keyword-decl` entry, which is not a typecheck failure.
 - 9 seals were re-saved on the lab with zig on PATH.
 - The 9 port specs whose `gen-verilog` fails on a local string array (`[N][]const u8`) fail with or without the gate. They stay ledgered under #5549.
+- Two more specs outside `specs/` were refused once the gate ran over the whole tree. Both are fixed here:
+  - `compiler/codegen/verilog/codegen.t27`: called the method `mangle_verilog_name(self, name)` without `self.`. All 3 call sites are now `self.mangle_verilog_name(..)`.
+  - `contrib/backend/zig/legacy/main_zig_handwritten.t27`: 14 calls passed a format and args to the 1-parameter `printError`. They now call the spec's own `printErrorFmt`.
+  - Their 3 seals (`verilog_codegen`, `verilog_verilog_codegen`, `legacy_main_zig_handwritten`) were re-saved on the lab.
