@@ -1509,6 +1509,19 @@ impl<'a> Lower<'a> {
                 Ok(())
             }
             NodeKind::StmtFor => self.for_array(n, out),
+            // `for i in a..b { ... }`: t27c's Zig backend prints
+            // `for (a..b) |i| { ... }`, the same loop as `for (a..b) |i|`.
+            NodeKind::StmtForRange => {
+                if n.children.len() != 3 {
+                    return self.reject("StmtForRange", "unexpected shape".into());
+                }
+                let body_node = &n.children[2];
+                if body_node.kind != NodeKind::Module || body_node.name != "body" {
+                    return self.reject("StmtForRange", "unexpected body shape".into());
+                }
+                let capture = n.name.trim().to_string();
+                self.for_range("StmtForRange", &capture, &n.children[0], &n.children[1], body_node, out)
+            }
             NodeKind::StmtBreak | NodeKind::StmtContinue => {
                 let k = kind_name(n);
                 if !n.name.is_empty() || !n.children.is_empty() {
@@ -1602,8 +1615,21 @@ impl<'a> Lower<'a> {
     /// is evaluated once, before the loop; its elements are read as the loop
     /// reaches them.
     fn for_array(&mut self, n: &Node, out: &mut Vec<Stmt>) -> R<()> {
-        if !n.name.is_empty() {
+        // `for x in xs { ... }` parses to this same node with the loop
+        // variable copied into `name` (t27c's `parse_for_range`); the Zig
+        // backend ignores `name` and prints `for (xs) |x|`. The parser builds
+        // no labelled loops, so any other `name` stays refused.
+        let in_form = n.params.len() == 1 && n.name == n.params[0].0;
+        if !n.name.is_empty() && !in_form {
             return self.reject("StmtFor", format!("labelled loop `{}`", n.name));
+        }
+        if n.children.len() > 2 {
+            // `for (xs, ys) |x, y|`: Zig checks the lengths are equal (a
+            // compile error when both are comptime-known, a panic otherwise).
+            return self.reject(
+                "StmtFor(multi-object)",
+                format!("{} iterables in one loop", n.children.len() - 1),
+            );
         }
         if n.children.len() != 2 || n.params.len() != 1 {
             return self.reject("StmtFor", "more than one iterable or capture".into());
@@ -1613,7 +1639,11 @@ impl<'a> Lower<'a> {
             return self.reject("StmtFor", "unexpected body shape".into());
         }
         if iter.kind == NodeKind::ExprBinary && iter.extra_op == ".." {
-            return self.reject("StmtFor(range)", "`for` over a range".into());
+            if iter.children.len() != 2 {
+                return self.reject("StmtFor(range)", "range without two bounds".into());
+            }
+            let capture = n.params[0].0.trim().to_string();
+            return self.for_range("StmtFor(range)", &capture, &iter.children[0], &iter.children[1], body_node, out);
         }
         let p = match self.expr(iter)? {
             Val::Poison => return Err(()),
@@ -1713,6 +1743,96 @@ impl<'a> Lower<'a> {
             },
         };
         out.push(Stmt::While { cond, body, step: vec![Stmt::Assign { var: i, value: next }] });
+        Ok(())
+    }
+
+    /// `for (lo..hi) |i| { ... }` as Zig runs it: both bounds are `usize`,
+    /// evaluated once, `lo` first; the length `hi - lo` is computed before
+    /// the first iteration and traps (integer overflow) when `hi < lo`; `i`
+    /// is a `usize` constant per iteration. Bounds Zig cannot coerce to
+    /// `usize` (a signed integer, a negative literal) are compile errors in
+    /// the reference and are refused here.
+    fn for_range(
+        &mut self,
+        construct: &str,
+        capture: &str,
+        lo_n: &Node,
+        hi_n: &Node,
+        body_node: &Node,
+        out: &mut Vec<Stmt>,
+    ) -> R<()> {
+        if capture.is_empty()
+            || capture.starts_with('*')
+            || capture.contains(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        {
+            return self.reject(construct, format!("capture `{}`", capture));
+        }
+        self.no_var_shadow(capture)?;
+        let usize_t = LTy::S(Ty::U64);
+        let lo = self.expr_as(lo_n, &usize_t)?;
+        let lo = self.coerce(lo, Ty::U64)?;
+        let hi = self.expr_as(hi_n, &usize_t)?;
+        let hi = self.coerce(hi, Ty::U64)?;
+        if let (ExprKind::Const(a), ExprKind::Const(b)) = (&lo.kind, &hi.kind) {
+            if a > b {
+                // Zig: a comptime-known reversed range is a compile error.
+                return self.reject(construct, format!("range {}..{} runs backwards", a, b));
+            }
+        }
+        let lo = match lo.kind {
+            ExprKind::Const(_) => lo,
+            _ => {
+                let h = self.hidden_var("%for_lo", usize_t.clone());
+                out.push(Stmt::Assign { var: h, value: lo });
+                Expr { ty: Ty::U64, kind: ExprKind::Var(h) }
+            }
+        };
+        let site = self.site(TrapKind::Overflow, "- on usize (for range length)".into(), Ty::U64);
+        let len = self.hidden_var("%for_len", usize_t.clone());
+        out.push(Stmt::Assign {
+            var: len,
+            value: Expr {
+                ty: Ty::U64,
+                kind: ExprKind::Arith { op: ArithOp::Sub, lhs: Box::new(hi), rhs: Box::new(lo.clone()), site },
+            },
+        });
+        let k = self.hidden_var("%for_k", usize_t.clone());
+        let var_k = Expr { ty: Ty::U64, kind: ExprKind::Var(k) };
+        out.push(Stmt::Assign { var: k, value: Expr { ty: Ty::U64, kind: ExprKind::Const(0) } });
+        let mut body = Vec::new();
+        self.scopes.push(HashMap::new());
+        if capture != "_" {
+            // lo + k <= hi, so the sum cannot wrap.
+            let value = Expr {
+                ty: Ty::U64,
+                kind: ExprKind::Arith { op: ArithOp::AddW, lhs: Box::new(lo), rhs: Box::new(var_k.clone()), site: 0 },
+            };
+            let x = self.new_lvar(capture, usize_t, false);
+            body.push(Stmt::Assign { var: x, value });
+        }
+        self.loop_depth += 1;
+        let r = self.stmts(&body_node.children);
+        self.loop_depth -= 1;
+        self.scopes.pop();
+        body.extend(r?);
+        let cond = Expr {
+            ty: Ty::Bool,
+            kind: ExprKind::Cmp {
+                op: CmpOp::Lt,
+                lhs: Box::new(var_k.clone()),
+                rhs: Box::new(Expr { ty: Ty::U64, kind: ExprKind::Var(len) }),
+            },
+        };
+        let next = Expr {
+            ty: Ty::U64,
+            kind: ExprKind::Arith {
+                op: ArithOp::AddW,
+                lhs: Box::new(var_k),
+                rhs: Box::new(Expr { ty: Ty::U64, kind: ExprKind::Const(1) }),
+                site: 0,
+            },
+        };
+        out.push(Stmt::While { cond, body, step: vec![Stmt::Assign { var: k, value: next }] });
         Ok(())
     }
 
