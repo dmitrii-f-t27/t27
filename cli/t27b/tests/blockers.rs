@@ -5,7 +5,7 @@ use std::path::Path;
 
 use t27b::blockers::{greedy, parse_test_report, replay, retry_timeouts_once, Reference};
 use t27b::ir::OverflowMode;
-use t27b::{front, lower};
+use t27b::{blockers, front, lower};
 
 /// Four unsupported constructs in four places, one of them (`f32`) repeated,
 /// and a fn whose parameter type is outside the subset called from a test.
@@ -169,4 +169,19 @@ fn a_timeout_is_retried_exactly_once_and_the_retry_decides() {
     let mut clean = vec![("a.t27", "pass"), ("b.t27", "fail")];
     let r = retry_timeouts_once(&mut clean, |x| x.1 == "timeout", |_| panic!("re-ran a non-timeout"));
     assert_eq!(r, vec![false, false]);
+}
+
+/// A timeout kills the child's whole process group -- here a grandchild that
+/// holds the stdout pipe open -- and nothing outside it. The lab once lost
+/// its corpus driver to `kill -KILL -<pgid>`, which procps-ng 4.0.2 reads as
+/// "every process"; reaching this line at all means the caller survived.
+#[test]
+fn a_timeout_kills_the_group_and_spares_the_caller() {
+    let t0 = std::time::Instant::now();
+    let mut cmd = std::process::Command::new("sh");
+    cmd.arg("-c").arg("sleep 30 & wait");
+    let got = blockers::run_capture(&mut cmd, std::time::Duration::from_millis(200)).unwrap();
+    assert!(got.is_none(), "a timeout is Ok(None)");
+    // The pipes close only once the backgrounded sleep is dead too.
+    assert!(t0.elapsed() < std::time::Duration::from_secs(10), "took {:?}", t0.elapsed());
 }
