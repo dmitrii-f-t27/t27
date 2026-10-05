@@ -2080,3 +2080,180 @@ test reversed_range_traps {
         assert!(m.contains(detail), "{}: {}", body, m);
     }
 }
+
+#[test]
+fn try_statements_in_tests_match_the_reference() {
+    // `try std.testing.<check>(...);` in a test: a failed check fails that
+    // test alone and the next one still runs. `try` in a bench and in a fn
+    // nothing reaches is never analyzed by the reference's Zig. Verdicts
+    // match `t27c test-report` on both sources.
+    let src = r#"module trystmt;
+
+const PHI: f64 = 1.618033988749895;
+
+const Trit = enum(i8) {
+    neg = -1,
+    zero = 0,
+    pos = 1,
+};
+
+var calls: u32 = 0;
+
+fn bump() u32 {
+    calls += 1;
+    return calls;
+}
+
+fn neg(t: Trit) Trit {
+    return switch (t) {
+        .neg => .pos,
+        .zero => .zero,
+        .pos => .neg,
+    };
+}
+
+fn never() void {
+    try std.testing.expect(false);
+}
+
+test expect_holds {
+    try std.testing.expect(1 + 1 == 2);
+    try std.testing.expectEqual(@as(u32, 1), bump());
+    try std.testing.expectEqual(@as(Trit, .pos), neg(.neg));
+    try std.testing.expectApproxEqAbs(PHI * PHI, PHI + 1.0, 0.000001);
+    try std.testing.expectApproxEqAbs(2.0, PHI, 1);
+}
+
+test expect_fails {
+    try std.testing.expect(bump() == 99);
+    try std.testing.expect(false);
+}
+
+test expect_equal_fails {
+    try std.testing.expectEqual(@as(u8, 3), @as(u8, 4));
+}
+
+test approx_fails {
+    try std.testing.expectApproxEqAbs(PHI, 1.0, 0.5);
+}
+
+test after_failures_still_run {
+    var i: u32 = 0;
+    while (i < 3) {
+        try std.testing.expect(i < 3);
+        i += 1;
+    }
+    try std.testing.expectEqual(@as(u32, 3), i);
+}
+
+bench b {
+    try std.testing.expect(false);
+}
+"#;
+    assert_eq!(
+        names_ok(&run(src)),
+        vec![
+            ("expect_holds", false, true),
+            ("expect_fails", false, false),
+            ("expect_equal_fails", false, false),
+            ("approx_fails", false, false),
+            ("after_failures_still_run", false, true),
+        ]
+    );
+    // approxEqAbs: equal infinities pass, a NaN fails even with a huge
+    // tolerance, each operand runs once, a negative tolerance panics.
+    let src = r#"module edge;
+
+var n: u32 = 0;
+
+fn big() f64 {
+    n += 1;
+    const a: f64 = 1.0e308;
+    return a * 10.0;
+}
+
+fn nan() f64 {
+    const z: f64 = 0.0;
+    return z / z;
+}
+
+fn tick() f64 {
+    n += 1;
+    return 1.0;
+}
+
+test inf_equal_passes {
+    try std.testing.expectApproxEqAbs(big(), big(), 0.5);
+}
+
+test nan_fails {
+    try std.testing.expectApproxEqAbs(nan(), nan(), 1.0e300);
+}
+
+test nan_equal_fails {
+    try std.testing.expectEqual(nan(), nan());
+}
+
+test operands_once {
+    const before: u32 = n;
+    try std.testing.expectApproxEqAbs(tick(), tick(), tick());
+    try std.testing.expectEqual(before + 3, n);
+}
+
+test zero_tol {
+    try std.testing.expectApproxEqAbs(@as(f64, 1.0), 1.0, 0.0);
+}
+
+test near_miss {
+    try std.testing.expectApproxEqAbs(@as(f64, 1.0), 1.5, 0.4);
+}
+"#;
+    assert_eq!(
+        names_ok(&run(src)),
+        vec![
+            ("inf_equal_passes", false, true),
+            ("nan_fails", false, false),
+            ("nan_equal_fails", false, false),
+            ("operands_once", false, true),
+            ("zero_tol", false, true),
+            ("near_miss", false, false),
+        ]
+    );
+    let neg = "module nt;\n\ntest t {\n    const tol: f64 = -1.0;\n    try std.testing.expectApproxEqAbs(tol, tol, tol);\n}\n\ntest u {\n    try std.testing.expect(true);\n}\n";
+    assert_eq!(names_ok(&run(neg)), vec![("t", false, false), ("u", false, true)]);
+}
+
+#[test]
+fn try_statements_the_reference_does_not_compile_are_refused() {
+    // Each of these is BLOCKED under `t27c test-report`.
+    let cases: [(&str, &str); 6] = [
+        (
+            "module a;\n\nfn reached() void {\n    try std.testing.expect(true);\n}\n\ntest t {\n    reached();\n}\n",
+            "ExprUnary(try) in a fn at line 4",
+        ),
+        (
+            "module b;\n\nconst PHI: f64 = 1.618033988749895;\n\ninvariant i {\n    try std.testing.expect(PHI > 1.0);\n}\n",
+            "ExprUnary(try) in an invariant at line 6",
+        ),
+        (
+            "module c;\n\nfn g() u32 {\n    return 1;\n}\n\ntest t {\n    try g();\n}\n",
+            "ExprUnary(try) on a non-error call at line 8",
+        ),
+        (
+            "module d;\n\ntest t {\n    try std.testing.expectApproxEqAbs(1.0, 1.5, 1.0);\n}\n",
+            "ExprCall(std.testing.expectApproxEqAbs) on comptime floats at line 4",
+        ),
+        (
+            "module e;\n\nfn g() u32 {\n    return 1;\n}\n\ntest t {\n    try std.testing.expectApproxEqAbs(g(), 1, 1);\n}\n",
+            "ExprCall(std.testing.expectApproxEqAbs) on a non-float at line 8",
+        ),
+        (
+            "module f;\n\ntest t {\n    try std.testing.expectError(1, 1);\n}\n",
+            "ExprUnary(try) std.testing.expectError at line 4",
+        ),
+    ];
+    for (src, want) in cases {
+        let m = rejected(src);
+        assert!(m.starts_with(&format!("t27b: unsupported construct {}", want)), "{}", m);
+    }
+}

@@ -1578,6 +1578,7 @@ impl<'a> Lower<'a> {
                 Some(c) if c.kind == NodeKind::ExprCall => self.call_stmt(c, out),
                 Some(c) if c.kind == NodeKind::ExprReturn => self.stmt(c, out),
                 Some(c) if c.kind == NodeKind::ExprIdentifier && c.name == "undefined" => self.undefined_stmt(c, out),
+                Some(c) if c.kind == NodeKind::ExprUnary && c.extra_op.trim() == "try" => self.try_stmt(c, out),
                 Some(c) if is_value_stmt(c) => self.value_stmt(c, out),
                 Some(c) => {
                     self.see(c);
@@ -2150,6 +2151,164 @@ impl<'a> Lower<'a> {
         Ok(())
     }
 
+    /// `try <call>;` as a statement. t27c's Zig backend prints it as
+    /// written. In a `test` (an error-returning fn in Zig) the error a
+    /// failed `std.testing` check returns ends that test as failed and the
+    /// next test still runs: here the check is an assert in the test, whose
+    /// trap fails that test alone. Three checks lower:
+    ///
+    /// - `std.testing.expect(ok)`: `ok` must be a bool;
+    /// - `std.testing.expectEqual(expected, actual)`: peer-typed, compared
+    ///   with `!=` (floats as IEEE values), as `assert_eq`;
+    /// - `std.testing.expectApproxEqAbs(expected, actual, tolerance)`: the
+    ///   peer type must be f64; `std.math.approxEqAbs` first asserts
+    ///   `tolerance >= 0` (a panic, which fails the test), then passes when
+    ///   `expected == actual` or `|expected - actual| <= tolerance` (false
+    ///   for a NaN). The operands are evaluated once, left to right.
+    ///
+    /// Everywhere else the reference decides by where the statement sits: a
+    /// fn nothing analyzed reaches (or a bench, an uncalled fn) is never
+    /// analyzed, so the statement lowers to a trap no test reaches; an
+    /// `invariant` is a container-level `comptime` block, where Zig's
+    /// AstGen refuses `try` ("'try' outside function scope"); a reachable
+    /// fn returns a non-error type in the reference's Zig ("expected type
+    /// 'void', found ...error_set"). Each refusal below is named and was
+    /// confirmed BLOCKED under `t27c test-report`.
+    fn try_stmt(&mut self, c: &Node, out: &mut Vec<Stmt>) -> R<()> {
+        self.see(c);
+        if c.children.len() != 1 {
+            return self.reject("ExprUnary(try)", "unexpected shape".into());
+        }
+        // The parser leaves `try` itself without a line; its operand has one.
+        self.see(&c.children[0]);
+        if self.comptime {
+            return self.reject(
+                "ExprUnary(try) in an invariant",
+                "t27c emits an invariant as a container-level `comptime` block, where Zig refuses `try` (outside function scope)".into(),
+            );
+        }
+        if self.unanalyzed_fn {
+            let site = self.site(TrapKind::Stub, "try in a fn the reference never analyzes".into(), Ty::Bool);
+            out.push(Stmt::Assert { cond: Expr { ty: Ty::Bool, kind: ExprKind::Const(0) }, site });
+            return Ok(());
+        }
+        if !self.in_test {
+            return self.reject(
+                "ExprUnary(try) in a fn",
+                "`try` in a fn a test, invariant or bench reaches: t27c gives the fn a non-error return type and the reference's Zig does not compile it".into(),
+            );
+        }
+        let e = &c.children[0];
+        if e.kind != NodeKind::ExprCall {
+            return self.reject(
+                "ExprUnary(try) on a non-call",
+                format!("`try` on {}", kind_name(e)),
+            );
+        }
+        self.see(e);
+        let args = &e.children;
+        let arity = |n: usize| args.len() == n;
+        match e.name.as_str() {
+            "std.testing.expect" if arity(1) => {
+                let cond = self.cond(&args[0])?;
+                let site = self.site(TrapKind::Assert, "std.testing.expect".into(), Ty::Bool);
+                out.push(Stmt::Assert { cond, site });
+                Ok(())
+            }
+            "std.testing.expectEqual" if arity(2) => {
+                self.assert_eq_stmt(&args[0], &args[1], "std.testing.expectEqual", out)
+            }
+            "std.testing.expectApproxEqAbs" if arity(3) => self.approx_eq_abs(args, out),
+            n if n.starts_with("std.testing.") => self.reject(
+                &format!("ExprUnary(try) {}", n),
+                format!("`try {}` with {} arguments", n, args.len()),
+            ),
+            n if self.sigs.contains_key(n) => self.reject(
+                "ExprUnary(try) on a non-error call",
+                format!("`try {}()`: t27c gives `{}` a non-error return type and the reference's Zig does not compile it", n, n),
+            ),
+            n => self.reject("ExprUnary(try) statement", format!("`try {}(...)`", n)),
+        }
+    }
+
+    /// `try std.testing.expectApproxEqAbs(expected, actual, tolerance);` in
+    /// a test (see `try_stmt`).
+    fn approx_eq_abs(&mut self, args: &[Node], out: &mut Vec<Stmt>) -> R<()> {
+        const WHAT: &str = "std.testing.expectApproxEqAbs";
+        let mut vals = Vec::with_capacity(3);
+        for a in args {
+            vals.push(self.expr(a)?);
+        }
+        if vals.iter().any(|v| v.is_poison()) {
+            return Err(());
+        }
+        // Zig's peer type of the three: f64 if any is a typed f64, and a
+        // compile error if any other typed operand takes part or none is
+        // typed (two comptime_floats).
+        let mut typed = false;
+        for v in &vals {
+            match v {
+                Val::E(e) if e.ty == Ty::F64 => typed = true,
+                Val::Ct(_) | Val::Cf(..) => {}
+                v => {
+                    let d = match v {
+                        Val::E(e) => e.ty.name().to_string(),
+                        v => self.val_desc(v),
+                    };
+                    return self.reject(
+                        &format!("ExprCall({}) on a non-float", WHAT),
+                        format!("operand of type {}: the reference's Zig refuses it (Unable to compare non floating point values)", d),
+                    );
+                }
+            }
+        }
+        if !typed {
+            return self.reject(
+                &format!("ExprCall({}) on comptime floats", WHAT),
+                "no operand is a typed f64: the reference's Zig refuses it (Cannot approximately compare two comptime_float values)".into(),
+            );
+        }
+        // Each operand once, in order, into a temporary unless it is a
+        // variable or a constant already.
+        let mut ops = Vec::with_capacity(3);
+        for v in vals {
+            let e = self.coerce(v, Ty::F64)?;
+            let e = if matches!(e.kind, ExprKind::Var(_) | ExprKind::Const(_)) {
+                e
+            } else {
+                let k = self.new_slot(&LTy::S(Ty::F64))?;
+                out.push(Stmt::Store { addr: slot_expr(k), off: 0, value: e });
+                Expr { ty: Ty::F64, kind: ExprKind::Load { addr: Box::new(slot_expr(k)), off: 0 } }
+            };
+            ops.push(e);
+        }
+        let (x, y, tol) = (ops[0].clone(), ops[1].clone(), ops[2].clone());
+        let cmp = |op: CmpOp, l: Expr, r: Expr| Expr {
+            ty: Ty::Bool,
+            kind: ExprKind::Cmp { op, lhs: Box::new(l), rhs: Box::new(r) },
+        };
+        let sub = |l: Expr, r: Expr| Expr {
+            ty: Ty::F64,
+            kind: ExprKind::FArith { op: FOp::Sub, lhs: Box::new(l), rhs: Box::new(r) },
+        };
+        let zero = Expr { ty: Ty::F64, kind: ExprKind::Const(0) };
+        let site = self.site(TrapKind::Assert, format!("{}: tolerance >= 0", WHAT), Ty::Bool);
+        out.push(Stmt::Assert { cond: cmp(CmpOp::Ge, tol.clone(), zero), site });
+        // |x - y| <= tol as (x - y <= tol) and (y - x <= tol): y - x is
+        // exactly -(x - y), and a NaN difference fails both.
+        let near = Expr {
+            ty: Ty::Bool,
+            kind: ExprKind::And(
+                Box::new(cmp(CmpOp::Le, sub(x.clone(), y.clone()), tol.clone())),
+                Box::new(cmp(CmpOp::Le, sub(y.clone(), x.clone()), tol)),
+            ),
+        };
+        let cond = Expr { ty: Ty::Bool, kind: ExprKind::Or(Box::new(cmp(CmpOp::Eq, x, y)), Box::new(near)) };
+        let site = self.site(TrapKind::Assert, WHAT.into(), Ty::Bool);
+        out.push(Stmt::Assert { cond, site });
+        Ok(())
+    }
+
     /// An expression statement whose value nothing uses: a Rust-style tail
     /// expression (`fn f(v: u8) -> u32 { v }`, `color | rgb`), a brace-form
     /// invariant (`invariant i { N == 3 }`), a bare comparison. t27c's Zig
@@ -2224,34 +2383,7 @@ impl<'a> Lower<'a> {
                         format!("assert_eq with {} arguments", c.children.len()),
                     );
                 }
-                let (a, b) = self.operands(&c.children[0], &c.children[1])?;
-                if a.is_poison() || b.is_poison() {
-                    return Err(());
-                }
-                let (lhs, rhs) = match (a, b) {
-                    (Val::P(x, LTy::Enum(i, _)), Val::P(y, LTy::Enum(j, _))) if i == j => (x, y),
-                    (a @ Val::P(_, LTy::Enum(..)), b) | (a, b @ Val::P(_, LTy::Enum(..))) => {
-                        let (x, y) = (self.val_desc(&a), self.val_desc(&b));
-                        return self.reject("type mismatch", format!("assert_eq on {} and {}", x, y));
-                    }
-                    (Val::Ct(x), Val::Ct(y)) => {
-                        let ty = if Ty::I64.fits(x) && Ty::I64.fits(y) {
-                            Ty::I64
-                        } else if Ty::U64.fits(x) && Ty::U64.fits(y) {
-                            Ty::U64
-                        } else {
-                            return self.reject("ExprCall", "assert_eq on out-of-range literals".into());
-                        };
-                        (
-                            Expr { ty, kind: ExprKind::Const(x) },
-                            Expr { ty, kind: ExprKind::Const(y) },
-                        )
-                    }
-                    (a, b) => self.peer(a, b, "assert_eq")?,
-                };
-                let site = self.site(TrapKind::AssertEq, "assert_eq".into(), lhs.ty);
-                out.push(Stmt::AssertEq { lhs, rhs, site });
-                Ok(())
+                self.assert_eq_stmt(&c.children[0], &c.children[1], "assert_eq", out)
             }
             _ => {
                 let (call, ret, _) = self.call(c, None)?;
@@ -2272,6 +2404,41 @@ impl<'a> Lower<'a> {
                 Ok(())
             }
         }
+    }
+
+    /// `assert_eq(a, b)`, and `try std.testing.expectEqual(a, b)` in a test:
+    /// both compare `a` and `b` after peer typing, floats as IEEE values,
+    /// and fail the test on a difference. `what` names the call in
+    /// refusals and in the trap.
+    fn assert_eq_stmt(&mut self, an: &Node, bn: &Node, what: &str, out: &mut Vec<Stmt>) -> R<()> {
+        let (a, b) = self.operands(an, bn)?;
+        if a.is_poison() || b.is_poison() {
+            return Err(());
+        }
+        let (lhs, rhs) = match (a, b) {
+            (Val::P(x, LTy::Enum(i, _)), Val::P(y, LTy::Enum(j, _))) if i == j => (x, y),
+            (a @ Val::P(_, LTy::Enum(..)), b) | (a, b @ Val::P(_, LTy::Enum(..))) => {
+                let (x, y) = (self.val_desc(&a), self.val_desc(&b));
+                return self.reject("type mismatch", format!("{} on {} and {}", what, x, y));
+            }
+            (Val::Ct(x), Val::Ct(y)) => {
+                let ty = if Ty::I64.fits(x) && Ty::I64.fits(y) {
+                    Ty::I64
+                } else if Ty::U64.fits(x) && Ty::U64.fits(y) {
+                    Ty::U64
+                } else {
+                    return self.reject("ExprCall", format!("{} on out-of-range literals", what));
+                };
+                (
+                    Expr { ty, kind: ExprKind::Const(x) },
+                    Expr { ty, kind: ExprKind::Const(y) },
+                )
+            }
+            (a, b) => self.peer(a, b, what)?,
+        };
+        let site = self.site(TrapKind::AssertEq, what.into(), lhs.ty);
+        out.push(Stmt::AssertEq { lhs, rhs, site });
+        Ok(())
     }
 
     /// A call: the `Call` expression (typed `Bool` for a void fn), the
