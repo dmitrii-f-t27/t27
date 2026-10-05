@@ -7682,7 +7682,7 @@ impl Codegen {
             if !cur.trim().is_empty() {
                 parts.push(cur.trim().to_string());
             }
-            // #6250: the REPEAT form `[v; n]` arrives as the text `v;n`, and
+            // #6451: the REPEAT form `[v; n]` arrives as the text `v;n`, and
             // was emitted as `{ v;n }` -- "expected ',' after initializer".
             // Zig spells it `{ v } ** n`; every caller writes the `[_]T` in
             // front, so `[_]T{ v } ** n` is the whole value. A Rust width
@@ -8650,7 +8650,7 @@ impl Codegen {
 
     fn t27_array_type_to_zig(ty: &str) -> String {
         let t = ty.trim();
-        // #6250: t27 also spells an optional Rust/TypeScript-style, AFTER the
+        // #6451: t27 also spells an optional Rust/TypeScript-style, AFTER the
         // type -- `OrgID?`, `str?`. Zig spells it `?T`; the suffix reached the
         // output verbatim and Zig answered "expected ',' after field" at the
         // struct declaration, before reading anything else in the file.
@@ -10616,7 +10616,7 @@ impl Codegen {
                     // reachable only through the @"" identifier syntax.
                     self.write(&format!("@\"{}\"", node.name));
                 } else if !node.name.contains("::") {
-                    // #6250: a field named for a Zig keyword (`r.error`) is
+                    // #6451: a field named for a Zig keyword (`r.error`) is
                     // declared escaped (`@"error": T`) and must be read the
                     // same way, or Zig stops at "expected pointer dereference,
                     // optional unwrap, or field access, found 'error'".
@@ -10768,7 +10768,7 @@ impl Codegen {
                     if i > 0 {
                         self.write(", ");
                     }
-                    // #6250: `.error = ""` is a keyword where Zig wants a
+                    // #6451: `.error = ""` is a keyword where Zig wants a
                     // field name ("expected field initializer").
                     self.write(&format!(".{} = ", Self::zig_ident(&field.name)));
                     if !field.children.is_empty() {
