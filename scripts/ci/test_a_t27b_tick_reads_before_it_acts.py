@@ -210,6 +210,25 @@ with tempfile.TemporaryDirectory() as tmp:
     check(code == 1 and codes == ["LAB-ERROR"] and "t27b_fail 1" in out,
           f"own fail: LAB-ERROR t27b_fail 1 (got {code} {codes})")
 
+    # #6441: a fail both sides share is an alarm when different tests fail, and a reference
+    # disagreement stops the lanes like a jit/interp mismatch does
+    other = lab(t27b_fail=1,
+                results=[{"file": "specs/b.t27", "t27b": "fail", "reference": "fail",
+                          "reference_disagree": ["x: t27b fail, reference pass", "y: t27b pass, reference fail"]}])
+    other["summary"].update(reference_disagree=1, reference_disagree_tests=2, reference_compared=1)
+    fx = os.path.join(tmp, "fx-ref-disagree")
+    write_fixture(fx, {**files, "lab.json": other})
+    code, codes, out = doctor(fx)
+    check(code == 1 and sorted(codes) == ["LAB-ERROR", "LAB-REF-DISAGREE"] and "reference disagree 1 file(s), 2 test(s)" in out,
+          f"other tests fail: LAB-REF-DISAGREE and LAB-ERROR (got {code} {codes})")
+    same = lab(t27b_fail=1,
+               results=[{"file": "specs/b.t27", "t27b": "fail", "reference": "fail", "reference_disagree": []}])
+    same["summary"].update(reference_disagree=0, reference_disagree_tests=0, reference_compared=1)
+    fx = os.path.join(tmp, "fx-ref-agree")
+    write_fixture(fx, {**files, "lab.json": same})
+    code, codes, out = doctor(fx)
+    check(code == 0 and codes == [], f"same tests fail: no anomaly (got {code} {codes})")
+
     # mutation control: the same tool over a generated C whose checkout rule never fires misses LAB-CHECKOUT,
     # so the finding comes from the spec, not from a branch in t27b.py
     gen_src = open(os.path.join(ROOT, "gen", "c", "tri", "t27b", "steward.c")).read()
@@ -230,6 +249,51 @@ with tempfile.TemporaryDirectory() as tmp:
     except ValueError:
         mut_codes = None
     check(mut_codes == ["LAB-STALE"], f"control: a mutated checkout rule loses LAB-CHECKOUT ({mut_codes})")
+
+    # #6443: the running lab image against master's contrib/railway/t27b-lab. On 2026-10-05 the
+    # deployed image predated #6115 (latest.json had no steps.ratchet) and nothing could tell.
+    files = {k: open(os.path.join(healthy, k)).read() for k in os.listdir(healthy)}
+    master_lab = {"lab.py": "1" * 40, "Dockerfile": "2" * 40}
+    cur = {"lab_py_sha": "1" * 40, "dockerfile_sha": "2" * 40, "image_built": "2026-10-05T16:00:00Z"}
+    old = dict(cur, lab_py_sha="3" * 40, image_built="2026-10-04T17:55:00Z")
+    def image_case(name, lab_doc, status=None):
+        fx = os.path.join(tmp, "fx-image-" + name)
+        write_fixture(fx, {**files, "lab.json": lab_doc, "master_lab.json": master_lab,
+                           "status.json": status})
+        return fx
+    code, codes, out = doctor(image_case("current", lab(image=cur)))
+    check(code == 0 and codes == [], f"image current: no anomaly (got {code} {codes})")
+    unrep = image_case("unreported", lab())
+    code, codes, out = doctor(unrep)
+    check(code == 1 and codes == ["LAB-IMAGE-STALE"] and "before #6443" in out,
+          f"image unreported: LAB-IMAGE-STALE, deployed before #6443 (got {code} {codes})")
+    differs = image_case("differs", lab(image=old))
+    code, codes, out = doctor(differs)
+    check(code == 1 and codes == ["LAB-IMAGE-STALE"] and "lab.py lab 333333333 master 111111111" in out
+          and "Dockerfile" not in out.split("LAB-IMAGE-STALE", 1)[1].split("redeploy")[0],
+          f"image differs: LAB-IMAGE-STALE names lab.py only (got {code} {codes})")
+    code, codes, out = doctor(image_case("redeployed", lab(image=old), status={"phase": "idle", "image": cur}))
+    check(code == 0 and codes == [], f"image redeployed: status.json (the live process) wins over latest.json "
+          f"(got {code} {codes})")
+    fx = os.path.join(tmp, "fx-image-nomaster")
+    write_fixture(fx, {**files, "lab.json": lab(image=old)})
+    code, codes, out = doctor(fx)
+    check(code == 0 and codes == [], f"image, master unreadable: nothing said (got {code} {codes})")
+    # mutation control: a generated C that never compares the shas loses the finding
+    needle = "uint8_t image_code(bool master_known, bool reported, bool same) {"
+    check(gen_src.count(needle) == 1, "control: the generated image rule is where the control expects it")
+    mut_src = re.sub(r"(uint8_t image_code\(bool master_known, bool reported, bool same\) \{.*?)"
+                     r"\(same == false\)", r"\1(false)", gen_src, count=1, flags=re.S)
+    check(mut_src != gen_src, "control: the image mutation applies")
+    with open(os.path.join(gen, "steward.c"), "w") as f:
+        f.write(mut_src)
+    p = subprocess.run([sys.executable, os.path.join(tree, "t27b.py"), "doctor", "--json", "--fixture", differs],
+                       capture_output=True, text=True)
+    try:
+        mut_codes = [a["code"] for a in json.loads(p.stdout)]
+    except ValueError:
+        mut_codes = None
+    check(mut_codes == [], f"control: a mutated image rule loses LAB-IMAGE-STALE ({mut_codes})")
 
     unread = os.path.join(tmp, "fx-unread")
     files = {k: open(os.path.join(broken, k)).read() for k in os.listdir(broken)}
@@ -351,6 +415,11 @@ with tempfile.TemporaryDirectory() as tmp:
     check(code == 2 and "unknown check state" in out, f"ready: an unknown check state is unreadable, exit 2 ({code})")
     sys.path.insert(0, os.path.dirname(TOOL))
     import t27b as t27b_tool
+    check(t27b_tool.diff_rows({"test_verdicts": {"a": True, "b": False, "c": True},
+                               "reference_tests": {"a": True, "b": True, "d": False}})
+          == [("a", "pass", "pass", False), ("b", "fail", "pass", True),
+              ("c", "pass", "-", True), ("d", "-", "fail", True)],
+          "diff: both verdict lists by name, a test one side lacks reads '-' and differs (#6441)")
     def ent(last, sha=None, running=False):
         return {"last": last, "sha": sha, "running": running}
     check(t27b_tool.fold_master(["a\tcancelled\nb\tfailure\nc\tskipped\n", "a\tsuccess\nb\tsuccess\nc\tneutral\n"])

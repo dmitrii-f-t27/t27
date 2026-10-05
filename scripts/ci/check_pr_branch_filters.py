@@ -61,6 +61,8 @@ except ImportError:
 MERGE_CRITICAL = (
     "issue-gate.yml",
     "schema-validation.yml",
+    # The "Only t27" gate (owner rule 2026-10-05, #6510); meant to be required.
+    "own-language.yml",
 )
 
 # The two lists above are a partition ONLY of the files they name. Everything
