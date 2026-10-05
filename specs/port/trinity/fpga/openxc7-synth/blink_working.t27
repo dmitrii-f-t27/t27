@@ -185,7 +185,8 @@ module blink_working {
         given cfg = blink_config(50, 26, 22, 24)
         then increment_counter(cfg, 0) == 1
         and increment_counter(cfg, 100) == 101
-        and increment_counter(cfg, COUNTER_MAX - 1) == 0  // overflow
+        and increment_counter(cfg, COUNTER_MAX - 1) == COUNTER_MAX
+        and increment_counter(cfg, COUNTER_MAX) == 0  // 26-bit wrap, as reg [25:0] counter + 1
 
     test led_outputs
         given cfg = blink_config(50, 26, 22, 24)
