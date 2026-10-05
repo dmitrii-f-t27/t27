@@ -2629,3 +2629,52 @@ fn array_literals_typed_by_their_use_rejections() {
         assert!(m.contains(detail), "{}: {}", body, m);
     }
 }
+
+/// Tuples, as the reference lowers them: a tuple type in a fn return type
+/// (positional or named), `return (a, b)`, `let`/`var` destructuring, the
+/// top-of-test `(a, b) = f()` form, `.0` and comptime `[0]`, a struct inside
+/// a tuple, forwarding a tuple return, and `.{ .. }` into an array.
+#[test]
+fn tuples_as_the_reference_lowers_them() {
+    let src = "module a;\n\npub struct Pt {\n    x: u32,\n    y: u32,\n}\n\nfn mk(v: u32) -> Pt {\n    return Pt{ .x = v, .y = v + 1 };\n}\n\nfn pair(v: u32) -> (u32, bool) {\n    return (v * 2, v > 2);\n}\n\nfn with_pt(v: u32) -> (Pt, u64, u8) {\n    return (mk(v), 7, 2);\n}\n\nfn fwd(v: u32) -> (Pt, u64, u8) {\n    return with_pt(v + 1);\n}\n\nfn named(v: u32) -> (lo: u32, hi: u32) {\n    return (v, v ^ 1);\n}\n\nfn swap(v: u32) -> (u32, u32) {\n    var (a, b) = (v, v + 1);\n    const t = a + 0;\n    a = b;\n    b = t;\n    return (a, b);\n}\n\nfn sum_pair(v: u32) -> u32 {\n    let (d, big) = pair(v);\n    const t = pair(v + 1);\n    if (big) {\n        return d + t.0;\n    }\n    return d;\n}\n\nfn origin() -> [3]f64 {\n    return .{ 0.5, 1.5, 2.5 };\n}\n\ntest destructure {\n    const (p, n, k) = fwd(4);\n    assert(p.y == 6 and n == 7 and k == 2);\n    (d, big) = pair(5);\n    assert(d == 10 and big);\n}\n\ntest fields_and_indices {\n    const q = fwd(1);\n    const qp = q.0;\n    assert(qp.x == 2 and q[1] == 7 and q[2] == 2);\n    const m = named(6);\n    assert(m.lo == 6 and m.hi == 7);\n    const (lo, hi) = named(8);\n    assert(lo + hi == 17);\n}\n\ntest literals {\n    const (s0, s1) = swap(9);\n    assert(s0 == 10 and s1 == 9);\n    assert(sum_pair(3) == 14);\n    assert(origin()[2] == 2.5);\n}\n\ntest tuple_fails {\n    const t = pair(1);\n    assert(t[1]);\n}\n";
+    let r = run(src);
+    assert_eq!(
+        names_ok(&r),
+        vec![
+            ("destructure", false, true),
+            ("fields_and_indices", false, true),
+            ("literals", false, true),
+            ("tuple_fails", false, false),
+        ]
+    );
+    assert_eq!(r[3].2, Err((TrapKind::Assert, line_of(src, "assert(t[1])"))));
+}
+
+/// The shapes next to those, each refused by the reference build (a tuple
+/// type outside a return type, `.{ a, b } = ..` in a fn body, a count
+/// mismatch, a runtime or out-of-bounds index, `q.0.x`), and the untyped
+/// tuple local, which stays unsupported.
+#[test]
+fn tuples_rejections() {
+    let head = "module a;\n\npub struct Pt {\n    x: u32,\n}\n\nfn p() -> (u32, u32) {\n    return (1, 2);\n}\n\nfn q() -> (Pt, u32) {\n    return (Pt{ .x = 1 }, 2);\n}\n\n";
+    let cases: &[(&str, &str, &str)] = &[
+        ("fn f(t: (u32, u32)) -> u32 { return 1; }", "type (tuple)", "`(u32, u32)`"),
+        ("test t { const t: (u32, u32) = p(); assert(t.0 == 1); }", "type (tuple)", "`(u32, u32)`"),
+        (
+            "fn f() -> u32 { var a: u32 = 0; var b: u32 = 0; (a, b) = p(); return a + b; }",
+            "StmtAssign(tuple)",
+            "outside the top of a test",
+        ),
+        ("fn f() -> (u32, u32) { return (1, 2, 3); }", "ExprTuple", "3 values for `(u32, u32)`"),
+        ("test t { const (a, b, c) = p(); assert(a == 1); }", "StmtLocal(destructure)", "3 names for 2 elements"),
+        ("fn g(i: usize) -> u32 { const t = p(); return t[i]; }", "ExprIndex(tuple)", "not known at compile time"),
+        ("test t { const t = p(); assert(t[2] == 1); }", "ExprIndex(tuple)", "index 2 out of bounds"),
+        ("test t { const t = q(); assert(t.0.x == 1); }", "ExprFieldAccess", "no field `0.x`"),
+        ("fn g(v: u32) -> u32 { const t = (v, 2); return t[0]; }", "ExprTuple", ""),
+    ];
+    for (body, construct, detail) in cases {
+        let m = rejected(&format!("{}{}\n", head, body));
+        assert!(m.starts_with(&format!("t27b: unsupported construct {} at line", construct)), "{}: {}", body, m);
+        assert!(m.contains(detail), "{}: {}", body, m);
+    }
+}
