@@ -1332,6 +1332,38 @@ impl<'a> Gen<'a> {
                     None => self.eval(value),
                 }
             }
+            ExprKind::Select { cond, then, els } => {
+                // Like And/Or: the destination is taken after the condition,
+                // and each arm is evaluated aside (its temps sit above the
+                // destination), then moved in; a spilled destination (x16)
+                // is stored on both paths.
+                let l_else = self.new_label();
+                let l_end = self.new_label();
+                self.branch(cond, l_else, false);
+                let (d, t) = self.dest(dst);
+                let spilled = t.map_or(false, |i| i >= TEMP_REGS);
+                self.select_arm(then, d, ty);
+                if spilled {
+                    let off = self.slot_of_temp(t.unwrap());
+                    self.str_slot(X16, off);
+                }
+                self.jump(l_end);
+                self.bind(l_else);
+                self.select_arm(els, d, ty);
+                let v = self.done(d, t);
+                self.bind(l_end);
+                v
+            }
+        }
+    }
+
+    /// One arm of a `Select`, evaluated and moved into `d`.
+    fn select_arm(&mut self, e: &Expr, d: Reg, ty: Ty) {
+        let v = self.eval(e);
+        let r = self.use_(v, X16, ty);
+        self.release(v);
+        if r != d {
+            self.emit(a64::mov(true, d, r));
         }
     }
 
@@ -1895,6 +1927,11 @@ fn weigh_expr(e: &Expr, unit: u64, w: &mut [u64], has_call: &mut bool) {
                 }
             }
             weigh_expr(value, unit, w, has_call);
+        }
+        ExprKind::Select { cond, then, els } => {
+            weigh_expr(cond, unit, w, has_call);
+            weigh_expr(then, unit, w, has_call);
+            weigh_expr(els, unit, w, has_call);
         }
     }
 }

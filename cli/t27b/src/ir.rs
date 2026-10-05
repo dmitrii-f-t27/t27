@@ -527,6 +527,14 @@ pub enum ExprKind {
     /// `value`. How an aggregate temporary (a struct literal passed as an
     /// argument) is built at the exact point the expression is evaluated.
     Seq { stmts: Vec<Stmt>, value: Box<Expr> },
+    /// `if (cond) then else els` used as a value: `cond` (Bool) first, then
+    /// exactly one of the two arms (both `ty`); the other is never evaluated,
+    /// so its traps, calls and stores do not happen.
+    Select {
+        cond: Box<Expr>,
+        then: Box<Expr>,
+        els: Box<Expr>,
+    },
 }
 
 #[derive(Clone, Debug)]
