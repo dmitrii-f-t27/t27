@@ -573,6 +573,34 @@ pub fn fcvtzs(sf: bool, rd: Reg, rn: Reg) -> u32 {
 pub fn fcvtzu(sf: bool, rd: Reg, rn: Reg) -> u32 {
     0x1E79_0000 | (sf as u32) << 31 | r(rn) << 5 | r(rd)
 }
+
+// Single precision (ftype 00): every double-precision data-processing and
+// conversion form above differs from its single form in bit 22 only.
+
+/// The single-precision (ftype 00) form of one of the double-precision
+/// encoders `fadd fsub fmul fdiv fneg fcmp scvtf ucvtf fcvtzs fcvtzu`:
+/// `s` registers in place of the `d` ones.
+pub fn single(w: u32) -> u32 {
+    w & !0x0040_0000
+}
+/// FMOV sd, wn (general to FP register, the 32-bit pattern unchanged; the
+/// rest of the vector register is zeroed).
+pub fn fmov_s_w(rd: Reg, rn: Reg) -> u32 {
+    0x1E27_0000 | r(rn) << 5 | r(rd)
+}
+/// FMOV wd, sn (FP to general register; the upper 32 bits of xd are zeroed).
+pub fn fmov_w_s(rd: Reg, rn: Reg) -> u32 {
+    0x1E26_0000 | r(rn) << 5 | r(rd)
+}
+/// FCVT dd, sn (single to double, exact).
+pub fn fcvt_d_s(rd: Reg, rn: Reg) -> u32 {
+    0x1E22_C000 | r(rn) << 5 | r(rd)
+}
+/// FCVT sd, dn (double to single, current rounding mode).
+pub fn fcvt_s_d(rd: Reg, rn: Reg) -> u32 {
+    0x1E62_4000 | r(rn) << 5 | r(rd)
+}
+
 /// STR dt, [xn, #imm] with imm a multiple of 8 in 0..32760. Xn 31 is SP.
 pub fn str_d(rt: Reg, rn: Reg, imm: u32) -> u32 {
     debug_assert!(imm % 8 == 0 && imm / 8 < 4096);
@@ -946,7 +974,7 @@ pub fn disasm(w: u32, pc: usize) -> String {
     format!(".word {:#010x}", w)
 }
 
-/// The double-precision forms `disasm` knows, or None.
+/// The floating-point forms `disasm` knows, or None.
 fn disasm_fp(w: u32) -> Option<String> {
     let rd = w & 31;
     let rn = (w >> 5) & 31;
@@ -954,7 +982,18 @@ fn disasm_fp(w: u32) -> Option<String> {
     let g = |sf: bool, n: u32| xr(sf, n, false);
     let sf = w >> 31 == 1;
     let opcode = (w >> 10) & 0x3f;
-    Some(if w & 0xFFE0_0C00 == 0x1E60_0800 && matches!(opcode, 0x02 | 0x06 | 0x0A | 0x0E) {
+    // Bit 22 picks double (1) or single (0) in the forms matched through `v`.
+    let p = if (w >> 22) & 1 == 1 { 'd' } else { 's' };
+    let v = w | 0x0040_0000;
+    Some(if w & 0xFFFF_FC00 == 0x1E22_C000 {
+        format!("fcvt d{}, s{}", rd, rn)
+    } else if w & 0xFFFF_FC00 == 0x1E62_4000 {
+        format!("fcvt s{}, d{}", rd, rn)
+    } else if w & 0xFFFF_FC00 == 0x1E27_0000 {
+        format!("fmov s{}, {}", rd, g(false, rn))
+    } else if w & 0xFFFF_FC00 == 0x1E26_0000 {
+        format!("fmov w{}, s{}", rd, rn)
+    } else if v & 0xFFE0_0C00 == 0x1E60_0800 && matches!(opcode, 0x02 | 0x06 | 0x0A | 0x0E) {
         // FP data processing, 2 source
         let name = match opcode {
             0x02 => "fmul",
@@ -962,23 +1001,23 @@ fn disasm_fp(w: u32) -> Option<String> {
             0x0A => "fadd",
             _ => "fsub",
         };
-        format!("{} d{}, d{}, d{}", name, rd, rn, rm)
-    } else if w & 0xFFE0_FC1F == 0x1E60_2000 {
-        format!("fcmp d{}, d{}", rn, rm)
-    } else if w & 0xFFFF_FC00 == 0x1E61_4000 {
-        format!("fneg d{}, d{}", rd, rn)
+        format!("{} {p}{}, {p}{}, {p}{}", name, rd, rn, rm)
+    } else if v & 0xFFE0_FC1F == 0x1E60_2000 {
+        format!("fcmp {p}{}, {p}{}", rn, rm)
+    } else if v & 0xFFFF_FC00 == 0x1E61_4000 {
+        format!("fneg {p}{}, {p}{}", rd, rn)
     } else if w & 0xFFFF_FC00 == 0x9E67_0000 {
         format!("fmov d{}, {}", rd, g(true, rn))
     } else if w & 0xFFFF_FC00 == 0x9E66_0000 {
         format!("fmov x{}, d{}", rd, rn)
-    } else if w & 0x7FFF_FC00 == 0x1E62_0000 {
-        format!("scvtf d{}, {}", rd, g(sf, rn))
-    } else if w & 0x7FFF_FC00 == 0x1E63_0000 {
-        format!("ucvtf d{}, {}", rd, g(sf, rn))
-    } else if w & 0x7FFF_FC00 == 0x1E78_0000 {
-        format!("fcvtzs {}, d{}", g(sf, rd), rn)
-    } else if w & 0x7FFF_FC00 == 0x1E79_0000 {
-        format!("fcvtzu {}, d{}", g(sf, rd), rn)
+    } else if v & 0x7FFF_FC00 == 0x1E62_0000 {
+        format!("scvtf {p}{}, {}", rd, g(sf, rn))
+    } else if v & 0x7FFF_FC00 == 0x1E63_0000 {
+        format!("ucvtf {p}{}, {}", rd, g(sf, rn))
+    } else if v & 0x7FFF_FC00 == 0x1E78_0000 {
+        format!("fcvtzs {}, {p}{}", g(sf, rd), rn)
+    } else if v & 0x7FFF_FC00 == 0x1E79_0000 {
+        format!("fcvtzu {}, {p}{}", g(sf, rd), rn)
     } else if w & 0xFF80_0000 == 0xFD00_0000 {
         let ld = (w >> 22) & 1 == 1;
         let imm = ((w >> 10) & 0xfff) * 8;

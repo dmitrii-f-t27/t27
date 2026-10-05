@@ -381,7 +381,7 @@ impl<'p> Interp<'p> {
                 let a = self.expr(lhs, env)?;
                 let b = self.expr(rhs, env)?;
                 // Floats compare as IEEE values: NaN never equals, -0.0 == 0.0.
-                let differ = if lhs.ty == Ty::F64 { f64_of(a) != f64_of(b) } else { a != b };
+                let differ = if lhs.ty.is_float() { float_of(a, lhs.ty) != float_of(b, lhs.ty) } else { a != b };
                 if differ {
                     return Err(Stop::Trap { site: *site, a, b });
                 }
@@ -460,29 +460,35 @@ impl<'p> Interp<'p> {
             ExprKind::Cmp { op, lhs, rhs } => {
                 let a = self.expr(lhs, env)?;
                 let b = self.expr(rhs, env)?;
-                if lhs.ty == Ty::F64 {
-                    return Ok(op.holds_f64(f64_of(a), f64_of(b)) as i128);
+                if lhs.ty.is_float() {
+                    // A binary32 widens to binary64 exactly: same order.
+                    return Ok(op.holds_f64(float_of(a, lhs.ty), float_of(b, lhs.ty)) as i128);
                 }
                 Ok(op.holds(a, b) as i128)
             }
             ExprKind::FArith { op, lhs, rhs } => {
                 let a = self.expr(lhs, env)?;
                 let b = self.expr(rhs, env)?;
-                Ok(f64_bits(op.apply(f64_of(a), f64_of(b))))
+                Ok(op.apply_bits(e.ty, a, b))
             }
             ExprKind::FNeg(a) => {
+                // Flips the sign bit, of a NaN too.
                 let v = self.expr(a, env)?;
-                Ok(f64_bits(-f64_of(v)))
+                Ok(v ^ (1i128 << (e.ty.bits() - 1)))
             }
             ExprKind::IntToFloat(a) => {
-                // i128 to f64 rounds to nearest, ties to even; every integer
-                // operand is below 2^64, so this is the one rounding.
+                // i128 to f64 / f32 rounds to nearest, ties to even; every
+                // integer operand is below 2^64, so this is the one rounding.
                 let v = self.expr(a, env)?;
-                Ok(f64_bits(v as f64))
+                Ok(if e.ty == Ty::F32 { f32_bits(v as f32) } else { f64_bits(v as f64) })
+            }
+            ExprKind::FloatCast(a) => {
+                let v = self.expr(a, env)?;
+                Ok(if e.ty == Ty::F32 { f32_bits(f64_of(v) as f32) } else { f64_bits(f32_of(v) as f64) })
             }
             ExprKind::FloatToInt { arg, site } => {
                 let v = self.expr(arg, env)?;
-                match float_to_int(f64_of(v), e.ty) {
+                match float_to_int(float_of(v, arg.ty), e.ty) {
                     Some(r) => Ok(r),
                     None => Err(Stop::Trap { site: *site, a: 0, b: 0 }),
                 }
