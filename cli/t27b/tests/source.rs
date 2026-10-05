@@ -2553,3 +2553,24 @@ fn shapes_the_reference_cannot_compile_are_refused() {
     let r = run("module h;\n\nconst S = struct { name: str, xs: [u32; 2] };\n\nfn inc(n: u32) -> u32 {\n    n = n + 1;\n    return n;\n}\n\ntest t {\n    assert(inc(1) == 2);\n}\n");
     assert_eq!(names_ok(&r), vec![("t", false, true)]);
 }
+
+/// A statement at top level is dropped, as t27c's Zig backend drops it
+/// (`gen_decl` emits nothing for it): a dotted `module a.b;` / `use a.b;`
+/// (parsed as `a` and a stray `.b`, #6102), a failing `assert` and a call all
+/// leave the file compiling and its tests passing under `t27c test-report`.
+/// A fn named only by such a statement is not analyzed by the reference
+/// either, so a `try` in it is not refused.
+#[test]
+fn top_level_statements_are_dropped_like_the_reference() {
+    let r = run("module sandbox.health;\n\nuse sandbox.session;\n\nconst N: u32 = 3;\n\nfn twice(x: u32) -> u32 {\n    return x * 2;\n}\n\ntest twice_works {\n    assert(twice(N) == 6);\n}\n");
+    assert_eq!(names_ok(&r), vec![("twice_works", false, true)]);
+    let r = run("module Specs.Lsp.Language;\n\ntest t {\n    assert(1 == 1);\n}\n");
+    assert_eq!(names_ok(&r), vec![("t", false, true)]);
+    let r = run("module top;\n\nassert(1 == 2);\n\nfn one() -> u32 {\n    return 1;\n}\n\ntest t {\n    assert(one() == 1);\n}\n");
+    assert_eq!(names_ok(&r), vec![("t", false, true)]);
+    let r = run("module top;\n\nfn sum(a: u32, b: u32) -> u32 {\n    return a + b;\n}\n\nfn only_from_top() -> u32 {\n    try std.testing.expect(true);\n    return 1;\n}\n\nonly_from_top();\n\ntest sum_works {\n    assert(sum(2, 3) == 5);\n}\n");
+    assert_eq!(names_ok(&r), vec![("sum_works", false, true)]);
+    // The same `try` in a fn a test reaches is still refused.
+    let m = rejected("module top;\n\nfn reached() -> u32 {\n    try std.testing.expect(true);\n    return 1;\n}\n\ntest t {\n    assert(reached() == 1);\n}\n");
+    assert!(m.contains("`try` in a fn a test, invariant or bench reaches"), "{}", m);
+}
