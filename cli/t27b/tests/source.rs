@@ -2574,3 +2574,58 @@ fn top_level_statements_are_dropped_like_the_reference() {
     let m = rejected("module top;\n\nfn reached() -> u32 {\n    try std.testing.expect(true);\n    return 1;\n}\n\ntest t {\n    assert(reached() == 1);\n}\n");
     assert!(m.contains("`try` in a fn a test, invariant or bench reaches"), "{}", m);
 }
+
+/// Array literals whose type comes from where they are used, as t27c's Zig
+/// backend writes them: an argument where `[]const u8` is declared
+/// (`@constCast(&[_]u8{ ... })`), an untyped local passed only where one
+/// array type is declared (`.{ ... }`, which coerces at each call), an empty
+/// literal for a slice field of a named struct literal, and an untyped local
+/// of plain literals nothing reads (`_ = x; // dead after const-inlining`).
+#[test]
+fn array_literals_typed_by_their_use() {
+    let src = "module a;\n\npub struct Cur {\n    pos: usize,\n    data: []i32,\n    name: []const u8,\n}\n\nfn mk(p: usize) -> Cur {\n    return Cur{ .pos = p, .data = [], .name = [] };\n}\n\nfn bsum(p: []const u8) -> u32 {\n    var s: u32 = 0;\n    for (p) |b| {\n        s += b;\n    }\n    return s;\n}\n\nfn tot(p: [2]i64) -> i64 {\n    return p[0] - p[1];\n}\n\nfn nine() -> i64 {\n    return 9;\n}\n\ntest str_arguments {\n    assert(bsum([1, 2, 250]) == 253);\n    const xs = [4, 5];\n    assert(bsum(xs) == 9);\n}\n\ntest tuple_locals {\n    const p = [2]i64{ 7, 2 };\n    assert(tot(p) == 5);\n    const a: i32 = -4;\n    const q = [a, nine()];\n    assert(tot(q) == -13 and tot(q) == -13);\n}\n\ntest empty_slice_fields {\n    const c = mk(3);\n    assert(c.pos == 3 and c.data.len == 0 and c.name.len == 0);\n}\n\ntest dead_literal_local {\n    const unused = [_]f32{ 1.0, -2.0 };\n    assert(bsum([]) == 0);\n}\n\ntest tuple_local_fails {\n    const r = [1, 2];\n    assert(tot(r) == 1);\n}\n";
+    let r = run(src);
+    assert_eq!(
+        names_ok(&r),
+        vec![
+            ("str_arguments", false, true),
+            ("tuple_locals", false, true),
+            ("empty_slice_fields", false, true),
+            ("dead_literal_local", false, true),
+            ("tuple_local_fails", false, false),
+        ]
+    );
+    assert_eq!(r[4].2, Err((TrapKind::Assert, line_of(src, "assert(tot(r) == 1)"))));
+}
+
+/// The shapes next to those: the reference refuses the first three (`.{ ... }`
+/// of the wrong length, `.{ ... }` for a slice field of an anonymous literal)
+/// or points into a constant (a non-empty slice field); a local also read
+/// other than as an argument stays unsupported.
+#[test]
+fn array_literals_typed_by_their_use_rejections() {
+    let head = "module a;\n\npub struct Cur {\n    pos: usize,\n    data: []i32,\n}\n\nfn first(p: [2]u8) -> u8 {\n    return p[0];\n}\n\nfn take(c: Cur) -> usize {\n    return c.data.len;\n}\n\n";
+    let cases: &[(&str, &str, &str)] = &[
+        ("test t { const p = [1, 2, 3]; assert(first(p) == 1); }", "ExprArrayLiteral", "3 elements for `[2]u8`"),
+        (
+            "test t { const c = Cur{ .pos = 0, .data = [1, 2] }; assert(c.data.len == 2); }",
+            "ExprArrayLiteral(to slice field)",
+            "a non-empty array literal for a slice field",
+        ),
+        (
+            "test t { assert(take(.{ .pos = 0, .data = [] }) == 0); }",
+            "ExprArrayLiteral(to slice)",
+            "anonymous struct literal",
+        ),
+        (
+            "test t { const p = [1, 2]; assert(first(p) == 1); assert(p[1] == 2); }",
+            "ExprArrayLiteral",
+            "array literal with no result type",
+        ),
+    ];
+    for (body, construct, detail) in cases {
+        let m = rejected(&format!("{}{}\n", head, body));
+        assert!(m.starts_with(&format!("t27b: unsupported construct {} at line", construct)), "{}: {}", body, m);
+        assert!(m.contains(detail), "{}: {}", body, m);
+    }
+}
