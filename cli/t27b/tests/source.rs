@@ -699,6 +699,133 @@ fn array_rejections_are_precise() {
     }
 }
 
+/// t27's own array spellings, matched to t27c's Zig backend: `[T; N]` is
+/// `[N]T`, `[T]` is `[]T`, a repeat (`[v; n]`, `[_]T{ ... } ** n`) is
+/// `.{ ... } ** n` with its elements evaluated once, an array literal passed
+/// to a slice parameter is `@constCast(&[_]T{ ... })`, and an untyped local
+/// so passed is a `[_]T` array passed by address. `t27c test-report` on this
+/// source: 3 pass, `repeat_fails` FAIL.
+#[test]
+fn t27_array_spellings_repeats_and_slice_arguments() {
+    let src = "module a;
+
+const N: u32 = 4;
+const ZEROS: [4]u32 = [_]u32{0} ** N;
+const GRID: [9]f64 = [_]f64{0} ** 9;
+
+var calls: u32 = 0;
+
+const Rec = struct { id: u32, w: u32 };
+
+fn tick() u32 {
+    calls += 1;
+    return calls;
+}
+
+fn total(xs: [u32]) u32 {
+    var s: u32 = 0;
+    for (xs) |x| {
+        s += x;
+    }
+    return s;
+}
+
+fn first_plus(xs: [u32], k: u32) void {
+    xs[0] = xs[0] + k;
+}
+
+fn weight(rs: [Rec]) u32 {
+    var s: u32 = 0;
+    for (rs) |r| {
+        s += r.w;
+    }
+    return s;
+}
+
+fn rec(i: u32) Rec {
+    return Rec{ .id = i, .w = i * 10 };
+}
+
+fn sum4(a: [u32; 4]) u32 {
+    return a[0] + a[1] + a[2] + a[3];
+}
+
+fn spread(v: u32) [u32; 4] {
+    return [v; 4];
+}
+
+test repeats {
+    var a: [u32; 3] = [tick(); 3];
+    a[1] = 9;
+    assert(a[0] == 1 and a[1] == 9 and a[2] == 1 and calls == 1);
+    const g: [5]u32 = [_]u32{7} ** 5;
+    assert(g[4] == 7 and g.len == 5);
+    const p: [4]u32 = [_]u32{ 1, 2 } ** 2;
+    assert(p[2] == 1 and p[3] == 2);
+    assert(sum4(spread(3)) == 12 and sum4(ZEROS) == 0 and GRID[8] == 0.0);
+    const rs: [3]Rec = [rec(2); 3];
+    assert(rs[2].w == 20 and rs[0].id == 2);
+}
+
+test slice_arguments {
+    assert(total([1, 2, 3]) == 6 and total([]) == 0);
+    assert(weight([rec(1), rec(2)]) == 30);
+    const one: u32 = 5;
+    assert(total([one]) == 5);
+}
+
+test slice_locals {
+    var xs = [4, 5, 6];
+    first_plus(xs, 10);
+    assert(xs[0] == 14 and total(xs) == 25 and xs.len == 3);
+}
+
+test repeat_fails {
+    const b: [2]u32 = [3; 2];
+    assert(sum4([b[0], b[1], 0, 0]) == 7);
+}
+";
+    let r = run(src);
+    assert_eq!(
+        names_ok(&r),
+        vec![
+            ("repeats", false, true),
+            ("slice_arguments", false, true),
+            ("slice_locals", false, true),
+            ("repeat_fails", false, false),
+        ]
+    );
+    assert_eq!(r[3].2, Err((TrapKind::Assert, line_of(src, "sum4([b[0], b[1], 0, 0]) == 7"))));
+}
+
+#[test]
+fn t27_array_spelling_rejections_are_precise() {
+    let head = "module a;\n\nconst ONE: u32 = 1;\n\nfn total(xs: [u32]) u32 {\n    return 0;\n}\n\nfn nested(xs: [[2]u32]) u32 {\n    return 0;\n}\n\n";
+    let cases: &[(&str, &str, &str)] = &[
+        ("fn f(p: [*]u8) u32 { return 0; }", "type [*]T", "a many-item pointer"),
+        ("fn f(m: [str:u32]) u32 { return 0; }", "type [K:V]", "a map"),
+        ("test t { assert(total([1; 2]) == 2); }", "ExprArrayLiteral(repeat to slice)", "where a slice is declared"),
+        (
+            "test t { var v: u32 = 1; const a: [2]u32 = [v + 1; 2]; assert(a[0] == 2); }",
+            "ExprArrayLiteral(text element)",
+            "element `v+1` is not a literal",
+        ),
+        (
+            "test t { const ONE: u32 = 2; const a: [2]u32 = [ONE; 2]; assert(a[0] == 2); }",
+            "ExprArrayLiteral(text element)",
+            "`ONE` shadows a module-level name",
+        ),
+        ("test t { assert(nested([[1, 2]]) == 0); }", "ExprArrayLiteral(to slice)", "a slice of arrays or slices"),
+        ("test t { const a: [3]u32 = [_]u32{ 1, 2 } ** 2; assert(a[0] == 1); }", "ExprArrayLiteral", "4 elements for `[3]u32`"),
+        ("test t { const a: [2]u32 = [7; 0]; assert(a.len == 2); }", "ExprArrayLiteral(repeat count)", "repeated zero times"),
+    ];
+    for (body, construct, detail) in cases {
+        let m = rejected(&format!("{}{}\n", head, body));
+        assert!(m.starts_with(&format!("t27b: unsupported construct {} at line", construct)), "{}: {}", body, m);
+        assert!(m.contains(detail), "{}: {}", body, m);
+    }
+}
+
 // ---------------------------------------------------------------- slices
 
 /// The 1-based line of the first line of `src` containing `needle`.
