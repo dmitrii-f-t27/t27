@@ -75,6 +75,7 @@ use std::collections::{HashMap, HashSet};
 
 #[path = "lower_float.rs"]
 mod float;
+mod paramcopy;
 mod tuple;
 
 /// A construct outside the supported subset (or a type error inside it).
@@ -1457,6 +1458,7 @@ impl<'a> Lower<'a> {
                 // A struct or str argument is the caller's memory, read-only.
                 t if is_agg(t) => {
                     let p = Place { addr: var, off: 0, ty: params[i].clone(), mutable: false, temp: None };
+                    let p = self.param_place(&n.children, pname, p, &mut body)?;
                     self.bind(pname, Binding::Mem(p));
                 }
                 t if self.addr_taken.contains(pname) => {
