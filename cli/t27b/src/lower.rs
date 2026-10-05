@@ -960,7 +960,7 @@ impl<'a> Lower<'a> {
         }
         let t = self.lty(ann)?;
         match &t {
-            LTy::S(_) | LTy::Enum(..) | LTy::Struct(_) | LTy::Arr(..) if !holds_str(&t) => {}
+            LTy::S(_) | LTy::Enum(..) | LTy::Struct(_) | LTy::Arr(..) if !self.holds_str(&t)? => {}
             _ => {
                 let d = self.type_name(&t);
                 return self.reject(
@@ -1081,9 +1081,7 @@ impl<'a> Lower<'a> {
         let ann = node.extra_type.trim();
         let st = if !ann.is_empty() {
             match self.lty(ann)? {
-                t @ LTy::Struct(_) => Some(t),
-                t @ LTy::Arr(..) if holds_str(&t) => return self.const_array(init, &t),
-                t @ LTy::Arr(..) => Some(t),
+                t @ (LTy::Struct(_) | LTy::Arr(..)) => Some(t),
                 LTy::Str => {
                     return match self.expr(init)? {
                         v @ (Val::S(..) | Val::Poison) => Ok(v),
@@ -1117,6 +1115,9 @@ impl<'a> Lower<'a> {
             None
         };
         if let Some(t) = st {
+            if self.holds_str(&t)? {
+                return self.const_agg(init, &t);
+            }
             return self.rodata(init, t);
         }
         let v = if node.extra_type.trim().is_empty() {
@@ -3942,6 +3943,7 @@ impl<'a> Lower<'a> {
             },
             LTy::Struct(_) => match v {
                 Val::M(p) if &p.ty == want => Ok(Val::M(p)),
+                Val::A(t, elems) if &t == want => Ok(Val::M(self.materialize(t, elems)?)),
                 Val::M(p) => {
                     let (a, b) = (self.type_name(want), self.type_name(&p.ty));
                     self.reject("type mismatch", format!("expected {}, found {}", a, b))
@@ -4005,17 +4007,27 @@ impl<'a> Lower<'a> {
         Ok(Place { addr, off: 0, ty: t, mutable: false, temp: Some(k) })
     }
 
-    /// The elements of a compile-time array into `dst` (pure address).
+    /// The elements (or fields) of a compile-time aggregate into `dst`
+    /// (pure address).
     fn store_const(&mut self, dst: &Place, elems: &[Val], out: &mut Vec<Stmt>) -> R<()> {
-        let LTy::Arr(elem, _) = &dst.ty else { unreachable!() };
-        let elem = (**elem).clone();
-        let (esize, _) = self.size_align(&elem)?;
-        for (i, v) in elems.iter().enumerate() {
-            let p = elem_place(dst, &elem, esize, i as u32);
+        let places: Vec<Place> = match &dst.ty {
+            LTy::Arr(elem, _) => {
+                let elem = (**elem).clone();
+                let (esize, _) = self.size_align(&elem)?;
+                (0..elems.len()).map(|i| elem_place(dst, &elem, esize, i as u32)).collect()
+            }
+            LTy::Struct(id) => self.fields(*id)?.iter().map(|f| field_place(dst, f)).collect(),
+            _ => return self.reject("ConstDecl", "internal: constant aggregate type".into()),
+        };
+        for (p, v) in places.iter().zip(elems) {
             match v {
-                Val::S(k, len) => self.store_str(&p, *k, *len, out),
-                Val::A(_, sub) => self.store_const(&p, sub, out)?,
-                _ => return self.reject("ConstDecl", "internal: array constant element".into()),
+                Val::S(k, len) => self.store_str(p, *k, *len, out),
+                Val::A(_, sub) => self.store_const(p, sub, out)?,
+                Val::M(src) => self.copy(p, src.clone(), out)?,
+                Val::E(e) | Val::P(e, _) => {
+                    out.push(Stmt::Store { addr: p.addr.clone(), off: p.off, value: e.clone() })
+                }
+                _ => return self.reject("ConstDecl", "internal: aggregate constant element".into()),
             }
         }
         Ok(())
@@ -4344,7 +4356,7 @@ impl<'a> Lower<'a> {
             }
         }
         let p = match base {
-            Val::A(t, elems) => {
+            Val::A(t @ LTy::Arr(..), elems) => {
                 let c = match &idx {
                     Val::Ct(c) => Some(*c),
                     Val::E(Expr { kind: ExprKind::Const(c), ty }) if ty.is_int() && !ty.signed() => Some(*c),
@@ -4665,11 +4677,18 @@ impl<'a> Lower<'a> {
         Ok(Val::M(Place { addr: Expr { ty: Ty::Ptr, kind: ExprKind::Data(k) }, off: 0, ty: t, mutable: false, temp: None }))
     }
 
-    /// A module-level array constant with strings in it: `Val::A`.
-    fn const_array(&mut self, n: &Node, t: &LTy) -> R<Val> {
+    /// A module-level array or struct constant with strings in it:
+    /// `Val::A`, one element per array element or per struct field (in
+    /// declaration order). Read-only data cannot hold the address of a
+    /// string, so the value is written into a frame temporary wherever
+    /// memory is needed (`materialize`).
+    fn const_agg(&mut self, n: &Node, t: &LTy) -> R<Val> {
         self.see(n);
-        let LTy::Arr(elem, _) = t else { unreachable!() };
-        if n.kind != NodeKind::ExprArrayLiteral {
+        let literal = match t {
+            LTy::Arr(..) => n.kind == NodeKind::ExprArrayLiteral,
+            _ => n.kind == NodeKind::ExprStructLit,
+        };
+        if !literal {
             let v = self.expr(n)?;
             return match v {
                 Val::A(ref u, _) if u == t => Ok(v),
@@ -4680,22 +4699,93 @@ impl<'a> Lower<'a> {
                 }
             };
         }
-        self.array_count(n, t)?;
         let mut elems = Vec::new();
-        for c in &n.children {
-            let v = if **elem == LTy::Str {
-                self.see(c);
-                match self.expr(c)? {
-                    v @ Val::S(..) => v,
-                    Val::Poison => return Err(()),
-                    _ => return self.reject("ConstDecl", "array element is not a string literal".into()),
+        match t {
+            LTy::Arr(elem, _) => {
+                self.array_count(n, t)?;
+                for c in &n.children {
+                    elems.push(self.const_elem(c, elem)?);
                 }
-            } else {
-                self.const_array(c, elem)?
-            };
-            elems.push(v);
+            }
+            LTy::Struct(id) => {
+                self.lit_type(n, t)?;
+                let fields = self.fields(*id)?;
+                let sname = self.structs[*id as usize].name.clone();
+                let mut init: Vec<Option<&Node>> = vec![None; fields.len()];
+                for c in &n.children {
+                    if c.kind != NodeKind::ExprFieldAccess || c.children.len() != 1 {
+                        return self.reject("ExprStructLit", format!("positional initializer in a `{}` literal", sname));
+                    }
+                    let Some(i) = fields.iter().position(|f| f.name == c.name) else {
+                        return self.reject("ExprStructLit", format!("`{}` has no field `{}`", sname, c.name));
+                    };
+                    if init[i].is_some() {
+                        return self.reject("ExprStructLit", format!("field `{}` initialised twice", c.name));
+                    }
+                    init[i] = Some(&c.children[0]);
+                }
+                for (i, f) in fields.iter().enumerate() {
+                    let Some(c) = init[i].or(f.default) else {
+                        return self.reject("ExprStructLit", format!("missing field `{}` of `{}`", f.name, sname));
+                    };
+                    elems.push(self.const_elem(c, &f.ty)?);
+                }
+            }
+            _ => unreachable!(),
         }
         Ok(Val::A(t.clone(), elems))
+    }
+
+    /// One element (or field) of a compile-time aggregate: a string
+    /// literal, a nested `Val::A`, an aggregate without strings in
+    /// read-only data, or a constant scalar or enum.
+    fn const_elem(&mut self, c: &Node, t: &LTy) -> R<Val> {
+        self.see(c);
+        if is_undefined(c) {
+            return self.reject("ConstDecl", "`undefined` in a constant with strings".into());
+        }
+        match t {
+            LTy::Str => match self.expr(c)? {
+                v @ Val::S(..) => Ok(v),
+                Val::Poison => Err(()),
+                _ => self.reject("ConstDecl", "str element is not a string literal".into()),
+            },
+            LTy::Struct(_) | LTy::Arr(..) if self.holds_str(t)? => self.const_agg(c, t),
+            LTy::Struct(_) | LTy::Arr(..) => self.rodata(c, t.clone()),
+            LTy::S(ty) => {
+                let v = self.expr_as(c, t)?;
+                let e = self.coerce(v, *ty)?;
+                if !matches!(e.kind, ExprKind::Const(_)) {
+                    return self.reject("ConstDecl", "struct field is not a compile-time value".into());
+                }
+                Ok(Val::E(e))
+            }
+            LTy::Enum(..) => match self.expr_as(c, t)? {
+                v @ Val::P(Expr { kind: ExprKind::Const(_), .. }, _) => Ok(v),
+                Val::Poison => Err(()),
+                _ => self.reject("ConstDecl", "enum field is not a compile-time value".into()),
+            },
+            LTy::Ptr(..) => self.reject("ConstDecl", "pointer in a constant struct".into()),
+            LTy::Slice(..) => self.reject("ConstDecl(slice)", "slice in a module-level constant".into()),
+        }
+    }
+
+    /// Whether a type has a `str` at a leaf (through arrays and struct
+    /// fields): no read-only image of it can exist.
+    fn holds_str(&mut self, t: &LTy) -> R<bool> {
+        match t {
+            LTy::Str => Ok(true),
+            LTy::Arr(inner, _) => self.holds_str(inner),
+            LTy::Struct(id) => {
+                for f in self.fields(*id)? {
+                    if self.holds_str(&f.ty)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            _ => Ok(false),
+        }
     }
 
     /// An array literal's element count must be the array's length.
@@ -4809,16 +4899,6 @@ fn reg_ty(t: &LTy) -> Option<Ty> {
 /// array or a slice.
 fn is_agg(t: &LTy) -> bool {
     matches!(t, LTy::Struct(_) | LTy::Str | LTy::Arr(..) | LTy::Slice(..))
-}
-
-/// An array type with strings at its leaves: no read-only image of it can
-/// exist, so its module constants are `Val::A`.
-fn holds_str(t: &LTy) -> bool {
-    match t {
-        LTy::Str => true,
-        LTy::Arr(inner, _) => holds_str(inner),
-        _ => false,
-    }
 }
 
 /// The place of element `i` (a constant) of array place `p`.
