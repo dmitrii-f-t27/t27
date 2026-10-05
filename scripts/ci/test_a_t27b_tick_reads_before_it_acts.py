@@ -250,6 +250,51 @@ with tempfile.TemporaryDirectory() as tmp:
         mut_codes = None
     check(mut_codes == ["LAB-STALE"], f"control: a mutated checkout rule loses LAB-CHECKOUT ({mut_codes})")
 
+    # #6443: the running lab image against master's contrib/railway/t27b-lab. On 2026-10-05 the
+    # deployed image predated #6115 (latest.json had no steps.ratchet) and nothing could tell.
+    files = {k: open(os.path.join(healthy, k)).read() for k in os.listdir(healthy)}
+    master_lab = {"lab.py": "1" * 40, "Dockerfile": "2" * 40}
+    cur = {"lab_py_sha": "1" * 40, "dockerfile_sha": "2" * 40, "image_built": "2026-10-05T16:00:00Z"}
+    old = dict(cur, lab_py_sha="3" * 40, image_built="2026-10-04T17:55:00Z")
+    def image_case(name, lab_doc, status=None):
+        fx = os.path.join(tmp, "fx-image-" + name)
+        write_fixture(fx, {**files, "lab.json": lab_doc, "master_lab.json": master_lab,
+                           "status.json": status})
+        return fx
+    code, codes, out = doctor(image_case("current", lab(image=cur)))
+    check(code == 0 and codes == [], f"image current: no anomaly (got {code} {codes})")
+    unrep = image_case("unreported", lab())
+    code, codes, out = doctor(unrep)
+    check(code == 1 and codes == ["LAB-IMAGE-STALE"] and "before #6443" in out,
+          f"image unreported: LAB-IMAGE-STALE, deployed before #6443 (got {code} {codes})")
+    differs = image_case("differs", lab(image=old))
+    code, codes, out = doctor(differs)
+    check(code == 1 and codes == ["LAB-IMAGE-STALE"] and "lab.py lab 333333333 master 111111111" in out
+          and "Dockerfile" not in out.split("LAB-IMAGE-STALE", 1)[1].split("redeploy")[0],
+          f"image differs: LAB-IMAGE-STALE names lab.py only (got {code} {codes})")
+    code, codes, out = doctor(image_case("redeployed", lab(image=old), status={"phase": "idle", "image": cur}))
+    check(code == 0 and codes == [], f"image redeployed: status.json (the live process) wins over latest.json "
+          f"(got {code} {codes})")
+    fx = os.path.join(tmp, "fx-image-nomaster")
+    write_fixture(fx, {**files, "lab.json": lab(image=old)})
+    code, codes, out = doctor(fx)
+    check(code == 0 and codes == [], f"image, master unreadable: nothing said (got {code} {codes})")
+    # mutation control: a generated C that never compares the shas loses the finding
+    needle = "uint8_t image_code(bool master_known, bool reported, bool same) {"
+    check(gen_src.count(needle) == 1, "control: the generated image rule is where the control expects it")
+    mut_src = re.sub(r"(uint8_t image_code\(bool master_known, bool reported, bool same\) \{.*?)"
+                     r"\(same == false\)", r"\1(false)", gen_src, count=1, flags=re.S)
+    check(mut_src != gen_src, "control: the image mutation applies")
+    with open(os.path.join(gen, "steward.c"), "w") as f:
+        f.write(mut_src)
+    p = subprocess.run([sys.executable, os.path.join(tree, "t27b.py"), "doctor", "--json", "--fixture", differs],
+                       capture_output=True, text=True)
+    try:
+        mut_codes = [a["code"] for a in json.loads(p.stdout)]
+    except ValueError:
+        mut_codes = None
+    check(mut_codes == [], f"control: a mutated image rule loses LAB-IMAGE-STALE ({mut_codes})")
+
     unread = os.path.join(tmp, "fx-unread")
     files = {k: open(os.path.join(broken, k)).read() for k in os.listdir(broken)}
     files.pop("lab.json")
