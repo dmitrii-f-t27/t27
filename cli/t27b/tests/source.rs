@@ -451,6 +451,85 @@ test unequal_fails {
     assert!(prog.funcs[5].is_test);
 }
 
+/// A module constant of a struct type with `str` fields (Zig's comptime
+/// struct value): a compile-time value written into a frame temporary where
+/// memory is needed, like a constant array of strings.
+#[test]
+fn struct_constants_with_str_fields() {
+    let src = "module sc;
+
+const Dir = enum(u8) { in, out };
+const Pos = struct { x: u8, y: u8 };
+const Pin = struct {
+    name: str,
+    bank: u8,
+    dir: Dir = .in,
+    at: Pos,
+    tag: str = \"io\",
+};
+const Board = struct { title: str, pins: [2]Pin, count: u32 };
+
+const CLK: Pin = Pin{ .name = \"E3\", .bank = 35, .at = Pos{ .x = 1, .y = 2 } };
+const TX = Pin{ .name = \"D10\", .bank = 16, .dir = .out, .at = .{ .x = 3, .y = 4 }, .tag = \"uart\" };
+const ALIAS: Pin = CLK;
+const PINS: [2]Pin = [CLK, TX];
+const BOARD: Board = Board{ .title = \"arty\", .pins = [TX, CLK], .count = 2 };
+
+fn bank_of(p: Pin) u8 {
+    return p.bank;
+}
+
+fn name_len(p: *const Pin) u64 {
+    return p.name.len;
+}
+
+test fields_fold_and_load {
+    assert(CLK.name == \"E3\" and CLK.bank == 35 and CLK.dir == .in);
+    assert(CLK.at.x == 1 and CLK.at.y == 2 and CLK.tag == \"io\");
+    assert(TX.dir == .out and TX.tag == \"uart\" and TX.name.len == 3);
+    assert(ALIAS.name == CLK.name);
+}
+
+test bound_passed_and_copied {
+    const pin = TX;
+    assert(pin.name == \"D10\" and bank_of(pin) == 16);
+    assert(bank_of(CLK) == 35 and name_len(&CLK) == 2);
+    var p = CLK;
+    p.bank = 7;
+    p.name = \"X\";
+    assert(p.bank == 7 and p.name == \"X\" and CLK.bank == 35 and CLK.name == \"E3\");
+}
+
+test arrays_and_nesting {
+    assert(PINS[1].name == \"D10\" and PINS.len == 2);
+    var i: u32 = 0;
+    assert(PINS[i].bank == 35);
+    var n: u64 = 0;
+    for (PINS) |q| {
+        n += q.name.len;
+    }
+    assert(n == 5);
+    assert(BOARD.title == \"arty\" and BOARD.pins[0].name == \"D10\" and BOARD.pins[1].at.y == 2);
+    assert(BOARD.count == 2);
+}
+
+test wrong_name_fails {
+    assert(CLK.name == \"E4\");
+}
+";
+    let r = run(src);
+    assert_eq!(
+        names_ok(&r),
+        vec![
+            ("fields_fold_and_load", false, true),
+            ("bound_passed_and_copied", false, true),
+            ("arrays_and_nesting", false, true),
+            ("wrong_name_fails", false, false),
+        ]
+    );
+    assert_eq!(r[3].2, Err((TrapKind::Assert, 59)));
+}
+
 #[test]
 fn string_rejections_are_precise() {
     let head = "module s;\n\nconst S: str = \"ab\";\n\n";
@@ -460,7 +539,9 @@ fn string_rejections_are_precise() {
         ("test t { assert(S.ptr == 0); }", "ExprFieldAccess(str)", "`.ptr` of a str"),
         ("test t { var s: str = \"x\"; s.len = 2; }", "StmtAssign", "assignment through a constant"),
         ("test t { assert(S); }", "condition", "expected bool, found a string"),
-        ("const P = struct { s: str };\nconst Q = P{ .s = \"x\" };\ntest t { assert(Q.s.len == 1); }", "ConstDecl(str field)", "str field"),
+        ("const P = struct { s: str };\nvar Q: P = P{ .s = \"x\" };\ntest t { assert(Q.s.len == 1); }", "VarDecl(module, pointer/str/slice)", "module-level var `Q`"),
+        ("fn g() str { return \"x\"; }\nconst P = struct { s: str };\nconst Q = P{ .s = g() };\ntest t { assert(Q.s.len == 1); }", "ConstDecl", "not a string literal"),
+        ("const P = struct { s: str, n: u8 };\nfn h() u8 { return 1; }\nconst Q = P{ .s = \"x\", .n = h() };\ntest t { assert(Q.n == 1); }", "ConstDecl", "not a compile-time value"),
         ("fn f() u32 { return 1; }\nconst T: str = f();\ntest t { assert(T.len == 0); }", "ConstDecl", "not a string literal"),
     ];
     for (body, construct, detail) in cases {
