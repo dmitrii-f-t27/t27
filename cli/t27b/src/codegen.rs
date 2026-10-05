@@ -215,6 +215,8 @@ struct Gen<'a> {
     agg_bytes: u32,
     /// x30 is used as scratch (copy loops): the function needs a frame.
     uses_lr: bool,
+    /// Some parameter arrives on the stack (read from x29, so a frame).
+    stack_params: bool,
     data_refs: Vec<(usize, u32)>,
 }
 
@@ -258,6 +260,7 @@ pub fn compile_func(prog: &Program, id: FuncId, style: TrapStyle) -> Result<Func
         agg_off: Vec::with_capacity(f.slots.len()),
         agg_bytes: 0,
         uses_lr: false,
+        stack_params: false,
         data_refs: Vec::new(),
     };
     let mut top = 0u32;
@@ -393,6 +396,7 @@ impl<'a> Gen<'a> {
             }
         }
         self.has_call = has_call;
+        self.stack_params = Program::stack_args(&Program::arg_regs(f)).1 > 0;
         let mut order: Vec<usize> = (0..f.vars.len()).collect();
         order.sort_by(|&a, &b| w[b].cmp(&w[a]).then(a.cmp(&b)));
         let mut callee = CALLEE_SAVED.iter().copied();
@@ -407,12 +411,12 @@ impl<'a> Gen<'a> {
             let mut caller: Vec<Reg> = ((nint as Reg)..8).collect();
             caller.reverse();
             for (p, &(fp, k)) in regs.iter().enumerate() {
-                if !fp {
+                if !fp && k < 8 {
                     self.homes[p] = Home::Reg(k as Reg);
                 }
             }
             for &v in &order {
-                if (v < f.nparams && !regs[v].0) || w[v] == 0 {
+                if (v < f.nparams && !regs[v].0 && regs[v].1 < 8) || w[v] == 0 {
                     continue;
                 }
                 self.homes[v] = if let Some(r) = caller.pop() {
@@ -474,7 +478,8 @@ impl<'a> Gen<'a> {
             || self.nvar_slots > 0
             || self.max_slot > 0
             || self.agg_bytes > 0
-            || self.uses_lr;
+            || self.uses_lr
+            || self.stack_params;
         // Drop a trailing `b ret` that would jump to the very next word.
         if let Some(&last) = self.ret_jumps.last() {
             if last + 1 == self.code.len() {
@@ -594,9 +599,33 @@ impl<'a> Gen<'a> {
         }
         // Parameters: normalise narrow ones and move them to their homes.
         let regs = Program::arg_regs(f);
+        let (stack, _) = Program::stack_args(&regs);
         for p in 0..f.nparams {
             let ty = f.vars[p].ty;
             let (fp, k) = regs[p];
+            if let Some(s) = stack[p] {
+                // A stack parameter: one full word above the saved x29/x30
+                // (an F64 is its bit pattern, homed in an x register too).
+                let at = 16 + 8 * s;
+                let ext = if fp { None } else { narrow_ext(ty) };
+                match self.homes[p] {
+                    Home::None => {}
+                    Home::Reg(h) => {
+                        pro.push(a64::ldr_x(h, FP, at));
+                        if let Some(e) = ext {
+                            pro.push(extend(h, h, e));
+                        }
+                    }
+                    Home::Slot(off) => {
+                        pro.push(a64::ldr_x(X16, FP, at));
+                        if let Some(e) = ext {
+                            pro.push(extend(X16, X16, e));
+                        }
+                        pro.push(a64::str_x(X16, SP, off));
+                    }
+                }
+                continue;
+            }
             if fp {
                 // AAPCS64: the k-th F64 argument is in d_k.
                 match self.homes[p] {
@@ -1407,9 +1436,15 @@ impl<'a> Gen<'a> {
         }
         let callee = &self.prog.funcs[func as usize];
         let regs = Program::arg_regs(callee);
+        let (stack, nstack) = Program::stack_args(&regs);
         let ret_f64 = callee.ret == Some(Ty::F64);
+        // Register arguments first (they touch only x0-x7, d0-d7 and x16),
+        // then the stack ones, below sp: x9-x15 still hold the temps.
         for (j, &(v, ty)) in vals.iter().enumerate() {
             let (fp, k) = regs[j];
+            if stack[j].is_some() {
+                continue;
+            }
             if fp {
                 // AAPCS64: the k-th F64 argument goes in d_k.
                 let r = self.use_(v, X16, ty);
@@ -1427,11 +1462,43 @@ impl<'a> Gen<'a> {
                 V::Const(c) => self.mov_imm(ty.is64(), rj, canon(c, ty)),
             }
         }
+        // Outgoing stack words, 16-byte aligned at the `bl`.
+        let out_bytes = (8 * nstack + 15) & !15;
+        if out_bytes > 0 {
+            if out_bytes >= 4096 {
+                self.fail(format!("{} stack argument words; at most 510", nstack));
+            }
+            self.emit(a64::sub_imm(true, SP, SP, out_bytes));
+            for (j, &(v, ty)) in vals.iter().enumerate() {
+                let Some(s) = stack[j] else { continue };
+                let r = match v {
+                    V::Temp(i) if i < TEMP_REGS => 9 + i as Reg,
+                    V::Temp(i) => {
+                        // A spilled temp's slot is sp-relative: sp moved.
+                        let off = self.slot_of_temp(i) + out_bytes;
+                        if off > MAX_SLOT_BYTES {
+                            self.fail(format!("frame larger than {} bytes", MAX_SLOT_BYTES));
+                        }
+                        self.ldr_slot(X16, off);
+                        X16
+                    }
+                    V::Reg(r) => r,
+                    V::Const(c) => {
+                        self.mov_imm(ty.is64(), X16, canon(c, ty));
+                        X16
+                    }
+                };
+                self.str_slot(r, 8 * s);
+            }
+        }
         for &(v, _) in vals.iter().rev() {
             self.release(v);
         }
         self.calls.push((self.code.len(), func));
         self.emit(a64::bl(0));
+        if out_bytes > 0 {
+            self.emit(a64::add_imm(true, SP, SP, out_bytes));
+        }
         let out = if want {
             let (d, t) = self.dest(dst);
             if ret_f64 {

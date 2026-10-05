@@ -442,7 +442,7 @@ fn lower_mode<'a>(
             NodeKind::FnDecl => {
                 if l.sigs.contains_key(&item.name) {
                     let _: R<()> = l.reject(
-                        "FnDecl",
+                        "FnDecl(duplicate)",
                         format!("duplicate function `{}`", item.name),
                     );
                     continue;
@@ -617,6 +617,14 @@ fn lower_mode<'a>(
         let site = l.site(TrapKind::NoReturn, format!("end of fn {}", STR_EQL), Ty::Bool);
         funcs.insert(l.nfuncs as usize, str_eql_func(site));
         l.internal_abi.push(l.nfuncs);
+    }
+    // More than 8 parameters of a class: the rest are passed on the stack
+    // in t27b's own convention (`Program::stack_args`), never exported.
+    for (id, f) in funcs.iter().enumerate() {
+        let id = id as FuncId;
+        if Program::stack_args(&Program::arg_regs(f)).1 > 0 && !l.internal_abi.contains(&id) {
+            l.internal_abi.push(id);
+        }
     }
     let prog = Program {
         module,
@@ -873,8 +881,10 @@ impl<'a> Lower<'a> {
         let mut bad = false;
         let mut params = Vec::new();
         for (pname, pty) in &n.params {
-            let r = if pname.starts_with("comptime ") || pty.is_empty() {
-                self.reject("FnDecl", format!("parameter `{}` of `{}`", pname, n.name))
+            let r = if pname.starts_with("comptime ") {
+                self.reject("FnDecl(comptime param)", format!("parameter `{}` of `{}`", pname, n.name))
+            } else if pty.is_empty() {
+                self.reject("FnDecl(untyped param)", format!("parameter `{}` of `{}`", pname, n.name))
             } else {
                 self.lty(pty)
             };
@@ -893,10 +903,10 @@ impl<'a> Lower<'a> {
         };
         // A struct result is returned through a hidden pointer parameter.
         let total = n.params.len() + ret.as_ref().is_some_and(is_agg) as usize;
-        if total > 8 {
+        if total > MAX_PARAMS {
             return self.reject(
-                "FnDecl",
-                format!("`{}` has {} parameters, at most 8 are supported", n.name, total),
+                "FnDecl(too many params)",
+                format!("`{}` has {} parameters, at most {} are supported", n.name, total, MAX_PARAMS),
             );
         }
         if bad {
@@ -4829,6 +4839,11 @@ fn str_eql_func(noreturn_site: SiteId) -> Func {
 
 /// The one function lowering synthesizes; not a name t27 source can declare
 /// (`__t27b_` is reserved to the backend).
+/// Most parameters (the hidden result pointer included) of one function.
+/// Past 8 of a class they go on the stack; the call's outgoing area must
+/// stay one `sub sp` immediate (codegen), far below this.
+const MAX_PARAMS: usize = 64;
+
 pub const STR_EQL: &str = "__t27b_str_eql";
 
 fn val_of(e: Expr, t: &LTy) -> Val {

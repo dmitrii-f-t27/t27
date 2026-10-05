@@ -625,9 +625,11 @@ pub struct Program {
     /// Initial bytes of each module-level `var`, addressed by
     /// `ExprKind::Global`. Each is placed 8-byte aligned in writable memory.
     pub globals: Vec<Vec<u8>>,
-    /// Functions that pass or return an aggregate. They use t27b's own
+    /// Functions that pass or return an aggregate, or take more parameters
+    /// of one class than AAPCS64 has argument registers. They use t27b's own
     /// convention (a pointer to the caller's copy; a hidden last pointer
-    /// parameter for the result, which is also returned), not AAPCS64, so an
+    /// parameter for the result, which is also returned; one full word per
+    /// stack parameter, see `Program::stack_args`), not the platform's, so an
     /// object file does not export them.
     pub internal_abi: Vec<FuncId>,
 }
@@ -654,6 +656,29 @@ impl Program {
                 }
             })
             .collect()
+    }
+
+    /// Stack slot of each parameter that AAPCS64 would not place in a
+    /// register (the ninth and later of its class), in parameter order; and
+    /// how many there are. Slot `s` is the 8-byte word at `[sp + 8*s]` of the
+    /// caller at the `bl`, i.e. `[x29 + 16 + 8*s]` in the callee. Every slot is
+    /// a full word holding the register image (t27b's own convention: Apple's
+    /// arm64 packs narrow stack arguments, so a function with stack
+    /// parameters is never exported, see `internal_abi`).
+    pub fn stack_args(regs: &[(bool, usize)]) -> (Vec<Option<u32>>, u32) {
+        let mut n = 0u32;
+        let v = regs
+            .iter()
+            .map(|&(_, k)| {
+                if k >= 8 {
+                    n += 1;
+                    Some(n - 1)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        (v, n)
     }
 
     pub fn tests(&self) -> impl Iterator<Item = (usize, &Func)> {

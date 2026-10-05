@@ -1095,3 +1095,177 @@ test inc_fails {
         );
     }
 }
+
+// ------------------------------------------------------ stack parameters
+
+/// More than 8 parameters: the ninth and later of a class are passed on the
+/// stack, one full word each (t27b's own convention, so such a fn is not
+/// exported). Every position is weighted differently so a slot read from
+/// the wrong place changes the result; narrow and negative values check
+/// that the callee re-normalises what it loads; a struct result's hidden
+/// pointer is itself the ninth word; a recursive fn passes its own
+/// parameters on; and calls happen with temps live across them.
+#[test]
+fn stack_parameters_reach_the_callee_in_order() {
+    let src = "module sp;
+
+const Pair = struct { lo: i32, hi: i32 };
+
+fn w9(a: u32, b: u32, c: u32, d: u32, e: u32, f: u32, g: u32, h: u32, i: u32) u32 {
+    return a + 2 * b + 3 * c + 4 * d + 5 * e + 6 * f + 7 * g + 8 * h + 100 * i;
+}
+
+fn mix(a: i8, b: u8, c: i16, d: u16, e: i32, f: u32, g: i64, h: u64, i: i8, j: u8, k: i16, l: bool, m: i64) i64 {
+    var s: i64 = a;
+    s = s * 3 + b;
+    s = s * 3 + c;
+    s = s * 3 + d;
+    s = s * 3 + e;
+    s = s * 3 + f;
+    s = s * 3 + g;
+    if (h > 5) {
+        s = s + 1;
+    }
+    s = s * 3 + i;
+    s = s * 3 + j;
+    s = s * 3 + k;
+    if (l) {
+        s = s * 3 + 1;
+    }
+    return s * 3 + m;
+}
+
+fn pair8(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32, g: i32, h: i32) Pair {
+    return Pair{ .lo = a + b + c + d, .hi = e + f + g + 10 * h };
+}
+
+fn down(n: u32, a: u32, b: u32, c: u32, d: u32, e: u32, f: u32, g: u32, h: u32, acc: u32) u32 {
+    if (n == 0) {
+        return acc + h;
+    }
+    return down(n - 1, b, c, d, e, f, g, h, a, acc + a * n);
+}
+
+fn outer(x: u32) u32 {
+    return (x + 1) + w9(x, x + 1, x + 2, x + 3, x + 4, x + 5, x + 6, x + 7, x + 8) + (x + 2);
+}
+
+test ninth_word {
+    assert(w9(1, 1, 1, 1, 1, 1, 1, 1, 1) == 136);
+    assert(w9(0, 0, 0, 0, 0, 0, 0, 0, 7) == 700);
+}
+
+test narrow_and_negative_on_the_stack {
+    assert(mix(-1, 255, -300, 65535, -70000, 4000000000, -5, 6, -128, 200, -32768, true, 9) == mix(-1, 255, -300, 65535, -70000, 4000000000, -5, 6, -128, 200, -32768, true, 9));
+    assert(mix(0, 0, 0, 0, 0, 0, 0, 0, -128, 0, 0, false, 0) == -128 * 27);
+    assert(mix(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1, false, 0) == -3);
+    assert(mix(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, true, 5) == 8);
+}
+
+test struct_result_pointer_on_the_stack {
+    const p = pair8(1, 2, 3, 4, 5, 6, 7, 8);
+    assert(p.lo == 10);
+    assert(p.hi == 98);
+}
+
+test recursion_passes_its_stack_words_on {
+    assert(down(0, 1, 2, 3, 4, 5, 6, 7, 8, 0) == 8);
+    assert(down(3, 1, 2, 3, 4, 5, 6, 7, 8, 0) == 1 * 3 + 2 * 2 + 3 * 1 + 3);
+}
+
+test temps_live_across_the_call {
+    assert(outer(10) == 11 + (10 + 22 + 36 + 52 + 70 + 90 + 112 + 136 + 1800) + 12);
+}
+
+test wrong_on_purpose {
+    assert(w9(1, 2, 3, 4, 5, 6, 7, 8, 9) == 0);
+}
+";
+    let r = run(src);
+    assert_eq!(
+        names_ok(&r),
+        vec![
+            ("ninth_word", false, true),
+            ("narrow_and_negative_on_the_stack", false, true),
+            ("struct_result_pointer_on_the_stack", false, true),
+            ("recursion_passes_its_stack_words_on", false, true),
+            ("temps_live_across_the_call", false, true),
+            ("wrong_on_purpose", false, false),
+        ]
+    );
+    let prog = lower_src(src).unwrap();
+    let internal: Vec<&str> = prog.internal_abi.iter().map(|&i| prog.funcs[i as usize].name.as_str()).collect();
+    assert_eq!(internal, vec!["pair8", "w9", "mix", "down"]);
+}
+
+#[test]
+fn fn_declaration_rejections_are_precise() {
+    let head = "module fd;\n\n";
+    let many: Vec<String> = (0..65).map(|i| format!("p{}: u8", i)).collect();
+    let cases: Vec<(String, &str, &str)> = vec![
+        ("fn f(x: struct {}) u32 { return 1; }\ntest t { assert(true); }".into(), "FnDecl(untyped param)", "parameter `x` of `f`"),
+        ("fn f(x: u32) u32 { return x; }\nfn f(x: u32) u32 { return x; }\ntest t { assert(f(1) == 1); }".into(), "FnDecl(duplicate)", "duplicate function `f`"),
+        (format!("fn f({}) u8 {{ return p0; }}\ntest t {{ assert(true); }}", many.join(", ")), "FnDecl(too many params)", "`f` has 65 parameters, at most 64"),
+    ];
+    for (body, construct, detail) in &cases {
+        let m = rejected(&format!("{}{}\n", head, body));
+        assert!(m.starts_with(&format!("t27b: unsupported construct {} at line", construct)), "{}: {}", body, m);
+        assert!(m.contains(detail), "{}: {}", body, m);
+    }
+}
+
+/// f64 parameters past d7 and integer ones past x7 in one signature: each
+/// class fills its own registers, and the overflow of both shares one run of
+/// stack words in parameter order. A leaf callee and one that calls.
+#[test]
+fn f64_and_integer_stack_parameters_interleave() {
+    let src = "module spf;
+
+fn wf(a: f64, b: u8, c: f64, d: f64, e: i16, f: f64, g: f64, h: f64, i: f64, j: f64, k: i32, l: f64, m: u8, n: f64, o: u8, p: u8, q: u8, r: u8, s: i8) f64 {
+    var t: f64 = a;
+    t = t * 2.0 + c;
+    t = t * 2.0 + d;
+    t = t * 2.0 + f;
+    t = t * 2.0 + g;
+    t = t * 2.0 + h;
+    t = t * 2.0 + i;
+    t = t * 2.0 + j;
+    t = t * 2.0 + l;
+    t = t * 2.0 + n;
+    var u: i32 = b;
+    u = u * 3 + e;
+    u = u * 3 + k;
+    u = u * 3 + m;
+    u = u * 3 + o;
+    u = u * 3 + p;
+    u = u * 3 + q;
+    u = u * 3 + r;
+    u = u * 3 + s;
+    return t * 100000.0 + @as(f64, @floatFromInt(u));
+}
+
+fn half(x: f64) f64 {
+    return x / 2.0;
+}
+
+fn wg(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64, g: f64, h: f64, i: f64, j: f64) f64 {
+    return half(a) + b + c + d + e + f + g + h + 3.0 * i + 5.0 * j;
+}
+
+test leaf_callee {
+    assert(wf(1.0, 0, 0.0, 0.0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0.0, 0, 0.0, 0, 0, 0, 0, 0) == 51200000.0);
+    assert(wf(0.0, 0, 0.0, 0.0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0.0, 0, 1.0, 0, 0, 0, 0, 0) == 100000.0);
+    assert(wf(0.0, 0, 0.0, 0.0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0.5, 0, 0.0, 0, 0, 0, 0, -1) == 99999.0);
+    assert(wf(0.0, 1, 0.0, 0.0, -1, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0.0, 0, 0.0, 0, 0, 0, 0, 0) == 4374.0);
+    assert(wf(0.0, 0, 0.0, 0.0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0.0, 0, 0.0, 0, 0, 0, 255, 0) == 765.0);
+}
+
+test calling_callee {
+    assert(wg(2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) == 1.0);
+    assert(wg(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0) == 3.0);
+    assert(wg(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0) == -5.0);
+}
+";
+    let r = run(src);
+    assert_eq!(names_ok(&r), vec![("leaf_callee", false, true), ("calling_callee", false, true)]);
+}
