@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""tri t27b -- the t27b steward's tick card (status), anomaly scan (doctor), per-spec ratchet between lab runs (delta), gen-c proof on the t27c lab (gen-check), the merge gate (ready) and the stack merger (watch).
+"""tri t27b -- the t27b steward's tick card (status), anomaly scan (doctor), per-spec ratchet between lab runs (delta), gen-c proof on the t27c lab (gen-check), the merge gate (ready), the stack merger (watch) and the reference-backed lane picker (next).
 
 WHY THIS EXISTS
 ---------------
@@ -1340,7 +1340,97 @@ def watch_main(argv, act=watch_act, sleep=time.sleep):
     return 0
 
 
+def next_lanes(lab):
+    """Count one lab run for `tri t27b next` (#6317). Which side of the picker
+    a file counts on is steward.t27's `lane_kind`, the rank its `lane_score`,
+    the with-tests denominator its `with_tests`; this only counts and sorts.
+    Slip Q38: a lane picked from blockers without the reference moved the
+    counted pass number by 0, because the reference could not compile its files."""
+    R = rules()
+    results = lab.get("results")
+    if not isinstance(results, list) or not results:
+        raise Unreadable("the lab run has no per-file results[]")
+    split = {"pass": 0, "pass_vacuous": 0, "blocked": 0, "other": 0}
+    fams = {"LANE": {}, "REFERENCE-BUG": {}}
+    files = {"LANE": 0, "REFERENCE-BUG": 0}
+    for x in results:
+        ref, t = x.get("reference"), x.get("t27b")
+        if ref == "pass":
+            split[t if t in split else "other"] += 1
+        kind = R.lane_kind(ref, t)
+        blockers = [b for b in (x.get("blockers") or []) if b]
+        if kind is None or not blockers:
+            continue
+        files[kind] += 1
+        for i, b in enumerate(dict.fromkeys(blockers)):
+            f = fams[kind].setdefault(b, {"family": b, "sole": 0, "first": 0, "any": 0})
+            f["any"] += 1
+            f["first"] += 1 if i == 0 else 0
+            f["sole"] += 1 if len(set(blockers)) == 1 else 0
+    for f in fams["LANE"].values():
+        f["score"] = R.lane_score(f["sole"], f["first"])
+    lanes = sorted(fams["LANE"].values(), key=lambda f: (-f["score"], -f["any"], f["family"]))
+    bugs = sorted(fams["REFERENCE-BUG"].values(), key=lambda f: (-f["any"], f["family"]))
+    ref_pass = sum(split.values())
+    tested = R.with_tests(ref_pass, split["pass_vacuous"])
+    return {"commit": lab.get("commit"), "ref": lab.get("ref"), "finished": lab.get("finished"),
+            "reference_pass": ref_pass, "t27b": split, "with_tests": tested,
+            "pct_with_tests": R.pct(split["pass"], tested),
+            "lane_files": files["LANE"], "reference_bug_files": files["REFERENCE-BUG"],
+            "lanes": lanes, "reference_bugs": bugs}
+
+
+def next_card(n, top):
+    s = n["t27b"]
+    out = [f"lab run {str(n['commit'])[:9]} ({n['ref']}), finished {n['finished']}",
+           f"reference passes {n['reference_pass']}: t27b pass {s['pass']}, pass_vacuous {s['pass_vacuous']} "
+           f"(0 tests), blocked {s['blocked']}, other {s['other']}",
+           f"t27b pass {s['pass']} / {n['with_tests']} with tests ({n['pct_with_tests']}%)",
+           "",
+           f"next lane -- {n['lane_files']} files where the reference passes and t27b is blocked",
+           f"  {'rank':>4}  {'sole':>4}  {'first':>5}  {'any':>4}  family   (sole: unlocks on its own;"
+           " order: steward.t27 lane_score)"]
+    for i, f in enumerate(n["lanes"][:top], 1):
+        out.append(f"  {i:>4}  {f['sole']:>4}  {f['first']:>5}  {f['any']:>4}  {f['family']}")
+    if len(n["lanes"]) > top:
+        out.append(f"  ... {len(n['lanes']) - top} more families (--top N)")
+    out += ["",
+            f"reference bugs to file, not lanes -- {n['reference_bug_files']} files t27b blocks where the "
+            "reference does not pass (Q38)",
+            f"  {'':>4}  {'sole':>4}  {'first':>5}  {'any':>4}  family"]
+    for f in n["reference_bugs"][:top]:
+        out.append(f"  {'':>4}  {f['sole']:>4}  {f['first']:>5}  {f['any']:>4}  {f['family']}")
+    if len(n["reference_bugs"]) > top:
+        out.append(f"  ... {len(n['reference_bugs']) - top} more families (--top N)")
+    return out
+
+
+def next_main(argv):
+    ap = argparse.ArgumentParser(prog="tri t27b next",
+                                 description="rank blocker families for the next t27b lane, reference-backed (#6317)")
+    ap.add_argument("--fixture", help="read lab.json from this directory instead of the lab")
+    ap.add_argument("--lab", default=LAB)
+    ap.add_argument("--top", type=int, default=15, help="families to print per list (default 15)")
+    ap.add_argument("--json", action="store_true")
+    try:
+        args = ap.parse_args(argv)
+    except SystemExit as e:
+        return 2 if e.code else 0
+    try:
+        n = next_lanes(Sources(fixture=args.fixture, lab=args.lab).lab_json())
+    except Unreadable as e:
+        print(f"tri t27b next: UNREADABLE {e}")
+        return 2
+    if args.json:
+        print(json.dumps(n, indent=1))
+    else:
+        print("\n".join(next_card(n, args.top)))
+    return 0
+
+
 def main(argv):
+    if argv[:1] == ["next"]:
+        return next_main(argv[1:])
     if argv[:1] == ["watch"]:
         return watch_main(argv[1:])
     if argv[:1] == ["ready"]:
@@ -1350,7 +1440,7 @@ def main(argv):
     if argv[:1] == ["gen-check"]:
         return gen_check_main(argv[1:])
     ap = argparse.ArgumentParser(prog="tri t27b", description=__doc__.split("\n")[0])
-    ap.add_argument("action", choices=("status", "doctor", "delta", "ratchet", "gen-check", "ready", "watch"))
+    ap.add_argument("action", choices=("status", "doctor", "delta", "ratchet", "gen-check", "ready", "watch", "next"))
     ap.add_argument("--from", dest="from_", help="delta: the earlier lab run's sha (default: the run before --to)")
     ap.add_argument("--to", default="latest", help="delta: the later run's sha (default: latest.json)")
     ap.add_argument("--fixture", help="read every source from this directory (tests)")

@@ -139,8 +139,8 @@ measure it are written in **t27**, not in Rust or Python by hand.
   sees neither sends it back.
 - The debt only shrinks. On 2026-10-05 (master c532fcae5, `wc -l`) it is
   `cli/t27b/src/*.rs` 8247 lines plus `cli/t27b/tests/*.rs` 2865 (Rust, and
-  it mounts `bootstrap/src/compiler.rs`), `scripts/tri_loop/t27b.py` 894
-  (Python, `tri t27b`), and `contrib/railway/t27b-lab/lab.py` 608 (Python, the
+  it mounts `bootstrap/src/compiler.rs`), `scripts/tri_loop/t27b.py` 1481
+  (Python, `tri t27b`; 894 at c532fcae5, 1481 after #6317's `next`), and `contrib/railway/t27b-lab/lab.py` 608 (Python, the
   Railway lab). Update these numbers in the PR that moves them.
 
 This is the "Own language first" rule below, applied to code: a project whose

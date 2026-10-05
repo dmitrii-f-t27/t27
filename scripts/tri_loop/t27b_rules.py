@@ -46,6 +46,8 @@ READINESS = ("READY", "WAIT", "RED", "CONFLICT", "RETARGET", "BLOCKED", "CLOSED"
 # `tri t27b watch` (#6285): the stacked parent's state, and what to do.
 PARENTS = ("NONE", "MERGED", "OPEN", "GONE")
 WATCH_ACTIONS = ("WAIT", "MERGE", "RETARGET", "STOP", "DONE")
+# `tri t27b next` (#6317): which side of the lane picker a file counts on.
+LANE_KINDS = (None, "LANE", "REFERENCE-BUG")
 
 
 class RulesUnavailable(RuntimeError):
@@ -116,6 +118,11 @@ def _build():
     so.pr_ready.restype = ctypes.c_uint8
     so.watch_action.argtypes = [ctypes.c_uint8, ctypes.c_uint8]
     so.watch_action.restype = ctypes.c_uint8
+    so.lane_kind.argtypes = [ctypes.c_uint8, ctypes.c_uint8]
+    so.lane_kind.restype = ctypes.c_uint8
+    for name in ("lane_score", "with_tests"):
+        getattr(so, name).argtypes = [ctypes.c_uint32, ctypes.c_uint32]
+        getattr(so, name).restype = ctypes.c_uint32
     return so
 
 
@@ -250,3 +257,18 @@ def watch_action(verdict, parent):
     if verdict not in READINESS or parent not in PARENTS:
         raise ValueError(f"unknown verdict/parent {verdict!r}/{parent!r}")
     return WATCH_ACTIONS[lib().watch_action(READINESS.index(verdict), PARENTS.index(parent))]
+
+
+def lane_kind(reference, t27b):
+    """None | LANE | REFERENCE-BUG for one lab record (#6317, slip Q38)."""
+    return LANE_KINDS[lib().lane_kind(verdict(reference), verdict(t27b))]
+
+
+def lane_score(sole, first):
+    """The rank of a blocker family for the next lane; higher goes first."""
+    return int(lib().lane_score(sole, first))
+
+
+def with_tests(reference, vacuous):
+    """Reference passes that run at least one test or invariant."""
+    return int(lib().with_tests(reference, vacuous))

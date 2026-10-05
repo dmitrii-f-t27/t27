@@ -388,6 +388,48 @@ with tempfile.TemporaryDirectory() as tmp:
     check(code == 2 and act is None and "UNREADABLE" in out,
           f"watch: an unreadable parent is no action, never a guessed retarget (Q33) ({code})")
 
+    # next (#6317, slip Q38): lanes only from files the reference passes
+    def rec(f, ref, t, *blockers):
+        return {"file": f, "reference": ref, "t27b": t, "blockers": list(blockers)}
+    nl = lab(results=[
+        rec("p1", "pass", "pass"), rec("p2", "pass", "pass"), rec("v1", "pass", "pass_vacuous"),
+        rec("o1", "pass", "frontend"),
+        rec("a1", "pass", "blocked", "Sole"), rec("a2", "pass", "blocked", "Sole"),
+        rec("b1", "pass", "blocked", "Wide", "Sole"), rec("b2", "pass", "blocked", "Wide", "Other"),
+        rec("b3", "pass", "blocked", "Wide", "Other"),
+        rec("r1", "blocked", "blocked", "RefBug"), rec("r2", "fail", "blocked", "RefBug"),
+        rec("r3", "blocked", "blocked", "RefBug"), rec("r4", "timeout", "blocked", "RefBug", "Sole"),
+        rec("x1", "lab_error", "blocked", "RefBug"), rec("x2", "blocked", "pass")])
+    nx = os.path.join(tmp, "fx-next")
+    write_fixture(nx, {"lab.json": nl})
+    p = subprocess.run([sys.executable, TOOL, "next", "--json", "--fixture", nx], capture_output=True, text=True)
+    try:
+        n = json.loads(p.stdout)
+    except ValueError:
+        n = None
+    check(p.returncode == 0 and n is not None, f"next: --json reads a fixture lab ({p.returncode} {p.stderr[-200:]})")
+    if n:
+        lanes = [(f["family"], f["sole"], f["first"]) for f in n["lanes"]]
+        check(lanes == [("Sole", 2, 2), ("Wide", 0, 3), ("Other", 0, 0)],
+              f"next: a family that unlocks files on its own outranks one that is first on more ({lanes})")
+        check([f["family"] for f in n["reference_bugs"]] == ["RefBug", "Sole"]
+              and n["reference_bugs"][0]["any"] == 4 and n["reference_bug_files"] == 4,
+              f"next: reference failures are listed apart, not as lanes; a lab error counts nowhere "
+              f"({n['reference_bugs']})")
+        check((n["reference_pass"], n["t27b"], n["with_tests"], n["pct_with_tests"])
+              == (9, {"pass": 2, "pass_vacuous": 1, "blocked": 5, "other": 1}, 8, "25.0"),
+              f"next: the honest denominator ({n['reference_pass']} {n['t27b']} {n['with_tests']})")
+    p = subprocess.run([sys.executable, TOOL, "next", "--fixture", nx], capture_output=True, text=True)
+    check(p.returncode == 0 and "t27b pass 2 / 8 with tests (25.0%)" in p.stdout
+          and "reference bugs to file, not lanes" in p.stdout
+          and p.stdout.index("Sole") < p.stdout.index("Wide") < p.stdout.index("RefBug"),
+          f"next: the card ranks lanes, then lists reference bugs\n{p.stdout}")
+    write_fixture(os.path.join(tmp, "fx-next-summary"), {"lab.json": lab()})
+    p = subprocess.run([sys.executable, TOOL, "next", "--fixture", os.path.join(tmp, "fx-next-summary")],
+                       capture_output=True, text=True)
+    check(p.returncode == 2 and "UNREADABLE" in p.stdout,
+          f"next: a summary-only run is unreadable, never an empty ranking ({p.returncode})")
+
     check(snapshot([clean, mid, dirty]) == before, "never write: the worktrees' git state is unchanged")
     # negative control for the snapshot: a change must show
     with open(os.path.join(clean, "g.txt"), "w") as f:
