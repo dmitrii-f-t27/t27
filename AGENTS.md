@@ -124,6 +124,31 @@ Gaps that are open until a PR closes them. Do not assume otherwise:
 
 ---
 
+## Only t27 (owner hard rule, 2026-10-05)
+
+Owner's rule, 2026-10-05: no new commit or pull request may contain code in
+another language; the hooks must stop it. It binds people, bees and agents alike.
+
+- **Allowed:** `.t27` specs; files `t27c` generated under a generated root
+  (`gen/`, `bootstrap/gen/`, `bootstrap/src/memory/generated/`); prose and data
+  (`.md`, `.txt`, `.json`); and **deletions**.
+- **Denied:** adding or modifying hand-written code in any other language --
+  `.rs .py .ts .js .sh .zig .c .go .v .lean .yml .toml`, Dockerfile, Makefile and
+  the rest of the list in the spec. A change to existing Rust
+  (`bootstrap/src/compiler.rs`, `cli/t27b`) or Python is denied too.
+- **The rule is** `specs/policy/own_language.t27`; its `t27c gen-c` output
+  `gen/c/policy/own_language.c` runs in `lefthook.yml` (pre-commit, pre-push)
+  and in `.github/workflows/own-language.yml` on every pull request. Read the
+  spec for the exact list; do not copy it here.
+- **The only override** is the label `owner-approved-foreign`, added by the
+  owner. Changing the gate itself needs it as well.
+- **Existing foreign code is debt** that only shrinks: by deletion, or by
+  replacing it with a spec and its generated output.
+- **`--no-verify` is forbidden**, and so is `LEFTHOOK=0`. Install the hooks
+  once per clone with `lefthook install`.
+- What gen cannot express yet is a compiler defect: file it on the self-host
+  epic (#5980) instead of writing the code by hand.
+
 ## t27b is written in t27
 
 Owner's rule, 2026-10-05: t27b -- the native backend -- and the tools that
@@ -134,9 +159,9 @@ measure it are written in **t27**, not in Rust or Python by hand.
   file is never hand-edited (L2).
 - What gen cannot express yet is a defect of the self-host work (#5980): file
   it there. Do not work around it in a hand-written file.
-- A hand-written addition is debt, not the method. The PR that adds one names
-  the spec that will replace it and links the port epic #6198. A reviewer who
-  sees neither sends it back.
+- A hand-written addition or modification is denied by the gate in "Only t27"
+  above unless the owner labels the pull request `owner-approved-foreign`; such
+  a PR still names the spec that will replace it and links the port epic #6198.
 - The debt only shrinks. On 2026-10-05 (master c532fcae5, `wc -l`) it is
   `cli/t27b/src/*.rs` 8247 lines plus `cli/t27b/tests/*.rs` 2865 (Rust, and
   it mounts `bootstrap/src/compiler.rs`), `scripts/tri_loop/t27b.py` 1568
