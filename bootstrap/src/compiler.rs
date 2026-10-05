@@ -7353,6 +7353,10 @@ pub struct Codegen {
     /// shadow one; t27 permits it (W734: fanout, clock_cfg, slack, diff_text
     /// each name a parameter after a FUNCTION in the same module).
     module_decl_names: std::collections::HashSet<String>,
+    /// #6295: the module-level `var`s among `module_decl_names`. A test block
+    /// that writes `rx_ready = false;` to one of these sets module state; it
+    /// does not bind a new local.
+    module_var_names: std::collections::HashSet<String>,
     /// Parameter renames in force for the function being emitted. The `_arg`
     /// re-binding used for MUTABLE parameters cannot serve the shadow case --
     /// `var fanout = fanout_arg;` recreates the very collision it was meant to
@@ -7447,6 +7451,7 @@ impl Codegen {
             mut_names: std::collections::HashSet::new(),
             discarded_by_ref: std::collections::HashSet::new(),
             module_decl_names: std::collections::HashSet::new(),
+            module_var_names: std::collections::HashSet::new(),
             param_renames: std::collections::HashMap::new(),
             zig_value_names: std::collections::HashSet::new(),
             declared_fns: std::collections::HashSet::new(),
@@ -8296,7 +8301,11 @@ impl Codegen {
     /// silently shadow one. Called once per module walk.
     fn collect_module_decl_names(&mut self, decls: &[Node]) {
         self.module_decl_names.clear();
+        self.module_var_names.clear();
         for d in decls {
+            if d.kind == NodeKind::ConstDecl && d.extra_mutable && !d.name.is_empty() {
+                self.module_var_names.insert(d.name.clone());
+            }
             if matches!(
                 d.kind,
                 NodeKind::FnDecl | NodeKind::ConstDecl | NodeKind::StructDecl | NodeKind::EnumDecl
@@ -8759,6 +8768,16 @@ impl Codegen {
         // type path never went through it, so Zig received `gf16::GF16` and
         // reported "expected ';' after declaration" pointing at the second colon.
         if mapped.contains("::") {
+            // #6533: a declaration spliced in by use-resolution keeps its
+            // module path (`gf16::GF16`), and `gf16` is not declared in the
+            // generated file. When the last segment is a type this mapper
+            // already knows (`GF16` -> `u16`, `str` -> `[]const u8`), that
+            // mapping is the type, exactly as for the importer's own fields.
+            let last = mapped.rsplit("::").next().unwrap_or(mapped).trim();
+            let last_mapped = Self::t27_array_type_to_zig(last);
+            if !last.is_empty() && last_mapped != last {
+                return format!("{}{}", prefix, last_mapped);
+            }
             return format!("{}{}", prefix, mapped.replace("::", "."));
         }
         if mapped == core && prefix.is_empty() && !t.starts_with('&') {
@@ -9173,6 +9192,54 @@ impl Codegen {
         self.zig_value_names.clear();
     }
 
+    /// #6295: the renames a test or bench block needs, set up the way
+    /// `gen_fn_decl` sets up W736. A `StmtLocal` named like a module
+    /// declaration, and a first `name = ...` binding named like a module
+    /// declaration that is NOT a module `var`, are new locals and get `_lv`.
+    /// A write to a module `var` is left alone: it is an assignment.
+    fn block_shadow_renames(&mut self, children: &[Node]) {
+        self.param_renames.clear();
+        let mut shadow_locals: Vec<String> = Vec::new();
+        Self::collect_shadowing_locals(children, &self.module_decl_names, &mut shadow_locals);
+        for stmt in children {
+            if stmt.kind == NodeKind::StmtAssign
+                && stmt.children.len() >= 2
+                && stmt.children[0].kind == NodeKind::ExprIdentifier
+            {
+                let n = &stmt.children[0].name;
+                if self.module_decl_names.contains(n.as_str())
+                    && !self.module_var_names.contains(n.as_str())
+                    && !shadow_locals.contains(n)
+                {
+                    shadow_locals.push(n.clone());
+                }
+            }
+        }
+        for l in shadow_locals {
+            self.param_renames.entry(l.clone()).or_insert(format!("{}_lv", l));
+        }
+    }
+
+    /// #6295: is this top-level block statement the FIRST binding of a name?
+    /// A name the block already declared with `var`/`let` is not, and neither
+    /// is a write to a module `var` (unless a block local shadows it).
+    fn block_fresh_binding(
+        &self,
+        stmt: &Node,
+        bound: &mut std::collections::HashSet<String>,
+    ) -> bool {
+        if stmt.kind == NodeKind::StmtLocal && !stmt.name.is_empty() {
+            bound.insert(stmt.name.clone());
+        }
+        stmt.kind == NodeKind::StmtAssign
+            && stmt.children.len() >= 2
+            && stmt.children[0].kind == NodeKind::ExprIdentifier
+            && !stmt.children[0].name.is_empty()
+            && !(self.module_var_names.contains(stmt.children[0].name.as_str())
+                && !self.param_renames.contains_key(&stmt.children[0].name))
+            && bound.insert(stmt.children[0].name.clone())
+    }
+
     fn gen_test_block(&mut self, node: &Node) {
         self.prepare_zig_value_scope(node);
         // Zig rejects a file that declares the same test name twice. Repeats
@@ -9235,13 +9302,25 @@ impl Codegen {
         let mut assign_counts: std::collections::HashMap<String, u32> =
             std::collections::HashMap::new();
         count_ident_assigns(&node.children, &mut assign_counts);
+
+        // #6295: a test sees the module's declarations the way a fn body does,
+        // and Zig rejects the same three things in it:
+        //   * `cover_hit = false;` where `cover_hit` is a module `var` is a
+        //     write to module state. Binding it as `const cover_hit` shadowed
+        //     the declaration.
+        //   * `var rx_ready = false;` where `rx_ready` is a module `var`, or
+        //     `pack_frac = ...` where `pack_frac` is a module fn, IS a new
+        //     local. It gets the W736 `_lv` rename that fn bodies already get,
+        //     at the binding site and at every reference.
+        //   * `var ok: bool = f(10); ... ok = f(20);` reassigns the local the
+        //     test declared. The first `ok = ...` was bound a second time
+        //     (`const ok`), because only assignments were tracked as bound.
+        // The renames are cleared at both ends: before this, the last fn's
+        // renames leaked into every test emitted after it.
+        self.block_shadow_renames(&node.children);
         let mut bound: std::collections::HashSet<String> = std::collections::HashSet::new();
         for stmt in &node.children {
-            let fresh_binding = stmt.kind == NodeKind::StmtAssign
-                && stmt.children.len() >= 2
-                && stmt.children[0].kind == NodeKind::ExprIdentifier
-                && !stmt.children[0].name.is_empty()
-                && bound.insert(stmt.children[0].name.clone());
+            let fresh_binding = self.block_fresh_binding(stmt, &mut bound);
             let tuple_binding = stmt.kind == NodeKind::StmtAssign
                 && stmt.children.len() >= 2
                 && stmt.children[0].kind == NodeKind::ExprTuple
@@ -9257,7 +9336,7 @@ impl Codegen {
                     "const"
                 };
                 self.write_indent();
-                self.write(&format!("{} {} = ", kw, Self::zig_binding_ident(name)));
+                self.write(&format!("{} {} = ", kw, Self::zig_binding_ident(&self.renamed(name))));
                 self.gen_expr(&stmt.children[1]);
                 self.write_line(";");
                 if stmt.children[0].kind == NodeKind::ExprIdentifier {
@@ -9281,7 +9360,7 @@ impl Codegen {
                             // binding would be an "unused local constant".
                             "_".to_string()
                         } else {
-                            format!("const {}", Self::zig_binding_ident(&e.name))
+                            format!("const {}", Self::zig_binding_ident(&self.renamed(&e.name)))
                         }
                     })
                     .collect();
@@ -9320,6 +9399,7 @@ impl Codegen {
             self.string_names.remove(n);
         }
         self.zig_value_names.clear();
+        self.param_renames.clear();
     }
 
     fn gen_invariant_block(&mut self, node: &Node) {
@@ -9474,13 +9554,15 @@ impl Codegen {
 
         // Same first-assignment-as-const lowering as gen_test_block: bench
         // bindings parse as StmtAssign and would reference undeclared names.
+        // #6295: the same shadow and rebinding rules as gen_test_block; a
+        // reassigned binding is `var`, as it is there.
+        self.block_shadow_renames(&node.children);
+        let mut assign_counts: std::collections::HashMap<String, u32> =
+            std::collections::HashMap::new();
+        count_ident_assigns(&node.children, &mut assign_counts);
         let mut bound: std::collections::HashSet<String> = std::collections::HashSet::new();
         for stmt in &node.children {
-            let fresh_binding = stmt.kind == NodeKind::StmtAssign
-                && stmt.children.len() >= 2
-                && stmt.children[0].kind == NodeKind::ExprIdentifier
-                && !stmt.children[0].name.is_empty()
-                && bound.insert(stmt.children[0].name.clone());
+            let fresh_binding = self.block_fresh_binding(stmt, &mut bound);
             let tuple_binding = stmt.kind == NodeKind::StmtAssign
                 && stmt.children.len() >= 2
                 && stmt.children[0].kind == NodeKind::ExprTuple
@@ -9509,7 +9591,13 @@ impl Codegen {
                     }
                     self.write("_ = ");
                 } else {
-                    self.write(&format!("const {} = ", Self::zig_binding_ident(&stmt.children[0].name)));
+                    let name = &stmt.children[0].name;
+                    let kw = if assign_counts.get(name).copied().unwrap_or(0) >= 2 {
+                        "var"
+                    } else {
+                        "const"
+                    };
+                    self.write(&format!("{} {} = ", kw, Self::zig_binding_ident(&self.renamed(name))));
                 }
                 self.gen_expr(&stmt.children[1]);
                 self.write_line(";");
@@ -9530,7 +9618,7 @@ impl Codegen {
                         if e.name == "_" {
                             "_".to_string()
                         } else {
-                            format!("const {}", Self::zig_binding_ident(&e.name))
+                            format!("const {}", Self::zig_binding_ident(&self.renamed(&e.name)))
                         }
                     })
                     .collect();
@@ -9557,6 +9645,7 @@ impl Codegen {
         self.dedent();
         self.write_line("}");
         self.zig_value_names.clear();
+        self.param_renames.clear();
     }
 
     fn gen_stmt(&mut self, node: &Node) {
