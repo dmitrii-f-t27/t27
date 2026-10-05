@@ -384,8 +384,9 @@ pub enum TrapKind {
     /// `@intFromFloat(x)` whose integer part is outside the result type, or
     /// x is NaN or infinite (Zig's safety check on the conversion).
     FloatToInt = 9,
-    /// `undefined;` in a fn the reference never analyzes: no test reaches
-    /// it, so this trap is never expected to fire.
+    /// `undefined;` or an ignored value (`expr;`) in a fn the reference
+    /// never analyzes: no test reaches it, so this trap is never expected
+    /// to fire.
     Stub = 10,
     // Memory lane: numbered from 16 so the scalar lane can add kinds below.
     /// An index at or past the length of an array, slice or string.
@@ -405,7 +406,7 @@ impl TrapKind {
             TrapKind::EnumTag => "invalid enum value",
             TrapKind::FloatToInt => "integer part of floating point value out of bounds",
             TrapKind::Bounds => "index out of bounds",
-            TrapKind::Stub => "reached a body stub (`undefined;`)",
+            TrapKind::Stub => "reached a statement the reference never compiles (`undefined;` or an ignored value)",
         }
     }
 }

@@ -1096,6 +1096,67 @@ test inc_fails {
     }
 }
 
+#[test]
+fn ignored_value_only_where_zig_never_looks() {
+    // A Rust-style tail expression (`fn f(v: u8) -> u32 { v }`) or a bare
+    // comparison is emitted by t27c's Zig backend as `expr;`, with no
+    // implicit return. Zig rejects that ("value of type 'bool' ignored") only
+    // in a body it analyzes; nothing a test reaches names these fns, so the
+    // reference compiles the file and runs both tests.
+    let src = "module vi;
+
+fn tail(v: u8) -> u32 {
+    v
+}
+
+fn mixed(a: u32, b: u32) -> u32 {
+    let c: u32 = a | b;
+    c | 1
+}
+
+fn flag(x: u32) -> bool {
+    if x > 3 {
+        true
+    } else {
+        false
+    }
+}
+
+fn inc(x: u32) u32 {
+    return x + 1;
+}
+
+test inc_works {
+    assert(inc(1) == 2);
+}
+
+test inc_fails {
+    assert(inc(1) == 3);
+}
+";
+    let r = run(src);
+    assert_eq!(names_ok(&r), vec![("inc_works", false, true), ("inc_fails", false, false)]);
+    // Where something analyzed reaches it -- a test, a brace-form invariant
+    // (a `comptime` block), a fn a test calls -- the reference does not
+    // compile: refused under the expression's own kind, never read as a
+    // return value.
+    let reached = [
+        ("const N: u32 = 3;\ninvariant i { N == 3 }\n", "ExprBinary"),
+        ("fn f(v: u32) -> u32 { v }\ntest t { assert(f(1) == 1); }\n", "ExprIdentifier"),
+        ("fn g(a: u32) -> u32 { a + 1 }\nfn f(x: u32) -> u32 { return g(x); }\ntest t { assert(f(1) == 2); }\n", "ExprBinary"),
+        ("test t { 1; }\n", "ExprLiteral"),
+    ];
+    for (body, kind) in reached {
+        let m = rejected(&format!("module vr;\n\n{}", body));
+        assert!(
+            m.starts_with(&format!("t27b: unsupported construct {}(value ignored) statement at line", kind)),
+            "{}: {}",
+            body,
+            m
+        );
+    }
+}
+
 // ------------------------------------------------------ stack parameters
 
 /// More than 8 parameters: the ninth and later of a class are passed on the
