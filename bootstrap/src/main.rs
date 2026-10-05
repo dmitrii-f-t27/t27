@@ -5213,8 +5213,14 @@ fn run_gen_testbench(input_path: &str, period_ns: u32, max_cycles: u32, output: 
     let ast = compiler::Compiler::parse_ast(&source)
         .map_err(|e| anyhow::anyhow!("Parse error: {}", e))?;
 
-    let module_name = if !ast.name.is_empty() { &ast.name } else { "dut" };
-    let mut tb = compiler::HirTestbench::new(module_name, max_cycles, period_ns);
+    // #5978: the DUT name must match the HIR module line, which sanitizes the
+    // name (a dotted `sandbox.health` is not a Verilog identifier).
+    let module_name = if !ast.name.is_empty() {
+        compiler::VerilogCodegen::sanitize_identifier(&ast.name)
+    } else {
+        "dut".to_string()
+    };
+    let mut tb = compiler::HirTestbench::new(&module_name, max_cycles, period_ns);
 
     for node in &ast.children {
         if node.kind == compiler::NodeKind::ConstDecl {

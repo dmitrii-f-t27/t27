@@ -1664,6 +1664,21 @@ the parser used to read it as `{}` followed by a negation",
                             self.advance();
                         }
                     }
+                    // #5978: a DOTTED name, `module sandbox.health;` or
+                    // `module port::trinity.src.tri.gen_image;`. The loop
+                    // stopped at the `.`, so the name was `sandbox` and
+                    // `.health` became a stray top-level expression with no
+                    // line -- 11 specs. Same repair as `::`: the name is a
+                    // NAME, kept verbatim, which is also what the seal tool's
+                    // `extract_module_name` already records. A `.` counts only
+                    // with a segment after it.
+                    if self.current.kind == TokenKind::Dot
+                        && self.peek.kind == TokenKind::Ident
+                    {
+                        self.advance(); // consume .
+                        mod_name.push('.');
+                        continue;
+                    }
                     if self.current.kind != TokenKind::Colon
                         || self.peek.kind != TokenKind::Colon
                     {
@@ -1807,11 +1822,13 @@ the parser used to read it as `{}` followed by a negation",
             // emit one file per spec regardless, so the declarations merge.
             if self.current.kind == TokenKind::KwModule {
                 self.advance(); // consume 'module'
+                // #5978: `.` too, so a later dotted header does not leave
+                // `.b` behind as a stray expression.
                 while matches!(
                     self.current.kind,
-                    TokenKind::Ident | TokenKind::Minus | TokenKind::Number
+                    TokenKind::Ident | TokenKind::Minus | TokenKind::Number | TokenKind::Dot
                 ) {
-                    self.advance(); // the (possibly hyphenated) name
+                    self.advance(); // the (possibly hyphenated or dotted) name
                 }
                 if self.current.kind == TokenKind::Semicolon
                     || self.current.kind == TokenKind::LBrace
@@ -1865,6 +1882,20 @@ the parser used to read it as `{}` followed by a negation",
                     } else {
                         // Parse :: separated segments
                         loop {
+                            // #5978: `use std.testing;` / `use sandbox.session;`.
+                            // The `.` ended the path, leaving `.testing` as a
+                            // stray top-level expression. A dotted use path is
+                            // a module path like any other, so it is stored
+                            // in the one spelling every consumer splits on --
+                            // `::` -- and its last segment is the import name.
+                            if self.current.kind == TokenKind::Dot
+                                && self.peek.kind == TokenKind::Ident
+                            {
+                                self.advance(); // consume .
+                                full_path.push_str("::");
+                                full_path.push_str(&self.read_hyphenated_ident());
+                                continue;
+                            }
                             if self.current.kind == TokenKind::Colon {
                                 self.advance();
                                 if self.current.kind == TokenKind::Colon {
@@ -8100,10 +8131,25 @@ impl Codegen {
                     || module_referenced(&n.children, module)
             })
         }
+        // #5978: `s.status` where `s` is a parameter or a local is a field
+        // access, not a module reference, and Zig rejects a local that shadows
+        // a container-level `const s = @import(...)`. Before the dotted-use fix
+        // `use sandbox.session;` was named `sandbox` and never collided;
+        // named `session`, it met the parameter `session` in
+        // specs/sandbox/orphan_detection.t27.
+        fn locally_bound(nodes: &[Node], name: &str) -> bool {
+            nodes.iter().any(|n| {
+                (n.kind == NodeKind::FnDecl && n.params.iter().any(|(p, _)| p == name))
+                    || (n.kind == NodeKind::StmtLocal && n.name == name)
+                    || locally_bound(&n.children, name)
+            })
+        }
         let mut has_imports = false;
         for decl in &ast.children {
             if decl.kind == NodeKind::UseDecl {
-                if module_referenced(&ast.children, &decl.name) {
+                if module_referenced(&ast.children, &decl.name)
+                    && !locally_bound(&ast.children, &decl.name)
+                {
                     self.write_line(&format!(
                         "const {} = @import(\"{}.zig\");",
                         decl.name, decl.name
@@ -11118,7 +11164,7 @@ impl VerilogCodegen {
         }
     }
 
-    fn sanitize_identifier(name: &str) -> String {
+    pub(crate) fn sanitize_identifier(name: &str) -> String {
         name.replace('-', "_")
             .replace(|c: char| !c.is_alphanumeric() && c != '_', "_")
     }
@@ -19131,7 +19177,9 @@ long double: fabsl, default: llabs)(x)",
         self.write_line("");
 
         // Guard macro
-        let guard = mn.replace('-', "_").to_uppercase();
+        // #5978: a dotted module name (`sandbox.health`) is not a macro name
+        // either; `.` goes the way `-` already did.
+        let guard = mn.replace(['-', '.'], "_").to_uppercase();
         self.write_line(&format!("#ifndef {}_H", guard));
         self.write_line(&format!("#define {}_H", guard));
         self.write_line("");
@@ -33920,8 +33968,11 @@ pub struct AstToHir;
 
 impl AstToHir {
     pub fn convert(ast: &Node) -> Result<HirModule, String> {
+        // #5978: the HIR name becomes `module <name> (` in Verilog, so it gets
+        // the same sanitizer the main gen-verilog path applies to the module
+        // name -- a dotted `sandbox.health` is not a Verilog identifier.
         let module_name = if !ast.name.is_empty() {
-            ast.name.clone()
+            VerilogCodegen::sanitize_identifier(&ast.name)
         } else {
             "unknown".to_string()
         };
