@@ -4,7 +4,6 @@ APB_Bridge_Testbench.json | tests-fail | specs/fpga/testbench/apb_bridge_tb.t27 
 AXI4_Testbench.json | tests-fail | specs/fpga/testbench/axi4_tb.t27 -- compiles since #6295; 5 of 8 tests fail (#6560)
 Binary16.json | dangling | specs/numeric/binary16.t27
 Bridge_Testbench.json | tests-fail | specs/fpga/testbench/bridge_tb.t27 -- compiles since #6295; 4 of 7 tests fail (#6560)
-BuildVerify.json | stale | specs/fpga/verification/build_verify.t27 -- tests fail (#5577); seal restored to pre-#5578 by #5580
 ClockDomain_Testbench.json | tests-fail | specs/fpga/testbench/clock_domain_tb.t27 -- compiles since #6315; its tests hang (#6560)
 D2D_Conformance.json | phantom | specs/network/d2d_conformance.t27
 GF16_Accel_Testbench.json | tests-fail | specs/fpga/testbench/gf16_accel_tb.t27 -- compiles since #6315; its tests fail (#6560)
@@ -141,6 +140,5 @@ triformat-posit16.json | dangling | specs/numeric/posit16.t27
 utils_TriTemplate.json | stale | specs/tri/utils/template.t27 -- tests fail (#5577); seal restored to pre-#5578 by #5580
 utils_TriTerminal.json | stale | specs/tri/utils/terminal.t27 -- tests fail (#5577); seal restored to pre-#5578 by #5580
 verdict_example.json | no-spec-path | the seal does not say which spec it describes
-verification_BuildVerify.json | stale | specs/fpga/verification/build_verify.t27 -- tests fail (#5577); seal restored to pre-#5578 by #5580
 vsa_simple_port-trin-vsa-simple.json | tests-fail | specs/port/trinity/src/vsa_simple/vsa.t27 -- compiles since #6295; 1 of 7 tests fail (#6560)
 webassembly_GfCalculator.json | dangling | examples/webassembly/gf-calculator.t27
