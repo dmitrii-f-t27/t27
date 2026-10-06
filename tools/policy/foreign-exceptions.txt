@@ -38,6 +38,10 @@ bootstrap/stage0/FROZEN_HASH
 scripts/tri_loop/t27b_dogfood.py
 scripts/tri_loop/t27b.py
 scripts/ci/test_a_t27b_tick_reads_before_it_acts.py
+# owner-approved 2026-10-06, #6664: "write everything in .t27" -- the --check fuel policy is
+# specs/tri/t27b/check_budget.t27 (t27c gen-rust); the hand-written Rust is the call-site glue in
+# cmd_test only. Debt #6198/#5980.
+cli/t27b/src/main.rs
 # owner 2026-10-06, issue #6444: the owner put the label owner-approved-foreign on #6444 (translated:
 # 'add the label yourself and do the work'). The native arm64 t27b CI workflow (CI plumbing); the
 # ready check names live in scripts/tri_loop/t27b.py, listed above. Plus one dict entry in
