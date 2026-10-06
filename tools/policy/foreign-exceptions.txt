@@ -118,6 +118,9 @@ cli/t27b/tests/arraylit.rs
 cli/t27b/src/lower.rs
 cli/t27b/tests/tail.rs
 cli/t27b/tests/source.rs
+# Same approval, issue #6967 (lower.rs and source.rs above): an untyped `var` set to an integer literal
+# takes the width the reference pins on it, and an untyped `const x = undefined;` is accepted.
+
 # owner-approved 2026-10-06 by the owner-approved-foreign labels already carried by #6826 (merger) and
 # #6847 (queen export-push, Refs #6657); standing authorization 2026-10-06 ("add the label yourself and
 # do the foreign part", translated). These pre-rule files were MODIFIED by those label-gated PRs but never
