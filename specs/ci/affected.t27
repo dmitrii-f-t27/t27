@@ -274,7 +274,9 @@ pub fn closure(buf: []const u8, n: usize, set: []u8, scap: usize) -> usize {
     while (grew and sn <= scap) {
         grew = false;
         s = gs;
-        while (s < c) {
+        // Stop once set_add() has overflowed: sn is then scap + 1 and in_set() would read set[sn0..sn],
+        // bytes never written. t27b's interpreter faults on that read (lab run 099ac2224, #6063).
+        while (s < c and sn <= scap) {
             const e : usize = line_end(buf, s, c);
             const t : usize = text_end(buf, s, e);
             const p : usize = first_tab(buf, s, t);
