@@ -320,7 +320,7 @@ size_t closure(uint8_t* buf, size_t n, uint8_t* set, size_t scap) {
     while ((grew && (sn <= scap))) {
         grew = false;
         s = gs;
-        while ((s < c)) {
+        while (((s < c) && (sn <= scap))) {
             size_t e = line_end(buf, s, c);
             size_t t = text_end(buf, s, e);
             size_t p = first_tab(buf, s, t);
