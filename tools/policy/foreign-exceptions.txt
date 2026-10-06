@@ -124,6 +124,9 @@ cli/t27b/tests/tail.rs
 cli/t27b/tests/source.rs
 # Same approval, issue #6967 (lower.rs and source.rs above): an untyped `var` set to an integer literal
 # takes the width the reference pins on it, and an untyped `const x = undefined;` is accepted.
+# Same approval, issue #7057: `_ = p;` for a parameter lowers to nothing where the reference compiles it.
+cli/t27b/src/lower.rs
+cli/t27b/tests/source.rs
 
 # owner-approved 2026-10-06 by the owner-approved-foreign labels already carried by #6826 (merger) and
 # #6847 (queen export-push, Refs #6657); standing authorization 2026-10-06 ("add the label yourself and
