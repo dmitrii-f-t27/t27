@@ -73,6 +73,15 @@ fn cr_root(l: &[String]) -> [u8; 32] { let k = cr::split_point(l.len() as u32) a
     if l.len() < 2 { l.first().map_or(cr_sha(&[]), |x| cr_sha(&[&[cr::LEAF_PREFIX], x.as_bytes()])) } else { cr_sha(&[&[cr::NODE_PREFIX], &cr_root(&l[..k]), &cr_root(&l[k..])]) } }
 fn cr_pair(a: &str, b: &str) -> String { let (a, b): (&'static str, &'static str) = (Box::leak(a.into()), Box::leak(b.into())); (0..cr::pair_len(a, b)).map(|k| cr::pair_char(a, b, k) as u8 as char).collect() }
 fn cr_leaves(v: &serde_json::Value, n: &str) -> Vec<String> { v["leaves"][n].as_array().into_iter().flatten().filter_map(|s| s.as_str().map(String::from)).collect() }
+// specs/tri/crypto/{sha256,ed25519}.t27 (ed25519 carries sha512.t27), lowered by
+// `t27c gen-rust`: receipt key ids, signing and verification. Never hand-edit;
+// bootstrap/tests/signed_receipt_reader.rs fails when a copy drifts.
+#[path = "../gen/rust/tri/crypto/sha256.rs"]
+#[allow(dead_code, unused_parens, unused_mut, unused_assignments, unused_variables, non_snake_case, non_upper_case_globals, clippy::all)]
+mod sha256;
+#[path = "../gen/rust/tri/crypto/ed25519.rs"]
+#[allow(dead_code, unused_parens, unused_mut, unused_assignments, unused_variables, non_snake_case, non_upper_case_globals, clippy::all)]
+mod ed25519;
 mod memory;
 mod trit_stdlib;
 mod behavior_sva;
@@ -106,7 +115,6 @@ mod tt_profile;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use sha2::{Sha256, Digest};
 #[cfg(feature = "server")]
 use std::env;
 use std::fs;
@@ -5508,9 +5516,7 @@ fn run_gen_python(input_path: &str) -> anyhow::Result<()> {
 }
 
 fn sha256_hex(data: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    format!("{:x}", hasher.finalize())
+    sha256::hash_hex(data).iter().map(|&c| c as char).collect()
 }
 
 fn run_conformance(input_path: &str) -> anyhow::Result<()> {
@@ -7413,10 +7419,9 @@ fn board_profile(name: &str) -> anyhow::Result<BoardProfile> {
 /// Prints `<64-hex-sha256> <repo-relative-path>`, which is the operational line
 /// `bootstrap/stage0/FROZEN_HASH` expects.
 fn run_frozen_digest(path: Option<&str>) -> anyhow::Result<()> {
-    use sha2::{Digest, Sha256};
     let rel = path.unwrap_or("bootstrap/src/compiler.rs");
     let bytes = fs::read(rel).with_context(|| format!("reading {}", rel))?;
-    println!("{:x} {}", Sha256::digest(&bytes), rel);
+    println!("{} {}", sha256_hex(&bytes), rel);
     Ok(())
 }
 
@@ -10054,9 +10059,7 @@ fn body_digest(node: &compiler::Node) -> String {
     for child in &node.children {
         structural(child, &mut shape);
     }
-    let mut hasher = Sha256::new();
-    hasher.update(shape.as_bytes());
-    format!("{:x}", hasher.finalize())[..16].to_string()
+    sha256_hex(shape.as_bytes())[..16].to_string()
 }
 
 /// How much body there is to compare.
@@ -11499,15 +11502,7 @@ fn run_hash(input_path: &str) -> anyhow::Result<()> {
     let mut f = std::fs::File::open(input_path)?;
     let mut buf = Vec::new();
     f.read_to_end(&mut buf)?;
-    let hash = {
-        use std::fmt::Write;
-        let digest = <sha2::Sha256 as sha2::Digest>::digest(&buf);
-        let mut s = String::with_capacity(64);
-        for byte in digest {
-            write!(&mut s, "{:02x}", byte).unwrap();
-        }
-        s
-    };
+    let hash = sha256_hex(&buf);
     println!("{}  {}", hash, file_name);
     Ok(())
 }
