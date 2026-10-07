@@ -394,6 +394,11 @@ fn qualified_refs(text: &str, modules: &[String]) -> Vec<(String, String, bool)>
 
 /// Every identifier-shaped token in the text, with `//` comments removed so a
 /// doc line cannot invent a dependency.
+///
+/// A token right after `@` is a builtin (`@pow`, `@abs`, `@as`), not a name
+/// the spec reads, so it is left out (#7292). Read as a name, `@pow(x, y)` in
+/// `memory/formula_embed.t27` spliced `math/constants.t27`'s own `pow`, and
+/// with it `floor`, `exp_approx` and `E`, which nothing in the importer calls.
 fn identifiers(text: &str) -> HashSet<String> {
     let mut out = HashSet::new();
     for line in text.lines() {
@@ -402,18 +407,24 @@ fn identifiers(text: &str) -> HashSet<String> {
             None => line,
         };
         let mut cur = String::new();
+        let mut builtin = false;
+        let mut prev = ' ';
         for c in code.chars() {
             if c.is_alphanumeric() || c == '_' {
+                if cur.is_empty() {
+                    builtin = prev == '@';
+                }
                 cur.push(c);
             } else {
-                if !cur.is_empty() && !cur.chars().next().unwrap().is_ascii_digit() {
+                if !builtin && !cur.is_empty() && !cur.chars().next().unwrap().is_ascii_digit() {
                     out.insert(std::mem::take(&mut cur));
                 } else {
                     cur.clear();
                 }
             }
+            prev = c;
         }
-        if !cur.is_empty() && !cur.chars().next().unwrap().is_ascii_digit() {
+        if !builtin && !cur.is_empty() && !cur.chars().next().unwrap().is_ascii_digit() {
             out.insert(cur);
         }
     }
@@ -611,6 +622,58 @@ fn flatten_qualified(
         .unwrap_or(false)
 }
 
+/// #7281: an item `use` whose items the splice declares has done its work, so
+/// it is written into the resolved text as a comment. Kept as it was, the Zig
+/// backend read `use base::types::Trit;` as an import whenever the body reads
+/// `Trit.neg`, and wrote `const Trit = @import("Trit.zig");` beside the
+/// spliced `Trit`: zig stops at "duplicate struct member name". A brace list
+/// keeps the items the splice did not declare. A whole-module `use`, an alias
+/// and an item the splice did not declare stay as they are. One line in, one
+/// line out, so a line number in a diagnostic still names the importer's line.
+fn consume_spliced_uses(source: &str, specs_root: &Path, pulled: &HashSet<String>) -> String {
+    let mut out = String::with_capacity(source.len());
+    for line in source.split_inclusive('\n') {
+        let text = line.strip_suffix('\n').unwrap_or(line);
+        match consumed_use(text, specs_root, pulled) {
+            Some(new) => {
+                out.push_str(&new);
+                if line.ends_with('\n') {
+                    out.push('\n');
+                }
+            }
+            None => out.push_str(line),
+        }
+    }
+    out
+}
+
+/// The line `consume_spliced_uses` writes for one `use` line, or None to keep it.
+fn consumed_use(line: &str, specs_root: &Path, pulled: &HashSet<String>) -> Option<String> {
+    let expr = use_path_expr(line)?;
+    let (_, whole) = use_target(specs_root, expr)?;
+    if whole || expr.contains(" as ") {
+        return None;
+    }
+    let indent = &line[..line.len() - line.trim_start().len()];
+    let (prefix, items): (&str, Vec<&str>) = match expr.find('{') {
+        Some(open) => {
+            let close = expr.rfind('}')?;
+            let list = expr[open + 1..close].split(',').map(str::trim).filter(|s| !s.is_empty());
+            (&expr[..open], list.collect())
+        }
+        None => ("", vec![expr.rsplit(|c| c == ':' || c == '.').next()?]),
+    };
+    let (spliced, kept): (Vec<&str>, Vec<&str>) = items.iter().partition(|n| pulled.contains(**n));
+    if spliced.is_empty() {
+        return None;
+    }
+    let note = format!("{} spliced below by t27c (#7281)", spliced.join(", "));
+    if kept.is_empty() {
+        return Some(format!("{}// {} -- {}", indent, line.trim(), note));
+    }
+    Some(format!("{}use {}{{{}}}; // {}", indent, prefix, kept.join(", "), note))
+}
+
 pub fn resolve(input_path: &Path, source: &str) -> String {
     let specs_root = match find_specs_root(input_path) {
         Some(r) => r,
@@ -748,7 +811,7 @@ pub fn resolve(input_path: &Path, source: &str) -> String {
 
     // Rewrite `module::name` / `module.name` to the bare name the splice
     // declares. Longest first, so `a::bc` is not damaged by rewriting `a::b`.
-    let mut out = String::from(source);
+    let mut out = consume_spliced_uses(source, &specs_root, &pulled_names);
     // W606: `|| local.contains(name)`.
     //
     // The filter used to accept only names the splice PULLED, so a qualified
@@ -1042,6 +1105,19 @@ mod tests {
         let ids = identifiers("let x = y; // mentions zzz\n");
         assert!(ids.contains("y"));
         assert!(!ids.contains("zzz"));
+    }
+
+    /// #7292: a builtin is not a name. `x@pow` cannot occur, so only the
+    /// token that starts right after `@` is dropped, and its arguments stay.
+    #[test]
+    fn identifiers_skips_a_builtin_but_keeps_its_arguments() {
+        let ids = identifiers("return @pow(base, @as(f64, exp)) + pow(a, b);\n");
+        for name in ["base", "exp", "f64", "pow", "a", "b"] {
+            assert!(ids.contains(name), "{} missing from {:?}", name, ids);
+        }
+        assert!(!ids.contains("as"), "{:?}", ids);
+        let only = identifiers("return @pow(base, 2.0);\n");
+        assert!(!only.contains("pow"), "{:?}", only);
     }
 }
 
@@ -1375,5 +1451,69 @@ mod missing_use_tests {
         assert_eq!(read, 7);
         assert_eq!(targets.len(), 4, "{:?}", targets);
         assert_eq!(targets.len() + notes.len(), read);
+    }
+
+    /// #7281: the item a `use` names is spliced, so the line is a comment and
+    /// the Zig backend imports nothing for it. Kept as a `use`, the same text
+    /// lowers `E.y` through `const E = @import("E.zig");` beside the spliced
+    /// `E` -- the control below shows that, so this test cannot pass on a
+    /// backend that stopped importing for another reason.
+    #[test]
+    fn a_spliced_item_use_is_written_as_a_comment() {
+        let root = specs_with_a_b("consume");
+        let b = "module b;\npub const K : u8 = 3;\npub const E = enum(u8) {\n    x = 0,\n    y = 1,\n};\n";
+        std::fs::write(root.join("a/b.t27"), b).expect("write");
+        let input = root.join("m.t27");
+        let src = "module m;\nuse a::b::E;\n\npub fn e() -> E {\n    return E.y;\n}\n";
+        let out = resolve(&input, src);
+        let note = "// use a::b::E; -- E spliced below by t27c (#7281)";
+        assert_eq!(out.lines().nth(1), Some(note), "{}", out);
+        assert_eq!(out.lines().nth(3), Some("pub fn e() -> E {"), "{}", out);
+        assert!(out.contains("pub const E = enum(u8) {"), "{}", out);
+        let zig = crate::compiler::Compiler::compile(&out).expect("gen");
+        assert!(!zig.contains("@import(\"E.zig\")"), "{}", zig);
+        let kept = crate::compiler::Compiler::compile(&out.replace(note, "use a::b::E;")).expect("gen");
+        assert!(kept.contains("const E = @import(\"E.zig\");"), "{}", kept);
+    }
+
+    /// A brace list keeps what the splice did not declare; a whole-module
+    /// `use`, an alias, and an item the importer declares itself stay as written.
+    #[test]
+    fn only_the_spliced_items_of_a_use_are_consumed() {
+        let root = specs_with_a_b("consume-kinds");
+        let input = root.join("m.t27");
+        let body = "\n\npub fn k() -> u8 {\n    return K;\n}\n";
+        let out = resolve(&input, &format!("module m;\n    use a::b::{{K, Q}};{}", body));
+        assert_eq!(
+            out.lines().nth(1),
+            Some("    use a::b::{Q}; // K spliced below by t27c (#7281)"),
+            "{}",
+            out
+        );
+        let out = resolve(&input, &format!("module m;\nuse a::b::{{ K }};{}", body));
+        assert_eq!(out.lines().nth(1), Some("// use a::b::{ K }; -- K spliced below by t27c (#7281)"));
+        for line in ["use a::b;", "use a::b::K as L;", "use a::b::Q;"] {
+            let out = resolve(&input, &format!("module m;\n{}{}", line, body));
+            assert_eq!(out.lines().nth(1), Some(line), "{}", out);
+        }
+        let local = "module m;\nuse a::b::K;\nconst K : u8 = 9;\npub fn k() -> u8 {\n    return K;\n}\n";
+        assert_eq!(resolve(&input, local).lines().nth(1), Some("use a::b::K;"));
+    }
+
+    /// #7292: an importer that reads `@pow` splices no `pow`. The control
+    /// calls `pow` by name and gets it, so the test cannot pass because the
+    /// splice stopped working.
+    #[test]
+    fn a_builtin_call_splices_no_namesake() {
+        let root = specs_with_a_b("builtin");
+        let b = "module b;\npub const K : f64 = 3.0;\npub fn pow(x: f64, y: f64) -> f64 {\n    return x;\n}\n";
+        std::fs::write(root.join("a/b.t27"), b).expect("write");
+        let input = root.join("m.t27");
+        let src = "module m;\nuse a::b::K;\n\npub fn sq() -> f64 {\n    return @pow(K, 2.0);\n}\n";
+        let out = resolve(&input, src);
+        assert!(out.contains("pub const K : f64 = 3.0;"), "{}", out);
+        assert!(!out.contains("pub fn pow("), "{}", out);
+        let named = resolve(&input, &src.replace("@pow(", "pow("));
+        assert!(named.contains("pub fn pow("), "{}", named);
     }
 }
