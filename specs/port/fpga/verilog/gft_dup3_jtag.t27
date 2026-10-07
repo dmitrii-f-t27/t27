@@ -1,0 +1,5 @@
+module gft_dup3_jtag {
+    test placeholder {
+        assert true;
+    }
+}
