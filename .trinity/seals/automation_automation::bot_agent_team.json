@@ -1,20 +1,20 @@
 {
   "built_by": "t27c-bootstrap@0.5.1+5263bba",
-  "gen_hash_c": "sha256:80250112a2048c313a94c682d88a515bfcb7ebdad0a6e050fb46ba4985612adf",
-  "gen_hash_rust": "sha256:8ef23903a9ec713518c66b4e734a6d6f6a936976e1b57407dff79dd7c0ec6718",
-  "gen_hash_verilog": "sha256:744521ac81f3843190eb9b2071119ffcaecd2d0b7fa2f72fdf9e4ced2fc46fe2",
-  "gen_hash_zig": "sha256:686fe80172179c825bcd64b46311cea7af88b5a7a1b21e31dce873e89b116a8a",
+  "gen_hash_c": "sha256:3c613953d069f4572b48b60d728861b003f231892c95d5cb04ca78b83c2def31",
+  "gen_hash_rust": "sha256:7960f8658a0c062a31d3a22b302d7c2c60ecdf00357c8dbfeb150ad2cf29a45a",
+  "gen_hash_verilog": "sha256:763371149e5b77249867dabac40d10f669b03fea11af9214342f270a989676a2",
+  "gen_hash_zig": "sha256:89cb12eb3ebe53574ca86fbece697f01c83cda47bb14cf79043483577cfc18b3",
   "module": "automation::bot_agent_team",
   "ring": 12,
-  "sealed_at": "2026-10-08T16:25:28Z",
+  "sealed_at": "2026-10-08T16:33:50Z",
   "sealed_by": "t27c-bootstrap@0.5.1",
-  "spec_hash": "sha256:29ba59b7343b57036aeceb995179d956a8864276b8146e787a025c8376bda131",
+  "spec_hash": "sha256:fda2d7c52bd434aaf4c1d03d5ad12fdf7547b080bc1ff328b7ac59d5ab7bd2a5",
   "spec_path": "specs/automation/bot-agent-team.t27",
   "tests": {
     "failed": 0,
     "failing": [],
     "forced": false,
-    "passed": 7,
-    "total": 7
+    "passed": 8,
+    "total": 8
   }
 }

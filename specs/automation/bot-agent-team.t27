@@ -14,7 +14,9 @@
 // v1 (2026-10-08): the core of the team, joining by the link a person came by, hiring by a
 // press, each member's trade. Owner, the same hour: "give the agents access to every spec and
 // every tool" -- a trade decides what a member leads with, never what it may use: every
-// member is shown every tool and the whole spec bank (agent-spec-bank.t27).
+// member is shown every tool and the whole spec bank (agent-spec-bank.t27). And: "the same
+// logic in the mini-app" -- one team in both: a member's chat in the app is its tab's
+// conversation, and hiring in the app makes the member's tab in the bot.
 // phi^2 + 1/phi^2 = 3 | TRINITY
 
 module automation::bot_agent_team {
@@ -53,6 +55,25 @@ module automation::bot_agent_team {
     }
 
     pub const HIRE_BUTTONS_PER_ROW : u32 = 2;
+
+    // ---- the same team in the mini-app ----
+
+    // A member's chat in the mini-app IS its tab's conversation (bot-agent-memory.t27,
+    // `tab<kind>`; the Agent's is the base one): what the Director heard in the bot tab it
+    // knows in the app, and the other way round.
+    pub const APP_CHAT_IS_TAB : bool = true;
+
+    // The app lists a member when it is on the team; a bot without tabs has no team to
+    // read, so there the app lists every member.
+    fn app_lists(on_team: bool, bot_has_tabs: bool) -> bool {
+        return on_team || !bot_has_tabs;
+    }
+
+    // A hire in the app is the same act as a press in the bot: the member's tab is made in
+    // the bot (offered decides), and the app opens the member's chat at once.
+    fn app_hire_makes_tab(offered_now: bool, bot_has_tabs: bool) -> bool {
+        return offered_now && bot_has_tabs;
+    }
 
     // ---- each member's trade ----
 
@@ -114,6 +135,17 @@ module automation::bot_agent_team {
         assert(!offered(1, true));
         assert(offered(5, false));
         assert(!offered(6, false));
+    }
+
+    test "one team in the bot and the app: a member is listed when on the team, or every member without tabs" {
+        assert(APP_CHAT_IS_TAB);
+        assert(app_lists(true, true));
+        assert(!app_lists(false, true));
+        assert(app_lists(false, false));
+        assert(app_lists(true, false));
+        assert(app_hire_makes_tab(true, true));
+        assert(!app_hire_makes_tab(false, true));
+        assert(!app_hire_makes_tab(true, false));
     }
 
     test "every member is shown every tool; its trade is what it leads with" {
