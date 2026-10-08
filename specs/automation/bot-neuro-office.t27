@@ -14,7 +14,8 @@
 // v2 (2026-10-08): the agent hears the room. A person's message that is not addressed to the
 // agent is kept in the room's memory and never answered, so "Director, do what Anna said"
 // has something to go on (ChatGPT group chats and channel agents read the whole thread and
-// speak only when asked). Every person's line in a room names who said it. Only in an
+// speak only when asked). Every person's line in a room names who said it, the name cut to
+// 64 characters. Only in an
 // office: a plain group the bot sits in is not heard.
 // phi^2 + 1/phi^2 = 3 | TRINITY
 
@@ -92,6 +93,15 @@ module automation::bot_neuro_office {
         return room && ROOM_LINE_NAMES_SPEAKER;
     }
 
+    // A speaker's name is a label, not a message: it is cut to this many characters before
+    // it names a line, so a name cannot carry a paragraph into the room's memory.
+    pub const SPEAKER_NAME_MAX_CHARS : u32 = 64;
+
+    fn speaker_chars(chars: u32) -> u32 {
+        if chars > SPEAKER_NAME_MAX_CHARS { return SPEAKER_NAME_MAX_CHARS; }
+        return chars;
+    }
+
     // ---- tests ----
 
     test "an office opens only in a forum, with the bot managing topics, at an admin's word" {
@@ -144,6 +154,10 @@ module automation::bot_neuro_office {
     test "a person's line in a room names who said it; a private chat names nobody" {
         assert(names_speaker(true));
         assert(!names_speaker(false));
+        assert(SPEAKER_NAME_MAX_CHARS == 64);
+        assert(speaker_chars(64) == 64);
+        assert(speaker_chars(65) == 64);
+        assert(speaker_chars(3) == 3);
     }
 
     test "VERSION says what the header's last note says" {
