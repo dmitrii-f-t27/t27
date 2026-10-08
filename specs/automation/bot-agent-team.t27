@@ -12,7 +12,9 @@
 // bot-topic-tabs.t27; the memory of each tab is bot-agent-memory.t27. Interface text (what
 // each agent says about its trade) stays in the hosts.
 // v1 (2026-10-08): the core of the team, joining by the link a person came by, hiring by a
-// press, each agent's tools, the hand-over to the colleague whose trade a tool is.
+// press, each member's trade. Owner, the same hour: "give the agents access to every spec and
+// every tool" -- a trade decides what a member leads with, never what it may use: every
+// member is shown every tool and the whole spec bank (agent-spec-bank.t27).
 // phi^2 + 1/phi^2 = 3 | TRINITY
 
 module automation::bot_agent_team {
@@ -54,32 +56,31 @@ module automation::bot_agent_team {
 
     // ---- each member's trade ----
 
-    // The tools each member works with: tool names, or prefixes ending in "_", separated by
-    // one space; TOOL_SCOPE_ALL is every tool. In the order of the members.
+    // The tools each member leads with: tool names, or prefixes ending in "_", separated by
+    // one space; TOOL_SCOPE_ALL means the generalist, who leads with none. In the order of
+    // the members. A member's words name these first; they are its trade, not its fence.
     pub const TOOL_SCOPE_ALL : str = "*";
-    pub const TEAM_TOOLS : [6]str = [
+    pub const TEAM_LEAD_TOOLS : [6]str = [
         "*",
         "image_ video_ lipsync_generate audio_generate voice_clone_speak story_reel my_story_reel reel_ split_reel my_renders my_assets render_status templates_list feed_ social_",
         "browser_ web_read web_search",
         "tg_create_bot botfather_main_app tabs_ skills_ provider_setup providers_status projects_list project_get project_save code_run agent_avatars_make",
-        "tokens_invoice club_invoice",
+        "tokens_invoice club_invoice my_balance pricing",
         "hive_ plan_ leela_plan defects_open defect_close"
     ];
 
-    // Whatever its trade, every member may say who the person is, read his own voice, name a
-    // price and the balance before the work, and take a defect report.
-    pub const SHARED_TOOLS : str = "whoami soul_get my_balance pricing report_defect";
+    // Owner 2026-10-08: every member has every tool. A trade never hides one: a Director
+    // asked for the balance answers it, and nothing is refused for being another's trade.
+    pub const EVERY_TOOL_FOR_EVERY_MEMBER : bool = true;
 
-    // A tool is shown to a member when its trade is every tool, or the tool is in its trade,
-    // or the tool is shared.
-    fn tool_shown(scope_all: bool, in_trade: bool, shared: bool) -> bool {
-        return scope_all || in_trade || shared;
+    // A tool is shown to a member when every tool is shown, or the tool is in its trade.
+    fn tool_shown(every_tool: bool, in_trade: bool) -> bool {
+        return every_tool || in_trade;
     }
 
-    // A tool a member does not show is refused with the name of the member whose trade it is:
-    // the person is sent to that colleague's tab, never left with "I cannot".
-    fn hands_over(shown: bool, colleague_known: bool) -> bool {
-        return !shown && colleague_known;
+    // A member's words list a tool among its own when the tool is in its trade.
+    fn leads_with(scope_all: bool, in_trade: bool) -> bool {
+        return !scope_all && in_trade;
     }
 
     // A turn has a trade only in a fixed tab other than the Agent's. The Agent tab, every
@@ -115,18 +116,15 @@ module automation::bot_agent_team {
         assert(!offered(6, false));
     }
 
-    test "a tool is shown in its trade, in the shared set, or to the generalist" {
-        assert(tool_shown(true, false, false));
-        assert(tool_shown(false, true, false));
-        assert(tool_shown(false, false, true));
-        assert(!tool_shown(false, false, false));
-    }
-
-    test "a tool outside the trade hands the person to the colleague whose trade it is" {
-        assert(hands_over(false, true));
-        assert(!hands_over(true, true));
-        assert(!hands_over(false, false));
-        assert(!hands_over(true, false));
+    test "every member is shown every tool; its trade is what it leads with" {
+        assert(EVERY_TOOL_FOR_EVERY_MEMBER);
+        assert(tool_shown(EVERY_TOOL_FOR_EVERY_MEMBER, false));
+        assert(tool_shown(EVERY_TOOL_FOR_EVERY_MEMBER, true));
+        assert(tool_shown(false, true));
+        assert(!tool_shown(false, false));
+        assert(leads_with(false, true));
+        assert(!leads_with(false, false));
+        assert(!leads_with(true, true));
     }
 
     test "only a fixed tab other than the Agent's has a trade" {
