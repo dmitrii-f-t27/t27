@@ -24,6 +24,10 @@ module automation::bot_agent_stream {
 
     // A draft is updated at most this often while the answer grows.
     pub const DRAFT_EVERY_MS : u32 = 1000;
+    // A draft is a preview that Telegram drops after about thirty seconds; while a tool runs
+    // and no text arrives, it is sent again this long after the last one, so "Thinking..."
+    // and its stop button stay on screen.
+    pub const DRAFT_REFRESH_MS : u32 = 20000;
     // Telegram takes 0 to 4096 characters of draft text.
     pub const DRAFT_MAX_CHARS : u32 = 4096;
     // This many refusals of sendMessageDraft turn drafts off for that bot until restart.
@@ -38,9 +42,9 @@ module automation::bot_agent_stream {
         return is_private && refusals < PROBE_REFUSALS;
     }
 
-    // A new draft only when the text grew and the last one is old enough.
+    // A new draft when the text grew and the last one is old enough, or to keep it alive.
     fn draft_due(grew: bool, since_last_ms: u32) -> bool {
-        return grew && since_last_ms >= DRAFT_EVERY_MS;
+        return (grew && since_last_ms >= DRAFT_EVERY_MS) || since_last_ms >= DRAFT_REFRESH_MS;
     }
 
     // The draft shows the beginning of the answer, cut to what Telegram takes.
@@ -70,11 +74,13 @@ module automation::bot_agent_stream {
         assert(!uses_draft(false, 1));
     }
 
-    test "a draft follows the answer at most once a second" {
+    test "a draft follows the answer at most once a second and stays alive" {
         assert(!draft_due(true, 0));
         assert(!draft_due(true, 999));
         assert(draft_due(true, 1000));
         assert(!draft_due(false, 5000));
+        assert(!draft_due(false, 19999));
+        assert(draft_due(false, 20000));
     }
 
     test "the draft never exceeds what Telegram takes" {
