@@ -1,0 +1,20 @@
+{
+  "built_by": "t27c-bootstrap@0.5.1+5263bba",
+  "gen_hash_c": "sha256:93e9d08b01c2af034478708d0b072be794d850fecd0073c15bd53008caa5981a",
+  "gen_hash_rust": "sha256:253cdf6e1f71b85123678c98c7916215f099c2af2c3a42714452b93f84ace17e",
+  "gen_hash_verilog": "sha256:3419de1d2e3a7253b63e75a27ef3c4b29d5819a155984da9462658b984606d8e",
+  "gen_hash_zig": "sha256:411e8feb518bdaf61e6aa1fdc6e849ff6dda1d721fffb44d2e8c43faf0481572",
+  "module": "automation::bot_agent_team",
+  "ring": 12,
+  "sealed_at": "2026-10-08T16:22:26Z",
+  "sealed_by": "t27c-bootstrap@0.5.1",
+  "spec_hash": "sha256:b8d46bd0cead6ddb66624b3167368612a7b792f7badc3bd3d32f0f531e89b582",
+  "spec_path": "specs/automation/bot-agent-team.t27",
+  "tests": {
+    "failed": 0,
+    "failing": [],
+    "forced": false,
+    "passed": 8,
+    "total": 8
+  }
+}

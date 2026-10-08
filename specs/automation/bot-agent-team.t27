@@ -1,0 +1,154 @@
+// SPDX-License-Identifier: Apache-2.0
+// specs/automation/bot-agent-team.t27 -- a person's team of agents in the private chat.
+// Host: 999-multibots-telegraf src/navigation/topics/team.ts (who joins the team, the hire
+// buttons, /team) and apps/vibee-editor/render/src/agent/profession.ts (each agent's trade:
+// its tools and its hand-over to a colleague).
+// Trace: owner 2026-10-08 "as soon as a person enters the bot, chats with agents are made for
+// his interests; each agent has its own chat, named after its profession, with its own skills
+// and tools; a team of agents, not folders" -- the model of OpenAI's dots (DevDay 2026-09-29):
+// one persistent agent per job, each with a workspace of its own.
+// Generated: t27c gen-ts; vendored spec and generated constants in src/spec/ of both hosts.
+// Claim status: composition and scope contract. The tab table (keys, titles, colours) is
+// bot-topic-tabs.t27; the memory of each tab is bot-agent-memory.t27. Interface text (what
+// each agent says about its trade) stays in the hosts.
+// v1 (2026-10-08): the core of the team, joining by the link a person came by, hiring by a
+// press, each agent's tools, the hand-over to the colleague whose trade a tool is.
+// phi^2 + 1/phi^2 = 3 | TRINITY
+
+module automation::bot_agent_team {
+    pub const KIND : str = "automation";
+    pub const ID : str = "bot-agent-team";
+    pub const REPO : str = "999-multibots-telegraf";
+    pub const VERSION : u8 = 1;
+
+    // ---- who is on the team ----
+
+    // The members, in bot-topic-tabs TAB_KEYS order: Agent, Director, Navigator, Builder,
+    // Treasurer, Queen. The first TEAM_CORE of them are on every team from the first /start:
+    // the Agent, the generalist who sees every tool and keeps the base conversation.
+    pub const TEAM_SIZE : u32 = 6;
+    pub const TEAM_CORE : u32 = 1;
+
+    // A member's tab is made at /start when it is the core, or when the link the person came
+    // by names that member's screen (?start=app_story brings the Director): the person has
+    // said what he came for. Nobody else is made behind his back.
+    fn joins_at_start(index: u32, named_by_link: bool) -> bool {
+        return index < TEAM_CORE || named_by_link;
+    }
+
+    // /start and /tabs look after every tab the person already has (its probe, its title)
+    // and make only the ones that join now: a member once on the team is never sent away by
+    // these rules, and one that did not join is never made.
+    fn tended(stored: bool, joins: bool) -> bool {
+        return stored || joins;
+    }
+
+    // The Agent tab's first message and /team offer every member not yet on the team, one
+    // button each; a press makes that one tab and nothing else. The core is never offered:
+    // it is always there.
+    fn offered(index: u32, on_team: bool) -> bool {
+        return index >= TEAM_CORE && index < TEAM_SIZE && !on_team;
+    }
+
+    pub const HIRE_BUTTONS_PER_ROW : u32 = 2;
+
+    // ---- each member's trade ----
+
+    // The tools each member works with: tool names, or prefixes ending in "_", separated by
+    // one space; TOOL_SCOPE_ALL is every tool. In the order of the members.
+    pub const TOOL_SCOPE_ALL : str = "*";
+    pub const TEAM_TOOLS : [6]str = [
+        "*",
+        "image_ video_ lipsync_generate audio_generate voice_clone_speak story_reel my_story_reel reel_ split_reel my_renders my_assets render_status templates_list feed_ social_",
+        "browser_ web_read web_search",
+        "tg_create_bot botfather_main_app tabs_ skills_ provider_setup providers_status projects_list project_get project_save code_run agent_avatars_make",
+        "tokens_invoice club_invoice",
+        "hive_ plan_ leela_plan defects_open defect_close"
+    ];
+
+    // Whatever its trade, every member may say who the person is, read his own voice, name a
+    // price and the balance before the work, and take a defect report.
+    pub const SHARED_TOOLS : str = "whoami soul_get my_balance pricing report_defect";
+
+    // A tool is shown to a member when its trade is every tool, or the tool is in its trade,
+    // or the tool is shared.
+    fn tool_shown(scope_all: bool, in_trade: bool, shared: bool) -> bool {
+        return scope_all || in_trade || shared;
+    }
+
+    // A tool a member does not show is refused with the name of the member whose trade it is:
+    // the person is sent to that colleague's tab, never left with "I cannot".
+    fn hands_over(shown: bool, colleague_known: bool) -> bool {
+        return !shown && colleague_known;
+    }
+
+    // A turn has a trade only in a fixed tab other than the Agent's. The Agent tab, every
+    // other thread, a group and the mini-app speak to the generalist (bot-agent-memory.t27).
+    fn has_trade(fixed_tab: bool, base: bool) -> bool {
+        return fixed_tab && !base;
+    }
+
+    // ---- tests ----
+
+    test "the Agent is on every team from the first start; the others join by the link the person came by" {
+        assert(joins_at_start(0, false));
+        assert(joins_at_start(0, true));
+        assert(!joins_at_start(1, false));
+        assert(joins_at_start(1, true));
+        assert(!joins_at_start(5, false));
+        assert(joins_at_start(5, true));
+    }
+
+    test "a tab the person has is looked after; one that does not join is never made" {
+        assert(tended(true, false));
+        assert(tended(true, true));
+        assert(tended(false, true));
+        assert(!tended(false, false));
+    }
+
+    test "every member not yet on the team is offered, the core never" {
+        assert(!offered(0, false));
+        assert(!offered(0, true));
+        assert(offered(1, false));
+        assert(!offered(1, true));
+        assert(offered(5, false));
+        assert(!offered(6, false));
+    }
+
+    test "a tool is shown in its trade, in the shared set, or to the generalist" {
+        assert(tool_shown(true, false, false));
+        assert(tool_shown(false, true, false));
+        assert(tool_shown(false, false, true));
+        assert(!tool_shown(false, false, false));
+    }
+
+    test "a tool outside the trade hands the person to the colleague whose trade it is" {
+        assert(hands_over(false, true));
+        assert(!hands_over(true, true));
+        assert(!hands_over(false, false));
+        assert(!hands_over(true, false));
+    }
+
+    test "only a fixed tab other than the Agent's has a trade" {
+        assert(has_trade(true, false));
+        assert(!has_trade(true, true));
+        assert(!has_trade(false, false));
+        assert(!has_trade(false, true));
+    }
+
+    test "six members, one core, two hire buttons a row" {
+        assert(TEAM_SIZE == 6);
+        assert(TEAM_CORE == 1);
+        assert(HIRE_BUTTONS_PER_ROW == 2);
+        assert(joins_at_start(TEAM_CORE - 1, false));
+        assert(!joins_at_start(TEAM_CORE, false));
+        assert(offered(TEAM_SIZE - 1, false));
+        assert(!offered(TEAM_SIZE, false));
+    }
+
+    test "VERSION says what the header's last note says" {
+        assert(VERSION == 1);
+    }
+}
+
+// phi^2 + 1/phi^2 = 3 | TRINITY
