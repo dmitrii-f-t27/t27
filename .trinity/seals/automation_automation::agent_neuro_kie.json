@@ -1,20 +1,20 @@
 {
   "built_by": "t27c-bootstrap@0.5.1+7c88448",
-  "gen_hash_c": "sha256:fb48b1f765b211dd586c202e1dc91d4f74c467d5d4bfd57808d09af70170d0e4",
-  "gen_hash_rust": "sha256:26cc020233788c65de10c864e7fdcc185283036eac72a0d847badade24b5f277",
-  "gen_hash_verilog": "sha256:6f288e129432ca46da3dcb398cbd61d899a7bbcd9e9c4d512f0b8487949ddc16",
-  "gen_hash_zig": "sha256:ebba046df934861ff9f1c2d3b85f32820fe53f5f2afcfab2641b8b2f406442ee",
+  "gen_hash_c": "sha256:8d64a7759c85143f8ed527b8fa11ea2e86fa8da9fec7ad2841f3fb4eb6714e54",
+  "gen_hash_rust": "sha256:8817287f2cffd115d98230c0ef858860310e20531a7cf4a448e44b89293247b3",
+  "gen_hash_verilog": "sha256:d11625b270d7e7ecb6f3f58b2bc464425cb866a2f24c3ac18d5a720228cdfeca",
+  "gen_hash_zig": "sha256:0e872f7f8caa22be7f1c15ec260b06602a8a25823352eb2a2658f973ef2be67c",
   "module": "automation::agent_neuro_kie",
   "ring": 12,
-  "sealed_at": "2026-10-09T08:23:50Z",
+  "sealed_at": "2026-10-09T08:40:47Z",
   "sealed_by": "t27c-bootstrap@0.5.1",
-  "spec_hash": "sha256:a66ad5ca9f6993e050343aeab47d94651c3357bb27c4194195aa72ebc8418251",
+  "spec_hash": "sha256:5d2e030b1c4d9deaf5d1377da36cb4ed3f9b799808f13d48c85d8ee362d8ccf6",
   "spec_path": "specs/automation/agent-neuro-kie.t27",
   "tests": {
     "failed": 0,
     "failing": [],
     "forced": false,
-    "passed": 4,
-    "total": 4
+    "passed": 5,
+    "total": 5
   }
 }
