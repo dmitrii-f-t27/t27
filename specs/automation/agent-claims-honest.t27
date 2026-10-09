@@ -53,6 +53,9 @@ module automation::agent_claims_honest {
 
     // v2: a file a tool made this turn that the answer does not carry is appended by the host.
     pub const FILES_APPENDED_BY_HOST : bool = true;
+    // The tools that MAKE a file (their answer's top-level url is the new file). A tool that lists
+    // files already there is not one: its list is not appended.
+    pub const FILE_MAKERS : str = "image_edit,image_generate,image_upscale,image_remove_background,video_generate,lipsync_generate,audio_generate";
     fn file_owed(made: bool, in_answer: bool) -> bool {
         return made && !in_answer;
     }
