@@ -1,20 +1,20 @@
 {
   "built_by": "t27c-bootstrap@0.5.1+7c88448",
-  "gen_hash_c": "sha256:3fdaf3a01b12b1059bf92b28aee272ba84121fd42e0002662abe01c64281e07a",
-  "gen_hash_rust": "sha256:c92799263a592fad7c3ab00437f2c12d575e95a70d91a62776f762ddb5bdddbb",
-  "gen_hash_verilog": "sha256:265bd773970ef4f8868c719bc61a4c89e26a1b3fb5fdd00f70553028600b76af",
-  "gen_hash_zig": "sha256:40a2f87f265cbffd2fcbdf74d6554ced27ada3892f75dc3d7c6280e1be60b219",
+  "gen_hash_c": "sha256:e215a634877b6a39cd0b4b08be9d88de7e8f24f08d0b4e27f3ce9b7901d3a468",
+  "gen_hash_rust": "sha256:fa25e6ee1590ac4b552fe0fbbfeb9b305d2e20cafb3f849a525a03ceeaa2362e",
+  "gen_hash_verilog": "sha256:f981f0b633917edbe864e4816d5ae1bc2d93454841613f3ce1c04d46e42c887c",
+  "gen_hash_zig": "sha256:2a175ec7cf0f622683f08f4451effb078220b8a2e50d6002a5697436097ccfe9",
   "module": "automation::agent_hive_group",
   "ring": 12,
-  "sealed_at": "2026-10-09T10:06:29Z",
+  "sealed_at": "2026-10-09T10:09:32Z",
   "sealed_by": "t27c-bootstrap@0.5.1",
-  "spec_hash": "sha256:638ad87d577d409a0e7e33524b2361fd03feac26f4d1435234a0340fefa68a0f",
+  "spec_hash": "sha256:9cdd5ed3872b60e900a364d843f908920334408f965bde194d233b64534076f9",
   "spec_path": "specs/automation/agent-hive-group.t27",
   "tests": {
     "failed": 0,
     "failing": [],
     "forced": false,
-    "passed": 19,
-    "total": 19
+    "passed": 20,
+    "total": 20
   }
 }

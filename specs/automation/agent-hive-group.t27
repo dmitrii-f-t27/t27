@@ -15,7 +15,8 @@
 // v4 (2026-10-09): agents hand off in private, bot to bot. Telegram lets a bot send a private
 // message to another bot by @username when Bot-to-Bot Communication Mode is on for both
 // (owner: "I switched it on exactly for A2A"). A colleague is heard in private only with the
-// hand-off tag, an ask is one hop, and the answer is carried to the person, never a new turn.
+// hand-off tag, an ask is one hop, and the answer is carried to the person, never a new turn,
+// and only while its ask is fresh.
 // Earlier laws are unchanged; each version only adds, so a host on an older one stays true.
 // phi^2 + 1/phi^2 = 3 | TRINITY
 
@@ -185,6 +186,15 @@ module automation::agent_hive_group {
         return kind == DM_ANSWER;
     }
 
+    // An ask is always a known tag; an answer only while its ask is fresh -- a colleague never
+    // writes to a person nobody asked it about. Half an hour covers the longest turn.
+    pub const DM_ANSWER_WINDOW_MS : u32 = 1800000;
+    fn dm_tag_ok(kind: u8, since_ask_ms: u32) -> bool {
+        if kind == DM_ASK { return true; }
+        if kind == DM_ANSWER { return since_ask_ms < DM_ANSWER_WINDOW_MS; }
+        return false;
+    }
+
     // How many of the hand-offs an answer asked for are sent.
     fn dm_handoffs_sent(asked: u32) -> u32 {
         if asked > MAX_DM_HANDOFFS { return MAX_DM_HANDOFFS; }
@@ -321,6 +331,17 @@ module automation::agent_hive_group {
         assert(dm_carries(DM_ANSWER));
         assert(!dm_carries(DM_ASK));
         assert(!dm_carries(0));
+    }
+
+    test "an answer is carried only while its ask is fresh" {
+        assert(DM_ANSWER_WINDOW_MS == 1800000);
+        assert(dm_tag_ok(DM_ASK, 4000000000));
+        assert(dm_tag_ok(DM_ANSWER, 0));
+        assert(dm_tag_ok(DM_ANSWER, 1799999));
+        assert(!dm_tag_ok(DM_ANSWER, 1800000));
+        assert(!dm_tag_ok(DM_ANSWER, 4000000000));
+        assert(!dm_tag_ok(0, 0));
+        assert(!dm_tag_ok(3, 0));
     }
 
     test "an answer hands off to at most two colleagues" {
