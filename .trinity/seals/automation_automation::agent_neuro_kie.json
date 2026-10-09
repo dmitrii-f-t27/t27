@@ -1,0 +1,20 @@
+{
+  "built_by": "t27c-bootstrap@0.5.1+7c88448",
+  "gen_hash_c": "sha256:f8520efbc44fb107c520fb5d630dc0614af39bfa562a0a8877a75952f08026f8",
+  "gen_hash_rust": "sha256:1b264fa64f12e410ee8c0ffe094232f0350fb923d8ff8ebc1206d5c46afeef22",
+  "gen_hash_verilog": "sha256:5c4ec848a52bcc97a72ad6ec194d02050df47f72ab7d0bbf3691478787521d6c",
+  "gen_hash_zig": "sha256:364abbc8b68136a183edd403a30f78af2e714cf7424d8c32af533e08ca433e1d",
+  "module": "automation::agent_neuro_kie",
+  "ring": 12,
+  "sealed_at": "2026-10-09T08:21:27Z",
+  "sealed_by": "t27c-bootstrap@0.5.1",
+  "spec_hash": "sha256:6c1a1c1ec6c9eabde2cea01392bc69dd4ef30c5f3aa2b8a918cefbf12a4c92e7",
+  "spec_path": "specs/automation/agent-neuro-kie.t27",
+  "tests": {
+    "failed": 0,
+    "failing": [],
+    "forced": false,
+    "passed": 4,
+    "total": 4
+  }
+}
