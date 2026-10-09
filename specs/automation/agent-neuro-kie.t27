@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // specs/automation/agent-neuro-kie.t27 -- every Kie neuro-function the agent may order.
-// Host: 999-multibots-telegraf apps/vibee-editor/render/src/agent/agent-neuro.ts (the tools
-// image_upscale, image_remove_background, the Kie model of image_generate, the picture of
+// Host: 999-multibots-telegraf apps/vibee-editor/render/src/agent/agent-neuro.ts (the source
+// tools built from the table below, the Kie model of image_generate, the picture of
 // video_generate).
 // Trace: owner 2026-10-09 "where are all the neuro-functions? connect them all!" and "Kie is
 // our main one!". Measured that day: the agent had five raw media tools; upscale, background
@@ -10,8 +10,9 @@
 // Generated: t27c gen-ts and scripts/t27-logic.mjs; vendored spec, constants and compiled
 // logic in src/spec/.
 // Claim status: render contract; the prices are the route's (priceForModel over the Kie list).
-// v1 (2026-10-09): upscale and background removal from a source, a Kie text-to-image model by
-// name, a clip from a picture; a source tool without a source is refused before any charge.
+// v1 (2026-10-09): upscale and background removal from a source -- rows of a tool table the host
+// builds from -- a Kie text-to-image model by name, a clip from a picture; a source tool
+// without a source is refused before any charge.
 // phi^2 + 1/phi^2 = 3 | TRINITY
 
 module automation::agent_neuro_kie {
@@ -20,10 +21,16 @@ module automation::agent_neuro_kie {
     pub const REPO : str = "999-multibots-telegraf";
     pub const VERSION : u8 = 1;
 
-    // ---- the models ----
+    // ---- the tools, as a table ----
 
-    pub const UPSCALE_MODEL : str = "kie/topaz/image-upscale";
-    pub const REMOVE_BG_MODEL : str = "kie/recraft/remove-background";
+    // Owner, 2026-10-09: "all new code is written in .t27, exclusively". A neuro-function
+    // the agent gets is a ROW here -- the tool's name, its Kie model, what the agent is told
+    // -- and the host builds every tool from these rows with one runner written once. A new
+    // Kie function is a new row, not new host code.
+    pub const SOURCE_TOOL_NAMES : [2]str = ["image_upscale", "image_remove_background"];
+    pub const SOURCE_TOOL_MODELS : [2]str = ["kie/topaz/image-upscale", "kie/recraft/remove-background"];
+    pub const SOURCE_TOOL_HELP : [2]str = ["Upscale a picture and make it sharper (Kie topaz). Needs image_url; the price is named before the press.", "Remove the background of a picture, leaving it transparent (Kie recraft). Needs image_url."];
+
     pub const IMAGE_TO_VIDEO_MODEL : str = "kie/kling/v2-1-pro";
 
     // ---- what may be ordered ----
