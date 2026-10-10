@@ -1,5 +1,5 @@
 {
-  "built_by": "t27c-bootstrap@0.5.2+7381eca0e",
+  "built_by": "t27c-bootstrap@0.5.2+c494cc5",
   "closure": [
     {
       "spec": "specs/base/types.t27",
@@ -14,7 +14,7 @@
   "module": "TernarySorting",
   "ring": 12,
   "seal_schema": 2,
-  "sealed_at": "2026-10-10T12:23:38Z",
+  "sealed_at": "2026-10-10T12:33:01Z",
   "sealed_by": "t27c-bootstrap@0.5.2",
   "spec_hash": "sha256:3d7fbd79b96b7b46ef0ed2af0d925a6d1e50cbccffdb39086c9c26aedfa69b1b",
   "spec_path": "specs/isa/ternary_sorting.t27",

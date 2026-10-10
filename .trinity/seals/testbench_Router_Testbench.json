@@ -1,5 +1,5 @@
 {
-  "built_by": "t27c-bootstrap@0.5.2+94a5d5c02",
+  "built_by": "t27c-bootstrap@0.5.2+c494cc5",
   "closure": [
     {
       "spec": "specs/fpga/router.t27",
@@ -14,7 +14,7 @@
   "module": "Router_Testbench",
   "ring": 12,
   "seal_schema": 2,
-  "sealed_at": "2026-10-10T12:16:05Z",
+  "sealed_at": "2026-10-10T12:33:07Z",
   "sealed_by": "t27c-bootstrap@0.5.2",
   "spec_hash": "sha256:b1fc4a65e6d0307835b080153fd15eebd537f13612a40bdb3fa9d4947203baa7",
   "spec_path": "specs/fpga/testbench/router_tb.t27",

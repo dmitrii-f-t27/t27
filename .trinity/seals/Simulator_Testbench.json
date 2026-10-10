@@ -14,7 +14,7 @@
   "module": "Simulator_Testbench",
   "ring": 12,
   "seal_schema": 2,
-  "sealed_at": "2026-10-10T12:16:07Z",
+  "sealed_at": "2026-10-10T12:33:08Z",
   "sealed_by": "t27c-bootstrap@0.5.2",
   "spec_hash": "sha256:37851eeeb0a85c821c91410c097979c44b4ce8460d4b47e5f90cb8115d442759",
   "spec_path": "specs/fpga/testbench/simulator_tb.t27",

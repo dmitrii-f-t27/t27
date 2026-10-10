@@ -5,7 +5,7 @@
   "gen_hash_zig": "sha256:70a9764b065cc70b1b3043fd210baacdd0e5368e4308293f98805d0d4e112118",
   "module": "PipelineE2E",
   "ring": 12,
-  "sealed_at": "2026-10-10T12:23:39Z",
+  "sealed_at": "2026-10-10T12:33:04Z",
   "spec_hash": "sha256:d56c5edb8cf0bc9656e5039691f9df8ccbd75ab16f27be5ebad21da9428314af",
   "spec_path": "specs/pipeline/e2e_test.t27",
   "tests": {

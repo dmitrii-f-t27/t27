@@ -1,5 +1,5 @@
 {
-  "built_by": "t27c-bootstrap@0.5.2+94a5d5c02",
+  "built_by": "t27c-bootstrap@0.5.2+c494cc5",
   "closure": [
     {
       "spec": "specs/fpga/cts.t27",
@@ -14,7 +14,7 @@
   "module": "CTS_Testbench",
   "ring": 12,
   "seal_schema": 2,
-  "sealed_at": "2026-10-10T12:15:51Z",
+  "sealed_at": "2026-10-10T12:33:06Z",
   "sealed_by": "t27c-bootstrap@0.5.2",
   "spec_hash": "sha256:0fb944015b643a0c24980d5707c13c2d7b1971bacec6e74daaffb91c7dcda59c",
   "spec_path": "specs/fpga/testbench/cts_tb.t27",

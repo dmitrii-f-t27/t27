@@ -9,7 +9,7 @@
   "module": "trinity-numeric-surface",
   "ring": 12,
   "seal_schema": 2,
-  "sealed_at": "2026-10-10T12:17:24Z",
+  "sealed_at": "2026-10-10T12:33:10Z",
   "sealed_by": "t27c-bootstrap@0.5.2",
   "spec_hash": "sha256:33a0ca91b8660300ea7291d90e4044808ff4d693c532168ec517bfd2d3781525",
   "spec_path": "specs/numeric/trinity_numeric_surface.t27",

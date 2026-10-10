@@ -14,7 +14,7 @@
   "module": "Partition_Testbench",
   "ring": 12,
   "seal_schema": 2,
-  "sealed_at": "2026-10-10T12:15:59Z",
+  "sealed_at": "2026-10-10T12:33:06Z",
   "sealed_by": "t27c-bootstrap@0.5.2",
   "spec_hash": "sha256:aa4f86e5c53229fe262eab7fb53a3cfc1c430e4d00ad98d7ae380ffc334d37f8",
   "spec_path": "specs/fpga/testbench/partition_tb.t27",

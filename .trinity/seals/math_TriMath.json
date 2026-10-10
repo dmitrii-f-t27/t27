@@ -1,5 +1,5 @@
 {
-  "built_by": "t27c-bootstrap@0.5.2+94a5d5c02",
+  "built_by": "t27c-bootstrap@0.5.2+c494cc5",
   "closure": [
     {
       "spec": "specs/base/types.t27",
@@ -18,7 +18,7 @@
   "module": "TriMath",
   "ring": 12,
   "seal_schema": 2,
-  "sealed_at": "2026-10-10T12:19:44Z",
+  "sealed_at": "2026-10-10T12:33:02Z",
   "sealed_by": "t27c-bootstrap@0.5.2",
   "spec_hash": "sha256:70dde84fdfb9647676fc55e77f3e5ef9a88fe288404b660a2a1cc5d6bb54600e",
   "spec_path": "specs/tri/math/math.t27",

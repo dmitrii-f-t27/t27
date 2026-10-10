@@ -9,7 +9,7 @@
   "module": "ternary_vs_binary",
   "ring": 12,
   "seal_schema": 2,
-  "sealed_at": "2026-10-10T12:06:18Z",
+  "sealed_at": "2026-10-10T12:33:06Z",
   "sealed_by": "t27c-bootstrap@0.5.2",
   "spec_hash": "sha256:dd040386ef12d1277e361d0db11119dfd77916f3bf32deafa5ec39e85b8c5093",
   "spec_path": "specs/benchmarks/ternary_vs_binary.t27",

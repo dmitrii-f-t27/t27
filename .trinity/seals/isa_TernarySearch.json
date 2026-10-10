@@ -1,5 +1,5 @@
 {
-  "built_by": "t27c-bootstrap@0.5.2+7381eca0e",
+  "built_by": "t27c-bootstrap@0.5.2+c494cc5",
   "closure": [
     {
       "spec": "specs/base/types.t27",
@@ -14,7 +14,7 @@
   "module": "TernarySearch",
   "ring": 12,
   "seal_schema": 2,
-  "sealed_at": "2026-10-10T12:23:37Z",
+  "sealed_at": "2026-10-10T12:33:01Z",
   "sealed_by": "t27c-bootstrap@0.5.2",
   "spec_hash": "sha256:2b398719972f572f86fe255bac5565dd1d23fd1e11c90c7f223ac3c1f4c73fee",
   "spec_path": "specs/isa/ternary_search.t27",
