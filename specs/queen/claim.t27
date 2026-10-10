@@ -38,6 +38,7 @@ use queen::review_valve::STEP_RELEASE;
 use queen::review_valve::STEP_BACKFILL;
 use queen::review_valve::STEP_CLOSE;
 use queen::review_valve::RETRY_FLOOR_MINUTES;
+use queen::review_valve::OBSOLETE_STATE;
 
 /// The empty-attempt floor is the valve's retry floor (queen-tick.ts EMPTY_ATTEMPT_FLOOR_MS =
 /// RETRY_FLOOR_MINUTES), imported above with the valve's kind and step codes: nothing of the valve is
@@ -61,7 +62,8 @@ pub const CLAIM_STATES : u8 = 6;
 /// The review_state column, as the boundary read it.
 /// V_NONE: no verdict yet (the column is null or empty). V_ACCEPT 'accept'. V_SEND_BACK 'sendBack'.
 /// V_ESCALATE 'escalate'. V_WAIT 'wait'. V_FAILED 'failed'. V_CANCELLED 'cancelled'. V_EMPTY 'empty'.
-/// V_STALE_CONTRACT 'stale-contract'. V_OBSOLETE 'obsolete' (review_valve.t27 OBSOLETE_STATE).
+/// V_STALE_CONTRACT 'stale-contract'. V_OBSOLETE: OBSOLETE_STATE, the word review_valve.t27 closes a
+/// row with, imported above so the boundary reads it from this card's generated constants.
 /// V_OTHER: any other word. It is held for review with no clock: a word nobody wrote a rule for
 /// releases nothing. A code past VERDICT_CODES is read the same way.
 pub const V_NONE : u8 = 0;
