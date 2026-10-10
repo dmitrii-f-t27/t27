@@ -55,6 +55,11 @@ verify their spec and C/Rust/Verilog/Zig hashes. The optimizer is excluded
 from passing-seal claims because its existing native compiler blockers
 remain; this repair only restores its complete parse.
 
+The ordinary `t27c seal --save` command also refreshes both optimizer
+seal files, explicitly recording tests as BLOCKED by the duplicate enum
+member `String`. It needs no force option. Their generated hashes verify,
+but that is not a passing test result or a native optimizer implementation.
+
 `cargo test --release -p t27b` passes after regeneration, including the
 compiler's integration and differential tests. The duplicate-body ratchet
 passes with 669 bodies in 194 known groups; its 11 negative-control shapes
@@ -73,6 +78,13 @@ L2 identified as stale: ast_shape, int_cast_plan, opaque_plan and their
 dependent coerce_plan/const_div_plan outputs. ast_scan's tracked copy is
 already byte-identical. Each replacement is the unchanged compiler's
 stdout for its corresponding `.t27` spec, with no manual Rust edits.
+
+The integrated 1824-spec corpus ratchet is CLEAN: 71 known primary failures
+match the existing ledger, with no unexpected failures, passes, expiries,
+discard drift or gate drift. This is not an all-passing corpus claim.
+The graph repair removed the conflicting Episode definition; only that
+resolved name is removed from `type_conflicts.json`, tightening its set
+from 87 to 86 instead of blessing new conflicts.
 
 ## Task-chain disposition
 
