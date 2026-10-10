@@ -68,6 +68,12 @@ and seals are produced by t27c, not hand-edited. Generated C, Rust and
 Verilog seal outputs are not claimed as independently executed; cargo's
 t27b generated Rust integration is additionally built and tested.
 
+The final integration also regenerates the five tracked Rust copies that
+L2 identified as stale: ast_shape, int_cast_plan, opaque_plan and their
+dependent coerce_plan/const_div_plan outputs. ast_scan's tracked copy is
+already byte-identical. Each replacement is the unchanged compiler's
+stdout for its corresponding `.t27` spec, with no manual Rust edits.
+
 ## Task-chain disposition
 
 1. Request: restore eligible owner-authored specs and green merge checks.
