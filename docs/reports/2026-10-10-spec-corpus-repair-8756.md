@@ -79,7 +79,7 @@ dependent coerce_plan/const_div_plan outputs. ast_scan's tracked copy is
 already byte-identical. Each replacement is the unchanged compiler's
 stdout for its corresponding `.t27` spec, with no manual Rust edits.
 
-The integrated 1824-spec corpus ratchet is CLEAN: 71 known primary failures
+Before the upstream refresh, the integrated 1824-spec corpus ratchet is CLEAN: 71 known primary failures
 match the existing ledger, with no unexpected failures, passes, expiries,
 discard drift or gate drift. This is not an all-passing corpus claim.
 The graph repair removed the conflicting Episode definition; only that
@@ -96,7 +96,9 @@ from 87 to 86 instead of blessing new conflicts.
 6. Embedded vectors, tests, negative control and seals recorded above.
 7. Own PR #8749 carries this repair together with #8745 and #8752.
 8. Self-review preserves existing test assertions and dependency signatures.
-9. Full corpus and latest-head CI remain to be checked after integration.
+9. Full reference corpus is clean against its existing failure ledger. The
+   latest-head native check requires the separately documented #8767 repair
+   and measured pass records; CI must remeasure that final source.
 10. Maintainer action is needed only if an ordinary merge is unauthorized.
 11. Merge and issue closure are pending until applicable checks pass.
 12. Publication is the accepted spec version; no service release is required.
