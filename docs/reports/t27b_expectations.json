@@ -520,6 +520,7 @@
   {"path": "specs/port/fpga/verilog/gft_smul_jtag.t27", "t27b": "pass"},
   {"path": "specs/port/fpga/verilog/gft_train1_jtag.t27", "t27b": "pass"},
   {"path": "specs/port/fpga/verilog/link_node.t27", "t27b": "pass"},
+  {"path": "specs/port/fpga/verilog/mvp_ternary_classifier_jtag_noport.t27", "t27b": "pass"},
   {"path": "specs/port/fpga/verilog/mvp_ternary_classifier_top.t27", "t27b": "pass"},
   {"path": "specs/port/fpga/verilog/phi_weights_jtag.t27", "t27b": "pass"},
   {"path": "specs/port/fpga/verilog/ternary_mac_demo_top.t27", "t27b": "pass"},
