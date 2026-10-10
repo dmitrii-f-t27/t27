@@ -1,13 +1,16 @@
 {
-  "built_by": "t27c-bootstrap@0.5.1+7c88448",
+  "built_by": "t27c-bootstrap@0.5.2+d619f2999",
+  "closure": [],
+  "config": "gen=c,rust,verilog,zig;tests=zig",
   "gen_hash_c": "sha256:5b02c6bf7e254cfc5ef5cbaa1eb9e67795b1d362fade268f44b587197192a5e5",
   "gen_hash_rust": "sha256:a9d9720fd758022b8e0d30818c4f99130bc496d9134d0d99546498dcd58a0b71",
   "gen_hash_verilog": "sha256:0ab3b46c2293c2f1c2caf97392e567189dfad8fc714309b6ef37a30aecceaa1a",
   "gen_hash_zig": "sha256:1e311a6e4004a49292cbbc8732080f007c75d73c4e1b272b6c0953027ac1d146",
   "module": "automation::ci_bridge",
   "ring": 12,
-  "sealed_at": "2026-10-09T20:11:07Z",
-  "sealed_by": "t27c-bootstrap@0.5.1",
+  "seal_schema": 2,
+  "sealed_at": "2026-10-10T12:20:14Z",
+  "sealed_by": "t27c-bootstrap@0.5.2",
   "spec_hash": "sha256:61e4f0923086bffdbb04b486977bbafecf60bed2433ad59df785f11309e60af0",
   "spec_path": "specs/automation/ci-bridge.t27",
   "tests": {
@@ -16,5 +19,9 @@
     "forced": false,
     "passed": 9,
     "total": 9
+  },
+  "toolchain": {
+    "test_runner": "sha256:1982ae948e24d00c5d221ccec12dfce1eb01204b53e37b0f857f93b16d64629d",
+    "zig": "0.16.0"
   }
 }

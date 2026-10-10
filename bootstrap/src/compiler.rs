@@ -7720,7 +7720,7 @@ impl Codegen {
                 self.gen_expr(elem);
             }
         } else {
-            let txt = node.extra_size.trim();
+            let txt = if node.extra_type.is_empty() { node.extra_size.trim() } else { "" }; // typed: a dimension
             let mut depth = 0i32;
             let mut cur = String::new();
             let mut parts: Vec<String> = Vec::new();
@@ -10003,7 +10003,7 @@ impl Codegen {
                                     if self.len_tainted_int_expr(&init) {
                                         self.len_locals.insert(node.name.clone());
                                     }
-                                    self.gen_expr(&node.children[0]);
+                                    let own = self.param_renames.remove(&node.name); self.gen_expr(&node.children[0]); if let Some(r) = own { self.param_renames.insert(node.name.clone(), r); } // #8416: an initializer never reads its own local (`const PI = constants::PI;` is the outer PI)
                                 }
                             }
                         }
@@ -10867,10 +10867,9 @@ impl Codegen {
                 // Emit Zig anonymous-list forms, which coerce to the typed
                 // array target: `.{ e1, e2, .. }` and `.{ v } ** n`.
                 let txt = node.extra_size.trim().to_string();
-                // No children and no element text is the EMPTY literal. Left
-                // to the comma-splitting path below it emitted `.{  }` with a
-                // phantom element.
-                if txt.is_empty() {
+                // No children and no element text, or a TYPED literal (whose extra_size is its dimension,
+                // `[_]S{}` -> `.{ _ }`, 17 specs), is the EMPTY literal; else `.{  }` had a phantom element.
+                if txt.is_empty() || !node.extra_type.is_empty() {
                     self.write(".{}");
                     return;
                 }
