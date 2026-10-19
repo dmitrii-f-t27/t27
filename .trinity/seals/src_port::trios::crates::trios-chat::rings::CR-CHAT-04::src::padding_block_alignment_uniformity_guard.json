@@ -1,5 +1,5 @@
 {
-  "built_by": "t27c-bootstrap@0.5.2+c4b09b37e",
+  "built_by": "t27c-bootstrap@0.5.2+7a94f0028",
   "closure": [
     {
       "spec": "specs/port/trios/crates/trios-chat/common/helpers.t27",
@@ -14,7 +14,7 @@
   "module": "port::trios::crates::trios-chat::rings::CR-CHAT-04::src::padding_block_alignment_uniformity_guard",
   "ring": 12,
   "seal_schema": 2,
-  "sealed_at": "2026-10-19T01:57:07Z",
+  "sealed_at": "2026-10-19T02:34:53Z",
   "sealed_by": "t27c-bootstrap@0.5.2",
   "spec_hash": "sha256:f840a4e12056b7f63bf55a40277b854bc6cda792254d60d83efd44585855f2d0",
   "spec_path": "specs/port/trios/crates/trios-chat/rings/CR-CHAT-04/src/padding_block_alignment_uniformity_guard.t27",

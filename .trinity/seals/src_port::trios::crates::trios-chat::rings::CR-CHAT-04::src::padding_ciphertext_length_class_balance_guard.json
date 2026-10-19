@@ -1,5 +1,5 @@
 {
-  "built_by": "t27c-bootstrap@0.5.2+c4b09b37e",
+  "built_by": "t27c-bootstrap@0.5.2+7a94f0028",
   "closure": [
     {
       "spec": "specs/port/trios/crates/trios-chat/common/helpers.t27",
@@ -14,7 +14,7 @@
   "module": "port::trios::crates::trios-chat::rings::CR-CHAT-04::src::padding_ciphertext_length_class_balance_guard",
   "ring": 12,
   "seal_schema": 2,
-  "sealed_at": "2026-10-19T01:57:15Z",
+  "sealed_at": "2026-10-19T02:35:00Z",
   "sealed_by": "t27c-bootstrap@0.5.2",
   "spec_hash": "sha256:08217b76dcc66a5f29a1c79c1ef5681d2f0f6bc3494475843b00fe2ebc721e57",
   "spec_path": "specs/port/trios/crates/trios-chat/rings/CR-CHAT-04/src/padding_ciphertext_length_class_balance_guard.t27",

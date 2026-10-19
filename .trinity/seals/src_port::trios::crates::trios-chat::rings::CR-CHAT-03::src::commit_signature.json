@@ -1,5 +1,5 @@
 {
-  "built_by": "t27c-bootstrap@0.5.2+c4b09b37e",
+  "built_by": "t27c-bootstrap@0.5.2+7a94f0028",
   "closure": [
     {
       "spec": "specs/port/trios/crates/trios-chat/common/helpers.t27",
@@ -14,7 +14,7 @@
   "module": "port::trios::crates::trios-chat::rings::CR-CHAT-03::src::commit_signature",
   "ring": 12,
   "seal_schema": 2,
-  "sealed_at": "2026-10-19T01:57:00Z",
+  "sealed_at": "2026-10-19T02:34:46Z",
   "sealed_by": "t27c-bootstrap@0.5.2",
   "spec_hash": "sha256:8f4e1de8933dd2df68577a397bd42d0839d5e2a84039a89092f99aa1662ecd33",
   "spec_path": "specs/port/trios/crates/trios-chat/rings/CR-CHAT-03/src/commit_signature.t27",
