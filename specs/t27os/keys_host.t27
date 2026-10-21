@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // T27 OS keys_host: where the key manager (keys.t27) touches the machine through libSystem. Two jobs, no
 // decisions (the check button, which needs Foundation, is keys_probe.t27):
-//   - the macOS Keychain, one generic-password item per key (up to MAX_KEYS a provider; account = provider
-//     name, then "<name>#2" .. "<name>#12") under the service "ai.t27.os": kc_get_n / kc_put_n / kc_del_n.
+//   - the macOS Keychain, one generic-password item per key (up to MAX_KEYS = 64 a provider; account = provider
+//     name, then "<name>#2" .. "<name>#64") under the service "ai.t27.os": kc_get_n / kc_put_n / kc_del_n.
 //     The Keychain is reached ONLY by running /usr/bin/security (posix_spawn, pipes, poll, waitpid), never
 //     through SecItem calls. The window is signed ad hoc, so each rebuild is a new code identity and every
 //     SecItem read of an item asked for the login password again; the items trust /usr/bin/security, which
 //     Apple signs and no rebuild changes. A key is never written to a file, never put on argv (ps shows it:
 //     an add feeds `security -i` one line on standard input) and never reaches the repo.
-//   - push_keys(): hand every stored key, with its number, to the PTY server (OP_SETKEY) so a pane it spawns
-//     is logged in and the server can rotate over the keys of a provider.
+//   - push_keys() / push_keys_mask(): hand every stored key, with its slot, to the PTY server (OP_SETKEY_WIDE)
+//     so a pane it spawns is logged in and the server can rotate over the keys of a provider. A key counts as
+//     pushed only when the server answered RE_OK (pty_client client_reply_ok).
 //
 // Two programs import this module: the window (glass_window.t27) and the PTY server (pty_server.t27, which
 // reads the Keychain itself with kc_get_n so it never depends on the window being connected). A module's
@@ -48,7 +49,7 @@ use t27os::keys::sec_gone;
 use t27os::keys::sec_key_from_output;
 use t27os::keys::scan_goes_on;
 use t27os::keys::keychain_account_n;
-use t27os::keys::setkey_byte;
+use t27os::keys::slot_taken;
 use t27os::pty_proto::get_u64;
 use t27os::pty_proto::MAX_FRAME;
 use t27os::pty_logic::put_pollfd;
@@ -61,7 +62,8 @@ use t27os::pty_sys::sys_close;
 use t27os::pty_sys::sys_poll;
 use t27os::pty_sys::sys_kill;
 use t27os::pty_sys::sys_waitpid;
-use t27os::pty_client::client_set_key;
+use t27os::pty_client::client_set_key_n;
+use t27os::pty_client::client_reply_ok;
 
 pub const SIGNAL_PIPE : i32 = 13;
 pub const SIGNAL_CHLD : i32 = 20;
@@ -320,6 +322,24 @@ pub fn kc_get_n(p: u32, k: u32, out: []u8) -> usize {
     return n;
 }
 
+/// Read key k (0-based) of provider p into out like kc_get_n, and also tell how the read went: state[0] is the
+/// run's state (keys.t27 SEC_OK, SEC_NOT_FOUND, SEC_DENIED, SEC_FAILED), so a caller can tell an empty slot
+/// from a read that failed or was denied (keys_import_logic import_read_class). The key's length, 0 when there
+/// is none or it was not read.
+pub fn kc_read_n(p: u32, k: u32, out: []u8, state: []u32) -> usize {
+    var raw : [256]u8 = undefined;
+    wipe(raw[0..256]);
+    var res : [2]u32 = undefined;
+    res[0] = 0;
+    res[1] = 0;
+    const st : u32 = sec_op(SEC_OP_READ, p, k, "", raw[0..256], res[0..2]);
+    var n : usize = 0;
+    if (st == SEC_OK) { n = sec_key_from_output(raw[0 .. @as(usize, res[0])], out); }
+    wipe(raw[0..256]);
+    if (state.len > 0) { state[0] = st; }
+    return n;
+}
+
 /// Find an existing local key without returning any secret. MAX_KEYS means absent.
 pub fn kc_find(p: u32, key: []const u8) -> u32 {
     var other : [256]u8 = undefined;
@@ -354,11 +374,18 @@ pub fn kc_has(p: u32) -> bool {
     return n > 0;
 }
 
-/// Hand every stored key to the PTY server on `fd`, each with its number; the count pushed. The numbered
-/// accounts of every provider are read (a scan stops after two misses in a row, keys.t27 scan_goes_on) and the
-/// number rides in the OP_SETKEY pane byte (keys.t27 setkey_byte), so the server holds all of them and
-/// rotates over them. Called on connect, when the KEYS tab opens and before a spawn, because a server that
-/// restarted has forgotten them. The copy of each key in this stack frame is wiped when the call ends.
+/// Hand one key to the server in a wide frame; true only when the server answered RE_OK.
+fn push_one(fd: i32, p: u32, k: u32, key: []const u8, reply: []u8) -> bool {
+    const rn : usize = client_set_key_n(fd, p, k, key, reply);
+    return client_reply_ok(reply, rn);
+}
+
+/// Hand every stored key to the PTY server on `fd`, each with its slot; the count the server accepted (RE_OK).
+/// With no mask known, every number of every provider is read (keys.t27 scan_goes_on reads all MAX_KEYS, so a
+/// key behind a gap is pushed too): about 64 runs of /usr/bin/security a provider. Each key goes in
+/// OP_SETKEY_WIDE (pty_client client_set_key_n), so slot 17 to 64 reach the server as themselves. Called when a
+/// connection opens (a server that restarted has forgotten the keys). The copy of each key in this stack frame
+/// is wiped after each push and when the call ends.
 pub fn push_keys(fd: i32) -> u32 {
     var key : [256]u8 = undefined;
     var reply : [MAX_FRAME]u8 = undefined;
@@ -371,9 +398,33 @@ pub fn push_keys(fd: i32) -> u32 {
             const n : usize = kc_get_n(p, k, key[0..256]);
             if (n > 0) {
                 misses = 0;
-                if (client_set_key(fd, setkey_byte(p, k), key[0..n], reply[0..MAX_FRAME]) > 0) { pushed = pushed + 1; }
+                if (push_one(fd, p, k, key[0..n], reply[0..MAX_FRAME])) { pushed = pushed + 1; }
             } else {
                 misses = misses + 1;
+            }
+            wipe(key[0..256]);
+            k = k + 1;
+        }
+        p = p + 1;
+    }
+    wipe(key[0..256]);
+    return pushed;
+}
+
+/// The same with the stored-slot masks the window already read (keys_refresh; stored[p] is provider p's u64
+/// mask): only the slots in a mask are read and pushed, so a refresh does not scan the Keychain twice.
+pub fn push_keys_mask(fd: i32, stored: []const u64) -> u32 {
+    var key : [256]u8 = undefined;
+    var reply : [MAX_FRAME]u8 = undefined;
+    var pushed : u32 = 0;
+    var p : u32 = 0;
+    while (p < PROVIDER_COUNT and p < stored.len) {
+        var k : u32 = 0;
+        while (k < MAX_KEYS) {
+            if (slot_taken(stored[p], k)) {
+                const n : usize = kc_get_n(p, k, key[0..256]);
+                if (n > 0 and push_one(fd, p, k, key[0..n], reply[0..MAX_FRAME])) { pushed = pushed + 1; }
+                wipe(key[0..256]);
             }
             k = k + 1;
         }

@@ -21,6 +21,12 @@ use t27os::pty_proto::OP_KEYS;
 use t27os::pty_proto::OP_READ;
 use t27os::pty_proto::OP_KILL;
 use t27os::pty_proto::OP_SETKEY;
+use t27os::pty_proto::OP_SETKEY_WIDE;
+use t27os::pty_proto::RE_OK;
+use t27os::pty_proto::RE_ERR;
+use t27os::keys::PROVIDER_COUNT;
+use t27os::keys::MAX_KEYS;
+use t27os::keys::setkey_wide_payload;
 use t27os::pty_proto::OP_RESIZE;
 use t27os::pty_proto::put_u16;
 use t27os::pty_proto::HEADER;
@@ -155,9 +161,29 @@ pub fn client_keys(fd: i32, pane: u32, keys: []const u8, out: []u8) -> usize {
     return client_call(fd, OP_KEYS, @as(u8, @intCast(pane)), keys, out);
 }
 
-/// SETKEY: hand the server provider p's key (empty = forget it); it lives in the server's memory only.
+/// SETKEY (legacy): hand the server the key of a legacy pane byte (keys.t27 setkey_byte, keys 1 to 16 only;
+/// empty = forget it); it lives in the server's memory only. A byte past 255 is never sent. New callers use
+/// client_set_key_n, which names any slot.
 pub fn client_set_key(fd: i32, provider: u32, key: []const u8, out: []u8) -> usize {
+    if (provider > 255) { return 0; }
     return client_call(fd, OP_SETKEY, @as(u8, @intCast(provider)), key, out);
+}
+
+/// SETKEY_WIDE: set key slot k (0-based, below MAX_KEYS) of provider p to `key`, or forget that slot when the
+/// key is empty. Nothing is sent unless every field is valid (keys.t27 setkey_wide_payload: no truncation,
+/// never another slot); 0 then. The caller checks the reply with client_reply_ok.
+pub fn client_set_key_n(fd: i32, p: u32, k: u32, key: []const u8, out: []u8) -> usize {
+    if (p >= PROVIDER_COUNT or k >= MAX_KEYS) { return 0; }
+    var pl : [260]u8 = undefined;
+    const n : usize = setkey_wide_payload(k, key, pl[0..260]);
+    if (n == 0) { return 0; }
+    return client_call(fd, OP_SETKEY_WIDE, @as(u8, @intCast(p)), pl[0..n], out);
+}
+
+/// Did the server accept a SETKEY (legacy or wide)? Only a whole RE_OK frame of n bytes counts: an RE_ERR reply,
+/// a short or empty read is a failure, so a refused key is never counted as pushed.
+pub fn client_reply_ok(reply: []const u8, n: usize) -> bool {
+    return n >= HEADER and n <= reply.len and reply[0] == RE_OK;
 }
 
 /// READ from `cursor`: the reply payload is the new cursor (8 bytes) then the output bytes.
@@ -207,4 +233,18 @@ test a_long_path_is_cut_at_103 {
     sockaddr_un(a[0..106], p[0..200]);
     assert a[104] == 97;
     assert a[105] == 0;
+}
+
+test only_an_ok_reply_counts_as_a_set_key {
+    var r : [8]u8 = undefined;
+    r[0] = RE_OK;
+    r[1] = 9;
+    r[2] = 0;
+    r[3] = 0;
+    assert client_reply_ok(r[0..8], 4);
+    assert client_reply_ok(r[0..8], 0) == false;
+    assert client_reply_ok(r[0..8], 3) == false;
+    assert client_reply_ok(r[0..8], 9) == false;
+    r[0] = RE_ERR;
+    assert client_reply_ok(r[0..8], 4) == false;
 }

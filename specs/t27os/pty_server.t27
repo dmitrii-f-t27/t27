@@ -18,8 +18,9 @@
 //   T27OS_INSTALL=1    write ~/Library/LaunchAgents/ai.t27.os-server.plist for this binary: it starts
 //                      the server at login, so panes come back (by session id, model kept) after a reboot.
 //
-// Keys (gHashTag/t27#11241): the server holds up to MAX_KEYS numbered keys for each provider, in memory only,
-// sent by the window with OP_SETKEY (the key number rides in the high nibble of the pane byte). Every agent
+// Keys (gHashTag/t27#11241, dmitrii-f-t27/t27#6): the server holds up to MAX_KEYS (64) numbered keys for each
+// provider, in memory only, sent by the window with OP_SETKEY_WIDE (payload [slot][key]) or the legacy
+// OP_SETKEY (keys 1 to 16, the key number in the high nibble of the pane byte). Every agent
 // pane picks its key by rotation at each start; the pane record keeps the key NUMBER, never the key. The
 // claude cell's screen is read for an error row (pty_logic screen_text, keys.t27 error_row and classify_line):
 // the failed key rests, the pane is respawned (resumed) on the next key or profile, or stays with a line in its
@@ -171,6 +172,7 @@ use t27os::pty_sys::sys_unsetenv;
 use t27os::pty_logic::O_KEYS;
 use t27os::pty_logic::KEY_CAP;
 use t27os::pty_proto::OP_SETKEY;
+use t27os::pty_proto::OP_SETKEY_WIDE;
 use t27os::pty_logic::G_PANEK;
 use t27os::pty_logic::G_KLOAD;
 use t27os::pty_logic::load_all_mask;
@@ -219,6 +221,8 @@ use t27os::keys::FA_KEEP;
 use t27os::keys::FA_GIVE_UP;
 use t27os::keys::setkey_provider;
 use t27os::keys::setkey_number;
+use t27os::keys::setkey_wide_ok;
+use t27os::keys::setkey_wide_slot;
 use t27os::keys::scan_goes_on;
 use t27os::keys_host::kc_get_n;
 use t27os::keys::agent_uses;
@@ -785,11 +789,11 @@ fn put_key(st: []u64, mem: []u8, sp: u32, sk: u32, src: usize, plen: usize) -> b
 
 /// Read the Keychain's keys of the providers in `mask` (pty_logic load_mask_agent, load_all_mask) into the table,
 /// each by put_key as an OP_SETKEY would put it. The reader is keys_host kc_get_n, which runs /usr/bin/security
-/// (never SecItem, so there is no dialog); a scan of one provider ends after two numbers in a row that hold
-/// nothing (keys.t27 scan_goes_on). A key is read into the scratch at O_TMP2 + 4096, which nothing else uses, and
+/// (never SecItem, so there is no dialog); a scan of one provider reads all MAX_KEYS (64) numbers (keys.t27
+/// scan_goes_on), so a key behind a gap is never skipped. A key is read into the scratch at O_TMP2 + 4096, which nothing else uses, and
 /// the scratch is wiped when the call ends. Sets G_KLOAD to now. Returns how many keys were put. It blocks the
-/// loop for the length of the reads (about 23 ms each, a few per provider): only the start and a spawn that
-/// found no key call it.
+/// loop for the length of the reads (about 23 ms each, 64 per provider asked for): only the start and a spawn
+/// that found no key call it.
 fn load_keys(st: []u64, mem: []u8, mask: u32) -> u32 {
     const at : usize = O_TMP2 + 4096;
     var got : u32 = 0;
@@ -838,7 +842,8 @@ fn handle_frame(st: []u64, mem: []u8, fd: i32, off: usize) -> void {
             const b : usize = @as(usize, i) * PF;
             if (st[b + PF_USED] != 0) {
                 const w : u32 = @as(u32, @intCast(st[b + PF_STATUS]));
-                // the flags byte carries the pane's key number + 1 in its high nibble (0 = no key); bits 0 to 2 as before
+                // the flags byte carries the pane's key number + 1 in its high nibble (0 = no key, and 0 for key 16 and
+                // later, which the nibble cannot hold: pty_logic list_key_nibble); bits 0 to 2 as before, bit 3 pinned
                 const kshown : u32 = pane_key_shown(st, @as(usize, i), @as(u32, @intCast(st[b + PF_AGENT])));
                 var pinned_flag : u32 = 0;
                 if (pc_find(model_of(mem, @as(usize, i))) < PC_COUNT) { pinned_flag = 8; }
@@ -921,6 +926,15 @@ fn handle_frame(st: []u64, mem: []u8, fd: i32, off: usize) -> void {
         // the pane byte is the provider in its low nibble and the key number (0 = key 1) in the high one
         // (keys.t27 setkey_byte): key 1 is the frame this op always had, an older client changes nothing
         if (!put_key(st, mem, setkey_provider(pane), setkey_number(pane), p0, plen)) { reply(fd, mem, RE_ERR, 0, 0); return; }
+        reply(fd, mem, RE_OK, @as(u8, @intCast(pane)), 0);
+        return;
+    }
+    if (op == OP_SETKEY_WIDE) {
+        // the pane byte is the provider; payload[0] the slot (0 to 63), the rest the key; the slot byte alone
+        // empties the slot. The whole frame is checked first (keys.t27 setkey_wide_ok): a refused frame changes
+        // no slot, and put_key checks provider, slot and key once more before it writes
+        if (setkey_wide_ok(pane, mem[p0 .. p0 + plen]) == false) { reply(fd, mem, RE_ERR, 0, 0); return; }
+        if (!put_key(st, mem, pane, setkey_wide_slot(mem[p0 .. p0 + plen]), p0 + 1, plen - 1)) { reply(fd, mem, RE_ERR, 0, 0); return; }
         reply(fd, mem, RE_OK, @as(u8, @intCast(pane)), 0);
         return;
     }
@@ -1337,11 +1351,13 @@ fn run_ctl(st: []u64, mem: []u8, verb: u8) -> void {
             say(" light ");
             const ln : usize = light_name(shown_light_of(@as(u32, out[at + 2])), mem[O_TMP1 + 3900 .. O_TMP1 + 3930]);
             sys_write(1, mem[O_TMP1 + 3900 .. O_TMP1 + 3900 + ln], @as(u64, ln));
-            // bits 0 to 2 of the flags byte as before; its high nibble is the key number (1 to 8) the pane holds
+            // bits 0 to 3 of the flags byte as before; its high nibble is the key number (1 to 15) the pane holds,
+            // and 0 for no key or for key 16 and later, which the four-byte entry cannot carry (pty_logic
+            // list_key_nibble): the CLI says so instead of naming a wrong key
             say(" flags ");
             print_dec(@as(u64, out[at + 3] % 16), mem);
             say(" key ");
-            if (out[at + 3] / 16 == 0) { say("-"); } else { print_dec(@as(u64, out[at + 3] / 16), mem); }
+            if (out[at + 3] / 16 == 0) { say("- (none, or 16 and up)"); } else { print_dec(@as(u64, out[at + 3] / 16), mem); }
             say("\n");
             at = at + 4;
         }
@@ -1395,8 +1411,8 @@ fn run_install(st: []u64, mem: []u8) -> void {
 }
 
 pub fn main() -> void {
-    var st : [608]u64 = undefined;
-    var mem : [1184000]u8 = undefined;
+    var st : [1664]u64 = undefined;
+    var mem : [1317120]u8 = undefined;
     var z : usize = 0;
     while (z < ST_SIZE) {
         st[z] = 0;
@@ -1439,7 +1455,7 @@ test the_arena_regions_do_not_overlap {
     assert O_KEYS + @as(usize, PROVIDER_COUNT) * @as(usize, MAX_KEYS) * KEY_CAP <= O_CARRY;
     assert O_CARRY + 16 * CARRY_SLOT <= O_SCAN;
     assert O_SCAN + SCAN_CAP <= MEM_SIZE;
-    assert MEM_SIZE == 1184000;
-    assert ST_SIZE == 608;
+    assert MEM_SIZE == 1317120;
+    assert ST_SIZE == 1664;
     assert CARRY_SLOT == CARRY_CAP + 4;
 }

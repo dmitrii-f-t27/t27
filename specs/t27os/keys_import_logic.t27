@@ -1,12 +1,25 @@
 // SPDX-License-Identifier: Apache-2.0
 // Local, explicit import for dmitrii-f-t27/t27#6. Never evaluate an env file.
-// Only exact NVIDIA_API_KEY[_N] and ZAI_API_KEY[_N] names are accepted.
+// Only exact NVIDIA_API_KEY[_N] and ZAI_API_KEY[_N] names are accepted (N 1 to MAX_KEYS = 64); a base name may
+// repeat, one line per key (the owner's file does that), and every recognized line is one key.
+// Planning (pure, below): the importer reads each provider's stored keys ONCE, then for every input key decides
+// duplicate (equal to a stored key, or to an earlier key of the same input) or new; the new keys take the lowest
+// free slots (import_slots), and the whole import is refused before any write when the new keys of a provider
+// do not fit its free slots (import_fits). Nothing here holds a key value beyond the bytes it is handed.
 module T27osKeysImportLogic;
 
 use t27os::keys::P_NVIDIA;
 use t27os::keys::P_ZAI;
 use t27os::keys::MAX_KEYS;
 use t27os::keys::sec_key_safe;
+use t27os::keys::SEC_OK;
+use t27os::keys::SEC_NOT_FOUND;
+use t27os::keys::SEC_DENIED;
+use t27os::keys::SEC_FAILED;
+use t27os::keys::slot_count;
+use t27os::keys::slot_taken;
+use t27os::keys::slot_add;
+use t27os::keys::slot_bit;
 use t27os::editors::same_bytes;
 
 pub const IMPORT_NONE : u32 = 0;
@@ -66,6 +79,74 @@ pub fn import_line(line: []const u8, bounds: []u32) -> u32 {
     return p;
 }
 
+/// What one Keychain read of a slot means for the import preflight. Only a read that answered with a key
+/// (SEC_OK and a key) is a stored slot, and only an explicit "no such item" (SEC_NOT_FOUND) is a free one.
+/// Anything else (denied, failed, a timeout, output that is no key) is unknown: the slot may hold a key the
+/// import cannot see, so the whole import stops before any write.
+pub const READ_STORED : u32 = 0;
+pub const READ_FREE : u32 = 1;
+pub const READ_UNKNOWN : u32 = 2;
+
+pub fn import_read_class(state: u32, key_len: usize) -> u32 {
+    if (state == SEC_OK and key_len > 0) { return READ_STORED; }
+    if (state == SEC_NOT_FOUND) { return READ_FREE; }
+    return READ_UNKNOWN;
+}
+
+/// Is the value of an earlier recognized line of provider p (a line that starts before byte `upto`) equal to v?
+/// The import uses it to call a key "repeated" by the input itself, whatever number of new keys came before, so
+/// the counts stay exact past MAX_KEYS new keys without keeping every range (the import is refused then anyway).
+pub fn import_earlier(data: []const u8, upto: usize, p: u32, v: []const u8) -> bool {
+    var b : [2]u32 = [0, 0];
+    var a : usize = 0;
+    while (a < upto and a < data.len) {
+        var e : usize = a;
+        while (e < data.len and data[e] != 10) { e = e + 1; }
+        if (import_line(data[a..e], b[0..2]) == p) {
+            const lo : usize = a + @as(usize, b[0]);
+            const hi : usize = a + @as(usize, b[1]);
+            if (same_bytes(data[lo..hi], v)) { return true; }
+        }
+        a = e + 1;
+    }
+    return false;
+}
+
+/// Do `new_keys` more keys fit next to the stored ones (`stored`, a u64 slot mask)?
+pub fn import_fits(stored: u64, new_keys: u32) -> bool {
+    return slot_count(stored) + new_keys <= MAX_KEYS;
+}
+
+/// The slots the next `new_keys` keys take, lowest free first, written to out[0 .. new_keys]; returns how many
+/// were assigned (fewer than new_keys only when they do not fit, and the caller then refuses the import). Stored
+/// slots are never assigned, so no existing key is ever replaced.
+pub fn import_slots(stored: u64, new_keys: u32, out: []u32) -> u32 {
+    var m : u64 = stored;
+    var got : u32 = 0;
+    var k : u32 = 0;
+    while (k < MAX_KEYS and got < new_keys and @as(usize, got) < out.len) {
+        if (slot_taken(m, k) == false) {
+            out[@as(usize, got)] = k;
+            m = slot_add(m, k);
+            got = got + 1;
+        }
+        k = k + 1;
+    }
+    return got;
+}
+
+/// Is value `v` among the `count` byte ranges [lo[i], hi[i]) of `data` (an earlier key of the same input)?
+pub fn import_seen(data: []const u8, lo: []const u32, hi: []const u32, count: u32, v: []const u8) -> bool {
+    var i : u32 = 0;
+    while (i < count and @as(usize, i) < lo.len and @as(usize, i) < hi.len) {
+        const a : usize = @as(usize, lo[@as(usize, i)]);
+        const b : usize = @as(usize, hi[@as(usize, i)]);
+        if (b <= data.len and a <= b and same_bytes(data[a..b], v)) { return true; }
+        i = i + 1;
+    }
+    return false;
+}
+
 test import_only_recognized_literal_values {
     var b : [2]u32 = [0, 0];
     assert import_line("NVIDIA_API_KEY=demo", b[0..2]) == P_NVIDIA;
@@ -73,7 +154,14 @@ test import_only_recognized_literal_values {
     assert import_line(" export ZAI_API_KEY_10 = 'demo' ", b[0..2]) == P_ZAI;
     assert b[1] - b[0] == 4;
     assert import_line("ZAI_API_KEY_12=demo", b[0..2]) == P_ZAI;
-    assert import_line("ZAI_API_KEY_13=demo", b[0..2]) == IMPORT_NONE;
+    assert import_line("ZAI_API_KEY_13=demo", b[0..2]) == P_ZAI;
+    assert import_line("NVIDIA_API_KEY_34=demo", b[0..2]) == P_NVIDIA;
+    assert import_line("NVIDIA_API_KEY_64=demo", b[0..2]) == P_NVIDIA;
+    assert import_line("NVIDIA_API_KEY_65=demo", b[0..2]) == IMPORT_NONE;
+    assert import_line("NVIDIA_API_KEY_640=demo", b[0..2]) == IMPORT_NONE;
+    // the owner's file repeats the base name, one key a line: each line is a key of its provider
+    assert import_line("NVIDIA_API_KEY=demo1", b[0..2]) == P_NVIDIA;
+    assert import_line("NVIDIA_API_KEY=demo2", b[0..2]) == P_NVIDIA;
     assert import_line("ZAI_API_KEY_01=demo", b[0..2]) == IMPORT_NONE;
     assert import_line("OTHER_KEY=demo", b[0..2]) == IMPORT_NONE;
     assert import_line("# ZAI_API_KEY=demo", b[0..2]) == IMPORT_NONE;
@@ -92,4 +180,124 @@ test import_trims_carriage_return_without_decoding_escapes {
     var b : [2]u32 = [0, 0];
     assert import_line(line[0..17], b[0..2]) == P_ZAI;
     assert b[0] == 12 and b[1] == 16;
+}
+
+/// A test mask with keys 0 .. n-1 stored.
+fn t_low(n: u32) -> u64 {
+    var m : u64 = 0;
+    var k : u32 = 0;
+    while (k < n) {
+        m = slot_add(m, k);
+        k = k + 1;
+    }
+    return m;
+}
+
+test new_keys_take_the_lowest_free_slots_and_never_a_stored_one {
+    var out : [64]u32 = undefined;
+    // the owner's NVIDIA case: 3 stored (0, 1, 2), 31 new take 3 .. 33
+    assert import_fits(t_low(3), 31);
+    assert import_slots(t_low(3), 31, out[0..64]) == 31;
+    assert out[0] == 3 and out[30] == 33;
+    // Z.ai: 11 stored, nothing new
+    assert import_slots(t_low(11), 0, out[0..64]) == 0;
+    assert import_fits(t_low(11), 0);
+    // a hole is filled first, then the slots after the last stored one; slot 63 is reachable
+    const holes : u64 = t_low(5) + slot_bit(7) + slot_bit(40);
+    assert import_slots(holes, 3, out[0..64]) == 3;
+    assert out[0] == 5 and out[1] == 6 and out[2] == 8;
+    assert import_slots(t_low(63), 1, out[0..64]) == 1;
+    assert out[0] == 63;
+    // no stored slot is ever handed out
+    const n : u32 = import_slots(holes, 57, out[0..64]);
+    assert n == 57;
+    var i : usize = 0;
+    while (i < 57) {
+        assert slot_taken(holes, out[i]) == false;
+        i = i + 1;
+    }
+    // overflow is refused as a whole: 64 stored take nothing, 60 stored take 4 of 5 and the caller refuses
+    assert import_fits(t_low(64), 1) == false;
+    assert import_slots(t_low(64), 1, out[0..64]) == 0;
+    assert import_fits(t_low(60), 4);
+    assert import_fits(t_low(60), 5) == false;
+    assert import_slots(t_low(60), 5, out[0..64]) == 4;
+}
+
+test a_key_repeated_in_the_input_is_a_duplicate_of_its_first_line {
+    const data : str = "k1 k2 k1 k3";
+    var lo : [4]u32 = [0, 3, 0, 0];
+    var hi : [4]u32 = [2, 5, 0, 0];
+    assert import_seen(data, lo[0..4], hi[0..4], 2, "k1");
+    assert import_seen(data, lo[0..4], hi[0..4], 2, "k2");
+    assert import_seen(data, lo[0..4], hi[0..4], 2, "k3") == false;
+    assert import_seen(data, lo[0..4], hi[0..4], 0, "k1") == false;
+    // a prefix is not the same key
+    assert import_seen(data, lo[0..4], hi[0..4], 2, "k") == false;
+}
+
+test a_slot_is_free_only_when_the_keychain_says_no_such_item {
+    assert import_read_class(SEC_OK, 40) == READ_STORED;
+    assert import_read_class(SEC_NOT_FOUND, 0) == READ_FREE;
+    // denied, failed, or an answer that is no key: unknown, never free
+    assert import_read_class(SEC_DENIED, 0) == READ_UNKNOWN;
+    assert import_read_class(SEC_FAILED, 0) == READ_UNKNOWN;
+    assert import_read_class(SEC_OK, 0) == READ_UNKNOWN;
+    assert import_read_class(7, 0) == READ_UNKNOWN;
+    assert import_read_class(SEC_DENIED, 40) == READ_UNKNOWN;
+}
+
+/// Write "ZAI_API_KEY=kNN\n" for NN = 10 .. 10 + count - 1 (two digits), then one more line for `again`.
+fn t_lines(out: []u8, count: u32, again: u32) -> usize {
+    var n : usize = 0;
+    var i : u32 = 0;
+    while (i <= count) {
+        var v : u32 = 10 + i;
+        if (i == count) { v = 10 + again; }
+        const head : []const u8 = "ZAI_API_KEY=k";
+        var h : usize = 0;
+        while (h < head.len) {
+            out[n] = head[h];
+            n = n + 1;
+            h = h + 1;
+        }
+        out[n] = @as(u8, @intCast(48 + v / 10));
+        out[n + 1] = @as(u8, @intCast(48 + v % 10));
+        out[n + 2] = 10;
+        n = n + 3;
+        i = i + 1;
+    }
+    return n;
+}
+
+test repeats_are_counted_exactly_past_64_new_keys {
+    // 65 distinct keys (k10 .. k74), then a second copy of the 65th (k74): 65 new, 1 repeated
+    var data : [1200]u8 = undefined;
+    const n : usize = t_lines(data[0..1200], 65, 64);
+    var b : [2]u32 = [0, 0];
+    var found : u32 = 0;
+    var repeated : u32 = 0;
+    var fresh : u32 = 0;
+    var a : usize = 0;
+    while (a < n) {
+        var e : usize = a;
+        while (e < n and data[e] != 10) { e = e + 1; }
+        if (import_line(data[a..e], b[0..2]) == P_ZAI) {
+            found = found + 1;
+            const lo : usize = a + @as(usize, b[0]);
+            const hi : usize = a + @as(usize, b[1]);
+            if (import_earlier(data[0..n], a, P_ZAI, data[lo..hi])) { repeated = repeated + 1; } else { fresh = fresh + 1; }
+        }
+        a = e + 1;
+    }
+    assert found == 66;
+    assert fresh == 65;
+    assert repeated == 1;
+    // 65 new keys never fit, even into an empty provider: the import is refused as a whole
+    assert import_fits(0, fresh) == false;
+    // the first line is never a repeat; another provider's identical value is not a repeat
+    assert import_earlier(data[0..n], 0, P_ZAI, "k10") == false;
+    assert import_earlier(data[0..n], n, P_NVIDIA, "k10") == false;
+    assert import_earlier(data[0..n], n, P_ZAI, "k74");
+    assert import_earlier(data[0..n], n, P_ZAI, "k75") == false;
 }

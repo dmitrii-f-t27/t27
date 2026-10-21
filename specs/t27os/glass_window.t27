@@ -79,7 +79,6 @@ use t27os::keys::ky_page_action;
 use t27os::keys::provider_label;
 use t27os::keys::PROFILE_COUNT;
 use t27os::keys::MAX_KEYS;
-use t27os::keys::setkey_byte;
 use t27os::keys::key_count_text;
 use t27os::keys::MAX_KEY_CHARS;
 use t27os::keys::KEYS_WORDS;
@@ -117,6 +116,7 @@ use t27os::keys::mask_key;
 use t27os::keys::sec_key_safe;
 use t27os::keys::key_index;
 use t27os::keys::slot_count;
+use t27os::keys::slot_add;
 use t27os::keys::next_free_key;
 use t27os::keys::newest_key;
 use t27os::keys::ky_set_word;
@@ -147,6 +147,7 @@ use t27os::keysync::kd_view_text_len;
 use t27os::keysync::kd_view_flags;
 use t27os::keysync::KDF_MINE;
 use t27os::keys_host::push_keys;
+use t27os::keys_host::push_keys_mask;
 use t27os::profile::PRF_OK;
 use t27os::profile::PRF_OK_SAVED;
 use t27os::profile::PRF_E_CANCELLED;
@@ -213,7 +214,7 @@ use t27os::profile_host::prfh_avatar_path;
 use t27os::profile_host::prfh_save_nick;
 use t27os::profile_host::prfh_remove;
 use t27os::profile_host::prfh_pick;
-use t27os::pty_client::client_set_key;
+use t27os::pty_client::client_set_key_n;
 use t27os::editors::EDITOR_COUNT;
 use t27os::editors::ED_NONE;
 use t27os::editors::ED_SLOT_H;
@@ -5026,7 +5027,8 @@ fn ns_bytes(s: u64, out: []u8) -> usize {
 }
 
 /// Connect to the server under the home directory; the fd, -1 when nothing listens. A new connection means a
-/// server that may have restarted and forgotten its keys, so every stored key is handed over again.
+/// server that may have restarted and forgotten its keys, so every stored key is handed over again
+/// (keys_host push_keys: all MAX_KEYS numbers of every provider are read, no mask is known here yet).
 fn term_connect(hb: []u8) -> i32 {
     const hn : usize = ns_bytes(home_dir(), hb);
     const fd : i32 = client_connect(hb[0 .. hn]);
@@ -5282,10 +5284,12 @@ fn bytes_w(kit: [48]u64, s: []const u8, n: usize, size: f64, weight: f64, mono: 
 }
 
 /// The Keychain is read here and nowhere else in the window: which numbers each provider holds (stored[p] is a
-/// bit mask, bit k set = key k+1 exists; keys.t27 slot_count counts it) and the masked text of its newest key,
-/// the highest number (16 bytes a provider). A scan stops after two misses in a row (keys.t27 scan_goes_on).
-/// The full key is wiped from the buffer before the next one is read.
-fn keys_refresh(stored: []u32, mask: []u8, mlen: []u32) -> void {
+/// u64 bit mask, bit k set = key k+1 exists, for keys 1 to 64; keys.t27 slot_count counts it) and the masked
+/// text of its newest key, the highest number (16 bytes a provider). A scan reads all MAX_KEYS numbers of every
+/// provider (keys.t27 scan_goes_on), so a key behind a gap is found: about 64 runs of /usr/bin/security a
+/// provider, only when the KEYS panel opens or a key is added, deleted or picked. The full key is wiped from
+/// the buffer before the next one is read.
+fn keys_refresh(stored: []u64, mask: []u8, mlen: []u32) -> void {
     // the Devices view (keysync.t27) rides after the provider mask bytes: refreshed with the keys
     if (mask.len >= KY_BUFFER_BYTES) { ks_view_fill(mask[KY_MASK_BYTES..KY_BUFFER_BYTES]); }
     var key : [256]u8 = undefined;
@@ -5301,7 +5305,7 @@ fn keys_refresh(stored: []u32, mask: []u8, mlen: []u32) -> void {
             if (n > 0) {
                 misses = 0;
                 mlen[p] = @as(u32, @intCast(mask_key(key[0..n], mask[at .. at + 16])));
-                stored[p] = stored[p] + (1 << k);
+                stored[p] = slot_add(stored[p], k);
             } else {
                 misses = misses + 1;
             }
@@ -5316,16 +5320,17 @@ fn keys_refresh(stored: []u32, mask: []u8, mlen: []u32) -> void {
     }
 }
 
-/// Hand the server every stored key with its number (keys_host push_keys), then take back each key whose last
-/// check failed (keys.t27 key_withheld), as the check button does: a refresh must not undo that. kst holds one
-/// status per key (keys.t27 key_index).
-fn keys_sync(fd: i32, kst: []const u32, out: []u8) -> void {
-    push_keys(fd);
+/// Hand the server every stored key with its slot (keys_host push_keys_mask, with the masks keys_refresh just
+/// read, so the Keychain is not scanned twice), then take back each key whose last check failed (keys.t27
+/// key_withheld), as the check button does: a refresh must not undo that. kst holds one status per key
+/// (keys.t27 key_index, PROVIDER_COUNT * MAX_KEYS = 640). Every key travels in OP_SETKEY_WIDE.
+fn keys_sync(fd: i32, stored: []const u64, kst: []const u32, out: []u8) -> void {
+    push_keys_mask(fd, stored);
     var p : u32 = 0;
     while (p < PROVIDER_COUNT) {
         var k : u32 = 0;
         while (k < MAX_KEYS) {
-            if (key_withheld(kst[key_index(p, k)])) { client_set_key(fd, setkey_byte(p, k), "", out); }
+            if (key_withheld(kst[key_index(p, k)])) { client_set_key_n(fd, p, k, "", out); }
             k = k + 1;
         }
         p = p + 1;
@@ -5421,7 +5426,7 @@ fn draw_provider_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64,
     draw_str(c, kit, status, x, t + 260.0, 9.5, 0.0);
 }
 
-fn draw_keys_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, stored: []const u32, mask: []const u8, mlen: []const u32, kst: []const u32, kfail: []const u32, kopen: []const u64, now: u64, kedit: u32, kbuf: []const u8, klen: u32, karm: u32, kstate: u32, kemask: u32, kewhy: u32, ktpick: u32) -> void {
+fn draw_keys_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, stored: []const u64, mask: []const u8, mlen: []const u32, kst: []const u32, kfail: []const u32, kopen: []const u64, now: u64, kedit: u32, kbuf: []const u8, klen: u32, karm: u32, kstate: u32, kemask: u32, kewhy: u32, ktpick: u32) -> void {
     const kbusy : u32 = kstate % 256;
     const kpage : u32 = kstate / 256 % 2;
     const kerror : u32 = kstate / 512 % 8;
@@ -5446,7 +5451,12 @@ fn draw_keys_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, sto
     if (kerror == 1) { n = put_bytes(w[0..48], 0, "Could not save. Retry or Esc."); }
     if (kerror == 2) { n = put_bytes(w[0..48], 0, "Invalid key. Check the pasted text."); }
     if (kerror == 3) { n = put_bytes(w[0..48], 0, "This key is already stored."); }
-    if (kerror == 4) { n = put_bytes(w[0..48], 0, "All twelve key slots are full."); }
+    if (kerror == 4) {
+        // the limit is keys.t27 MAX_KEYS (64 a provider): "All 64 key slots are full."
+        n = put_bytes(w[0..48], 0, "All ");
+        n = put_dec(w[0..48], n, @as(u64, MAX_KEYS));
+        n = put_bytes(w[0..48], n, " key slots are full.");
+    }
     draw_bytes(c, kit, w[0..48], n, x, t + 46.0, 9.5, 0.0, false);
     var row : u32 = 0;
     while (row < KY_PAGE_ROWS) {
@@ -8828,7 +8838,7 @@ fn draw_profile_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, 
     }
 }
 
-fn draw(c: u64, kit: [48]u64, frame: u32, state: u32, hov: u32, ma: f64, shown: u32, task: u32, space: u32, sp: u32, ss: u64, cur: u32, collapsed: bool, mx: f64, my: f64, z: f64, sw: f64, sh: f64, ws: u32, full: bool, qp: bool, ring: [8]u64, n: u32, now: u64, sug: u32, god: bool, glow: f64, dk: [128]u64, dp: bool, darmed: u32, doff: u32, dgo: u32, dlive: bool, dlabel: u64, tst: []const u32, tcells: []const u32, topen: u32, tcur: bool, kyp: bool, kstored: []const u32, kmask: []const u8, kmlen: []const u32, kst: []const u32, kfail: []const u32, kopen: []const u64, kedit: u32, kbuf: []const u8, klen: u32, karm: u32, kstate: u32, kemask: u32, kewhy: u32, ktpick: u32, hs: u32, cons: bool, dc: []u64, gal: []const u8, gt: []const u32, evd: u32, evpk: u64, pb: []const u8, sst: []const u32, tg: []const u64, tb: []const u8) -> void {
+fn draw(c: u64, kit: [48]u64, frame: u32, state: u32, hov: u32, ma: f64, shown: u32, task: u32, space: u32, sp: u32, ss: u64, cur: u32, collapsed: bool, mx: f64, my: f64, z: f64, sw: f64, sh: f64, ws: u32, full: bool, qp: bool, ring: [8]u64, n: u32, now: u64, sug: u32, god: bool, glow: f64, dk: [128]u64, dp: bool, darmed: u32, doff: u32, dgo: u32, dlive: bool, dlabel: u64, tst: []const u32, tcells: []const u32, topen: u32, tcur: bool, kyp: bool, kstored: []const u64, kmask: []const u8, kmlen: []const u32, kst: []const u32, kfail: []const u32, kopen: []const u64, kedit: u32, kbuf: []const u8, klen: u32, karm: u32, kstate: u32, kemask: u32, kewhy: u32, ktpick: u32, hs: u32, cons: bool, dc: []u64, gal: []const u8, gt: []const u32, evd: u32, evpk: u64, pb: []const u8, sst: []const u32, tg: []const u64, tb: []const u8) -> void {
     // evp, evn2 and evpr travel packed (the draw call is at the 64 parameter limit)
     const evp : u32 = @as(u32, @intCast(evpk % 1048576));
     const evn2 : u32 = @as(u32, @intCast(evpk / 1048576 % 1048576));
@@ -10323,10 +10333,10 @@ pub fn main() -> void {
     // bytes, wiped after use), the DELETE that waits for its second click, the check in flight (the provider
     // and the next number it reads), and the editors found
     var kyp : bool = false;
-    var kstored : [10]u32 = undefined;
+    var kstored : [10]u64 = undefined;
     var kmask : [560]u8 = undefined;
     var kmlen : [10]u32 = undefined;
-    var kst : [120]u32 = undefined;
+    var kst : [640]u32 = undefined;
     var kfail : [10]u32 = undefined;
     var kopen : [10]u64 = undefined;
     var kbuf : [256]u8 = undefined;
@@ -10578,7 +10588,7 @@ pub fn main() -> void {
                             dp = false;
                             keys_refresh(kstored[0..10], kmask[0..560], kmlen[0..10]);
                             // the refresh also hands the server every numbered key again (a server that restarted forgot them)
-                            if (tfd >= 0) { keys_sync(tfd, kst[0..120], tout[0..4100]); }
+                            if (tfd >= 0) { keys_sync(tfd, kstored[0..10], kst[0..640], tout[0..4100]); }
                             const khn : usize = ns_bytes(home_dir(), khome[0..256]);
                             kemask = installed_mask(khome[0..khn]);
                             ktpick = term_pick(term_mask());
@@ -10777,7 +10787,7 @@ pub fn main() -> void {
                                 if (kdn < MAX_KEYS) {
                                     if (kc_del_n(kq, kdn)) {
                                         kst[key_index(kq, kdn)] = ST_STORED;
-                                        if (tfd >= 0) { client_set_key(tfd, setkey_byte(kq, kdn), "", tout[0..4100]); }
+                                        if (tfd >= 0) { client_set_key_n(tfd, kq, kdn, "", tout[0..4100]); }
                                     }
                                 }
                                 karm = KY_NONE;
@@ -11080,7 +11090,7 @@ pub fn main() -> void {
                         dp = false;
                         keys_refresh(kstored[0..10], kmask[0..560], kmlen[0..10]);
                         // the refresh also hands the server every numbered key again (a server that restarted forgot them)
-                        if (tfd >= 0) { keys_sync(tfd, kst[0..120], tout[0..4100]); }
+                        if (tfd >= 0) { keys_sync(tfd, kstored[0..10], kst[0..640], tout[0..4100]); }
                         const khn : usize = ns_bytes(home_dir(), khome[0..256]);
                         kemask = installed_mask(khome[0..khn]);
                         ktpick = term_pick(term_mask());
@@ -11452,7 +11462,7 @@ pub fn main() -> void {
                                     kerror = 0;
                                     kst[key_index(kedit, ksn)] = ST_STORED;
                                     kfail[kedit] = 0;
-                                    if (tfd >= 0) { client_set_key(tfd, setkey_byte(kedit, ksn), kbuf[0 .. @as(usize, klen)], tout[0..4100]); }
+                                    if (tfd >= 0) { client_set_key_n(tfd, kedit, ksn, kbuf[0 .. @as(usize, klen)], tout[0..4100]); }
                                 }
                             }
                             if (kerror == 0) {
@@ -11748,9 +11758,9 @@ pub fn main() -> void {
                     // that passed is handed over again
                     if (tfd >= 0) {
                         if (key_withheld(kst[kix])) {
-                            client_set_key(tfd, setkey_byte(kbusy, kbk), "", tout[0..4100]);
+                            client_set_key_n(tfd, kbusy, kbk, "", tout[0..4100]);
                         } else {
-                            client_set_key(tfd, setkey_byte(kbusy, kbk), ktmp[0 .. kn2], tout[0..4100]);
+                            client_set_key_n(tfd, kbusy, kbk, ktmp[0 .. kn2], tout[0..4100]);
                         }
                     }
                 }
@@ -12199,14 +12209,14 @@ pub fn main() -> void {
         fwait = fg_wait_anim(fquiet, tlink == PANE_LIVE and topen != PANE_NONE, fanim, FRAME_S);
         msg_flag(tx_cls, s_quiet, true);
         if (fdraw and narrow) {
-            draw(cc, kit, frame, state, hov, ma, shown, task, space, sp, ss, cur, collapsed, mx, my, z, sw, sh, ws, full, qp, ring, evn, now, sug, god, glow, dk, dp, darmed, doff, dgo, walking, dlabel, tst[0..32], tcells[0..960000], topen, tcur, kyp, kstored[0..10], kmask[0..560], kmlen[0..10], kst[0..120], kfail[0..10], kopen[0..10], kedit, kbuf[0..256], klen, karm, kbusy + kpage * 256 + kerror * 512 + pcell * 4096 + ppage * 16384 + perror * 65536, kemask, kewhy, ktpick, hs, cons2, dcv[0..512], gal[0..49152], gt[0..2560], evd, @as(u64, evp) + @as(u64, evn2) * 1048576 + @as(u64, evpr) * 1099511627776, pbuf[0..4160], sst[0..560], tgv[0..256], tbv[0..77312]);
+            draw(cc, kit, frame, state, hov, ma, shown, task, space, sp, ss, cur, collapsed, mx, my, z, sw, sh, ws, full, qp, ring, evn, now, sug, god, glow, dk, dp, darmed, doff, dgo, walking, dlabel, tst[0..32], tcells[0..960000], topen, tcur, kyp, kstored[0..10], kmask[0..560], kmlen[0..10], kst[0..640], kfail[0..10], kopen[0..10], kedit, kbuf[0..256], klen, karm, kbusy + kpage * 256 + kerror * 512 + pcell * 4096 + ppage * 16384 + perror * 65536, kemask, kewhy, ktpick, hs, cons2, dcv[0..512], gal[0..49152], gt[0..2560], evd, @as(u64, evp) + @as(u64, evn2) * 1048576 + @as(u64, evpr) * 1099511627776, pbuf[0..4160], sst[0..560], tgv[0..256], tbv[0..77312]);
             const whole : u64 = cg_image(cc);
             const img : u64 = cg_crop(whole, 0.0, 0.0, sw * RETINA, sh * RETINA);
             msg1(layer, s_contents, img);
             cg_image_release(img);
             cg_image_release(whole);
         } else if (fdraw) {
-            draw(c, kit, frame, state, hov, ma, shown, task, space, sp, ss, cur, collapsed, mx, my, z, sw, sh, ws, full, qp, ring, evn, now, sug, god, glow, dk, dp, darmed, doff, dgo, walking, dlabel, tst[0..32], tcells[0..960000], topen, tcur, kyp, kstored[0..10], kmask[0..560], kmlen[0..10], kst[0..120], kfail[0..10], kopen[0..10], kedit, kbuf[0..256], klen, karm, kbusy + kpage * 256 + kerror * 512 + pcell * 4096 + ppage * 16384 + perror * 65536, kemask, kewhy, ktpick, hs, cons2, dcv[0..512], gal[0..49152], gt[0..2560], evd, @as(u64, evp) + @as(u64, evn2) * 1048576 + @as(u64, evpr) * 1099511627776, pbuf[0..4160], sst[0..560], tgv[0..256], tbv[0..77312]);
+            draw(c, kit, frame, state, hov, ma, shown, task, space, sp, ss, cur, collapsed, mx, my, z, sw, sh, ws, full, qp, ring, evn, now, sug, god, glow, dk, dp, darmed, doff, dgo, walking, dlabel, tst[0..32], tcells[0..960000], topen, tcur, kyp, kstored[0..10], kmask[0..560], kmlen[0..10], kst[0..640], kfail[0..10], kopen[0..10], kedit, kbuf[0..256], klen, karm, kbusy + kpage * 256 + kerror * 512 + pcell * 4096 + ppage * 16384 + perror * 65536, kemask, kewhy, ktpick, hs, cons2, dcv[0..512], gal[0..49152], gt[0..2560], evd, @as(u64, evp) + @as(u64, evn2) * 1048576 + @as(u64, evpr) * 1099511627776, pbuf[0..4160], sst[0..560], tgv[0..256], tbv[0..77312]);
             const whole : u64 = cg_image(c);
             const img : u64 = cg_crop(whole, 0.0, 0.0, sw * WIDE_RETINA, sh * WIDE_RETINA);
             msg1(layer, s_contents, img);
