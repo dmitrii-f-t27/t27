@@ -32,6 +32,8 @@ pub const OP_HOOK : u8 = 9;
 /// SETKEY: the pane byte is the provider (keys.t27), the payload the key; the server keeps it in memory
 /// only and gives it to the panes it spawns afterwards. An empty payload forgets the key.
 pub const OP_SETKEY : u8 = 10;
+/// Idempotent provider SPAWN: same payload, exact catalog token required. Reuses only matching space/cwd/token.
+pub const OP_PROVIDER_OPEN : u8 = 11;
 pub const RE_OK : u8 = 128;
 pub const RE_ERR : u8 = 129;
 pub const RE_DATA : u8 = 130;
@@ -110,7 +112,7 @@ pub fn frame_complete(buf: []const u8) -> bool {
     return need > 1 and buf.len >= need;
 }
 
-pub fn is_request(op: u8) -> bool { return op >= OP_LIST and op <= OP_SETKEY; }
+pub fn is_request(op: u8) -> bool { return op >= OP_LIST and op <= OP_PROVIDER_OPEN; }
 pub fn is_reply(op: u8) -> bool { return op >= RE_OK and op <= RE_LISTING; }
 
 /// The running count of the oldest byte still in the ring and how many bytes a reader at `cursor` gets,
@@ -292,7 +294,7 @@ test ops_are_split_into_requests_and_replies {
         assert !(is_request(op) and is_reply(op));
         op = op + 1;
     }
-    assert requests == 10;
+    assert requests == 11;
     assert replies == 4;
 }
 

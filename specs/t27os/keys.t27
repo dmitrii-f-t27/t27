@@ -45,6 +45,7 @@ use t27os::editors::same_bytes;
 use t27os::session_store::csv_field;
 use t27os::session_store::put_bytes;
 use t27os::session_store::put_dec;
+use t27os::session_store::model_ok;
 
 /// Keychain service every item is stored under.
 pub const KEYCHAIN_SERVICE : str = "ai.t27.os";
@@ -1148,12 +1149,18 @@ pub fn oai_base_url(pr: u32, out: []u8) -> usize {
 /// provider named t27 whose key is read from the provider's variable, and the model. 0 for a profile with no
 /// OpenAI-compatible URL (anthropic-api needs no config). 600 bytes are enough. Holds no key.
 pub fn opencode_config(pr: u32, step: u32, out: []u8) -> usize {
-    var url : [64]u8 = undefined;
     var m : [64]u8 = undefined;
+    const ml : usize = tier_model_step(pr, TI_DEFAULT, step, m[0..64]);
+    return opencode_config_model(pr, m[0..ml], out);
+}
+
+/// A validated explicit model. Only t27 is enabled, so ambient config cannot route to another provider.
+pub fn opencode_config_model(pr: u32, m: []const u8, out: []u8) -> usize {
+    var url : [64]u8 = undefined;
     var ev : [40]u8 = undefined;
     const ul : usize = oai_base_url(pr, url[0..64]);
-    const ml : usize = tier_model_step(pr, TI_DEFAULT, step, m[0..64]);
-    if (ul == 0 or ml == 0) { return 0; }
+    const ml : usize = m.len;
+    if (ul == 0 or ml == 0 or ml > 60 or model_ok(m) == false) { return 0; }
     const el : usize = provider_env(PROFILE_PROVIDER[pr], ev[0..40]);
     var n : usize = put_bytes(out, 0, "{\"$schema\":\"https://opencode.ai/config.json\",\"provider\":{\"t27\":{\"npm\":\"@ai-sdk/openai-compatible\",\"name\":\"T27\",\"options\":{\"baseURL\":\"");
     n = put_bytes(out, n, url[0..ul]);
@@ -1165,7 +1172,7 @@ pub fn opencode_config(pr: u32, step: u32, out: []u8) -> usize {
     n = put_bytes(out, n, m[0..ml]);
     n = put_bytes(out, n, "\"}}}},\"model\":\"t27/");
     n = put_bytes(out, n, m[0..ml]);
-    return put_bytes(out, n, "\"}");
+    return put_bytes(out, n, "\",\"enabled_providers\":[\"t27\"]}");
 }
 
 /// Crush's crush.json for profile pr at model step `step`: the same provider, large and small model the one id.

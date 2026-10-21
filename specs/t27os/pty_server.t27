@@ -37,6 +37,17 @@
 //
 // Refs gHashTag/t27#10782.
 module T27osPtyServer;
+use t27os::provider_catalog::pc_find;
+use t27os::provider_catalog::pc_model;
+use t27os::provider_catalog::pc_provider;
+use t27os::provider_catalog::pc_profile;
+use t27os::provider_catalog::PC_COUNT;
+use t27os::pty_proto::OP_PROVIDER_OPEN;
+use t27os::pty_logic::PK_PIN_BIT;
+use t27os::pty_logic::PK_BAD;
+use t27os::pty_logic::key_count;
+use t27os::keys::opencode_config_model;
+use t27os::provider_catalog::pc_reserved;
 
 use t27os::agents::AGENT_COUNT;
 use t27os::agents::S_STOPPED;
@@ -338,6 +349,8 @@ fn model_of(mem: []const u8, i: usize) -> []const u8 {
 
 /// Set pane i's model from mem[at .. at + len] when model_ok() passes it; true when it changed.
 fn set_model(mem: []u8, i: usize, at: usize, len: usize) -> bool {
+    // Hooks/transcripts may report a model; they cannot remove an explicit provider pin.
+    if (pc_find(model_of(mem, i)) < PC_COUNT and pc_find(mem[at .. at + len]) >= PC_COUNT) { return false; }
     if (len >= MODEL_CAP or !model_ok(mem[at .. at + len])) { return false; }
     const mo : usize = O_MODEL + i * MODEL_CAP;
     var same : bool = @as(usize, mem[mo]) == len;
@@ -475,7 +488,11 @@ fn inject_profile(st: []const u64, mem: []u8, i: usize, agent: u32) -> void {
         if (agent_var_is_key(agent, pr, k)) {
             sys_setenv(mem[O_TMP2 .. O_TMP2 + nl + 1], mem[at + 1 .. at + 2 + @as(usize, mem[at])], 1);
         } else {
-            const vl : usize = agent_var_text_step(agent, pr, k, pane_mstep_get(st, i), home_slice(st, mem), mem[O_TMP2 + 3072 .. O_TMP2 + 4000]);
+            var vl : usize = agent_var_text_step(agent, pr, k, pane_mstep_get(st, i), home_slice(st, mem), mem[O_TMP2 + 3072 .. O_TMP2 + 4000]);
+            const choice : u32 = pc_find(model_of(mem, i));
+            if (agent == 3 and k == 1 and choice < PC_COUNT) {
+                vl = opencode_config_model(pr, pc_model(choice), mem[O_TMP2 + 3072 .. O_TMP2 + 4000]);
+            }
             mem[O_TMP2 + 3072 + vl] = 0;
             sys_setenv(mem[O_TMP2 .. O_TMP2 + nl + 1], mem[O_TMP2 + 3072 .. O_TMP2 + 3072 + vl + 1], 1);
         }
@@ -548,7 +565,17 @@ fn launch(st: []u64, mem: []u8, i: usize, plan: u32, spawned: bool) -> bool {
     }
     // the keys of this start: the profile and the key number of each provider the agent reads, by rotation
     // over the numbered keys (a failover has set what to skip); the unfinished screen row of the old process goes
+    const choice : u32 = pc_find(model_of(mem, i));
+    if (pc_reserved(model_of(mem, i)) and choice >= PC_COUNT) { return false; }
+    if (choice < PC_COUNT) {
+        if (agent != 3) { return false; }
+        const pk : usize = G_PANEK + i * PK;
+        st[pk + PK_PROF] = @as(u64, pc_profile(choice));
+        st[pk + PK_BAD] = PK_PIN_BIT;
+        if (key_count(st, pc_provider(choice)) == 0) { load_keys(st, mem, 1 << pc_provider(choice)); }
+    }
     plan_pane_keys(st, i, agent, now_ms(mem));
+    if (choice < PC_COUNT and pane_key_get(st, i, pc_provider(choice)) == 0) { return false; }
     write_agent_config(st, mem, i, agent);
     // the model of this start, from the profile just chosen; the pane's slot (and so its record) takes it
     const mn : usize = launch_model(st, i, agent, spawned, model_of(mem, i), mem[O_TMP2 + 2048 .. O_TMP2 + 2112]);
@@ -813,14 +840,16 @@ fn handle_frame(st: []u64, mem: []u8, fd: i32, off: usize) -> void {
                 const w : u32 = @as(u32, @intCast(st[b + PF_STATUS]));
                 // the flags byte carries the pane's key number + 1 in its high nibble (0 = no key); bits 0 to 2 as before
                 const kshown : u32 = pane_key_shown(st, @as(usize, i), @as(u32, @intCast(st[b + PF_AGENT])));
-                at = put_list_entry(mem[O_OUT .. O_OUT + 128], at - O_OUT, i, @as(u32, @intCast(st[b + PF_AGENT])), list_shown(st, @as(usize, i), @as(u32, @intCast(st[b + PF_AGENT])), shown_state(w), now_ms(mem)), list_flags_key(st[b + PF_LIVE] != 0, w, kshown)) + O_OUT;
+                var pinned_flag : u32 = 0;
+                if (pc_find(model_of(mem, @as(usize, i))) < PC_COUNT) { pinned_flag = 8; }
+                at = put_list_entry(mem[O_OUT .. O_OUT + 128], at - O_OUT, i, @as(u32, @intCast(st[b + PF_AGENT])), list_shown(st, @as(usize, i), @as(u32, @intCast(st[b + PF_AGENT])), shown_state(w), now_ms(mem)), list_flags_key(st[b + PF_LIVE] != 0, w, kshown) + pinned_flag) + O_OUT;
             }
             i = i + 1;
         }
         reply(fd, mem, RE_LISTING, 0, at - O_OUT - HEADER);
         return;
     }
-    if (op == OP_SPAWN) {
+    if (op == OP_SPAWN or op == OP_PROVIDER_OPEN) {
         if (!spawn_ok(mem[p0 .. p0 + plen])) { reply(fd, mem, RE_ERR, 0, 0); return; }
         const slot : u32 = pane_alloc(st);
         const cl : usize = spawn_cwd_len(mem[p0 .. p0 + plen]);
@@ -828,6 +857,30 @@ fn handle_frame(st: []u64, mem: []u8, fd: i32, off: usize) -> void {
         // path as `<editor> '<path>'`: a path that would break the quoting is refused here
         var ml : usize = 0;
         if (3 + cl < plen) { ml = plen - 4 - cl; }
+        const choice : u32 = pc_find(mem[p0 + 4 + cl .. p0 + 4 + cl + ml]);
+        if (pc_reserved(mem[p0 + 4 + cl .. p0 + 4 + cl + ml]) and (choice >= PC_COUNT or mem[p0] != 3)) { reply(fd, mem, RE_ERR, 0, 0); return; }
+        if (op == OP_PROVIDER_OPEN) {
+            if (choice >= PC_COUNT or mem[p0] != 3) { reply(fd, mem, RE_ERR, 0, 0); return; }
+            var pi : usize = 0;
+            while (pi < @as(usize, MAX_PANES)) {
+                const pb : usize = pi * PF;
+                if (st[pb + PF_USED] != 0 and st[pb + PF_AGENT] == 3 and st[pb + PF_SPACE] == @as(u64, mem[p0 + 1]) and pc_find(model_of(mem, pi)) == choice) {
+                    const cwd : []const u8 = cwd_of(st, mem, pi);
+                    var equal : bool = cwd.len == cl;
+                    var cj : usize = 0;
+                    while (cj < cwd.len and cj < cl) { if (cwd[cj] != mem[p0 + 3 + cj]) { equal = false; } cj = cj + 1; }
+                    if (equal) {
+                        if (st[pb + PF_LIVE] == 0) {
+                            st[G_PANEK + pi * PK + PK_WAIT] = W_DONE;
+                            if (launch(st, mem, pi, R_RELAUNCH, false) == false) { reply(fd, mem, RE_ERR, 0, 0); return; }
+                            save_pane(st, mem, pi);
+                        }
+                        reply(fd, mem, RE_OK, @as(u8, @intCast(pi)), 0); return;
+                    }
+                }
+                pi = pi + 1;
+            }
+        }
         const edit_ok : bool = editor_spawn_ok(@as(u32, mem[p0]), mem[p0 + 4 + cl .. p0 + 4 + cl + ml], mem[p0 + 3 .. p0 + 3 + cl]);
         if (slot >= MAX_PANES or cl > CWD_CAP - 1 or cl == 0 or mem[p0] >= AGENT_COUNT and mem[p0] != SHELL_CELL or edit_ok == false) {
             reply(fd, mem, RE_ERR, 0, 0);
@@ -855,7 +908,11 @@ fn handle_frame(st: []u64, mem: []u8, fd: i32, off: usize) -> void {
         // Keychain for the providers the agent reads, unless that was done in the last minute (keys_reload_due)
         const spawn_agent : u32 = @as(u32, mem[p0]);
         if (keys_reload_due(st, spawn_agent, now_ms(mem), st[G_KLOAD])) { load_keys(st, mem, load_mask_agent(spawn_agent)); }
-        launch(st, mem, @as(usize, slot), R_RELAUNCH, true);
+        if (launch(st, mem, @as(usize, slot), R_RELAUNCH, true) == false and op == OP_PROVIDER_OPEN) {
+            st[sb + PF_USED] = 0;
+            reply(fd, mem, RE_ERR, 0, 0);
+            return;
+        }
         save_pane(st, mem, @as(usize, slot));
         reply(fd, mem, RE_OK, @as(u8, @intCast(slot)), 0);
         return;

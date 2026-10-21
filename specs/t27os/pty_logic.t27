@@ -5,6 +5,8 @@
 ; tests (t27c needs two arguments for @extern; the JIT refuses imports), and a decision should run its tests.
 ; Refs gHashTag/t27#10782.
 module T27osPtyLogic;
+use t27os::provider_catalog::pc_find;
+use t27os::provider_catalog::PC_COUNT;
 
 use t27os::agents::AGENT_COUNT;
 use t27os::agents::S_STOPPED;
@@ -221,6 +223,8 @@ pub const PK_STOP : usize = 5;
 pub const PK_WAIT : usize = 6;
 /// PK_PROF of a pane that has not chosen a profile yet.
 pub const PK_UNSET : u64 = 254;
+/// High bit is outside the profile-bad mask: an explicit catalog selection never fails over.
+pub const PK_PIN_BIT : u64 = 1073741824;
 /// PK_WAIT: 0 nothing; 1 + plan a restored pane waiting for a key of its provider (its launch is deferred);
 /// W_KEYLESS a restored pane that started with no key (its one respawn is due when a key arrives); W_DONE
 /// that respawn was made.
@@ -388,10 +392,18 @@ pub fn editor_spawn_ok(agent: u32, model: []const u8, cwd: []const u8) -> bool {
 /// its record, which keeps the editor in the model field and the path in the cwd), every other pane runs
 /// pane_command as before.
 pub fn launch_command(agent: u32, plan: u32, sid: []const u8, model: []const u8, home: []const u8, cwd: []const u8, out: []u8) -> usize {
+    // OpenCode 2.0.32: a private server keeps each pinned provider's environment independent.
+    if (agent == 3 and pc_find(model) < PC_COUNT) { return put_bytes(out, 0, "opencode --standalone"); }
     if (wants_editor(agent, model) and term_path_fits(cwd)) {
         return editor_command(term_index(model), cwd, out);
     }
     return pane_command(agent, plan, sid, model, home, out);
+}
+
+test provider_cells_use_independent_opencode_servers {
+    var out : [256]u8 = undefined;
+    const n : usize = launch_command(3, R_RELAUNCH, "", "za:glm-4.7-flash", "/tmp", "/tmp", out[0..256]);
+    assert same_bytes(out[0..n], "opencode --standalone");
 }
 
 /// The argv strings of `/bin/sh -c "exec <cmd>"` in one buffer, NUL separated; offsets go to f:
@@ -791,6 +803,7 @@ pub fn plan_failover(st: []u64, i: usize, class: u32, now_ms: u64, why: []u8, wl
     const step : u32 = pane_mstep_get(st, i);
     var act : u32 = fo_action(class, pr, stored, bad, done, alt);
     if (fo_next_model(class, pr, step, done, alt)) { act = FA_RESPAWN_MODEL; }
+    if (st[pk + PK_BAD] / PK_PIN_BIT % 2 == 1) { act = FA_GIVE_UP; }
     var nxt : u32 = PR_NONE;
     if (act == FA_RESPAWN_KEY) {
         nxt = pr;
@@ -824,6 +837,7 @@ pub fn plan_failover(st: []u64, i: usize, class: u32, now_ms: u64, why: []u8, wl
 /// SPAWN, whose payload may name a model on purpose; that one, and the model of every agent but the claude
 /// cell (no profile), stay as they are.
 pub fn launch_model(st: []const u64, i: usize, a: u32, first: bool, saved: []const u8, out: []u8) -> usize {
+    if (st[G_PANEK + i * PK + PK_BAD] / PK_PIN_BIT % 2 == 1) { return put_bytes(out, 0, saved); }
     if (profile_agent(a) == false or first) { return put_bytes(out, 0, saved); }
     var pr : u32 = PR_NONE;
     const w : u64 = st[G_PANEK + i * PK + PK_PROF];
@@ -2278,6 +2292,22 @@ test an_opencode_pane_and_a_crush_pane_get_a_profile_and_their_own_variables_by_
     assert has_key_for(st[0..608], 3) and has_key_for(st[0..608], 5);
     assert load_mask_agent(3) == 537 and load_mask_agent(5) == 537;
     assert needs_key(3) and needs_key(5);
+}
+
+test explicit_provider_pin_survives_restart_and_stops_all_fallback {
+    var st : [608]u64 = undefined;
+    var why : [128]u8 = undefined;
+    var wl : [2]u64 = undefined;
+    t_zai3(st[0..608]);
+    st[G_PANEK + PK_PROF] = @as(u64, PR_ZAI);
+    st[G_PANEK + PK_BAD] = PK_PIN_BIT;
+    plan_pane_keys(st[0..608], 0, 3, 1000000);
+    assert t_prof(st[0..608], 0) == PR_ZAI;
+    assert plan_failover(st[0..608], 0, FC_OVERLOADED, 1001000, why[0..128], wl[0..2]) == FA_GIVE_UP;
+    assert t_prof(st[0..608], 0) == PR_ZAI;
+    assert pane_mstep_get(st[0..608], 0) == 0;
+    const n : usize = launch_model(st[0..608], 0, 3, false, "za:glm-4.7-flash", why[0..64]);
+    assert n == 16 and begins_with(why[0..n], "za:glm-4.7-flash");
 }
 
 test an_opencode_pane_rotates_keys_models_and_profiles_like_claude_code_and_never_to_ollama {
