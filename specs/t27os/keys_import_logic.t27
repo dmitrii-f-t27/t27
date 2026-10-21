@@ -1,0 +1,95 @@
+// SPDX-License-Identifier: Apache-2.0
+// Local, explicit import for dmitrii-f-t27/t27#6. Never evaluate an env file.
+// Only exact NVIDIA_API_KEY[_N] and ZAI_API_KEY[_N] names are accepted.
+module T27osKeysImportLogic;
+
+use t27os::keys::P_NVIDIA;
+use t27os::keys::P_ZAI;
+use t27os::keys::MAX_KEYS;
+use t27os::keys::sec_key_safe;
+use t27os::editors::same_bytes;
+
+pub const IMPORT_NONE : u32 = 0;
+pub const IMPORT_INVALID : u32 = 1;
+
+fn ws(c: u8) -> bool { return c == 32 or c == 9 or c == 13; }
+
+fn numbered(name: []const u8, base: []const u8) -> bool {
+    if (same_bytes(name, base)) { return true; }
+    if (name.len <= base.len + 1) { return false; }
+    if (same_bytes(name[0..base.len], base) == false or name[base.len] != 95) { return false; }
+    var i : usize = base.len + 1;
+    if (name[i] == 48) { return false; }
+    var n : u32 = 0;
+    while (i < name.len) {
+        if (name[i] < 48 or name[i] > 57 or n > MAX_KEYS) { return false; }
+        n = n * 10 + @as(u32, name[i] - 48);
+        i = i + 1;
+    }
+    return n >= 1 and n <= MAX_KEYS;
+}
+
+/// Returns ignored, invalid, or the provider id. Bounds receive only byte offsets.
+/// A recognized empty/unsafe value refuses the whole import before any Keychain write.
+pub fn import_line(line: []const u8, bounds: []u32) -> u32 {
+    bounds[0] = 0;
+    bounds[1] = 0;
+    var a : usize = 0;
+    var b : usize = line.len;
+    while (a < b and ws(line[a])) { a = a + 1; }
+    while (b > a and ws(line[b - 1])) { b = b - 1; }
+    if (b - a >= 7 and same_bytes(line[a..a + 7], "export ")) { a = a + 7; }
+    var eq : usize = a;
+    while (eq < b and line[eq] != 61) { eq = eq + 1; }
+    if (eq == b) { return IMPORT_NONE; }
+    var ne : usize = eq;
+    while (ne > a and ws(line[ne - 1])) { ne = ne - 1; }
+    var p : u32 = IMPORT_NONE;
+    if (numbered(line[a..ne], "NVIDIA_API_KEY")) { p = P_NVIDIA; }
+    if (numbered(line[a..ne], "ZAI_API_KEY")) { p = P_ZAI; }
+    if (p == IMPORT_NONE) { return p; }
+    a = eq + 1;
+    while (a < b and ws(line[a])) { a = a + 1; }
+    if (b > a and (line[a] == 34 or line[a] == 39)) {
+        if (b - a < 2 or line[b - 1] != line[a]) { return IMPORT_INVALID; }
+        a = a + 1;
+        b = b - 1;
+    }
+    var v : usize = a;
+    while (v < b) {
+        if (line[v] == 36 or line[v] == 96) { return IMPORT_INVALID; }
+        v = v + 1;
+    }
+    if (sec_key_safe(line[a..b]) == false) { return IMPORT_INVALID; }
+    bounds[0] = @as(u32, @intCast(a));
+    bounds[1] = @as(u32, @intCast(b));
+    return p;
+}
+
+test import_only_recognized_literal_values {
+    var b : [2]u32 = [0, 0];
+    assert import_line("NVIDIA_API_KEY=demo", b[0..2]) == P_NVIDIA;
+    assert b[0] == 15 and b[1] == 19;
+    assert import_line(" export ZAI_API_KEY_10 = 'demo' ", b[0..2]) == P_ZAI;
+    assert b[1] - b[0] == 4;
+    assert import_line("ZAI_API_KEY_12=demo", b[0..2]) == P_ZAI;
+    assert import_line("ZAI_API_KEY_13=demo", b[0..2]) == IMPORT_NONE;
+    assert import_line("ZAI_API_KEY_01=demo", b[0..2]) == IMPORT_NONE;
+    assert import_line("OTHER_KEY=demo", b[0..2]) == IMPORT_NONE;
+    assert import_line("# ZAI_API_KEY=demo", b[0..2]) == IMPORT_NONE;
+    assert import_line("ZAI_API_KEY=", b[0..2]) == IMPORT_INVALID;
+    assert import_line("ZAI_API_KEY='demo", b[0..2]) == IMPORT_INVALID;
+    assert import_line("ZAI_API_KEY=two words", b[0..2]) == IMPORT_INVALID;
+    assert import_line("ZAI_API_KEY=$(echo)", b[0..2]) == IMPORT_INVALID;
+}
+
+test import_trims_carriage_return_without_decoding_escapes {
+    var line : [19]u8 = undefined;
+    const text : str = "ZAI_API_KEY=demo";
+    var i : usize = 0;
+    while (i < text.len) { line[i] = text[i]; i = i + 1; }
+    line[16] = 13;
+    var b : [2]u32 = [0, 0];
+    assert import_line(line[0..17], b[0..2]) == P_ZAI;
+    assert b[0] == 12 and b[1] == 16;
+}

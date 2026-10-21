@@ -69,6 +69,13 @@ use t27os::layout::cap_mid;
 use t27os::layout::same_line;
 use t27os::agents::AGENT_NAMES;
 use t27os::keys::PROVIDER_COUNT;
+use t27os::keys::KY_PAGE_ROWS;
+use t27os::keys::KY_MASK_BYTES;
+use t27os::keys::KY_BUFFER_BYTES;
+use t27os::keys::ky_provider;
+use t27os::keys::ky_page_hit;
+use t27os::keys::ky_page_action;
+use t27os::keys::provider_label;
 use t27os::keys::PROFILE_COUNT;
 use t27os::keys::MAX_KEYS;
 use t27os::keys::setkey_byte;
@@ -125,6 +132,7 @@ use t27os::keys::status_after_probe;
 use t27os::keys::circuit_fails;
 use t27os::keys::status_shown;
 use t27os::keys_host::kc_put_n;
+use t27os::keys_host::kc_find;
 use t27os::keys_host::kc_get_n;
 use t27os::keys_host::kc_del_n;
 use t27os::keys_host::kc_has;
@@ -5242,8 +5250,8 @@ fn bytes_w(kit: [48]u64, s: []const u8, n: usize, size: f64, weight: f64, mono: 
 /// the highest number (16 bytes a provider). A scan stops after two misses in a row (keys.t27 scan_goes_on).
 /// The full key is wiped from the buffer before the next one is read.
 fn keys_refresh(stored: []u32, mask: []u8, mlen: []u32) -> void {
-    // the Devices view (keysync.t27) rides after the 144 mask bytes: refreshed with the keys
-    if (mask.len >= 544) { ks_view_fill(mask[144..544]); }
+    // the Devices view (keysync.t27) rides after the provider mask bytes: refreshed with the keys
+    if (mask.len >= KY_BUFFER_BYTES) { ks_view_fill(mask[KY_MASK_BYTES..KY_BUFFER_BYTES]); }
     var key : [256]u8 = undefined;
     var p : u32 = 0;
     while (p < PROVIDER_COUNT) {
@@ -5327,7 +5335,10 @@ fn draw_key_btn(c: u64, kit: [48]u64, bx: f64, by: f64, word: u32, on: bool, liv
     draw_bytes(c, kit, w[0..24], n, bx + (KY_BTN_W - lw) / 2.0, by + 13.0, 9.5, WEIGHT_SEMIBOLD, false);
 }
 
-fn draw_keys_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, stored: []const u32, mask: []const u8, mlen: []const u32, kst: []const u32, kfail: []const u32, kopen: []const u64, now: u64, kedit: u32, kbuf: []const u8, klen: u32, karm: u32, kbusy: u32, kemask: u32, kewhy: u32, ktpick: u32) -> void {
+fn draw_keys_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, stored: []const u32, mask: []const u8, mlen: []const u32, kst: []const u32, kfail: []const u32, kopen: []const u64, now: u64, kedit: u32, kbuf: []const u8, klen: u32, karm: u32, kstate: u32, kemask: u32, kewhy: u32, ktpick: u32) -> void {
+    const kbusy : u32 = kstate % 256;
+    const kpage : u32 = kstate / 256 % 2;
+    const kerror : u32 = kstate / 512;
     const l : f64 = qp_left(sw);
     const t : f64 = WS_TOP;
     const x : f64 = l + QP_PAD;
@@ -5339,18 +5350,26 @@ fn draw_keys_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, sto
     var n : usize = csv_field(KEYS_WORDS, 0, w[0..48]);
     draw_bytes(c, kit, w[0..48], n, x, t + 25.0, 11.5, WEIGHT_SEMIBOLD, false);
     draw_close_x(c, sw - QP_PAD - 8.0, t + 20.0, on_panel_close(mx, my, sw, t), 1.0);
+    var paging : str = "1 / 2  >";
+    if (kpage == 1) { paging = "<  2 / 2"; }
+    draw_bytes(c, kit, paging, paging.len, l + 92.0, t + 25.0, 10.0, WEIGHT_SEMIBOLD, false);
     var hint : u32 = 8;
     if (kedit != KY_NONE) { hint = 9; }
     n = csv_field(KEYS_WORDS, hint, w[0..48]);
     cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+    if (kerror == 1) { n = put_bytes(w[0..48], 0, "Could not save. Retry or Esc."); }
+    if (kerror == 2) { n = put_bytes(w[0..48], 0, "Invalid key. Check the pasted text."); }
+    if (kerror == 3) { n = put_bytes(w[0..48], 0, "This key is already stored."); }
+    if (kerror == 4) { n = put_bytes(w[0..48], 0, "All twelve key slots are full."); }
     draw_bytes(c, kit, w[0..48], n, x, t + 46.0, 9.5, 0.0, false);
-    var p : u32 = 0;
-    while (p < PROVIDER_COUNT) {
-        const y : f64 = ky_row_top(t, p);
+    var row : u32 = 0;
+    while (row < KY_PAGE_ROWS) {
+        const p : u32 = ky_provider(kpage, row);
+        const y : f64 = ky_row_top(t, row);
         const has : bool = stored[p] > 0;
         const st : u32 = status_shown(has, provider_status(kst, p, stored[p]), kfail[p], kopen[p], now);
         cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
-        n = provider_name(p, w[0..48]);
+        n = provider_label(p, w[0..48]);
         const nw : f64 = draw_bytes(c, kit, w[0..48], n, x, y + 14.0, 11.0, WEIGHT_SEMIBOLD, false);
         // how many keys the provider holds ("zai  7 keys"), right after its name; the line below shows the newest key, masked
         n = key_count_text(slot_count(stored[p]), w[0..48]);
@@ -5359,10 +5378,10 @@ fn draw_keys_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, sto
             draw_bytes(c, kit, w[0..48], n, x + nw + 8.0, y + 14.0, 9.5, 0.0, false);
         }
         cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
-        draw_dot(c, status_dot(st), x + 112.0, y + 10.0, 1.0);
+        draw_dot(c, status_dot(st), x + 164.0, y + 10.0, 1.0);
         n = key_status_text(st, kst, p, stored[p], w[0..48]);
         cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
-        draw_bytes(c, kit, w[0..48], n, x + 124.0, y + 14.0, 9.5, 0.0, false);
+        draw_bytes(c, kit, w[0..48], n, x + 176.0, y + 14.0, 9.5, 0.0, false);
         // the key as typed (masked, with a caret) while it is being entered; else the stored key, masked
         cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
         if (kedit == p) {
@@ -5377,7 +5396,7 @@ fn draw_keys_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, sto
             n = csv_field(KEYS_WORDS, 7, w[0..48]);
             draw_bytes(c, kit, w[0..48], n, x, y + 33.0, 10.0, 0.0, false);
         }
-        const hit : u32 = ky_hit(mx, my, l, QP_W, QP_PAD, t);
+        const hit : u32 = ky_page_action(kpage, ky_hit(mx, my, l, QP_W, QP_PAD, t));
         const by : f64 = y + KY_BTN_DY;
         const setw : u32 = ky_set_word(stored[p]);
         draw_key_btn(c, kit, ky_btn_x(l, QP_W, QP_PAD, B_SET), by, setw, false, setw == 1, hit == p * 4 + B_SET);
@@ -5389,7 +5408,7 @@ fn draw_keys_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, sto
         draw_key_btn(c, kit, ky_btn_x(l, QP_W, QP_PAD, B_CHECK), by, chkw, kbusy == p, has and probe_has(p), hit == p * 4 + B_CHECK);
         cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LINE_WHITE));
         cg_fill_rect(c, x, y + KY_ROW_H - 2.0, QP_W - 2.0 * QP_PAD, HAIR);
-        p = p + 1;
+        row = row + 1;
     }
     // the claude profile and why (keys.t27 profile_why): which provider a new claude pane gets; no key text
     var sm : u32 = 0;
@@ -5403,7 +5422,7 @@ fn draw_keys_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, sto
     cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
     // the foot (editors.t27 foot_*): the status row, then OPEN IN, then the chips, each in a band of its own
     // below the provider rows, so no two text rows share a y band (the status line sat on the chips)
-    const ft : f64 = ky_row_top(t, PROVIDER_COUNT);
+    const ft : f64 = ky_row_top(t, KY_PAGE_ROWS);
     if (foot_status_fits(ft, sh)) {
         draw_bytes(c, kit, wy[0..96], n, x, foot_status_top(ft) + FT_BASE, 9.5, 0.0, false);
     }
@@ -5434,7 +5453,7 @@ fn draw_keys_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, sto
         }
     }
     // K2. Devices (keysync.t27), below the chips
-    draw_devices_section(c, kit, x, foot_bottom(ft, sh, strip_count(kemask, ktpick)) + 8.0, sh, mask[144..544]);
+    draw_devices_section(c, kit, x, foot_bottom(ft, sh, strip_count(kemask, ktpick)) + 8.0, sh, mask[KY_MASK_BYTES..KY_BUFFER_BYTES]);
 }
 
 // ---- K2. the Devices section of the KEYS panel (keysync.t27): this device's fingerprint, the other devices, the sync status ----
@@ -8723,7 +8742,7 @@ fn draw_profile_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, 
     }
 }
 
-fn draw(c: u64, kit: [48]u64, frame: u32, state: u32, hov: u32, ma: f64, shown: u32, task: u32, space: u32, sp: u32, ss: u64, cur: u32, collapsed: bool, mx: f64, my: f64, z: f64, sw: f64, sh: f64, ws: u32, full: bool, qp: bool, ring: [8]u64, n: u32, now: u64, sug: u32, god: bool, glow: f64, dk: [128]u64, dp: bool, darmed: u32, doff: u32, dgo: u32, dlive: bool, dlabel: u64, tst: []const u32, tcells: []const u32, topen: u32, tcur: bool, kyp: bool, kstored: []const u32, kmask: []const u8, kmlen: []const u32, kst: []const u32, kfail: []const u32, kopen: []const u64, kedit: u32, kbuf: []const u8, klen: u32, karm: u32, kbusy: u32, kemask: u32, kewhy: u32, ktpick: u32, hs: u32, cons: bool, dc: []u64, gal: []const u8, gt: []const u32, evd: u32, evpk: u64, pb: []const u8, sst: []const u32, tg: []const u64, tb: []const u8) -> void {
+fn draw(c: u64, kit: [48]u64, frame: u32, state: u32, hov: u32, ma: f64, shown: u32, task: u32, space: u32, sp: u32, ss: u64, cur: u32, collapsed: bool, mx: f64, my: f64, z: f64, sw: f64, sh: f64, ws: u32, full: bool, qp: bool, ring: [8]u64, n: u32, now: u64, sug: u32, god: bool, glow: f64, dk: [128]u64, dp: bool, darmed: u32, doff: u32, dgo: u32, dlive: bool, dlabel: u64, tst: []const u32, tcells: []const u32, topen: u32, tcur: bool, kyp: bool, kstored: []const u32, kmask: []const u8, kmlen: []const u32, kst: []const u32, kfail: []const u32, kopen: []const u64, kedit: u32, kbuf: []const u8, klen: u32, karm: u32, kstate: u32, kemask: u32, kewhy: u32, ktpick: u32, hs: u32, cons: bool, dc: []u64, gal: []const u8, gt: []const u32, evd: u32, evpk: u64, pb: []const u8, sst: []const u32, tg: []const u64, tb: []const u8) -> void {
     // evp, evn2 and evpr travel packed (the draw call is at the 64 parameter limit)
     const evp : u32 = @as(u32, @intCast(evpk % 1048576));
     const evn2 : u32 = @as(u32, @intCast(evpk / 1048576 % 1048576));
@@ -8757,7 +8776,7 @@ fn draw(c: u64, kit: [48]u64, frame: u32, state: u32, hov: u32, ma: f64, shown: 
     if (qp or dp or kyp or pfp) { draw_panel_ground(c, sw, sh, full); }
     if (qp) { draw_queen_panel(c, kit, sw, sh, mx, my, view_of(menu_open(state), shown), space, ss, cur, ring, n, now, sug, god, evd, evp, evn2, evpr); }
     if (dp and qp == false) { draw_doctor_panel(c, kit, dk, sw, sh, mx, my, darmed, doff, dgo, dlive); }
-    if (kyp and qp == false and dp == false) { draw_keys_panel(c, kit, sw, sh, mx, my, kstored, kmask, kmlen, kst, kfail, kopen, now, kedit, kbuf, klen, karm, kbusy, kemask, kewhy, ktpick); }
+    if (kyp and qp == false and dp == false) { draw_keys_panel(c, kit, sw, sh, mx, my, kstored, kmask, kmlen, kst, kfail, kopen, now, kedit, kbuf, klen, karm, kstate, kemask, kewhy, ktpick); }
     if (pfp and qp == false and dp == false and kyp == false) { draw_profile_panel(c, kit, sw, sh, mx, my, tb[TBO_PF .. TBO_PF + PF_CAP], tg[TPG_PF_IMG]); }
     if (ma > 0.0) {
         var uws : u32 = ws;
@@ -10207,17 +10226,19 @@ pub fn main() -> void {
     // bytes, wiped after use), the DELETE that waits for its second click, the check in flight (the provider
     // and the next number it reads), and the editors found
     var kyp : bool = false;
-    var kstored : [9]u32 = undefined;
-    var kmask : [544]u8 = undefined;
-    var kmlen : [9]u32 = undefined;
-    var kst : [72]u32 = undefined;
-    var kfail : [9]u32 = undefined;
-    var kopen : [9]u64 = undefined;
+    var kstored : [10]u32 = undefined;
+    var kmask : [560]u8 = undefined;
+    var kmlen : [10]u32 = undefined;
+    var kst : [120]u32 = undefined;
+    var kfail : [10]u32 = undefined;
+    var kopen : [10]u64 = undefined;
     var kbuf : [256]u8 = undefined;
     var klen : u32 = 0;
     var kedit : u32 = KY_NONE;
     var karm : u32 = KY_NONE;
     var kbusy : u32 = KY_NONE;
+    var kpage : u32 = 0;
+    var kerror : u32 = 0;
     var kemask : u32 = 0;
     var kewhy : u32 = OPEN_NONE;
     // the terminal editor the strip's first chip opens inside (editors.t27 term_pick; TERM_NONE when none was
@@ -10239,7 +10260,7 @@ pub fn main() -> void {
     var kbk : u32 = 0;
     var kpre : u32 = 0;
     var ki : u32 = 0;
-    while (ki < 9) {
+    while (ki < PROVIDER_COUNT) {
         kstored[ki] = 0;
         kmlen[ki] = 0;
         kfail[ki] = 0;
@@ -10247,13 +10268,13 @@ pub fn main() -> void {
         ki = ki + 1;
     }
     var kz : u32 = 0;
-    while (kz < 72) {
+    while (kz < PROVIDER_COUNT * MAX_KEYS) {
         kst[kz] = ST_STORED;
         kz = kz + 1;
     }
-    // the Devices view (keysync.t27) after the 144 mask bytes starts empty
-    var kdv : usize = 144;
-    while (kdv < 544) {
+    // the Devices view (keysync.t27) after the provider mask bytes starts empty
+    var kdv : usize = KY_MASK_BYTES;
+    while (kdv < KY_BUFFER_BYTES) {
         kmask[kdv] = 0;
         kdv = kdv + 1;
     }
@@ -10425,6 +10446,8 @@ pub fn main() -> void {
                         kyp = false;
                         karm = KY_NONE;
                         kedit = KY_NONE;
+                        keys_wipe(kbuf[0..256]);
+                        kerror = 0;
                         klen = 0;
                     }
                     tsince = 0;
@@ -10442,20 +10465,22 @@ pub fn main() -> void {
                         const url : u64 = msg1(cls("NSURL"), sel("URLWithString:"), cf(REPO_URL));
                         msg1(msg0(cls("NSWorkspace"), sel("sharedWorkspace")), sel("openURL:"), url);
                         ctl = C_REPO_LINK;
-                    } else if (screen and (on_keys_foot(mx, my, sw, sh) or sbp == PG_KEYS)) {
+                    } else if ((screen or hscreen) and (on_keys_foot(mx, my, sw, sh) or sbp == PG_KEYS)) {
                         // K. KEYS in the foot opens or closes the panel; it takes the Queen and DOCTOR panels' place
                         kyp = kyp == false;
                         karm = KY_NONE;
                         kedit = KY_NONE;
+                        keys_wipe(kbuf[0..256]);
+                        kerror = 0;
                         klen = 0;
                         if (kyp) {
                             qp = false;
                             god = false;
                             pfp = false;
                             dp = false;
-                            keys_refresh(kstored[0..9], kmask[0..144], kmlen[0..9]);
+                            keys_refresh(kstored[0..10], kmask[0..560], kmlen[0..10]);
                             // the refresh also hands the server every numbered key again (a server that restarted forgot them)
-                            if (tfd >= 0) { keys_sync(tfd, kst[0..72], tout[0..4100]); }
+                            if (tfd >= 0) { keys_sync(tfd, kst[0..120], tout[0..4100]); }
                             const khn : usize = ns_bytes(home_dir(), khome[0..256]);
                             kemask = installed_mask(khome[0..khn]);
                             ktpick = term_pick(term_mask());
@@ -10590,19 +10615,33 @@ pub fn main() -> void {
                         kyp = false;
                         karm = KY_NONE;
                         kedit = KY_NONE;
+                        keys_wipe(kbuf[0..256]);
+                        kerror = 0;
                         klen = 0;
                     } else {
-                        const kh : u32 = ky_hit(mx, my, kl, QP_W, QP_PAD, WS_TOP);
+                        if (ky_page_hit(mx, my, kl, WS_TOP)) {
+                            kpage = 1 - kpage;
+                            keys_wipe(kbuf[0..256]);
+                            kedit = KY_NONE;
+                            karm = KY_NONE;
+                            klen = 0;
+                            kerror = 0;
+                        }
+                        const kh : u32 = ky_page_action(kpage, ky_hit(mx, my, kl, QP_W, QP_PAD, WS_TOP));
                         const kq : u32 = kh / 4;
                         if (kh != KY_NONE) {
                             const kact : u32 = ky_click(kh % 4, kstored[kq] > 0, next_free_key(kstored[kq]) >= MAX_KEYS, probe_has(kq), karm, kq);
                             if (kact == KA_EDIT) {
                                 kedit = kq;
+                                keys_wipe(kbuf[0..256]);
                                 klen = 0;
+                                kerror = 0;
                                 karm = KY_NONE;
                             } else if (kact == KA_ARM) {
                                 karm = kq;
                                 kedit = KY_NONE;
+                                keys_wipe(kbuf[0..256]);
+                                kerror = 0;
                                 klen = 0;
                             } else if (kact == KA_DELETE) {
                                 // the row's DELETE removes the newest key only (keys.t27 newest_key), from the Keychain and the server
@@ -10615,7 +10654,7 @@ pub fn main() -> void {
                                 }
                                 karm = KY_NONE;
                                 kfail[kq] = 0;
-                                keys_refresh(kstored[0..9], kmask[0..544], kmlen[0..9]);
+                                keys_refresh(kstored[0..10], kmask[0..560], kmlen[0..10]);
                             } else if (kact == KA_CHECK) {
                                 kbusy = kq;
                                 kbk = 0;
@@ -10626,7 +10665,7 @@ pub fn main() -> void {
                             }
                         } else {
                             karm = KY_NONE;
-                            const kft : f64 = ky_row_top(WS_TOP, PROVIDER_COUNT);
+                            const kft : f64 = ky_row_top(WS_TOP, KY_PAGE_ROWS);
                             const keh : u32 = ed_hit(mx, my, kl, QP_PAD, foot_chips_top(kft), foot_chips(kft, sh, strip_count(kemask, ktpick)));
                             if (keh != ED_NONE) {
                                 // the editor opens the folder of the space on screen (home when it is unbound)
@@ -10874,20 +10913,22 @@ pub fn main() -> void {
                     // U. the update line above the foot: Update now (install as soon as no pane is busy) or try again
                     tgv[TPG_U_GO] = 1;
                     tg_bump(tgv[0..256]);
-                } else if (screen and on_keys_foot(mx, my, sw, sh)) {
+                } else if ((screen or hscreen) and on_keys_foot(mx, my, sw, sh)) {
                     // K. KEYS in the foot opens or closes the panel; it takes the Queen and DOCTOR panels' place
                     kyp = kyp == false;
                     karm = KY_NONE;
                     kedit = KY_NONE;
+                    keys_wipe(kbuf[0..256]);
+                    kerror = 0;
                     klen = 0;
                     if (kyp) {
                         qp = false;
                         god = false;
                         pfp = false;
                         dp = false;
-                        keys_refresh(kstored[0..9], kmask[0..544], kmlen[0..9]);
+                        keys_refresh(kstored[0..10], kmask[0..560], kmlen[0..10]);
                         // the refresh also hands the server every numbered key again (a server that restarted forgot them)
-                        if (tfd >= 0) { keys_sync(tfd, kst[0..72], tout[0..4100]); }
+                        if (tfd >= 0) { keys_sync(tfd, kst[0..120], tout[0..4100]); }
                         const khn : usize = ns_bytes(home_dir(), khome[0..256]);
                         kemask = installed_mask(khome[0..khn]);
                         ktpick = term_pick(term_mask());
@@ -11220,31 +11261,44 @@ pub fn main() -> void {
                     // K. a key is being typed: Return saves it to the Keychain, Esc cancels, Cmd+V pastes
                     const kk : u32 = ky_key(@as(u32, @intCast(key)), cmd);
                     if (kk == KE_CANCEL) {
-                        keys_wipe(kbuf[0..256]);
+                        kerror = 0;
                         kedit = KY_NONE;
+                        keys_wipe(kbuf[0..256]);
+                        kerror = 0;
                         klen = 0;
                     } else if (kk == KE_BACK) {
+                        kerror = 0;
                         if (klen > 0) {
                             klen = klen - 1;
                             kbuf[@as(usize, klen)] = 0;
                         }
                     } else if (kk == KE_SAVE) {
+                        kerror = 2;
                         if (sec_key_safe(kbuf[0 .. @as(usize, klen)])) {
                             // the key takes the lowest free number of its provider, never an existing one
                             const ksn : u32 = next_free_key(kstored[kedit]);
-                            if (ksn < MAX_KEYS) {
+                            kerror = 4;
+                            if (kc_find(kedit, kbuf[0 .. @as(usize, klen)]) < MAX_KEYS) {
+                                kerror = 3;
+                            } else if (ksn < MAX_KEYS) {
+                                kerror = 1;
                                 if (kc_put_n(kedit, ksn, kbuf[0 .. @as(usize, klen)])) {
+                                    kerror = 0;
                                     kst[key_index(kedit, ksn)] = ST_STORED;
                                     kfail[kedit] = 0;
                                     if (tfd >= 0) { client_set_key(tfd, setkey_byte(kedit, ksn), kbuf[0 .. @as(usize, klen)], tout[0..4100]); }
                                 }
                             }
-                            keys_wipe(kbuf[0..256]);
-                            keys_refresh(kstored[0..9], kmask[0..544], kmlen[0..9]);
-                            kedit = KY_NONE;
-                            klen = 0;
+                            if (kerror == 0) {
+                                keys_wipe(kbuf[0..256]);
+                                keys_refresh(kstored[0..10], kmask[0..560], kmlen[0..10]);
+                                kedit = KY_NONE;
+                                kerror = 0;
+                                klen = 0;
+                            }
                         }
                     } else if (kk == KE_PASTE) {
+                        kerror = 0;
                         const pb : u64 = msg0(cls("NSPasteboard"), sel("generalPasteboard"));
                         const ps : u64 = msg1(pb, sel("stringForType:"), cf("public.utf8-plain-text"));
                         if (ps != 0) {
@@ -11255,6 +11309,7 @@ pub fn main() -> void {
                             keys_wipe(ktmp[0..256]);
                         }
                     } else if (kk == KE_CHAR) {
+                        kerror = 0;
                         const kc : u64 = msg0(ev, s_chars);
                         var kn : u64 = 0;
                         if (kc != 0) { kn = dk_len(dk, kc); }
@@ -11907,6 +11962,26 @@ pub fn main() -> void {
         fk = fg_mix(fg_mix(fk, tgv[TPG_G_LAST]), tgv[TPG_G_NEXT]);
         fk = fg_mix(fg_mix(fk, @as(u64, sst[SST_QDASH])), tgv[TPG_QD_FLAGS]);
         fk = fg_mix(fk, tgv[TPG_PF_IMG]);
+        fk = fg_mix(fk, fg_flag(kyp));
+        if (kyp) {
+            fk = fg_mix(fg_mix(fg_mix(fk, @as(u64, kpage)), @as(u64, kerror)), @as(u64, kedit));
+            fk = fg_mix(fg_mix(fg_mix(fk, @as(u64, klen)), @as(u64, karm)), @as(u64, kbusy));
+            var fkb : usize = 0;
+            while (fkb < @as(usize, klen)) {
+                fk = fg_mix(fk, @as(u64, kbuf[fkb]));
+                fkb = fkb + 1;
+            }
+            var fkp : usize = 0;
+            while (fkp < @as(usize, PROVIDER_COUNT)) {
+                fk = fg_mix(fg_mix(fg_mix(fk, @as(u64, kstored[fkp])), @as(u64, kfail[fkp])), kopen[fkp]);
+                var fkk : usize = 0;
+                while (fkk < @as(usize, MAX_KEYS)) {
+                    fk = fg_mix(fk, @as(u64, kst[fkp * @as(usize, MAX_KEYS) + fkk]));
+                    fkk = fkk + 1;
+                }
+                fkp = fkp + 1;
+            }
+        }
         var fki2 : usize = 0;
         while (fki2 < 144) {
             fk = fg_mix(fk, @as(u64, tbv[TBO_PF + fki2]));
@@ -11946,14 +12021,14 @@ pub fn main() -> void {
         fwait = fg_wait_anim(fquiet, tlink == PANE_LIVE and topen != PANE_NONE, fanim, FRAME_S);
         msg_flag(tx_cls, s_quiet, true);
         if (fdraw and narrow) {
-            draw(cc, kit, frame, state, hov, ma, shown, task, space, sp, ss, cur, collapsed, mx, my, z, sw, sh, ws, full, qp, ring, evn, now, sug, god, glow, dk, dp, darmed, doff, dgo, walking, dlabel, tst[0..32], tcells[0..960000], topen, tcur, kyp, kstored[0..9], kmask[0..544], kmlen[0..9], kst[0..72], kfail[0..9], kopen[0..9], kedit, kbuf[0..256], klen, karm, kbusy, kemask, kewhy, ktpick, hs, cons2, dcv[0..512], gal[0..49152], gt[0..2560], evd, @as(u64, evp) + @as(u64, evn2) * 1048576 + @as(u64, evpr) * 1099511627776, pbuf[0..4160], sst[0..560], tgv[0..256], tbv[0..77312]);
+            draw(cc, kit, frame, state, hov, ma, shown, task, space, sp, ss, cur, collapsed, mx, my, z, sw, sh, ws, full, qp, ring, evn, now, sug, god, glow, dk, dp, darmed, doff, dgo, walking, dlabel, tst[0..32], tcells[0..960000], topen, tcur, kyp, kstored[0..10], kmask[0..560], kmlen[0..10], kst[0..120], kfail[0..10], kopen[0..10], kedit, kbuf[0..256], klen, karm, kbusy + kpage * 256 + kerror * 512, kemask, kewhy, ktpick, hs, cons2, dcv[0..512], gal[0..49152], gt[0..2560], evd, @as(u64, evp) + @as(u64, evn2) * 1048576 + @as(u64, evpr) * 1099511627776, pbuf[0..4160], sst[0..560], tgv[0..256], tbv[0..77312]);
             const whole : u64 = cg_image(cc);
             const img : u64 = cg_crop(whole, 0.0, 0.0, sw * RETINA, sh * RETINA);
             msg1(layer, s_contents, img);
             cg_image_release(img);
             cg_image_release(whole);
         } else if (fdraw) {
-            draw(c, kit, frame, state, hov, ma, shown, task, space, sp, ss, cur, collapsed, mx, my, z, sw, sh, ws, full, qp, ring, evn, now, sug, god, glow, dk, dp, darmed, doff, dgo, walking, dlabel, tst[0..32], tcells[0..960000], topen, tcur, kyp, kstored[0..9], kmask[0..544], kmlen[0..9], kst[0..72], kfail[0..9], kopen[0..9], kedit, kbuf[0..256], klen, karm, kbusy, kemask, kewhy, ktpick, hs, cons2, dcv[0..512], gal[0..49152], gt[0..2560], evd, @as(u64, evp) + @as(u64, evn2) * 1048576 + @as(u64, evpr) * 1099511627776, pbuf[0..4160], sst[0..560], tgv[0..256], tbv[0..77312]);
+            draw(c, kit, frame, state, hov, ma, shown, task, space, sp, ss, cur, collapsed, mx, my, z, sw, sh, ws, full, qp, ring, evn, now, sug, god, glow, dk, dp, darmed, doff, dgo, walking, dlabel, tst[0..32], tcells[0..960000], topen, tcur, kyp, kstored[0..10], kmask[0..560], kmlen[0..10], kst[0..120], kfail[0..10], kopen[0..10], kedit, kbuf[0..256], klen, karm, kbusy + kpage * 256 + kerror * 512, kemask, kewhy, ktpick, hs, cons2, dcv[0..512], gal[0..49152], gt[0..2560], evd, @as(u64, evp) + @as(u64, evn2) * 1048576 + @as(u64, evpr) * 1099511627776, pbuf[0..4160], sst[0..560], tgv[0..256], tbv[0..77312]);
             const whole : u64 = cg_image(c);
             const img : u64 = cg_crop(whole, 0.0, 0.0, sw * WIDE_RETINA, sh * WIDE_RETINA);
             msg1(layer, s_contents, img);
@@ -12536,8 +12611,8 @@ test an_open_panel_takes_its_width_from_the_terminal {
 }
 
 test the_keys_foot_gives_the_status_the_open_in_row_and_each_chip_row_a_band_at_960_by_540 {
-    const ft : f64 = ky_row_top(WS_TOP, PROVIDER_COUNT);
-    const last : f64 = ky_row_top(WS_TOP, PROVIDER_COUNT - 1);
+    const ft : f64 = ky_row_top(WS_TOP, KY_PAGE_ROWS);
+    const last : f64 = ky_row_top(WS_TOP, KY_PAGE_ROWS - 1);
     // the foot starts below the last provider row's buttons and plates
     assert last + KY_BTN_DY + KY_BTN_H + 2.0 <= foot_status_top(ft);
     // the bench Mac's six chips (T27 OS, Cursor, Xcode, Antigravity, Antigravity IDE, ZCode) are two rows
@@ -12558,8 +12633,8 @@ test the_keys_foot_gives_the_status_the_open_in_row_and_each_chip_row_a_band_at_
     assert foot_chips(ft, 900.0, EDITOR_COUNT) == EDITOR_COUNT;
     assert foot_chips(ft, 1440.0, EDITOR_COUNT) == EDITOR_COUNT;
     assert foot_bottom(ft, 900.0, EDITOR_COUNT) <= 900.0;
-    // the window's own height holds six chips of a longer table: whole rows only, never a partial one
-    assert foot_chips(ft, H_PT, EDITOR_COUNT) == 6;
+    // Paging leaves room for every editor chip at the normal window height.
+    assert foot_chips(ft, H_PT, EDITOR_COUNT) == EDITOR_COUNT;
 }
 
 /// Test helper: how many sampled points of the terminal's rectangle (every 12 pt) a window control answers at.

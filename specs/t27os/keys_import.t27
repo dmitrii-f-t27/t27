@@ -1,0 +1,137 @@
+// SPDX-License-Identifier: Apache-2.0
+// Explicit local owner import, dmitrii-f-t27/t27#6.
+// T27OS_IMPORT_FILE is a local path. Dry-run unless T27OS_IMPORT_APPLY=1.
+// Never emits a key, never uploads, never replaces an existing Keychain item.
+module T27osKeysImport;
+use t27os::keys_import_logic::import_line;
+use t27os::keys_import_logic::IMPORT_INVALID;
+use t27os::keys::P_ZAI;
+use t27os::keys::P_NVIDIA;
+use t27os::keys::MAX_KEYS;
+use t27os::keys_host::kc_find;
+use t27os::keys_host::kc_get_n;
+use t27os::keys_host::kc_put_n;
+use t27os::pty_sys::sys_getenv;
+use t27os::pty_sys::sys_strlen;
+use t27os::pty_sys::sys_peek;
+use t27os::pty_sys::sys_open_ro;
+use t27os::pty_sys::sys_read;
+use t27os::pty_sys::sys_write;
+use t27os::pty_sys::sys_close;
+use t27os::pty_sys::sys_exit;
+use t27os::session_store::put_bytes;
+use t27os::session_store::put_dec;
+
+fn wipe(b: []u8) -> void {
+    var i : usize = 0;
+    while (i < b.len) { b[i] = 0; i = i + 1; }
+}
+fn say(s: []const u8) -> void { sys_write(1, s, @as(u64, s.len)); }
+fn env(name: []const u8, out: []u8) -> usize {
+    var z : [64]u8 = undefined;
+    wipe(z[0..64]);
+    if (name.len >= 64) { return 0; }
+    put_bytes(z[0..64], 0, name);
+    const p : u64 = sys_getenv(z[0..64]);
+    if (p == 0) { return 0; }
+    const n : u64 = sys_strlen(p);
+    if (n == 0 or n >= @as(u64, out.len)) { return 0; }
+    wipe(out);
+    sys_peek(out, p, n);
+    return @as(usize, @intCast(n));
+}
+fn summary(p: u32, found: u32, duplicate: u32, added: u32, failed: u32) -> void {
+    var out : [128]u8 = undefined;
+    var n : usize = 0;
+    if (p == P_NVIDIA) { n = put_bytes(out[0..128], n, "NVIDIA"); }
+    else { n = put_bytes(out[0..128], n, "Z.ai Coding Plan"); }
+    n = put_bytes(out[0..128], n, " found=");
+    n = put_dec(out[0..128], n, @as(u64, found));
+    n = put_bytes(out[0..128], n, " duplicate=");
+    n = put_dec(out[0..128], n, @as(u64, duplicate));
+    n = put_bytes(out[0..128], n, " added=");
+    n = put_dec(out[0..128], n, @as(u64, added));
+    n = put_bytes(out[0..128], n, " failed=");
+    n = put_dec(out[0..128], n, @as(u64, failed));
+    n = put_bytes(out[0..128], n, "\n");
+    say(out[0..n]);
+}
+pub fn main() -> void {
+    var path : [4096]u8 = undefined;
+    const pn : usize = env("T27OS_IMPORT_FILE", path[0..4096]);
+    if (pn == 0) { say("Missing local import path.\n"); sys_exit(2); }
+    const fd : i32 = sys_open_ro(path[0..pn + 1], 0);
+    wipe(path[0..4096]);
+    if (fd < 0) { say("Cannot open local import file.\n"); sys_exit(2); }
+    var data : [65536]u8 = undefined;
+    wipe(data[0..65536]);
+    var n : usize = 0;
+    var bad : bool = false;
+    var done : bool = false;
+    while (done == false and n < 65536) {
+        const r : i64 = sys_read(fd, data[n..65536], @as(u64, 65536 - n));
+        if (r < 0) { bad = true; done = true; }
+        else if (r == 0) { done = true; }
+        else { n = n + @as(usize, @intCast(r)); }
+    }
+    sys_close(fd);
+    if (bad or n == 65536) {
+        wipe(data[0..65536]); say("Import read failed or exceeded size limit.\n"); sys_exit(2);
+    }
+    var flags : [8]u8 = undefined;
+    const fnn : usize = env("T27OS_IMPORT_APPLY", flags[0..8]);
+    const apply : bool = fnn == 1 and flags[0] == 49;
+    // Validate every recognized line before the first write.
+    var a : usize = 0;
+    var b : [2]u32 = [0, 0];
+    while (a < n) {
+        var e : usize = a;
+        while (e < n and data[e] != 10) { e = e + 1; }
+        if (import_line(data[a..e], b[0..2]) == IMPORT_INVALID) { bad = true; }
+        a = e + 1;
+    }
+    if (bad) { wipe(data[0..65536]); say("Invalid recognized value; nothing imported.\n"); sys_exit(2); }
+    var group : u32 = 0;
+    while (group < 2) {
+        var p : u32 = P_NVIDIA;
+        if (group == 1) { p = P_ZAI; }
+        var found : u32 = 0;
+        var dup : u32 = 0;
+        var added : u32 = 0;
+        var failed : u32 = 0;
+        a = 0;
+        while (a < n) {
+            var e : usize = a;
+            while (e < n and data[e] != 10) { e = e + 1; }
+            if (import_line(data[a..e], b[0..2]) == p) {
+                found = found + 1;
+                const lo : usize = a + @as(usize, b[0]);
+                const hi : usize = a + @as(usize, b[1]);
+                if (kc_find(p, data[lo..hi]) < MAX_KEYS) { dup = dup + 1; }
+                else if (apply) {
+                    var slot : u32 = 0;
+                    var other : [256]u8 = undefined;
+                    while (slot < MAX_KEYS) {
+                        const sn : usize = kc_get_n(p, slot, other[0..256]);
+                        wipe(other[0..256]);
+                        if (sn == 0) { break; }
+                        slot = slot + 1;
+                    }
+                    if (slot < MAX_KEYS and kc_put_n(p, slot, data[lo..hi])) {
+                        // Read-back compares in process, never emits the value.
+                        if (kc_find(p, data[lo..hi]) == slot) { added = added + 1; }
+                        else { failed = failed + 1; }
+                    } else { failed = failed + 1; }
+                }
+            }
+            a = e + 1;
+        }
+        summary(p, found, dup, added, failed);
+        if (failed > 0) { bad = true; }
+        group = group + 1;
+    }
+    wipe(data[0..65536]);
+    if (apply == false) { say("Dry-run: no Keychain writes.\n"); }
+    if (bad) { sys_exit(1); }
+    sys_exit(0);
+}

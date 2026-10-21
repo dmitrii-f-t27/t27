@@ -2,7 +2,7 @@
 // T27 OS keys_host: where the key manager (keys.t27) touches the machine through libSystem. Two jobs, no
 // decisions (the check button, which needs Foundation, is keys_probe.t27):
 //   - the macOS Keychain, one generic-password item per key (up to MAX_KEYS a provider; account = provider
-//     name, then "<name>#2" .. "<name>#8") under the service "ai.t27.os": kc_get_n / kc_put_n / kc_del_n.
+//     name, then "<name>#2" .. "<name>#12") under the service "ai.t27.os": kc_get_n / kc_put_n / kc_del_n.
 //     The Keychain is reached ONLY by running /usr/bin/security (posix_spawn, pipes, poll, waitpid), never
 //     through SecItem calls. The window is signed ad hoc, so each rebuild is a new code identity and every
 //     SecItem read of an item asked for the login password again; the items trust /usr/bin/security, which
@@ -29,6 +29,7 @@
 module T27osKeysHost;
 
 use t27os::keys::PROVIDER_COUNT;
+use t27os::editors::same_bytes;
 use t27os::keys::MAX_KEYS;
 use t27os::keys::KEYCHAIN_SERVICE;
 use t27os::keys::SEC_OP_READ;
@@ -115,8 +116,11 @@ fn sec_run_inner(words: []u8, offs: []const u32, argc: u32, feed: []const u8, ou
     }
     var ev : [8]u8 = undefined;
     wipe(ev[0..8]);
-    sys_peek(ev[0..8], sys_environ(), 8);
-    const envp : u64 = get_u64(ev[0..8], 0);
+    // The OS may run with an isolated HOME/CFFIXED_USER_HOME. Those are not the
+    // login user's Keychain domain. Only the signed security child gets an empty
+    // environment, so Security resolves the current uid's normal login Keychain.
+    // The parent and its agent processes keep their original isolated environment.
+    const envp : u64 = addr_of(ev[0..8], ev[0..8], 0);
     var po : [2]u32 = undefined;
     po[0] = 0;
     po[1] = 0;
@@ -314,6 +318,20 @@ pub fn kc_get_n(p: u32, k: u32, out: []u8) -> usize {
     if (st == SEC_OK) { n = sec_key_from_output(raw[0 .. @as(usize, res[0])], out); }
     wipe(raw[0..256]);
     return n;
+}
+
+/// Find an existing local key without returning any secret. MAX_KEYS means absent.
+pub fn kc_find(p: u32, key: []const u8) -> u32 {
+    var other : [256]u8 = undefined;
+    var k : u32 = 0;
+    while (k < MAX_KEYS) {
+        const n : usize = kc_get_n(p, k, other[0..256]);
+        const equal : bool = n > 0 and same_bytes(key, other[0..n]);
+        wipe(other[0..256]);
+        if (equal) { return k; }
+        k = k + 1;
+    }
+    return MAX_KEYS;
 }
 
 /// Delete key k (0-based) of provider p. True when it is gone (also when none was there).
