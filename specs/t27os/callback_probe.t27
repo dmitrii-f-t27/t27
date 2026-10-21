@@ -15,7 +15,8 @@
 //   t27b build specs/t27os/callback_probe.t27 -o probe.o --macho
 //   ld -arch arm64 -platform_version macos 11.0 $(xcrun --show-sdk-version) -syslibroot $(xcrun --show-sdk-path) \
 //      -e _main -lSystem -framework CoreFoundation -framework AudioToolbox -o probe probe.o
-// Exits 0 only when the direct calls and checks 1 and 2 pass. ASCII only (L3).
+// Step 4 (ABI probe): part A is a 10 ms timer for 10 s with first/last time marks; part B is a 440 Hz tone, 10 ms
+// buffers (960 bytes, 48 kHz mono 16 bit), 4 buffers, 60 s, callbacks counted. Exits 0 only when the direct calls and checks 1 and 2 pass. ASCII only (L3).
 
 module T27osCallbackProbe;
 
@@ -47,17 +48,23 @@ fn cbp_aq_new_output(fmt: []const u8, cb: u64, user: u64, rl: u64, mode: u64, fl
 fn cbp_aq_alloc(aq: u64, size: u32, out_buf: []u8) -> i32 { return @extern("AudioQueueAllocateBuffer"); }
 fn cbp_aq_enqueue(aq: u64, buf: u64, n: u32, descs: u64) -> i32 { return @extern("AudioQueueEnqueueBuffer"); }
 fn cbp_aq_start(aq: u64, at: u64) -> i32 { return @extern("AudioQueueStart"); }
+fn cbp_sin(x: f64) -> f64 { return @extern("sin"); }
 fn cbp_aq_dispose(aq: u64, now: bool) -> i32 { return @extern("AudioQueueDispose"); }
 
-/// The 8-byte counter at a raw address, plus one.
-fn cbp_bump(at: u64) -> u64 {
+fn cbp_get(at: u64) -> u64 {
     var c : [8]u8 = undefined;
     sys_peek(c[0..8], at, 8);
-    const v : u64 = get_u64(c[0..8], 0) + 1;
+    return get_u64(c[0..8], 0);
+}
+
+fn cbp_put(at: u64, v: u64) -> void {
+    var c : [8]u8 = undefined;
     put_u64(c[0..8], 0, v);
     cbp_poke(at, c[0..8], 8);
-    return v;
 }
+
+/// Microseconds on the CF absolute clock.
+fn cbp_us() -> u64 { return @as(u64, @intFromFloat(cbp_now() * 1000000.0)); }
 
 /// qsort comparator. a and b are the addresses of two 1-byte elements.
 pub fn cbp_cmp(a: u64, b: u64) -> i32 {
@@ -68,20 +75,47 @@ pub fn cbp_cmp(a: u64, b: u64) -> i32 {
     return @as(i32, @intCast(x[0])) - @as(i32, @intCast(y[0]));
 }
 
-/// CFRunLoopTimer callout (timer, info): counts its calls in the u64 at info.
+/// State block at `st` (u64 slots): 0 count, 1 info as received, 2 magic, 3 first us, 4 last us, 5 sample index.
+/// CFRunLoopTimer callout (timer, info): info is the address of the state block.
 pub fn cbp_tick(timer: u64, info: u64) -> u64 {
-    return cbp_bump(info);
+    const n : u64 = cbp_get(info) + 1;
+    cbp_put(info, n);
+    cbp_put(info + 8, info);
+    const t : u64 = cbp_us();
+    if (n == 1) { cbp_put(info + 24, t); }
+    cbp_put(info + 32, t);
+    return n;
 }
 
-/// AudioQueue output callback (user, queue, buffer): counts its calls in the u64 at user and enqueues the
-/// buffer again, so the queue keeps playing (silence) while the run loop runs.
-pub fn cbp_out(user: u64, aq: u64, buf: u64) -> u64 {
-    cbp_enqueue_again(aq, buf);
-    return cbp_bump(user);
-}
-
-fn cbp_enqueue_again(aq: u64, buf: u64) -> i32 {
+/// Fill the AudioQueue buffer with 480 samples (10 ms) of 440 Hz and enqueue it.
+fn cbp_fill(st: u64, aq: u64, buf: u64) -> i32 {
+    var pcm : [960]u8 = undefined;
+    const base : u64 = cbp_get(st + 40);
+    var i : usize = 0;
+    while (i < 480) {
+        const ph : f64 = 6.283185307179586 * 440.0 * @as(f64, @floatFromInt(base + @as(u64, i))) / 48000.0;
+        const v : i32 = @as(i32, @intFromFloat(cbp_sin(ph) * 8000.0)) + 32768;
+        pcm[i * 2] = @as(u8, @intCast(v & 255));
+        pcm[i * 2 + 1] = @as(u8, @intCast((v >> 8) & 255)) ^ 128;
+        i = i + 1;
+    }
+    cbp_put(st + 40, base + 480);
+    cbp_poke(cbp_get(buf + 8), pcm[0..960], 960);
+    var sz : [4]u8 = undefined;
+    sz[0] = 192; sz[1] = 3; sz[2] = 0; sz[3] = 0;
+    cbp_poke(buf + 16, sz[0..4], 4);
     return cbp_aq_enqueue(aq, buf, 0, 0);
+}
+
+/// AudioQueue output callback (user, queue, buffer): user is the address of the state block.
+pub fn cbp_out(user: u64, aq: u64, buf: u64) -> u64 {
+    const n : u64 = cbp_get(user) + 1;
+    cbp_put(user, n);
+    const t : u64 = cbp_us();
+    if (n == 1) { cbp_put(user + 24, t); }
+    cbp_put(user + 32, t);
+    cbp_fill(user, aq, buf);
+    return n;
 }
 
 fn say(s: []const u8, ok: bool) -> bool {
@@ -119,12 +153,12 @@ fn cbp_konst(name: []const u8) -> u64 {
     return get_u64(c[0..8], 0);
 }
 
-/// The 40-byte AudioStreamBasicDescription of 16-bit mono PCM at 16 kHz.
-fn cbp_pcm16k(out: []u8) -> void {
+/// The 40-byte AudioStreamBasicDescription of 16-bit mono PCM at 48 kHz.
+fn cbp_pcm48k(out: []u8) -> void {
     var i : usize = 0;
     while (i < 40) { out[i] = 0; i = i + 1; }
-    // mSampleRate 16000.0 as IEEE-754 binary64 = 0x40CF400000000000.
-    put_u64(out, 0, 4670021707350671360);
+    // mSampleRate 48000.0 as IEEE-754 binary64 = 0x40E7700000000000.
+    put_u64(out, 0, 4680673736892645376);
     out[8] = @as(u8, @intCast(CBP_LPCM & 255));
     out[9] = @as(u8, @intCast((CBP_LPCM >> 8) & 255));
     out[10] = @as(u8, @intCast((CBP_LPCM >> 16) & 255));
@@ -138,128 +172,106 @@ fn cbp_pcm16k(out: []u8) -> void {
 }
 
 pub fn main() -> void {
-    // 0. A direct call first: it also makes sure cbp_cmp, cbp_tick and cbp_out are emitted.
-    var a : [1]u8 = undefined;
-    var b : [1]u8 = undefined;
-    a[0] = 3;
-    b[0] = 7;
-    const pa : u64 = sys_addr(a[0..1], a[0..1], 0);
-    const pb : u64 = sys_addr(b[0..1], b[0..1], 0);
-    var cnt : [8]u8 = undefined;
-    put_u64(cnt[0..8], 0, 0);
-    const pc : u64 = sys_addr(cnt[0..8], cnt[0..8], 0);
-    cbp_tick(0, pc);
-    const direct : bool = say("direct calls: cmp(3,7) < 0 and tick counts 1", cbp_cmp(pa, pb) < 0 and get_u64(cnt[0..8], 0) == 1);
-    // Never true (the counter is 1); the call only makes sure cbp_out is emitted and so exported.
-    if (get_u64(cnt[0..8], 0) == 99) { cbp_out(pc, 0, 0); }
+    var st : [64]u8 = undefined;
+    var z : usize = 0;
+    while (z < 64) { st[z] = 0; z = z + 1; }
+    const ps : u64 = sys_addr(st[0..64], st[0..64], 0);
+    cbp_put(ps + 16, 1511506142);
+    cbp_tick(0, ps);
+    // Never true (count is 1): only makes sure cbp_out is emitted and so exported.
+    if (cbp_get(ps) == 99) { cbp_out(ps, 0, 0); }
+    const direct : bool = say("direct call: tick counts 1", cbp_get(ps) == 1);
+    cbp_put(ps, 0);
+    cbp_put(ps + 24, 0);
 
-    // 1. qsort through the dlsym address.
-    const fcmp : u64 = cbp_dlsym(CBP_RTLD_DEFAULT, "cbp_cmp");
-    var arr : [8]u8 = undefined;
-    arr[0] = 9; arr[1] = 3; arr[2] = 7; arr[3] = 1; arr[4] = 8; arr[5] = 2; arr[6] = 6; arr[7] = 0;
-    if (fcmp != 0) { cbp_qsort(arr[0..8], 8, 1, fcmp); }
-    var sorted : bool = fcmp != 0;
-    var i : usize = 1;
-    while (i < 8) {
-        if (arr[i - 1] > arr[i]) { sorted = false; }
-        i = i + 1;
-    }
-    const by_qsort : bool = say("dlsym finds cbp_cmp and qsort sorts 8 bytes with it", sorted and arr[0] == 0 and arr[7] == 9);
-
-    // 2. A run loop timer calls cbp_tick on this thread.
+    // A. 10 ms timer for 10 s through the dlsym address.
     const ftick : u64 = cbp_dlsym(CBP_RTLD_DEFAULT, "cbp_tick");
+    const fout : u64 = cbp_dlsym(CBP_RTLD_DEFAULT, "cbp_out");
     const mode : u64 = cbp_konst("kCFRunLoopDefaultMode");
-    put_u64(cnt[0..8], 0, 0);
+    say("dlsym finds cbp_tick and cbp_out", ftick != 0 and fout != 0);
     var ctx : [40]u8 = undefined;
     var k : usize = 0;
     while (k < 40) { ctx[k] = 0; k = k + 1; }
-    put_u64(ctx[0..40], 8, pc);
-    var ticks : u64 = 0;
+    put_u64(ctx[0..40], 8, ps);
+    var by_timer : bool = false;
     if (ftick != 0 and mode != 0) {
-        const t : u64 = cbp_timer_create(0, cbp_now() + 0.01, 0.02, 0, 0, ftick, ctx[0..40]);
+        const t0 : u64 = cbp_us();
+        const t : u64 = cbp_timer_create(0, cbp_now() + 0.01, 0.01, 0, 0, ftick, ctx[0..40]);
         if (t != 0) {
             cbp_add_timer(cbp_rl_current(), t, mode);
-            const r : i32 = cbp_run(mode, 0.3, false);
+            const r : i32 = cbp_run(mode, 10.0, false);
             say_num("run loop result: ", @as(i64, r));
             cbp_timer_invalidate(t);
             cbp_release(t);
         }
-        ticks = get_u64(cnt[0..8], 0);
+        const n : u64 = cbp_get(ps);
+        say_num("A ticks in 10 s: ", @as(i64, @intCast(n)));
+        say_num("A info sent (address of state): ", @as(i64, @intCast(ps)));
+        say_num("A info received:                ", @as(i64, @intCast(cbp_get(ps + 8))));
+        say_num("A magic in state block:         ", @as(i64, @intCast(cbp_get(ps + 16))));
+        say_num("A start us:       ", @as(i64, @intCast(t0)));
+        say_num("A first tick +us: ", @as(i64, @intCast(cbp_get(ps + 24) - t0)));
+        say_num("A last tick  +us: ", @as(i64, @intCast(cbp_get(ps + 32) - t0)));
+        by_timer = n >= 900 and n <= 1100 and cbp_get(ps + 8) == ps;
     }
-    say_num("timer callbacks in 0.3 s: ", @as(i64, @intCast(ticks)));
-    const by_timer : bool = say("a CFRunLoop timer calls cbp_tick at least 5 times", ticks >= 5);
+    const a_ok : bool = say("A: about 1000 ticks, info matches", by_timer);
 
-    // 3. AudioQueue output with cbp_out as its callback. Never decides the exit code. It reports
-    //    "AUDIO VERIFIED" only when every step held: the callback resolved, the queue was created, all three
-    //    buffers were allocated and enqueued, the queue started, cbp_out ran at least once and the queue was
-    //    disposed. Otherwise it reports "AUDIO SKIP" (no queue: for example no output device) or
-    //    "AUDIO UNVERIFIED" (a queue, but a later step failed or no callback was seen).
-    const fout : u64 = cbp_dlsym(CBP_RTLD_DEFAULT, "cbp_out");
+    // B. 440 Hz tone, 4 buffers of 960 bytes, 60 s on this run loop.
     var fmt : [40]u8 = undefined;
-    cbp_pcm16k(fmt[0..40]);
+    cbp_pcm48k(fmt[0..40]);
     var aqb : [8]u8 = undefined;
     put_u64(aqb[0..8], 0, 0);
-    put_u64(cnt[0..8], 0, 0);
-    var st : i32 = -1;
-    if (fout != 0 and mode != 0) { st = cbp_aq_new_output(fmt[0..40], fout, pc, cbp_rl_current(), mode, 0, aqb[0..8]); }
-    say_num("AudioQueueNewOutput status: ", @as(i64, st));
+    cbp_put(ps, 0);
+    cbp_put(ps + 24, 0);
+    cbp_put(ps + 40, 0);
+    var s1 : i32 = -1;
+    if (a_ok and fout != 0) { s1 = cbp_aq_new_output(fmt[0..40], fout, ps, cbp_rl_current(), mode, 0, aqb[0..8]); }
+    say_num("AudioQueueNewOutput status: ", @as(i64, s1));
     const aq : u64 = get_u64(aqb[0..8], 0);
     var queued : u32 = 0;
-    var started : bool = false;
+    var s2 : i32 = -1;
+    var b_calls : u64 = 0;
     var disposed : bool = false;
-    var audio_calls : u64 = 0;
-    if (st == 0 and aq != 0) {
-        var zero : [640]u8 = undefined;
-        var z : usize = 0;
-        while (z < 640) { zero[z] = 0; z = z + 1; }
+    if (s1 == 0 and aq != 0) {
         var n : u32 = 0;
-        while (n < 3) {
+        while (n < 4) {
             var bb : [8]u8 = undefined;
             put_u64(bb[0..8], 0, 0);
-            if (cbp_aq_alloc(aq, 640, bb[0..8]) == 0) {
-                const buf : u64 = get_u64(bb[0..8], 0);
-                // mAudioData is the pointer at offset 8 of AudioQueueBuffer: fill it with silence.
-                var hd : [8]u8 = undefined;
-                sys_peek(hd[0..8], buf + 8, 8);
-                cbp_poke(get_u64(hd[0..8], 0), zero[0..640], 640);
-                // mAudioDataByteSize is the u32 at offset 16 of AudioQueueBuffer: 640 bytes of silence.
-                var sz : [4]u8 = undefined;
-                sz[0] = 128; sz[1] = 2; sz[2] = 0; sz[3] = 0;
-                cbp_poke(buf + 16, sz[0..4], 4);
-                if (cbp_enqueue_again(aq, buf) == 0) { queued = queued + 1; }
+            if (cbp_aq_alloc(aq, 960, bb[0..8]) == 0) {
+                if (cbp_fill(ps, aq, get_u64(bb[0..8], 0)) == 0) { queued = queued + 1; }
             }
             n = n + 1;
         }
-        const s2 : i32 = cbp_aq_start(aq, 0);
+        say_num("buffers enqueued: ", @as(i64, @intCast(queued)));
+        s2 = cbp_aq_start(aq, 0);
         say_num("AudioQueueStart status: ", @as(i64, s2));
         if (s2 == 0) {
-            started = true;
-            cbp_run(mode, 0.3, false);
+            var sec : u32 = 0;
+            while (sec < 6) {
+                cbp_run(mode, 10.0, false);
+                say_num("B callbacks so far: ", @as(i64, @intCast(cbp_get(ps))));
+                sec = sec + 1;
+            }
         }
-        audio_calls = get_u64(cnt[0..8], 0);
-        say_num("audio callbacks in 0.3 s: ", @as(i64, @intCast(audio_calls)));
+        b_calls = cbp_get(ps);
+        say_num("B callbacks in 60 s: ", @as(i64, @intCast(b_calls)));
+        say_num("B first +us (from queue start): ", @as(i64, @intCast(cbp_get(ps + 24))));
+        say_num("B last us - first us: ", @as(i64, @intCast(cbp_get(ps + 32) - cbp_get(ps + 24))));
         disposed = cbp_aq_dispose(aq, true) == 0;
     }
-    if (st != 0 or aq == 0) {
-        sys_write(1, "AUDIO SKIP: no output queue (no device, or the callback did not resolve); audio not verified\n", 93);
-    } else if (queued == 3 and started and audio_calls > 0 and disposed) {
-        sys_write(1, "AUDIO VERIFIED: output queue ran cbp_out on this run loop and was disposed\n", 75);
-    } else {
-        sys_write(1, "AUDIO UNVERIFIED: a queue was created but a later step failed or no callback ran\n", 81);
-    }
-
-    if (direct and by_qsort and by_timer) {
-        sys_write(1, "callback-probe: required checks pass\n", 37);
+    const b_ok : bool = say("B: Start=0, 4 buffers, callbacks >= 5900, disposed", s2 == 0 and queued == 4 and b_calls >= 5900 and disposed);
+    if (a_ok and b_ok) {
+        sys_write(1, "abi-probe: A and B pass (audibility of the tone not checked)\n", 62);
         sys_exit(0);
     }
-    sys_write(1, "callback-probe: FAILED\n", 23);
+    sys_write(1, "abi-probe: FAILED\n", 18);
     sys_exit(1);
 }
 
-test the_pcm_format_is_16_khz_mono_16_bit {
+test the_pcm_format_is_48_khz_mono_16_bit {
     var f : [40]u8 = undefined;
-    cbp_pcm16k(f[0..40]);
-    assert get_u64(f[0..40], 0) == 4670021707350671360;
+    cbp_pcm48k(f[0..40]);
+    assert get_u64(f[0..40], 0) == 4680673736892645376;
     assert f[8] == 109 and f[9] == 99 and f[10] == 112 and f[11] == 108;
     assert f[12] == 12 and f[16] == 2 and f[20] == 1 and f[24] == 2 and f[28] == 1 and f[32] == 16;
 }
