@@ -1,0 +1,245 @@
+// SPDX-License-Identifier: Apache-2.0
+// specs/t27os/callback_probe.t27 -- can the OS call back into a t27b fn? Evidence for the in-OS call audio
+// (owner, 2026-10-21: avatar calls inside T27 OS, no servers). Every streaming audio API on macOS (AudioQueue,
+// AudioUnit, AVAudioEngine) hands its buffers to a C callback, and the language cannot take a fn's address.
+// t27b does export every all-scalar fn as the global `_<name>` (cli/t27b/README.md, "exported"), and the window
+// is linked with no export list, so dlsym(RTLD_DEFAULT, "<name>") may return that fn's address. This program
+// checks exactly that, three ways, and prints one line per check. Not part of the app.
+//   1. libc qsort sorts 8 bytes with cbp_cmp, reached only through its dlsym address (a synchronous callback).
+//   2. A CFRunLoop timer calls cbp_tick on this thread while CFRunLoopRunInMode runs: the shape an AudioQueue
+//      created with the main run loop would use, so a callback never runs on another thread.
+//   3. An AudioQueue output queue with cbp_out as its callback, run on this run loop for 0.3 s. Informational:
+//      a machine with no output device fails here; its status is printed and does not decide the exit code.
+// Build (Apple silicon):
+//   t27b build specs/t27os/callback_probe.t27 -o probe.o --macho
+//   ld -arch arm64 -platform_version macos 11.0 $(xcrun --show-sdk-version) -syslibroot $(xcrun --show-sdk-path) \
+//      -e _main -lSystem -framework CoreFoundation -framework AudioToolbox -o probe probe.o
+// Exits 0 only when the direct calls and checks 1 and 2 pass; check 3 prints its status either way. ASCII only (L3).
+
+module T27osCallbackProbe;
+
+use t27os::pty_sys::sys_write;
+use t27os::pty_sys::sys_exit;
+use t27os::pty_sys::sys_peek;
+use t27os::pty_sys::sys_addr;
+use t27os::pty_proto::put_u64;
+use t27os::pty_proto::get_u64;
+
+const CBP_RTLD_DEFAULT : u64 = 18446744073709551614;
+/// kAudioFormatLinearPCM, 'lpcm'.
+const CBP_LPCM : u32 = 1819304813;
+/// kLinearPCMFormatFlagIsSignedInteger | kLinearPCMFormatFlagIsPacked.
+const CBP_PCM_FLAGS : u32 = 12;
+
+fn cbp_dlsym(h: u64, name: []const u8) -> u64 { return @extern("dlsym"); }
+/// memmove with a raw destination address: copy n bytes of src to memory at dst.
+fn cbp_poke(dst: u64, src: []const u8, n: u64) -> u64 { return @extern("memmove"); }
+fn cbp_qsort(base: []u8, n: u64, width: u64, cmp: u64) -> void { @extern("qsort"); }
+fn cbp_rl_current() -> u64 { return @extern("CFRunLoopGetCurrent"); }
+fn cbp_now() -> f64 { return @extern("CFAbsoluteTimeGetCurrent"); }
+fn cbp_timer_create(alloc: u64, fire: f64, every: f64, flags: u64, order: i64, callout: u64, ctx: []const u8) -> u64 { return @extern("CFRunLoopTimerCreate"); }
+fn cbp_add_timer(rl: u64, timer: u64, mode: u64) -> void { @extern("CFRunLoopAddTimer"); }
+fn cbp_run(mode: u64, seconds: f64, after_one: bool) -> i32 { return @extern("CFRunLoopRunInMode"); }
+fn cbp_timer_invalidate(timer: u64) -> void { @extern("CFRunLoopTimerInvalidate"); }
+fn cbp_release(x: u64) -> void { @extern("CFRelease"); }
+fn cbp_aq_new_output(fmt: []const u8, cb: u64, user: u64, rl: u64, mode: u64, flags: u32, out_aq: []u8) -> i32 { return @extern("AudioQueueNewOutput"); }
+fn cbp_aq_alloc(aq: u64, size: u32, out_buf: []u8) -> i32 { return @extern("AudioQueueAllocateBuffer"); }
+fn cbp_aq_enqueue(aq: u64, buf: u64, n: u32, descs: u64) -> i32 { return @extern("AudioQueueEnqueueBuffer"); }
+fn cbp_aq_start(aq: u64, at: u64) -> i32 { return @extern("AudioQueueStart"); }
+fn cbp_aq_dispose(aq: u64, now: bool) -> i32 { return @extern("AudioQueueDispose"); }
+
+/// The 8-byte counter at a raw address, plus one.
+fn cbp_bump(at: u64) -> u64 {
+    var c : [8]u8 = undefined;
+    sys_peek(c[0..8], at, 8);
+    const v : u64 = get_u64(c[0..8], 0) + 1;
+    put_u64(c[0..8], 0, v);
+    cbp_poke(at, c[0..8], 8);
+    return v;
+}
+
+/// qsort comparator. a and b are the addresses of two 1-byte elements.
+pub fn cbp_cmp(a: u64, b: u64) -> i32 {
+    var x : [1]u8 = undefined;
+    var y : [1]u8 = undefined;
+    sys_peek(x[0..1], a, 1);
+    sys_peek(y[0..1], b, 1);
+    return @as(i32, @intCast(x[0])) - @as(i32, @intCast(y[0]));
+}
+
+/// CFRunLoopTimer callout (timer, info): counts its calls in the u64 at info.
+pub fn cbp_tick(timer: u64, info: u64) -> u64 {
+    return cbp_bump(info);
+}
+
+/// AudioQueue output callback (user, queue, buffer): counts its calls in the u64 at user and enqueues the
+/// buffer again, so the queue keeps playing (silence) while the run loop runs.
+pub fn cbp_out(user: u64, aq: u64, buf: u64) -> u64 {
+    cbp_enqueue_again(aq, buf);
+    return cbp_bump(user);
+}
+
+fn cbp_enqueue_again(aq: u64, buf: u64) -> i32 {
+    return cbp_aq_enqueue(aq, buf, 0, 0);
+}
+
+fn say(s: []const u8, ok: bool) -> bool {
+    if (ok) { sys_write(1, "ok   ", 5); } else { sys_write(1, "FAIL ", 5); }
+    sys_write(1, s, @as(u64, s.len));
+    sys_write(1, "\n", 1);
+    return ok;
+}
+
+/// One decimal line, "<label><n>".
+fn say_num(label: []const u8, n: i64) -> void {
+    var b : [24]u8 = undefined;
+    var v : u64 = 0;
+    var neg : bool = false;
+    if (n < 0) { neg = true; v = @as(u64, @intCast(0 - n)); } else { v = @as(u64, @intCast(n)); }
+    var i : usize = 24;
+    if (v == 0) { i = i - 1; b[i] = 48; }
+    while (v > 0) {
+        i = i - 1;
+        b[i] = @as(u8, @intCast(48 + v % 10));
+        v = v / 10;
+    }
+    if (neg) { i = i - 1; b[i] = 45; }
+    sys_write(1, label, @as(u64, label.len));
+    sys_write(1, b[i..24], @as(u64, 24 - i));
+    sys_write(1, "\n", 1);
+}
+
+/// The CFStringRef a CF constant holds, read through its dlsym address; 0 when the symbol is absent.
+fn cbp_konst(name: []const u8) -> u64 {
+    const a : u64 = cbp_dlsym(CBP_RTLD_DEFAULT, name);
+    if (a == 0) { return 0; }
+    var c : [8]u8 = undefined;
+    sys_peek(c[0..8], a, 8);
+    return get_u64(c[0..8], 0);
+}
+
+/// The 40-byte AudioStreamBasicDescription of 16-bit mono PCM at 16 kHz.
+fn cbp_pcm16k(out: []u8) -> void {
+    var i : usize = 0;
+    while (i < 40) { out[i] = 0; i = i + 1; }
+    // mSampleRate 16000.0 as IEEE-754 binary64 = 0x40CF400000000000.
+    put_u64(out, 0, 4670021707350671360);
+    out[8] = @as(u8, @intCast(CBP_LPCM & 255));
+    out[9] = @as(u8, @intCast((CBP_LPCM >> 8) & 255));
+    out[10] = @as(u8, @intCast((CBP_LPCM >> 16) & 255));
+    out[11] = @as(u8, @intCast((CBP_LPCM >> 24) & 255));
+    out[12] = @as(u8, @intCast(CBP_PCM_FLAGS));
+    out[16] = 2;
+    out[20] = 1;
+    out[24] = 2;
+    out[28] = 1;
+    out[32] = 16;
+}
+
+pub fn main() -> void {
+    // 0. A direct call first: it also makes sure cbp_cmp, cbp_tick and cbp_out are emitted.
+    var a : [1]u8 = undefined;
+    var b : [1]u8 = undefined;
+    a[0] = 3;
+    b[0] = 7;
+    const pa : u64 = sys_addr(a[0..1], a[0..1], 0);
+    const pb : u64 = sys_addr(b[0..1], b[0..1], 0);
+    var cnt : [8]u8 = undefined;
+    put_u64(cnt[0..8], 0, 0);
+    const pc : u64 = sys_addr(cnt[0..8], cnt[0..8], 0);
+    cbp_tick(0, pc);
+    const direct : bool = say("direct calls: cmp(3,7) < 0 and tick counts 1", cbp_cmp(pa, pb) < 0 and get_u64(cnt[0..8], 0) == 1);
+    // Never true (the counter is 1); the call only makes sure cbp_out is emitted and so exported.
+    if (get_u64(cnt[0..8], 0) == 99) { cbp_out(pc, 0, 0); }
+
+    // 1. qsort through the dlsym address.
+    const fcmp : u64 = cbp_dlsym(CBP_RTLD_DEFAULT, "cbp_cmp");
+    var arr : [8]u8 = undefined;
+    arr[0] = 9; arr[1] = 3; arr[2] = 7; arr[3] = 1; arr[4] = 8; arr[5] = 2; arr[6] = 6; arr[7] = 0;
+    if (fcmp != 0) { cbp_qsort(arr[0..8], 8, 1, fcmp); }
+    var sorted : bool = fcmp != 0;
+    var i : usize = 1;
+    while (i < 8) {
+        if (arr[i - 1] > arr[i]) { sorted = false; }
+        i = i + 1;
+    }
+    const by_qsort : bool = say("dlsym finds cbp_cmp and qsort sorts 8 bytes with it", sorted and arr[0] == 0 and arr[7] == 9);
+
+    // 2. A run loop timer calls cbp_tick on this thread.
+    const ftick : u64 = cbp_dlsym(CBP_RTLD_DEFAULT, "cbp_tick");
+    const mode : u64 = cbp_konst("kCFRunLoopDefaultMode");
+    put_u64(cnt[0..8], 0, 0);
+    var ctx : [40]u8 = undefined;
+    var k : usize = 0;
+    while (k < 40) { ctx[k] = 0; k = k + 1; }
+    put_u64(ctx[0..40], 8, pc);
+    var ticks : u64 = 0;
+    if (ftick != 0 and mode != 0) {
+        const t : u64 = cbp_timer_create(0, cbp_now() + 0.01, 0.02, 0, 0, ftick, ctx[0..40]);
+        if (t != 0) {
+            cbp_add_timer(cbp_rl_current(), t, mode);
+            const r : i32 = cbp_run(mode, 0.3, false);
+            say_num("run loop result: ", @as(i64, r));
+            cbp_timer_invalidate(t);
+            cbp_release(t);
+        }
+        ticks = get_u64(cnt[0..8], 0);
+    }
+    say_num("timer callbacks in 0.3 s: ", @as(i64, @intCast(ticks)));
+    const by_timer : bool = say("a CFRunLoop timer calls cbp_tick at least 5 times", ticks >= 5);
+
+    // 3. AudioQueue output with cbp_out as its callback (informational).
+    const fout : u64 = cbp_dlsym(CBP_RTLD_DEFAULT, "cbp_out");
+    var fmt : [40]u8 = undefined;
+    cbp_pcm16k(fmt[0..40]);
+    var aqb : [8]u8 = undefined;
+    put_u64(aqb[0..8], 0, 0);
+    put_u64(cnt[0..8], 0, 0);
+    const st : i32 = cbp_aq_new_output(fmt[0..40], fout, pc, cbp_rl_current(), mode, 0, aqb[0..8]);
+    say_num("AudioQueueNewOutput status: ", @as(i64, st));
+    const aq : u64 = get_u64(aqb[0..8], 0);
+    say("AudioQueueNewOutput accepts the t27 callback (informational)", st == 0 and aq != 0 and fout != 0);
+    if (st == 0 and aq != 0) {
+        var zero : [640]u8 = undefined;
+        var z : usize = 0;
+        while (z < 640) { zero[z] = 0; z = z + 1; }
+        var n : u32 = 0;
+        while (n < 3) {
+            var bb : [8]u8 = undefined;
+            put_u64(bb[0..8], 0, 0);
+            if (cbp_aq_alloc(aq, 640, bb[0..8]) == 0) {
+                const buf : u64 = get_u64(bb[0..8], 0);
+                // mAudioData is the pointer at offset 8 of AudioQueueBuffer: fill it with silence.
+                var hd : [8]u8 = undefined;
+                sys_peek(hd[0..8], buf + 8, 8);
+                cbp_poke(get_u64(hd[0..8], 0), zero[0..640], 640);
+                // mAudioDataByteSize is the u32 at offset 16 of AudioQueueBuffer: 640 bytes of silence.
+                var sz : [4]u8 = undefined;
+                sz[0] = 128; sz[1] = 2; sz[2] = 0; sz[3] = 0;
+                cbp_poke(buf + 16, sz[0..4], 4);
+                cbp_enqueue_again(aq, buf);
+            }
+            n = n + 1;
+        }
+        const s2 : i32 = cbp_aq_start(aq, 0);
+        say_num("AudioQueueStart status: ", @as(i64, s2));
+        if (s2 == 0) { cbp_run(mode, 0.3, false); }
+        say_num("audio callbacks in 0.3 s: ", @as(i64, @intCast(get_u64(cnt[0..8], 0))));
+        cbp_aq_dispose(aq, true);
+    }
+
+    if (direct and by_qsort and by_timer) {
+        sys_write(1, "callback-probe: required checks pass\n", 37);
+        sys_exit(0);
+    }
+    sys_write(1, "callback-probe: FAILED\n", 23);
+    sys_exit(1);
+}
+
+test the_pcm_format_is_16_khz_mono_16_bit {
+    var f : [40]u8 = undefined;
+    cbp_pcm16k(f[0..40]);
+    assert get_u64(f[0..40], 0) == 4670021707350671360;
+    assert f[8] == 109 and f[9] == 99 and f[10] == 112 and f[11] == 108;
+    assert f[12] == 12 and f[16] == 2 and f[20] == 1 and f[24] == 2 and f[28] == 1 and f[32] == 16;
+}
