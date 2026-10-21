@@ -8,13 +8,14 @@
 //   1. libc qsort sorts 8 bytes with cbp_cmp, reached only through its dlsym address (a synchronous callback).
 //   2. A CFRunLoop timer calls cbp_tick on this thread while CFRunLoopRunInMode runs: the shape an AudioQueue
 //      created with the main run loop would use, so a callback never runs on another thread.
-//   3. An AudioQueue output queue with cbp_out as its callback, run on this run loop for 0.3 s. Informational:
-//      a machine with no output device fails here; its status is printed and does not decide the exit code.
+//   3. An AudioQueue output queue with cbp_out as its callback, run on this run loop for 0.3 s. It never decides
+//      the exit code and prints AUDIO VERIFIED, AUDIO UNVERIFIED or AUDIO SKIP. Exit 0 says nothing about
+//      audio: playback, capture and duplex audio need their own acceptance on a Mac with devices.
 // Build (Apple silicon):
 //   t27b build specs/t27os/callback_probe.t27 -o probe.o --macho
 //   ld -arch arm64 -platform_version macos 11.0 $(xcrun --show-sdk-version) -syslibroot $(xcrun --show-sdk-path) \
 //      -e _main -lSystem -framework CoreFoundation -framework AudioToolbox -o probe probe.o
-// Exits 0 only when the direct calls and checks 1 and 2 pass; check 3 prints its status either way. ASCII only (L3).
+// Exits 0 only when the direct calls and checks 1 and 2 pass. ASCII only (L3).
 
 module T27osCallbackProbe;
 
@@ -188,17 +189,25 @@ pub fn main() -> void {
     say_num("timer callbacks in 0.3 s: ", @as(i64, @intCast(ticks)));
     const by_timer : bool = say("a CFRunLoop timer calls cbp_tick at least 5 times", ticks >= 5);
 
-    // 3. AudioQueue output with cbp_out as its callback (informational).
+    // 3. AudioQueue output with cbp_out as its callback. Never decides the exit code. It reports
+    //    "AUDIO VERIFIED" only when every step held: the callback resolved, the queue was created, all three
+    //    buffers were allocated and enqueued, the queue started, cbp_out ran at least once and the queue was
+    //    disposed. Otherwise it reports "AUDIO SKIP" (no queue: for example no output device) or
+    //    "AUDIO UNVERIFIED" (a queue, but a later step failed or no callback was seen).
     const fout : u64 = cbp_dlsym(CBP_RTLD_DEFAULT, "cbp_out");
     var fmt : [40]u8 = undefined;
     cbp_pcm16k(fmt[0..40]);
     var aqb : [8]u8 = undefined;
     put_u64(aqb[0..8], 0, 0);
     put_u64(cnt[0..8], 0, 0);
-    const st : i32 = cbp_aq_new_output(fmt[0..40], fout, pc, cbp_rl_current(), mode, 0, aqb[0..8]);
+    var st : i32 = -1;
+    if (fout != 0 and mode != 0) { st = cbp_aq_new_output(fmt[0..40], fout, pc, cbp_rl_current(), mode, 0, aqb[0..8]); }
     say_num("AudioQueueNewOutput status: ", @as(i64, st));
     const aq : u64 = get_u64(aqb[0..8], 0);
-    say("AudioQueueNewOutput accepts the t27 callback (informational)", st == 0 and aq != 0 and fout != 0);
+    var queued : u32 = 0;
+    var started : bool = false;
+    var disposed : bool = false;
+    var audio_calls : u64 = 0;
     if (st == 0 and aq != 0) {
         var zero : [640]u8 = undefined;
         var z : usize = 0;
@@ -217,15 +226,26 @@ pub fn main() -> void {
                 var sz : [4]u8 = undefined;
                 sz[0] = 128; sz[1] = 2; sz[2] = 0; sz[3] = 0;
                 cbp_poke(buf + 16, sz[0..4], 4);
-                cbp_enqueue_again(aq, buf);
+                if (cbp_enqueue_again(aq, buf) == 0) { queued = queued + 1; }
             }
             n = n + 1;
         }
         const s2 : i32 = cbp_aq_start(aq, 0);
         say_num("AudioQueueStart status: ", @as(i64, s2));
-        if (s2 == 0) { cbp_run(mode, 0.3, false); }
-        say_num("audio callbacks in 0.3 s: ", @as(i64, @intCast(get_u64(cnt[0..8], 0))));
-        cbp_aq_dispose(aq, true);
+        if (s2 == 0) {
+            started = true;
+            cbp_run(mode, 0.3, false);
+        }
+        audio_calls = get_u64(cnt[0..8], 0);
+        say_num("audio callbacks in 0.3 s: ", @as(i64, @intCast(audio_calls)));
+        disposed = cbp_aq_dispose(aq, true) == 0;
+    }
+    if (st != 0 or aq == 0) {
+        sys_write(1, "AUDIO SKIP: no output queue (no device, or the callback did not resolve); audio not verified\n", 93);
+    } else if (queued == 3 and started and audio_calls > 0 and disposed) {
+        sys_write(1, "AUDIO VERIFIED: output queue ran cbp_out on this run loop and was disposed\n", 75);
+    } else {
+        sys_write(1, "AUDIO UNVERIFIED: a queue was created but a later step failed or no callback ran\n", 81);
     }
 
     if (direct and by_qsort and by_timer) {
