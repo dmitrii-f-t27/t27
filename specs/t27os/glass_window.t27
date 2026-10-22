@@ -57,6 +57,7 @@
 ; layer's contents. Epic gHashTag/t27#10782.
 
 module T27osGlassWindow;
+use t27os::pty_sys::sys_signal;
 
 use t27f::petal_glass::clamp01;
 use t27f::petal_glass::scale;
@@ -69,9 +70,15 @@ use t27os::layout::cap_mid;
 use t27os::layout::same_line;
 use t27os::agents::AGENT_NAMES;
 use t27os::keys::PROVIDER_COUNT;
+use t27os::keys::KY_PAGE_ROWS;
+use t27os::keys::KY_MASK_BYTES;
+use t27os::keys::KY_BUFFER_BYTES;
+use t27os::keys::ky_provider;
+use t27os::keys::ky_page_hit;
+use t27os::keys::ky_page_action;
+use t27os::keys::provider_label;
 use t27os::keys::PROFILE_COUNT;
 use t27os::keys::MAX_KEYS;
-use t27os::keys::setkey_byte;
 use t27os::keys::key_count_text;
 use t27os::keys::MAX_KEY_CHARS;
 use t27os::keys::KEYS_WORDS;
@@ -109,6 +116,7 @@ use t27os::keys::mask_key;
 use t27os::keys::sec_key_safe;
 use t27os::keys::key_index;
 use t27os::keys::slot_count;
+use t27os::keys::slot_add;
 use t27os::keys::next_free_key;
 use t27os::keys::newest_key;
 use t27os::keys::ky_set_word;
@@ -125,6 +133,7 @@ use t27os::keys::status_after_probe;
 use t27os::keys::circuit_fails;
 use t27os::keys::status_shown;
 use t27os::keys_host::kc_put_n;
+use t27os::keys_host::kc_find;
 use t27os::keys_host::kc_get_n;
 use t27os::keys_host::kc_del_n;
 use t27os::keys_host::kc_has;
@@ -138,6 +147,7 @@ use t27os::keysync::kd_view_text_len;
 use t27os::keysync::kd_view_flags;
 use t27os::keysync::KDF_MINE;
 use t27os::keys_host::push_keys;
+use t27os::keys_host::push_keys_mask;
 use t27os::profile::PRF_OK;
 use t27os::profile::PRF_OK_SAVED;
 use t27os::profile::PRF_E_CANCELLED;
@@ -204,7 +214,7 @@ use t27os::profile_host::prfh_avatar_path;
 use t27os::profile_host::prfh_save_nick;
 use t27os::profile_host::prfh_remove;
 use t27os::profile_host::prfh_pick;
-use t27os::pty_client::client_set_key;
+use t27os::pty_client::client_set_key_n;
 use t27os::editors::EDITOR_COUNT;
 use t27os::editors::ED_NONE;
 use t27os::editors::ED_SLOT_H;
@@ -694,7 +704,243 @@ use t27f::petal_menu::BOX_CY;
 use t27f::petal_menu::PETAL_COUNT;
 use t27f::petal_menu::PETAL_NONE;
 use t27f::petal_menu::STATE_HOME;
-use t27f::petal_menu::CARD_SLOTS;
+// Launcher cells are distinct from the nine persisted coding-agent identities.
+pub const CARD_SLOTS : u32 = 11;
+use t27os::provider_catalog::PC_COUNT;
+use t27os::provider_catalog::PC_NONE;
+use t27os::provider_catalog::pc_model;
+use t27os::provider_catalog::pc_label;
+use t27os::provider_catalog::pc_note_short;
+use t27os::api_manage::am_model_note;
+use t27os::api_manage::am_model_note_short;
+use t27os::provider_catalog::pc_provider;
+use t27os::provider_catalog::pc_row;
+use t27os::provider_catalog::pc_page_count;
+use t27os::provider_catalog::pc_get;
+use t27os::provider_catalog::pc_set;
+use t27os::provider_catalog::pc_drop;
+use t27os::provider_catalog::pc_drop_space;
+use t27os::provider_catalog::pc_ordinal;
+use t27os::pty_client::client_provider_open;
+use t27os::provider_catalog::pc_raw;
+use t27os::provider_catalog::pc_set_raw;
+use t27os::provider_catalog::PC_BOUND;
+use t27os::pty_client::client_provider_open_token;
+use t27os::pty_client::client_reply_ok;
+use t27os::editors::same_bytes;
+use t27os::pty_sys::sys_exit;
+use t27os::keys::slot_taken;
+use t27os::keys::slot_drop;
+use t27os::keys::P_NVIDIA;
+use t27os::keys::P_ZAI;
+use t27os::api_manage::AM_NONE;
+use t27os::api_manage::AM_PROVIDERS;
+use t27os::api_manage::AM_NV;
+use t27os::api_manage::AM_ZA;
+use t27os::api_manage::AM_SLOTS;
+use t27os::api_manage::AM_M_OVERVIEW;
+use t27os::api_manage::AM_M_DETAIL;
+use t27os::api_manage::AM_M_MODELS;
+use t27os::api_manage::AM_M_CUSTOM;
+use t27os::api_manage::AM_M_ADD;
+use t27os::api_manage::AM_W_MODE;
+use t27os::api_manage::AM_W_PROV;
+use t27os::api_manage::AM_W_PAGE;
+use t27os::api_manage::AM_W_MPAGE;
+use t27os::api_manage::AM_W_ARM;
+use t27os::api_manage::AM_W_MSG;
+use t27os::api_manage::AM_W_GEN;
+use t27os::api_manage::AM_W_SEL;
+use t27os::api_manage::AM_W_STORED;
+use t27os::api_manage::AM_W_UNKNOWN;
+use t27os::api_manage::AM_W_LOADED;
+use t27os::api_manage::AM_W_SCAN_M;
+use t27os::api_manage::AM_W_SCAN_NEXT;
+use t27os::api_manage::AM_W_PID;
+use t27os::api_manage::AM_W_FD;
+use t27os::api_manage::AM_W_REQ_M;
+use t27os::api_manage::AM_W_REQ_SLOT;
+use t27os::api_manage::AM_W_REQ_START;
+use t27os::api_manage::AM_W_BUFLEN;
+use t27os::api_manage::AM_W_REAP;
+use t27os::api_manage::AM_W_REAPN;
+use t27os::api_manage::AM_W_EOF;
+use t27os::api_manage::AM_W_BATCH;
+use t27os::api_manage::AM_W_BSTOP;
+use t27os::api_manage::AM_W_PAUSE;
+use t27os::api_manage::AM_W_TIME;
+use t27os::api_manage::AM_B_WBUF;
+use t27os::api_manage::AM_MASK_CAP;
+use t27os::api_manage::AM_WLINE_MAX;
+use t27os::api_manage::AM_WORKER_WAIT_MS;
+use t27os::api_manage::AM_MSG_STOPPING;
+use t27os::api_manage::AM_S_NOT_CHECKED;
+use t27os::api_manage::AM_S_INVALID;
+use t27os::api_manage::AM_S_NETWORK;
+use t27os::api_manage::AM_S_CANCELLED;
+use t27os::api_manage::AM_S_RATE;
+use t27os::api_manage::AM_R_APPLIED;
+use t27os::api_manage::AM_R_STALE;
+use t27os::api_manage::AM_MSG_NONE;
+use t27os::api_manage::AM_MSG_NO_KEY;
+use t27os::api_manage::AM_MSG_BUSY;
+use t27os::api_manage::AM_MSG_PAUSED;
+use t27os::api_manage::AM_MSG_STOPPED;
+use t27os::api_manage::AM_MSG_SAVED;
+use t27os::api_manage::AM_MSG_NO_SERVER;
+use t27os::api_manage::AM_MSG_SPAWN;
+use t27os::api_manage::AM_MSG_DELETED;
+use t27os::api_manage::AM_MSG_CHAT_FULL;
+use t27os::api_manage::AM_MSG_SCANNING;
+use t27os::api_manage::AM_MSG_KEY_ADDED;
+use t27os::api_manage::AM_MSG_HOLD;
+use t27os::api_manage::AM_MSG_RESUMED;
+use t27os::api_manage::AM_MSG_CHAT_GONE;
+use t27os::api_manage::AM_MSG_SELECTED;
+use t27os::api_manage::AM_MSG_KC_FAIL;
+use t27os::api_manage::AM_MSG_ID_BASE;
+use t27os::api_manage::AM_K_NONE;
+use t27os::api_manage::AM_K_MANAGE;
+use t27os::api_manage::AM_K_OTHER;
+use t27os::api_manage::AM_K_BACK;
+use t27os::api_manage::AM_K_MODEL;
+use t27os::api_manage::AM_K_CHECK;
+use t27os::api_manage::AM_K_CHECK_ALL;
+use t27os::api_manage::AM_K_STOP;
+use t27os::api_manage::AM_K_OPEN;
+use t27os::api_manage::AM_K_ADD;
+use t27os::api_manage::AM_K_ROW;
+use t27os::api_manage::AM_K_DEL;
+use t27os::api_manage::AM_K_CONFIRM;
+use t27os::api_manage::AM_K_CANCEL;
+use t27os::api_manage::AM_K_PREV;
+use t27os::api_manage::AM_K_NEXT;
+use t27os::api_manage::AM_K_USE;
+use t27os::api_manage::AM_K_CUSTOM;
+use t27os::api_manage::AM_K_FIELD;
+use t27os::api_manage::AM_K_SAVE;
+use t27os::api_manage::AM_BTN_H;
+use t27os::api_manage::AM_ROW_H;
+use t27os::api_manage::AM_FOOT_H;
+use t27os::api_manage::AM_MROW_H;
+use t27os::api_manage::AM_MLIST_TOP;
+use t27os::api_manage::AM_D_MODEL_Y;
+use t27os::api_manage::AM_D_ID_Y;
+use t27os::api_manage::AM_D_KEY_Y;
+use t27os::api_manage::AM_D_ACT_Y;
+use t27os::api_manage::AM_D_SUM_Y;
+use t27os::api_manage::AM_D_MSG_Y;
+use t27os::api_manage::am_init;
+use t27os::api_manage::am_touch;
+use t27os::api_manage::am_name;
+use t27os::api_manage::am_provider;
+use t27os::api_manage::am_index;
+use t27os::api_manage::am_model;
+use t27os::api_manage::am_mask;
+use t27os::api_manage::am_mask_at;
+use t27os::api_manage::am_catalog_of;
+use t27os::api_manage::am_catalog_first;
+use t27os::api_manage::am_catalog_count;
+use t27os::api_manage::am_counts;
+use t27os::api_manage::am_all_green;
+use t27os::api_manage::am_summary;
+use t27os::api_manage::am_ago_text;
+use t27os::api_manage::am_ago_short;
+use t27os::api_manage::am_last_time;
+use t27os::api_manage::am_state_text;
+use t27os::api_manage::am_state_short;
+use t27os::api_manage::am_state_pending;
+use t27os::api_manage::am_slot_state;
+use t27os::api_manage::am_key_label;
+use t27os::api_manage::am_msg_text;
+use t27os::api_manage::am_progress_text;
+use t27os::api_manage::am_active_key;
+use t27os::api_manage::am_key_problem;
+use t27os::api_manage::am_select_key;
+use t27os::api_manage::am_set_model;
+use t27os::api_manage::am_slot_changed;
+use t27os::api_manage::am_scan_begin;
+use t27os::api_manage::am_scan_record;
+use t27os::api_manage::am_scanning;
+use t27os::api_manage::am_busy;
+use t27os::api_manage::am_checking;
+use t27os::api_manage::am_held;
+use t27os::api_manage::am_resume;
+use t27os::api_manage::am_can_start;
+use t27os::api_manage::am_request_begin;
+use t27os::api_manage::am_request_fail;
+use t27os::api_manage::am_result_apply;
+use t27os::api_manage::am_wline_parse;
+use t27os::api_manage::am_batch_begin;
+use t27os::api_manage::am_batch_next;
+use t27os::api_manage::am_batch_after;
+use t27os::api_manage::am_single_after;
+use t27os::api_manage::am_bind_token;
+use t27os::api_manage::am_bind_ok;
+use t27os::api_manage::am_bind_retired;
+use t27os::api_manage::am_bind_parse;
+use t27os::api_manage::am_session_bound;
+use t27os::api_manage::am_sb_get;
+use t27os::api_manage::am_sb_set;
+use t27os::api_manage::am_sb_drop;
+use t27os::api_manage::am_sb_drop_space;
+use t27os::api_manage::am_sb_retire;
+use t27os::api_manage::am_sb_emit;
+use t27os::api_manage::am_sb_parse;
+use t27os::api_manage::am_cfg_emit;
+use t27os::api_manage::am_cfg_parse;
+use t27os::api_manage::am_hit;
+use t27os::api_manage::am_hit_kind;
+use t27os::api_manage::am_hit_arg;
+use t27os::api_manage::am_card_h;
+use t27os::api_manage::am_card_y;
+use t27os::api_manage::am_manage_x;
+use t27os::api_manage::am_manage_y;
+use t27os::api_manage::am_other_y;
+use t27os::api_manage::am_rows_fit;
+use t27os::api_manage::am_row_slot;
+use t27os::api_manage::am_row_y;
+use t27os::api_manage::am_pages;
+use t27os::api_manage::am_page_of;
+use t27os::api_manage::am_listed;
+use t27os::api_manage::am_page_shown;
+use t27os::api_manage::am_row_of;
+use t27os::api_manage::am_act_x;
+use t27os::api_manage::am_act_w;
+use t27os::api_manage::am_mrows_fit;
+use t27os::api_manage::am_mpages;
+use t27os::api_manage::am_input;
+use t27os::api_manage::am_input_clear;
+use t27os::api_manage::am_input_key;
+use t27os::api_manage::am_input_select_all;
+use t27os::api_manage::am_input_selected;
+use t27os::api_manage::am_input_deselect;
+use t27os::api_manage::am_input_type;
+use t27os::api_manage::am_input_erase;
+use t27os::api_manage::am_input_put;
+use t27os::api_manage::am_custom_begin;
+use t27os::api_manage::am_say;
+use t27os::api_manage::am_msg_for;
+use t27os::api_manage::am_bstop_for;
+use t27os::api_manage::am_block_reason;
+use t27os::api_manage::am_end_batch;
+use t27os::api_manage::am_ago_compact;
+use t27os::api_manage::AM_IK_SELECT_ALL;
+use t27os::api_manage::AM_IK_DESELECT;
+use t27os::api_manage::AM_W_INSEL;
+use t27os::api_manage::AM_W_REAP_M;
+use t27os::api_manage::AM_MSG_PASTE;
+use t27os::api_manage::AM_ID_LONG;
+use t27os::api_check_host::ac_worker_main;
+use t27os::api_check_host::ac_spawn;
+use t27os::api_check_host::ac_drain;
+use t27os::api_check_host::ac_close;
+use t27os::api_check_host::ac_reap;
+use t27os::api_check_host::ac_scan_slot;
+use t27os::api_check_host::ac_defaults_get;
+use t27os::api_check_host::ac_defaults_put;
+use t27os::api_check_host::AC_GONE;
+use t27os::term_pane::tp_state_id;
 use t27f::petal_menu::CARD_GAP_PX;
 use t27f::petal_menu::WORLD_NAMES;
 use t27f::petal_menu::fit_permille;
@@ -2400,7 +2646,7 @@ pub fn wide_shape() -> f64 {
 /// half a cell right. The cell radius (centre to corner) that fits a w x h body with HEX_GAP between cells.
 pub fn hex_r(w: f64, h: f64) -> f64 {
     const byw : f64 = (w - 2.5 * HEX_GAP) / (3.5 * SQRT3);
-    const byh : f64 = (h - 2.0 * HEX_GAP) / 5.0;
+    const byh : f64 = (h - 3.0 * HEX_GAP) / 6.5;
     if (byw < byh) { return byw; }
     return byh;
 }
@@ -2413,10 +2659,10 @@ pub fn hex_c(k: u32, axis: u32, l: f64, t: f64, w: f64, h: f64) -> f64 {
     const row : f64 = @as(f64, @floatFromInt(k / 3));
     if (axis == 0) {
         var x : f64 = l + 0.5 * (w - (3.5 * cw + 2.5 * HEX_GAP)) + 0.5 * cw + col * (cw + HEX_GAP);
-        if (k / 3 == 1) { x = x + 0.5 * (cw + HEX_GAP); }
+        if (k / 3 % 2 == 1) { x = x + 0.5 * (cw + HEX_GAP); }
         return x;
     }
-    return t + 0.5 * (h - (5.0 * r + 2.0 * HEX_GAP)) + r + row * (1.5 * r + HEX_GAP);
+    return t + 0.5 * (h - (6.5 * r + 3.0 * HEX_GAP)) + r + row * (1.5 * r + HEX_GAP);
 }
 
 /// C. Is (x, y) inside the pointy-top hexagon of radius r centred at (cx, cy)?
@@ -2482,7 +2728,7 @@ pub fn card_live(up: bool, x: f64, y: f64, sw: f64, sh: f64, ws: u32, collapsed:
 
 /// C. Cards arrive one after another: slot k shows CASCADE of the fade later than slot k - 1.
 pub fn card_alpha(ma: f64, k: u32) -> f64 {
-    return clamp01((ma - CASCADE * @as(f64, @floatFromInt(k))) / (1.0 - CASCADE * 8.0));
+    return clamp01((ma - CASCADE * @as(f64, @floatFromInt(k))) / (1.0 - CASCADE * 10.0));
 }
 
 /// S. Modifier bit test on NSEvent.modifierFlags.
@@ -3355,7 +3601,17 @@ fn draw_agent_mark(c: u64, k: u32, x: f64, y: f64, s: f64, a: f64) -> void {
     cg_line_width(c, 0.12 * s);
     cg_stroke_rgba(c, 1.0, 1.0, 1.0, MARK_WHITE * a);
     cg_fill_rgba(c, 1.0, 1.0, 1.0, MARK_WHITE * a);
-    if (k == 0) {
+    if (k == 9 or k == 10) {
+        // Provider initials in the same monochrome line system as the existing launcher.
+        if (k == 9) {
+            cg_move(c, x - s, y + s); cg_line(c, x - s, y - s);
+            cg_line(c, x + s, y + s); cg_line(c, x + s, y - s);
+        } else {
+            cg_move(c, x - s, y - s); cg_line(c, x + s, y - s);
+            cg_line(c, x - s, y + s); cg_line(c, x + s, y + s);
+        }
+        cg_stroke_path(c);
+    } else if (k == 0) {
         // Claude Code: a spark, long and short rays in turn
         cg_line_width(c, 0.18 * s);
         var i : u32 = 0;
@@ -3499,10 +3755,14 @@ fn draw_cards(c: u64, kit: [48]u64, task: u32, a: f64, collapsed: bool, mx: f64,
         draw_agent_mark(c, k, kx, ky - AGENT_MARK_UP * r, AGENT_MARK * r, ka);
         const ns : f64 = agent_name_pt(r);
         if (ns >= AGENT_NAME_MIN) {
-            const name : u64 = msg1(kit[K_AGENT_NAMES], kit[K_AT], @as(u64, k));
+            var name : u64 = 0;
+            if (k < 9) { name = msg1(kit[K_AGENT_NAMES], kit[K_AT], @as(u64, k)); }
+            else if (k == 9) { name = cf("NVIDIA"); }
+            else { name = cf("Z.ai"); }
             const nw : f64 = text_w(kit, name, ns, WEIGHT_SEMIBOLD, false);
             cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE) * ka);
             draw_text(c, kit, name, kx - 0.5 * nw, ky + AGENT_NAME_DOWN * r, ns, WEIGHT_SEMIBOLD, false);
+            if (k >= 9) { cf_release(name); }
         }
         k = k + 1;
     }
@@ -4988,7 +5248,8 @@ fn ns_bytes(s: u64, out: []u8) -> usize {
 }
 
 /// Connect to the server under the home directory; the fd, -1 when nothing listens. A new connection means a
-/// server that may have restarted and forgotten its keys, so every stored key is handed over again.
+/// server that may have restarted and forgotten its keys, so every stored key is handed over again
+/// (keys_host push_keys: all MAX_KEYS numbers of every provider are read, no mask is known here yet).
 fn term_connect(hb: []u8) -> i32 {
     const hn : usize = ns_bytes(home_dir(), hb);
     const fd : i32 = client_connect(hb[0 .. hn]);
@@ -4997,12 +5258,26 @@ fn term_connect(hb: []u8) -> i32 {
 }
 
 /// The server pane for chat `cur`: the k-th pane of its agent when the server has one (a reopened
-/// window lands here), else a new pane spawned in `cwd`. PANE_NONE when the server refuses or is gone.
-fn term_open(fd: i32, ss: u64, cur: u32, cwd: u64, out: []u8, db: []u8) -> u32 {
+/// window lands here), else a new pane spawned in `cwd`. PANE_NONE when the server refuses or is gone. A chat
+/// bound by the API panel (`bind`, its api_manage binding) opens exactly that binding; a retired one (its key was
+/// deleted or replaced) opens nothing: the person chooses a key and opens a new chat.
+fn term_open(fd: i32, ss: u64, pins: u64, bind: []const u8, cur: u32, cwd: u64, out: []u8, db: []u8) -> u32 {
     const a : u32 = session_agent(ss, cur);
+    const pick : u32 = pc_get(pins, cur);
+    if (pc_raw(pins, cur) == PC_BOUND) {
+        if (a != 3 or am_bind_ok(bind) == false) { return PANE_NONE; }
+        const bn : usize = ns_bytes(cwd, db);
+        const brn : usize = client_provider_open_token(fd, session_space(ss, cur), bind, db[0..bn], out);
+        return tp_spawned(out, brn);
+    }
+    if (pick < PC_COUNT and a == 3) {
+        const cn : usize = ns_bytes(cwd, db);
+        const rn : usize = client_provider_open(fd, session_space(ss, cur), pick, db[0..cn], out);
+        return tp_spawned(out, rn);
+    }
     const ln : usize = client_list(fd, out);
     if (ln == 0) { return PANE_NONE; }
-    const have : u32 = tp_pick_pane(out, ln, a, tp_ordinal(ss, cur));
+    const have : u32 = tp_pick_pane(out, ln, a, pc_ordinal(pins, ss, cur));
     if (have != PANE_NONE) { return have; }
     const dn : usize = ns_bytes(cwd, db);
     const sn : usize = client_spawn(fd, a, session_space(ss, cur), cur, db[0 .. dn], out);
@@ -5238,12 +5513,14 @@ fn bytes_w(kit: [48]u64, s: []const u8, n: usize, size: f64, weight: f64, mono: 
 }
 
 /// The Keychain is read here and nowhere else in the window: which numbers each provider holds (stored[p] is a
-/// bit mask, bit k set = key k+1 exists; keys.t27 slot_count counts it) and the masked text of its newest key,
-/// the highest number (16 bytes a provider). A scan stops after two misses in a row (keys.t27 scan_goes_on).
-/// The full key is wiped from the buffer before the next one is read.
-fn keys_refresh(stored: []u32, mask: []u8, mlen: []u32) -> void {
-    // the Devices view (keysync.t27) rides after the 144 mask bytes: refreshed with the keys
-    if (mask.len >= 544) { ks_view_fill(mask[144..544]); }
+/// u64 bit mask, bit k set = key k+1 exists, for keys 1 to 64; keys.t27 slot_count counts it) and the masked
+/// text of its newest key, the highest number (16 bytes a provider). A scan reads all MAX_KEYS numbers of every
+/// provider (keys.t27 scan_goes_on), so a key behind a gap is found: about 64 runs of /usr/bin/security a
+/// provider, only when the KEYS panel opens or a key is added, deleted or picked. The full key is wiped from
+/// the buffer before the next one is read.
+fn keys_refresh(stored: []u64, mask: []u8, mlen: []u32) -> void {
+    // the Devices view (keysync.t27) rides after the provider mask bytes: refreshed with the keys
+    if (mask.len >= KY_BUFFER_BYTES) { ks_view_fill(mask[KY_MASK_BYTES..KY_BUFFER_BYTES]); }
     var key : [256]u8 = undefined;
     var p : u32 = 0;
     while (p < PROVIDER_COUNT) {
@@ -5257,7 +5534,7 @@ fn keys_refresh(stored: []u32, mask: []u8, mlen: []u32) -> void {
             if (n > 0) {
                 misses = 0;
                 mlen[p] = @as(u32, @intCast(mask_key(key[0..n], mask[at .. at + 16])));
-                stored[p] = stored[p] + (1 << k);
+                stored[p] = slot_add(stored[p], k);
             } else {
                 misses = misses + 1;
             }
@@ -5272,16 +5549,17 @@ fn keys_refresh(stored: []u32, mask: []u8, mlen: []u32) -> void {
     }
 }
 
-/// Hand the server every stored key with its number (keys_host push_keys), then take back each key whose last
-/// check failed (keys.t27 key_withheld), as the check button does: a refresh must not undo that. kst holds one
-/// status per key (keys.t27 key_index).
-fn keys_sync(fd: i32, kst: []const u32, out: []u8) -> void {
-    push_keys(fd);
+/// Hand the server every stored key with its slot (keys_host push_keys_mask, with the masks keys_refresh just
+/// read, so the Keychain is not scanned twice), then take back each key whose last check failed (keys.t27
+/// key_withheld), as the check button does: a refresh must not undo that. kst holds one status per key
+/// (keys.t27 key_index, PROVIDER_COUNT * MAX_KEYS = 640). Every key travels in OP_SETKEY_WIDE.
+fn keys_sync(fd: i32, stored: []const u64, kst: []const u32, out: []u8) -> void {
+    push_keys_mask(fd, stored);
     var p : u32 = 0;
     while (p < PROVIDER_COUNT) {
         var k : u32 = 0;
         while (k < MAX_KEYS) {
-            if (key_withheld(kst[key_index(p, k)])) { client_set_key(fd, setkey_byte(p, k), "", out); }
+            if (key_withheld(kst[key_index(p, k)])) { client_set_key_n(fd, p, k, "", out); }
             k = k + 1;
         }
         p = p + 1;
@@ -5327,7 +5605,878 @@ fn draw_key_btn(c: u64, kit: [48]u64, bx: f64, by: f64, word: u32, on: bool, liv
     draw_bytes(c, kit, w[0..24], n, bx + (KY_BTN_W - lw) / 2.0, by + 13.0, 9.5, WEIGHT_SEMIBOLD, false);
 }
 
-fn draw_keys_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, stored: []const u32, mask: []const u8, mlen: []const u32, kst: []const u32, kfail: []const u32, kopen: []const u64, now: u64, kedit: u32, kbuf: []const u8, klen: u32, karm: u32, kbusy: u32, kemask: u32, kewhy: u32, ktpick: u32) -> void {
+pub fn pc_hit(x: f64, y: f64, sw: f64, cell: u32, page: u32) -> u32 {
+    if (x < qp_left(sw) + QP_PAD or x >= sw - QP_PAD or y < WS_TOP + 80.0 or y >= WS_TOP + 240.0) { return PC_NONE; }
+    return pc_row(cell, page, @as(u32, @intFromFloat((y - WS_TOP - 80.0) / 32.0)));
+}
+
+fn draw_provider_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, packed: u32) -> void {
+    const cell : u32 = packed / 4096 % 4;
+    const page : u32 = packed / 16384 % 4;
+    const err : u32 = packed / 65536;
+    const l : f64 = qp_left(sw);
+    const x : f64 = l + QP_PAD;
+    const t : f64 = WS_TOP;
+    var title : str = "NVIDIA";
+    if (cell == 2) { title = "Z.ai"; }
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, 0.90);
+    draw_str(c, kit, title, x, t + 25.0, 13.0, WEIGHT_SEMIBOLD);
+    draw_str(c, kit, "KEYS +", l + 230.0, t + 25.0, 10.0, WEIGHT_SEMIBOLD);
+    if (pc_page_count(cell) > 1) {
+        var pg : str = "1 / 2 >"; if (page == 1) { pg = "< 2 / 2"; }
+        draw_str(c, kit, pg, l + 135.0, t + 25.0, 10.0, WEIGHT_SEMIBOLD);
+    }
+    draw_close_x(c, sw - QP_PAD - 8.0, t + 20.0, on_panel_close(mx, my, sw, t), 1.0);
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, 0.70);
+    var note : str = "Free API endpoints - provider limits apply";
+    if (cell == 2) { note = "Free models - your Coding Plan endpoint"; }
+    draw_str(c, kit, note, x, t + 49.0, 10.0, 0.0);
+    draw_str(c, kit, "Choose a model to open in OpenCode", x, t + 66.0, 10.0, 0.0);
+    var row : u32 = 0;
+    while (row < 5) {
+        const pick : u32 = pc_row(cell, page, row);
+        if (pick < PC_COUNT) {
+            const y : f64 = t + 80.0 + @as(f64, @floatFromInt(row)) * 32.0;
+            if (pc_hit(mx, my, sw, cell, page) == pick) {
+                cg_fill_rgba(c, 1.0, 1.0, 1.0, 0.10);
+                cg_fill_rect(c, x - 6.0, y, QP_W - 2.0 * QP_PAD + 12.0, 30.0);
+            }
+            cg_fill_rgba(c, 1.0, 1.0, 1.0, 0.90);
+            draw_str(c, kit, pc_label(pick), x, y + 20.0, 11.5, WEIGHT_MEDIUM);
+            draw_str(c, kit, ">", sw - QP_PAD - 12.0, y + 20.0, 12.0, WEIGHT_MEDIUM);
+        }
+        row = row + 1;
+    }
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, 0.75);
+    var status : str = "Catalog checked 2026-10-21";
+    if (cell == 1) { status = "Catalog updated 2026-10-22"; }
+    if (err == 1) { status = "Add a key using KEYS +, then choose a model."; }
+    if (err == 2) { status = "OpenCode is not installed. Open KEYS to set up."; }
+    if (err == 3) { status = "Close a chat before opening another model."; }
+    draw_str(c, kit, status, x, t + 260.0, 9.5, 0.0);
+}
+
+
+// ---- API management panel (owner, 2026-10-21: choose the model I need, show whether all APIs work, make API
+// management understandable). api_manage.t27 decides every rule and holds every word; api_check_host.t27 runs the
+// checks in a worker and reads the Keychain a slot at a time. The panel is open while pcell == 3: draw() lays the
+// panel ground, draw_api_panel draws on it after draw(). No view opens a network request by itself: only Check,
+// Check all and Open chat act, and only after the person's click.
+
+pub const API_SEL_KEY : str = "t27os.api-selection1";
+pub const API_BIND_KEY : str = "t27os.provider-bindings1";
+pub const API_PCELL : u32 = 3;
+
+/// A button of the API panel, drawn like the KEYS buttons: the panel's glass plate, a rounded outline, the word
+/// centred; `on` filled (the armed delete), `live` false dim.
+fn api_btn(c: u64, kit: [48]u64, x: f64, y: f64, w: f64, h: f64, word: []const u8, on: bool, live: bool, over: bool) -> void {
+    draw_plate(c, x - 2.0, y - 2.0, w + 4.0, h + 4.0);
+    round_rect(c, x, y, w, h, 5.0);
+    var ink : f64 = lv(kit, THV_TEXT_WHITE);
+    if (on) {
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+        cg_fill_path(c);
+        cg_fill_rgba(c, 0.0, 0.0, 0.0, 1.0);
+    } else {
+        if (live == false) { ink = lv(kit, THV_MUTED_WHITE); }
+        cg_line_width(c, 1.0);
+        cg_stroke_rgba(c, 1.0, 1.0, 1.0, STRICT_HOVER_EDGE);
+        if (over and live) { cg_stroke_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE)); }
+        cg_stroke_path(c);
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, ink);
+    }
+    const tw : f64 = bytes_w(kit, word, word.len, 9.5, WEIGHT_SEMIBOLD, false);
+    draw_bytes(c, kit, word, word.len, x + (w - tw) / 2.0, y + h / 2.0 + 3.5, 9.5, WEIGHT_SEMIBOLD, false);
+}
+
+/// Draw s, cut to maxw with ".." when it does not fit (never wider than its place); the width drawn.
+fn api_text(c: u64, kit: [48]u64, s: []const u8, x: f64, base: f64, size: f64, weight: f64, mono: bool, maxw: f64) -> f64 {
+    var n : usize = s.len;
+    if (n > 120) { n = 120; }
+    if (bytes_w(kit, s, n, size, weight, mono) <= maxw) { return draw_bytes(c, kit, s, n, x, base, size, weight, mono); }
+    const dots : f64 = bytes_w(kit, "..", 2, size, weight, mono);
+    while (n > 0 and bytes_w(kit, s, n, size, weight, mono) + dots > maxw) { n = n - 1; }
+    var buf : [128]u8 = undefined;
+    var k : usize = 0;
+    while (k < n) {
+        buf[k] = s[k];
+        k = k + 1;
+    }
+    buf[n] = 46;
+    buf[n + 1] = 46;
+    return draw_bytes(c, kit, buf[0..128], n + 2, x, base, size, weight, mono);
+}
+
+/// The size, from 10 down to 8.5 points, at which s fits maxw in the text face; 8.5 when even that does not fit
+/// (api_text then cuts it). The summary's counts shrink before they are ever cut.
+fn api_fit_size(kit: [48]u64, s: []const u8, weight: f64, maxw: f64) -> f64 {
+    var size : f64 = 10.0;
+    while (size > 8.5 and bytes_w(kit, s, s.len, size, weight, false) > maxw) { size = size - 0.5; }
+    return size;
+}
+
+/// The size that fits s in maxw in the mono face, between 7 and 9.5 points: the full model id is always whole.
+fn api_mono_size(kit: [48]u64, s: []const u8, maxw: f64) -> f64 {
+    var size : f64 = 9.5;
+    while (size > 7.0 and bytes_w(kit, s, s.len, size, 0.0, true) > maxw) { size = size - 0.5; }
+    return size;
+}
+
+/// The name a provider's model shows: its catalog label, or "Custom model" for an exact id typed by the person.
+fn api_model_name(b: []const u8, m: u32, out: []u8) -> usize {
+    const row : u32 = am_catalog_of(m, am_model(b, m));
+    if (row != PC_NONE) { return put_bytes(out, 0, pc_label(row)); }
+    return put_bytes(out, 0, "Custom model");
+}
+
+/// The dot beside a provider: filled all working, alert a failure or an unreadable slot, ring no key, dim pending.
+/// The words beside it always say the same, so the colour is never the only signal.
+fn api_dot(cnt: []const u32) -> u32 {
+    if (cnt[0] == 0 and cnt[6] == 0) { return DOT_RING; }
+    if (am_all_green(cnt)) { return DOT_FILLED; }
+    if (cnt[3] > 0 or cnt[6] > 0) { return DOT_ALERT; }
+    return DOT_DIM;
+}
+
+/// The summary of provider m: "Reading saved keys 12/64" while its scan runs, else api_manage am_summary.
+fn api_summary(w: []const u64, m: u32, out: []u8) -> usize {
+    if (am_scanning(w) and w[AM_W_SCAN_M] == @as(u64, m)) {
+        var n : usize = put_bytes(out, 0, "Reading saved keys ");
+        n = put_dec(out, n, w[AM_W_SCAN_NEXT]);
+        return put_bytes(out, n, "/64");
+    }
+    if (w[AM_W_LOADED + @as(usize, m)] == 0) { return put_bytes(out, 0, "Saved keys not read yet"); }
+    var cnt : [7]u32 = [0, 0, 0, 0, 0, 0, 0];
+    am_counts(w, m, cnt[0..7]);
+    return am_summary(cnt[0..7], out);
+}
+
+/// The status line of provider m's detail view, only ever about m (live QA 2026-10-21: a stopped NVIDIA check's
+/// line showed in Z.ai): m's check all progress, m's scan, m's single check in flight, m's stopped worker still
+/// finishing, the row under the pointer, m's last message or check all end (api_manage am_msg_for, am_bstop_for),
+/// m's rate pause, or what Check all covers. Error reasons come through these lines and stay until m's next action.
+fn api_status(w: []const u64, b: []const u8, m: u32, hover: u32, now_s: u64, out: []u8) -> usize {
+    const now_ms : u64 = now_s * 1000;
+    if (w[AM_W_BATCH] == @as(u64, m)) {
+        const n : usize = am_progress_text(w, out);
+        return put_bytes(out, n, ". Stop ends it.");
+    }
+    if (am_scanning(w) and w[AM_W_SCAN_M] == @as(u64, m)) { return api_summary(w, m, out); }
+    // m's single check in flight: which key, on which model
+    if (w[AM_W_PID] != 0 and w[AM_W_REQ_M] == @as(u64, m)) {
+        var n : usize = put_bytes(out, 0, "Checking ");
+        n = n + am_key_label(@as(u32, @intCast(w[AM_W_REQ_SLOT] % 64)), out[n .. out.len]);
+        n = put_bytes(out, n, " on ");
+        return put_bytes(out, n, am_model(b, m));
+    }
+    // m's stopped or overdue worker still finishing on its own (it is never signalled); nothing new starts meanwhile
+    if (w[AM_W_REAP] != 0 and w[AM_W_PID] == 0 and w[AM_W_REAP_M] == @as(u64, m) and w[AM_W_REAPN] > 1) { return put_bytes(out, 0, am_msg_text(AM_MSG_STOPPING)); }
+    if (hover < AM_SLOTS) {
+        var n : usize = am_key_label(hover, out);
+        n = put_bytes(out, n, ": ");
+        if (slot_taken(w[AM_W_UNKNOWN + @as(usize, m)], hover)) { return put_bytes(out, n, "Keychain unreadable"); }
+        if (slot_taken(w[AM_W_STORED + @as(usize, m)], hover) == false) { return put_bytes(out, n, "empty slot"); }
+        n = put_bytes(out, n, am_state_text(am_slot_state(w, m, hover)));
+        n = put_bytes(out, n, ", ");
+        var ab : [48]u8 = undefined;
+        const an : usize = am_ago_text(now_ms, w[AM_W_TIME + @as(usize, m) * 64 + @as(usize, hover)], ab[0..48]);
+        return put_bytes(out, n, ab[0..an]);
+    }
+    if (am_msg_for(w, m) != AM_MSG_NONE) { return put_bytes(out, 0, am_msg_text(am_msg_for(w, m))); }
+    if (am_bstop_for(w, m) != AM_MSG_NONE) { return put_bytes(out, 0, am_msg_text(am_bstop_for(w, m))); }
+    if (am_held(w, m)) { return put_bytes(out, 0, am_msg_text(AM_MSG_HOLD)); }
+    if (w[AM_W_PAUSE + @as(usize, m)] > now_s) {
+        var n : usize = put_bytes(out, 0, "Rate limited: wait ");
+        n = put_dec(out, n, w[AM_W_PAUSE + @as(usize, m)] - now_s);
+        return put_bytes(out, n, " s before checking.");
+    }
+    // a model with a dated warning (ordinary GLM-5.3 on NVIDIA) says it whole here while it is selected
+    if (am_model_note(m, am_model(b, m)).len > 0) { return put_bytes(out, 0, am_model_note(m, am_model(b, m))); }
+    if (am_catalog_of(m, am_model(b, m)) == PC_NONE) { return put_bytes(out, 0, "Custom ID: availability unverified until checked."); }
+    return put_bytes(out, 0, "Check all tests every saved key on this model.");
+}
+
+/// The overview: the two connected providers first (model, counts, last check, Manage), then the way to the
+/// other providers and settings (the KEYS panel with the Claude profile line, the editors and the devices).
+fn api_draw_overview(c: u64, kit: [48]u64, sw: f64, sh: f64, w: []const u64, b: []const u8, now_s: u64, hit: u32) -> void {
+    const l : f64 = qp_left(sw);
+    const t : f64 = WS_TOP;
+    const x : f64 = l + QP_PAD;
+    const inner : f64 = QP_W - 2.0 * QP_PAD;
+    var tb : [128]u8 = undefined;
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+    draw_str(c, kit, "API keys", x, t + 25.0, 11.5, WEIGHT_SEMIBOLD);
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+    draw_str(c, kit, "Nothing is sent until you press Check.", x, t + 44.0, 9.5, 0.0);
+    const ch : f64 = am_card_h(t, sh);
+    var cm : u32 = 0;
+    while (cm < AM_PROVIDERS) {
+        const cy : f64 = am_card_y(t, sh, cm);
+        const over : bool = am_hit_kind(hit) == AM_K_MANAGE and am_hit_arg(hit) == cm;
+        round_rect(c, x, cy, inner, ch, 8.0);
+        cg_line_width(c, 1.0);
+        if (over) { cg_stroke_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE)); } else { cg_stroke_rgba(c, 1.0, 1.0, 1.0, STRICT_HOVER_EDGE); }
+        cg_stroke_path(c);
+        var cnt : [7]u32 = [0, 0, 0, 0, 0, 0, 0];
+        am_counts(w, cm, cnt[0..7]);
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+        const nw : f64 = draw_str(c, kit, am_name(cm), x + 10.0, cy + 18.0, 11.0, WEIGHT_SEMIBOLD);
+        draw_dot(c, api_dot(cnt[0..7]), x + 10.0 + nw + 10.0, cy + 14.0, 1.0);
+        var n : usize = put_bytes(tb[0..128], 0, "Model: ");
+        n = n + api_model_name(b, cm, tb[n .. 128]);
+        // a dated warning (ordinary GLM-5.3) rides along with the model it belongs to
+        const ovnote : str = am_model_note_short(cm, am_model(b, cm));
+        if (ovnote.len > 0) {
+            n = put_bytes(tb[0..128], n, " (");
+            n = put_bytes(tb[0..128], n, ovnote);
+            n = put_bytes(tb[0..128], n, ")");
+        }
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+        api_text(c, kit, tb[0..n], x + 10.0, cy + 34.0, 9.5, 0.0, false, inner - 20.0);
+        n = api_summary(w, cm, tb[0..128]);
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+        api_text(c, kit, tb[0..n], x + 10.0, cy + 50.0, 10.0, WEIGHT_MEDIUM, false, inner - 20.0);
+        if (ch >= 80.0) {
+            n = am_ago_text(now_s * 1000, am_last_time(w, cm), tb[0..128]);
+            cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+            api_text(c, kit, tb[0..n], x + 10.0, cy + 66.0, 9.0, 0.0, false, inner - 100.0);
+        }
+        api_btn(c, kit, am_manage_x(l, QP_W), am_manage_y(t, sh, cm), 72.0, AM_BTN_H, "Manage", false, true, over);
+        cm = cm + 1;
+    }
+    const oy : f64 = am_other_y(t, sh);
+    var ink : f64 = lv(kit, THV_LABEL_WHITE);
+    if (am_hit_kind(hit) == AM_K_OTHER) { ink = lv(kit, THV_TEXT_WHITE); }
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, ink);
+    draw_str(c, kit, "Other providers and settings  >", x, oy + 16.0, 10.0, WEIGHT_SEMIBOLD);
+}
+
+/// The provider detail: the model (and its full id), the active key, Check / Check all (Stop, Resume) / Open chat /
+/// Add key, the summary, the status line, then all 64 slots a page at a time, and the footer (paging, or the
+/// two-step delete that names its slot).
+fn api_draw_detail(c: u64, kit: [48]u64, sw: f64, sh: f64, w: []const u64, b: []const u8, now_s: u64, hit: u32) -> void {
+    const l : f64 = qp_left(sw);
+    const t : f64 = WS_TOP;
+    const x : f64 = l + QP_PAD;
+    const inner : f64 = QP_W - 2.0 * QP_PAD;
+    const m : u32 = @as(u32, @intCast(w[AM_W_PROV] % 2));
+    const hk : u32 = am_hit_kind(hit);
+    const bx : f64 = l + QP_W - QP_PAD - 72.0;
+    var tb : [128]u8 = undefined;
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+    draw_str(c, kit, am_name(m), x + 64.0, t + 25.0, 11.5, WEIGHT_SEMIBOLD);
+    // the model and, on its own line, the exact API id
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+    draw_str(c, kit, "Model", x, t + AM_D_MODEL_Y + 15.0, 9.0, 0.0);
+    var n : usize = api_model_name(b, m, tb[0..128]);
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+    api_text(c, kit, tb[0..n], x + 40.0, t + AM_D_MODEL_Y + 15.0, 10.5, WEIGHT_SEMIBOLD, false, bx - x - 48.0);
+    api_btn(c, kit, bx, t + AM_D_MODEL_Y, 72.0, AM_BTN_H, "Change", false, true, hk == AM_K_MODEL);
+    const id : []const u8 = am_model(b, m);
+    // a dated warning (ordinary GLM-5.3) follows the id on its line: the whole note when it fits beside the id at
+    // its smallest size, else the part that must stay visible; the id itself is never cut (it only shrinks)
+    var dnote : str = am_model_note(m, id);
+    var dnotew : f64 = 0.0;
+    if (dnote.len > 0) {
+        dnotew = bytes_w(kit, dnote, dnote.len, 8.5, WEIGHT_SEMIBOLD, false);
+        if (bytes_w(kit, id, id.len, 7.5, 0.0, true) + 8.0 + dnotew > inner) {
+            dnote = am_model_note_short(m, id);
+            dnotew = bytes_w(kit, dnote, dnote.len, 8.5, WEIGHT_SEMIBOLD, false);
+        }
+    }
+    var didmax : f64 = inner;
+    if (dnote.len > 0) { didmax = inner - dnotew - 8.0; }
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+    const didw : f64 = draw_bytes(c, kit, id, id.len, x, t + AM_D_ID_Y, api_mono_size(kit, id, didmax), 0.0, true);
+    if (dnote.len > 0) {
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+        api_text(c, kit, dnote, x + didw + 8.0, t + AM_D_ID_Y, 8.5, WEIGHT_SEMIBOLD, false, inner - didw - 8.0);
+    }
+    // the active key: the selected one, the first saved one (said so), or why there is none
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+    draw_str(c, kit, "Key", x, t + AM_D_KEY_Y + 15.0, 9.0, 0.0);
+    const ak : u32 = am_active_key(w, m);
+    if (ak != AM_NONE) {
+        n = am_key_label(ak, tb[0..128]);
+        n = put_bytes(tb[0..128], n, "  ");
+        n = put_bytes(tb[0..128], n, am_mask(b, m, ak));
+        if (w[AM_W_SEL + @as(usize, m)] >= @as(u64, AM_SLOTS)) { n = put_bytes(tb[0..128], n, "  (first saved)"); }
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+    } else if (am_key_problem(w, m) == AM_MSG_KEY_MISSING) {
+        n = am_key_label(@as(u32, @intCast(w[AM_W_SEL + @as(usize, m)])), tb[0..128]);
+        n = put_bytes(tb[0..128], n, " was removed: choose a key");
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+    } else {
+        n = put_bytes(tb[0..128], 0, "No key saved: add one");
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+    }
+    api_text(c, kit, tb[0..n], x + 40.0, t + AM_D_KEY_Y + 15.0, 10.0, 0.0, true, bx - x - 48.0);
+    const single : bool = am_busy(w) and w[AM_W_REQ_M] == @as(u64, m) and w[AM_W_BATCH] != @as(u64, m);
+    var cw : str = "Check";
+    if (single) { cw = "Checking"; }
+    api_btn(c, kit, bx, t + AM_D_KEY_Y, 72.0, AM_BTN_H, cw, single, ak != AM_NONE and am_block_reason(w, m) == AM_MSG_NONE, hk == AM_K_CHECK);
+    // the three actions
+    var a0 : str = "Check all";
+    const stopping : bool = w[AM_W_REAP] != 0 and w[AM_W_PID] == 0 and w[AM_W_REAP_M] == @as(u64, m);
+    if (am_checking(w, m)) { a0 = "Stop"; } else if (stopping) { a0 = "Stopping"; } else if (am_held(w, m)) { a0 = "Resume"; }
+    const loaded : bool = w[AM_W_LOADED + @as(usize, m)] != 0;
+    const freek : u32 = next_free_key(w[AM_W_STORED + @as(usize, m)] | w[AM_W_UNKNOWN + @as(usize, m)]);
+    // Check all is live when this provider may start one; Stop while it checks; Resume (sends nothing) while held
+    var a0live : bool = loaded and w[AM_W_STORED + @as(usize, m)] != 0 and am_block_reason(w, m) == AM_MSG_NONE;
+    if (am_checking(w, m)) { a0live = true; }
+    if (am_held(w, m) and am_checking(w, m) == false and stopping == false) { a0live = true; }
+    const aw : f64 = am_act_w(QP_W);
+    api_btn(c, kit, am_act_x(l, QP_W, 0), t + AM_D_ACT_Y, aw, AM_BTN_H + 2.0, a0, false, a0live, hk == AM_K_CHECK_ALL or hk == AM_K_STOP);
+    api_btn(c, kit, am_act_x(l, QP_W, 1), t + AM_D_ACT_Y, aw, AM_BTN_H + 2.0, "Open chat", false, ak != AM_NONE, hk == AM_K_OPEN);
+    api_btn(c, kit, am_act_x(l, QP_W, 2), t + AM_D_ACT_Y, aw, AM_BTN_H + 2.0, "Add key", false, loaded and freek < AM_SLOTS, hk == AM_K_ADD);
+    // the counts of the saved keys on this model and, in a short field of its own at the right, the age of the
+    // newest verdict: the time never eats the counts (live QA 2026-10-21 saw "... 1 failed - checked 5 mi...")
+    n = api_summary(w, m, tb[0..128]);
+    var ab : [24]u8 = undefined;
+    var an : usize = 0;
+    if (loaded and am_scanning(w) == false) { an = am_ago_compact(now_s * 1000, am_last_time(w, m), ab[0..24]); }
+    var agew : f64 = 0.0;
+    if (an > 0) {
+        agew = bytes_w(kit, ab[0..24], an, 9.0, 0.0, false);
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+        draw_bytes(c, kit, ab[0..24], an, x + inner - agew, t + AM_D_SUM_Y, 9.0, 0.0, false);
+        agew = agew + 8.0;
+    }
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+    const sumw : f64 = inner - agew;
+    api_text(c, kit, tb[0..n], x, t + AM_D_SUM_Y, api_fit_size(kit, tb[0..n], WEIGHT_MEDIUM, sumw), WEIGHT_MEDIUM, false, sumw);
+    var hover : u32 = AM_NONE;
+    if (hk == AM_K_ROW or hk == AM_K_DEL) { hover = am_hit_arg(hit); }
+    n = api_status(w, b, m, hover, now_s, tb[0..128]);
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+    api_text(c, kit, tb[0..n], x, t + AM_D_MSG_Y, 9.0, 0.0, false, inner);
+    // the saved (and unreadable) slots, each under its own physical label; an empty slot is not a row
+    const per : u32 = am_rows_fit(t, sh);
+    const listed : u64 = am_listed(w, m);
+    const pages : u32 = am_pages(listed, per);
+    const page : u32 = am_page_shown(w, m, per);
+    const stored : u64 = w[AM_W_STORED + @as(usize, m)];
+    const unknown : u64 = w[AM_W_UNKNOWN + @as(usize, m)];
+    var r : u32 = 0;
+    while (r < per) {
+        const k : u32 = am_row_slot(listed, page, per, r);
+        if (k != AM_NONE) {
+            const ry : f64 = am_row_y(t, r);
+            const has : bool = slot_taken(stored, k);
+            if (k == ak or hover == k) {
+                cg_fill_rgba(c, 1.0, 1.0, 1.0, 0.06);
+                if (k == ak) { cg_fill_rgba(c, 1.0, 1.0, 1.0, 0.10); }
+                cg_fill_rect(c, x - 6.0, ry, inner + 12.0, AM_ROW_H - 1.0);
+            }
+            var dot : u32 = DOT_FAINT;
+            if (has) { dot = DOT_RING; }
+            if (k == ak) { dot = DOT_FILLED; }
+            draw_dot(c, dot, x + 3.0, ry + 12.0, 1.0);
+            n = am_key_label(k, tb[0..128]);
+            var ink : f64 = lv(kit, THV_MUTED_WHITE);
+            if (has) { ink = lv(kit, THV_TEXT_WHITE); }
+            cg_fill_rgba(c, 1.0, 1.0, 1.0, ink);
+            draw_bytes(c, kit, tb[0..128], n, x + 12.0, ry + 16.0, 9.5, WEIGHT_SEMIBOLD, false);
+            if (has) {
+                const mk : []const u8 = am_mask(b, m, k);
+                cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+                draw_bytes(c, kit, mk, mk.len, x + 50.0, ry + 16.0, 8.5, 0.0, true);
+                cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+                api_text(c, kit, am_state_short(am_slot_state(w, m, k)), x + 124.0, ry + 16.0, 9.0, 0.0, false, 62.0);
+                n = am_ago_short(now_s * 1000, w[AM_W_TIME + @as(usize, m) * 64 + @as(usize, k)], tb[0..128]);
+                if (am_state_pending(am_slot_state(w, m, k))) { n = put_bytes(tb[0..128], 0, "-"); }
+                cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+                draw_bytes(c, kit, tb[0..128], n, x + 188.0, ry + 16.0, 9.0, 0.0, false);
+                const armed : bool = w[AM_W_ARM] == @as(u64, k);
+                api_btn(c, kit, l + QP_W - QP_PAD - 52.0, ry + 2.0, 52.0, AM_ROW_H - 4.0, "Delete", armed, true, hk == AM_K_DEL and am_hit_arg(hit) == k);
+            } else if (slot_taken(unknown, k)) {
+                cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+                draw_str(c, kit, "Keychain unreadable", x + 50.0, ry + 16.0, 9.0, 0.0);
+            }
+        }
+        r = r + 1;
+    }
+    // the footer: the two-step delete names its slot and keeps Cancel; else the pages
+    const fy : f64 = sh - AM_FOOT_H;
+    if (w[AM_W_ARM] < @as(u64, AM_SLOTS)) {
+        const kd : u32 = @as(u32, @intCast(w[AM_W_ARM]));
+        n = put_bytes(tb[0..128], 0, "Delete ");
+        n = n + am_key_label(kd, tb[n .. 128]);
+        api_btn(c, kit, x, fy + 2.0, 120.0, AM_BTN_H, tb[0..n], true, true, hk == AM_K_CONFIRM);
+        api_btn(c, kit, x + 128.0, fy + 2.0, 80.0, AM_BTN_H, "Cancel", false, true, hk == AM_K_CANCEL);
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+        api_text(c, kit, "Running chats keep it until exit; none relaunches.", x, fy + 38.0, 9.0, 0.0, false, inner);
+    } else {
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+        if (hk == AM_K_PREV) { cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE)); }
+        draw_str(c, kit, "< Prev", x, fy + 16.0, 10.0, WEIGHT_SEMIBOLD);
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+        if (hk == AM_K_NEXT) { cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE)); }
+        draw_str(c, kit, "Next >", l + QP_W - QP_PAD - 40.0, fy + 16.0, 10.0, WEIGHT_SEMIBOLD);
+        // page, then the capacity in short: saved, unreadable, free of 64
+        n = put_dec(tb[0..128], 0, @as(u64, page + 1));
+        n = put_bytes(tb[0..128], n, "/");
+        n = put_dec(tb[0..128], n, @as(u64, pages));
+        n = put_bytes(tb[0..128], n, "  ");
+        n = put_dec(tb[0..128], n, @as(u64, slot_count(stored)));
+        n = put_bytes(tb[0..128], n, " saved, ");
+        if (unknown != 0) {
+            n = put_dec(tb[0..128], n, @as(u64, slot_count(unknown)));
+            n = put_bytes(tb[0..128], n, " unreadable, ");
+        }
+        n = put_dec(tb[0..128], n, @as(u64, AM_SLOTS - slot_count(listed)));
+        n = put_bytes(tb[0..128], n, " free");
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+        const lw : f64 = bytes_w(kit, tb[0..128], n, 9.0, 0.0, false);
+        draw_bytes(c, kit, tb[0..128], n, l + (QP_W - lw) / 2.0, fy + 16.0, 9.0, 0.0, false);
+    }
+}
+
+/// The model picker: the catalog rows of the provider (label, exact id, Selected or Use model), then "Other model
+/// ID"; the catalog note says what was verified and when.
+fn api_draw_models(c: u64, kit: [48]u64, sw: f64, sh: f64, w: []const u64, b: []const u8, hit: u32) -> void {
+    const l : f64 = qp_left(sw);
+    const t : f64 = WS_TOP;
+    const x : f64 = l + QP_PAD;
+    const inner : f64 = QP_W - 2.0 * QP_PAD;
+    const m : u32 = @as(u32, @intCast(w[AM_W_PROV] % 2));
+    const hk : u32 = am_hit_kind(hit);
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+    draw_str(c, kit, "Model", x + 64.0, t + 25.0, 11.5, WEIGHT_SEMIBOLD);
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+    // NVIDIA's list gained ordinary GLM-5.3 on 2026-10-22 (provider_catalog.t27); Z.ai's is unchanged since 2026-10-21
+    var note : str = "Updated 2026-10-22: free endpoints, limits apply";
+    if (m == AM_ZA) { note = "Catalog of 2026-10-21: free models, Coding Plan route"; }
+    api_text(c, kit, note, x, t + 44.0, 9.0, 0.0, false, inner);
+    const per : u32 = am_mrows_fit(t, sh);
+    const first : u32 = am_catalog_first(m);
+    const count : u32 = am_catalog_count(m);
+    const pages : u32 = am_mpages(m, per);
+    var page : u32 = @as(u32, @intCast(w[AM_W_MPAGE]));
+    if (page >= pages) { page = pages - 1; }
+    const cur : []const u8 = am_model(b, m);
+    var r : u32 = 0;
+    while (r < per) {
+        const at : u32 = page * per + r;
+        const ry : f64 = t + AM_MLIST_TOP + @as(f64, @floatFromInt(r)) * AM_MROW_H;
+        if (at <= count) {
+            var over : bool = false;
+            if (at < count and hk == AM_K_USE and am_hit_arg(hit) == first + at) { over = true; }
+            if (at == count and hk == AM_K_CUSTOM) { over = true; }
+            if (over) {
+                cg_fill_rgba(c, 1.0, 1.0, 1.0, 0.08);
+                cg_fill_rect(c, x - 6.0, ry, inner + 12.0, AM_MROW_H - 2.0);
+            }
+        }
+        if (at < count) {
+            const row : u32 = first + at;
+            const chosen : bool = same_bytes(cur, pc_model(row));
+            cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+            api_text(c, kit, pc_label(row), x, ry + 13.0, 10.5, WEIGHT_MEDIUM, false, inner - 84.0);
+            cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+            const mrw : f64 = api_text(c, kit, pc_model(row), x, ry + 25.0, 8.0, 0.0, true, inner - 84.0);
+            // a dated warning (ordinary GLM-5.3) shows before the model is chosen, after its exact id
+            if (pc_note_short(row).len > 0) {
+                cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+                api_text(c, kit, pc_note_short(row), x + mrw + 6.0, ry + 25.0, 8.0, WEIGHT_SEMIBOLD, false, inner - 84.0 - mrw - 6.0);
+            }
+            if (chosen) {
+                cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+                draw_dot(c, DOT_FILLED, l + QP_W - QP_PAD - 66.0, ry + 11.0, 1.0);
+                draw_str(c, kit, "Selected", l + QP_W - QP_PAD - 58.0, ry + 15.0, 9.5, WEIGHT_SEMIBOLD);
+            } else {
+                api_btn(c, kit, l + QP_W - QP_PAD - 72.0, ry + 4.0, 72.0, 20.0, "Use model", false, true, hk == AM_K_USE and am_hit_arg(hit) == row);
+            }
+        } else if (at == count) {
+            const custom : bool = am_catalog_of(m, cur) == PC_NONE;
+            cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+            draw_str(c, kit, "Other model ID...", x, ry + 13.0, 10.5, WEIGHT_MEDIUM);
+            cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+            if (custom) {
+                var tb : [96]u8 = undefined;
+                var n : usize = put_bytes(tb[0..96], 0, "In use: ");
+                n = put_bytes(tb[0..96], n, cur);
+                api_text(c, kit, tb[0..n], x, ry + 25.0, 8.0, 0.0, true, inner);
+            } else {
+                draw_str(c, kit, "Exact API id; unverified until checked", x, ry + 25.0, 8.5, 0.0);
+            }
+        }
+        r = r + 1;
+    }
+    if (pages > 1) {
+        const fy : f64 = sh - AM_FOOT_H;
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+        draw_str(c, kit, "< Prev", x, fy + 16.0, 10.0, WEIGHT_SEMIBOLD);
+        draw_str(c, kit, "Next >", l + QP_W - QP_PAD - 40.0, fy + 16.0, 10.0, WEIGHT_SEMIBOLD);
+        var pb : [24]u8 = undefined;
+        var n : usize = put_bytes(pb[0..24], 0, "Page ");
+        n = put_dec(pb[0..24], n, @as(u64, page + 1));
+        n = put_bytes(pb[0..24], n, "/");
+        n = put_dec(pb[0..24], n, @as(u64, pages));
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+        const pw : f64 = bytes_w(kit, pb[0..24], n, 9.0, 0.0, false);
+        draw_bytes(c, kit, pb[0..24], n, l + (QP_W - pw) / 2.0, fy + 16.0, 9.0, 0.0, false);
+    }
+}
+
+/// A text field of the panel (the exact model id, or a key shown masked): the box, the text (its end when it is
+/// longer than the box), a caret; with `selected` the text sits on a highlight and there is no caret, so it is
+/// plain that the next key replaces all of it.
+fn api_field(c: u64, kit: [48]u64, x: f64, y: f64, w: f64, s: []const u8, mono: bool, selected: bool) -> void {
+    draw_plate(c, x - 2.0, y - 2.0, w + 4.0, 30.0);
+    round_rect(c, x, y, w, 26.0, 5.0);
+    cg_line_width(c, 1.0);
+    cg_stroke_rgba(c, 1.0, 1.0, 1.0, STRICT_HOVER_EDGE);
+    cg_stroke_path(c);
+    var a : usize = 0;
+    while (a < s.len and bytes_w(kit, s[a .. s.len], s.len - a, 9.5, 0.0, mono) > w - 20.0) { a = a + 1; }
+    if (selected and s.len > a) {
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, 0.28);
+        cg_fill_rect(c, x + 4.0, y + 5.0, bytes_w(kit, s[a .. s.len], s.len - a, 9.5, 0.0, mono) + 4.0, 16.0);
+    }
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+    const tw : f64 = draw_bytes(c, kit, s[a .. s.len], s.len - a, x + 6.0, y + 17.0, 9.5, 0.0, mono);
+    if (selected == false) { draw_bytes(c, kit, "_", 1, x + 6.0 + tw, y + 17.0, 9.5, 0.0, mono); }
+}
+
+/// The exact model id input: the field (the whole text is kept, also past the limit, so a refusal is visible), the
+/// refusal or the note that a custom id is unverified and never marked free, the count, Save and Cancel.
+fn api_draw_custom(c: u64, kit: [48]u64, sw: f64, w: []const u64, b: []const u8, hit: u32) -> void {
+    const l : f64 = qp_left(sw);
+    const t : f64 = WS_TOP;
+    const x : f64 = l + QP_PAD;
+    const inner : f64 = QP_W - 2.0 * QP_PAD;
+    const m : u32 = @as(u32, @intCast(w[AM_W_PROV] % 2));
+    const hk : u32 = am_hit_kind(hit);
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+    draw_str(c, kit, "Other model ID", x + 64.0, t + 25.0, 11.5, WEIGHT_SEMIBOLD);
+    var tb : [96]u8 = undefined;
+    var n : usize = put_bytes(tb[0..96], 0, "Exact API model ID for ");
+    n = put_bytes(tb[0..96], n, am_name(m));
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+    api_text(c, kit, tb[0..n], x, t + 50.0, 9.5, 0.0, false, inner);
+    api_field(c, kit, x, t + 60.0, inner, am_input(b), true, am_input_selected(w));
+    if (am_msg_for(w, m) > AM_MSG_ID_BASE or am_msg_for(w, m) == AM_MSG_PASTE) {
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+        api_text(c, kit, am_msg_text(am_msg_for(w, m)), x, t + 100.0, 9.5, WEIGHT_SEMIBOLD, false, inner);
+    } else if (am_input_selected(w)) {
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+        api_text(c, kit, "All selected: typing or a paste replaces it.", x, t + 100.0, 9.0, 0.0, false, inner);
+    } else {
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+        api_text(c, kit, "Unverified until checked; never marked free.", x, t + 100.0, 9.0, 0.0, false, inner);
+    }
+    n = put_dec(tb[0..96], 0, @as(u64, am_input(b).len));
+    n = put_bytes(tb[0..96], n, "/54. Cmd+A selects all, Enter saves, Esc cancels.");
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+    api_text(c, kit, tb[0..n], x, t + 113.0, 8.5, 0.0, false, inner);
+    api_btn(c, kit, x, t + 120.0, 84.0, AM_BTN_H + 2.0, "Save", false, true, hk == AM_K_SAVE);
+    api_btn(c, kit, x + 92.0, t + 120.0, 84.0, AM_BTN_H + 2.0, "Cancel", false, true, hk == AM_K_CANCEL);
+}
+
+/// Add a key: the field shows the typed key masked (keys.t27 mask_key), the slot it will take, why a save failed.
+fn api_draw_add(c: u64, kit: [48]u64, sw: f64, w: []const u64, kb: []const u8, kl: u32, kerr: u32, hit: u32) -> void {
+    const l : f64 = qp_left(sw);
+    const t : f64 = WS_TOP;
+    const x : f64 = l + QP_PAD;
+    const inner : f64 = QP_W - 2.0 * QP_PAD;
+    const m : u32 = @as(u32, @intCast(w[AM_W_PROV] % 2));
+    const hk : u32 = am_hit_kind(hit);
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+    draw_str(c, kit, "Add key", x + 64.0, t + 25.0, 11.5, WEIGHT_SEMIBOLD);
+    var tb : [96]u8 = undefined;
+    const freek : u32 = next_free_key(w[AM_W_STORED + @as(usize, m)] | w[AM_W_UNKNOWN + @as(usize, m)]);
+    var n : usize = put_bytes(tb[0..96], 0, "Paste a ");
+    n = put_bytes(tb[0..96], n, am_name(m));
+    if (freek < AM_SLOTS) {
+        n = put_bytes(tb[0..96], n, " key; it is saved as ");
+        n = n + am_key_label(freek, tb[n .. 96]);
+    } else {
+        n = put_bytes(tb[0..96], n, " key: all 64 slots are taken");
+    }
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+    api_text(c, kit, tb[0..n], x, t + 50.0, 9.5, 0.0, false, inner);
+    var mk : [24]u8 = undefined;
+    var mn : usize = 0;
+    if (kl > 0) { mn = mask_key(kb[0 .. @as(usize, kl)], mk[0..24]); }
+    api_field(c, kit, x, t + 60.0, inner, mk[0..mn], true, false);
+    var why : str = "Enter saves, Esc cancels. Nothing is sent until you check.";
+    if (kerr == 1) { why = "Could not save to the Keychain. Retry or Esc."; }
+    if (kerr == 2) { why = "That is not a key. Check the pasted text."; }
+    if (kerr == 3) { why = "This key is already saved."; }
+    if (kerr == 4) { why = "All 64 key slots are taken."; }
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+    if (kerr == 0) { cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE)); }
+    api_text(c, kit, why, x, t + 104.0, 9.0, 0.0, false, inner);
+    api_btn(c, kit, x, t + 120.0, 84.0, AM_BTN_H + 2.0, "Save", false, kl > 0 and freek < AM_SLOTS, hk == AM_K_SAVE);
+    api_btn(c, kit, x + 92.0, t + 120.0, 84.0, AM_BTN_H + 2.0, "Cancel", false, true, hk == AM_K_CANCEL);
+}
+
+/// The API panel on the ground draw() laid: the close x, and the view of api_manage's mode.
+fn draw_api_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, w: []const u64, b: []const u8, now_s: u64, kb: []const u8, kl: u32, kerr: u32) -> void {
+    const l : f64 = qp_left(sw);
+    const t : f64 = WS_TOP;
+    const mode : u32 = @as(u32, @intCast(w[AM_W_MODE]));
+    const hit : u32 = am_hit(w, mx, my, l, QP_W, t, sh);
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LINE_WHITE));
+    cg_fill_rect(c, l, t, HAIR, sh - t);
+    draw_close_x(c, sw - QP_PAD - 8.0, t + 20.0, on_panel_close(mx, my, sw, t), 1.0);
+    if (mode == AM_M_OVERVIEW) {
+        api_draw_overview(c, kit, sw, sh, w, b, now_s, hit);
+        return;
+    }
+    var bi : f64 = lv(kit, THV_LABEL_WHITE);
+    if (am_hit_kind(hit) == AM_K_BACK) { bi = lv(kit, THV_TEXT_WHITE); }
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, bi);
+    draw_str(c, kit, "< Back", l + QP_PAD, t + 25.0, 10.0, WEIGHT_SEMIBOLD);
+    if (mode == AM_M_DETAIL) { api_draw_detail(c, kit, sw, sh, w, b, now_s, hit); }
+    if (mode == AM_M_MODELS) { api_draw_models(c, kit, sw, sh, w, b, hit); }
+    if (mode == AM_M_CUSTOM) { api_draw_custom(c, kit, sw, w, b, hit); }
+    if (mode == AM_M_ADD) { api_draw_add(c, kit, sw, w, kb, kl, kerr, hit); }
+}
+
+/// Open the panel on the overview or on provider m's detail (m = AM_NONE: overview). The saved keys of a provider
+/// not read yet this session are read a slot a frame (api_tick); nothing is sent.
+fn api_open(w: []u64, m: u32) -> void {
+    w[AM_W_ARM] = @as(u64, AM_NONE);
+    w[AM_W_INSEL] = 0;
+    if (m < AM_PROVIDERS) {
+        // the view opens clean: m's one-shot message from earlier goes (a check all end stays m's, until m acts)
+        if (am_msg_for(w, m) != AM_MSG_NONE) { am_say(w, m, AM_MSG_NONE); }
+        w[AM_W_MODE] = @as(u64, AM_M_DETAIL);
+        w[AM_W_PROV] = @as(u64, m);
+    } else {
+        w[AM_W_MODE] = @as(u64, AM_M_OVERVIEW);
+    }
+    am_touch(w);
+}
+
+/// Persist the selection (model and key per provider; never a result) and the chat bindings. Neither holds a key.
+fn api_save_cfg(w: []const u64, b: []const u8) -> void {
+    var o : [256]u8 = undefined;
+    const n : usize = am_cfg_emit(w, b, o[0..256]);
+    if (n > 0) { ac_defaults_put(API_SEL_KEY, o[0..n]); }
+}
+
+fn api_save_binds(b: []const u8) -> void {
+    var o : [512]u8 = undefined;
+    const n : usize = am_sb_emit(b, o[0..512]);
+    ac_defaults_put(API_BIND_KEY, o[0..n]);
+}
+
+fn api_load(w: []u64, b: []u8) -> void {
+    var t : [512]u8 = undefined;
+    var n : usize = ac_defaults_get(API_SEL_KEY, t[0..512]);
+    if (n > 0) { am_cfg_parse(t[0..n], w, b); }
+    n = ac_defaults_get(API_BIND_KEY, t[0..512]);
+    if (n > 0) { am_sb_parse(t[0..n], b); }
+}
+
+/// Save the add view's typed key for provider m into the lowest slot that is neither saved nor unreadable (keys_host
+/// kc_put_n never replaces an item), read that one slot back (no rescan of every provider), and hand it to the
+/// server. Selects nothing. The KEYS error code: 0 saved, 1 the Keychain refused or the read-back failed, 2 not a
+/// key, 3 already saved, 4 every slot taken. The caller wipes the typed bytes.
+fn api_add_key(w: []u64, b: []u8, m: u32, kb: []const u8, kl: u32, kstored: []u64, tfd: i32, tout: []u8) -> u32 {
+    const p : u32 = am_provider(m);
+    const key : []const u8 = kb[0 .. @as(usize, kl)];
+    if (kl == 0 or sec_key_safe(key) == false) { return 2; }
+    const k : u32 = next_free_key(am_listed(w, m));
+    if (k >= AM_SLOTS) { return 4; }
+    if (kc_find(p, key) < MAX_KEYS) { return 3; }
+    if (kc_put_n(p, k, key) == false) { return 1; }
+    var res : [2]u32 = [0, 0];
+    const ma : usize = am_mask_at(m, k);
+    ac_scan_slot(p, k, res[0..2], b[ma .. ma + AM_MASK_CAP]);
+    am_slot_changed(w, m, k, res[0] == 1);
+    if (res[1] == 1) { w[AM_W_UNKNOWN + @as(usize, m)] = slot_add(w[AM_W_UNKNOWN + @as(usize, m)], k); }
+    if (res[0] != 1) { return 1; }
+    kstored[p] = slot_add(kstored[p], k);
+    if (tfd >= 0) { client_set_key_n(tfd, p, k, key, tout); }
+    return 0;
+}
+
+/// Start a check of key slot k of provider m (one worker; api_check_host ac_spawn). False when a worker or its
+/// reap is pending, a rate pause holds the provider, or the spawn failed (the slot then reads not checked).
+fn api_start(w: []u64, b: []const u8, exe: []const u8, m: u32, k: u32, now_s: u64) -> bool {
+    if (am_can_start(w, m, now_s) == false or w[AM_W_REAP] != 0) { return false; }
+    const req : u64 = am_request_begin(w, m, k, now_s * 1000);
+    var o : [2]u64 = [0, 0];
+    const pid : u64 = ac_spawn(exe, req, am_provider(m), k, am_model(b, m), o[0..2]);
+    if (pid == 0) {
+        am_request_fail(w, AM_S_NOT_CHECKED, now_s * 1000);
+        return false;
+    }
+    w[AM_W_PID] = pid;
+    w[AM_W_FD] = o[0];
+    return true;
+}
+
+/// Read what the worker printed, without waiting; true when its output reached end of file (it exited).
+fn api_drain(w: []u64, b: []u8) -> bool {
+    var tries : u32 = 0;
+    while (tries < 8) {
+        const got : i64 = ac_drain(w[AM_W_FD], b[AM_B_WBUF .. AM_B_WBUF + AM_WLINE_MAX], @as(usize, @intCast(w[AM_W_BUFLEN])));
+        if (got > 0) {
+            w[AM_W_BUFLEN] = w[AM_W_BUFLEN] + @as(u64, @intCast(got));
+        } else if (got == 0) {
+            w[AM_W_EOF] = 1;
+            return true;
+        } else if (got == -2) {
+            return false;
+        } else {
+            tries = 8;
+        }
+        tries = tries + 1;
+    }
+    return false;
+}
+
+/// The worker's output ended: its line, parsed strictly, becomes the slot's result when it answers this request
+/// for the slot's current identity; anything else is an invalid response (a late or foreign line never applies).
+/// The worker has exited or is exiting: it is reaped (here, else in the next frames), never signalled.
+fn api_finish(w: []u64, b: []u8, now_s: u64) -> void {
+    const now_ms : u64 = now_s * 1000;
+    const pid : u64 = w[AM_W_PID];
+    const fd : u64 = w[AM_W_FD];
+    const m : u32 = @as(u32, @intCast(w[AM_W_REQ_M] % 256));
+    const k : u32 = @as(u32, @intCast(w[AM_W_REQ_SLOT] % 64));
+    const inbatch : bool = w[AM_W_BATCH] == w[AM_W_REQ_M];
+    var f : [6]u64 = [0, 0, 0, 0, 0, 0];
+    var st : u32 = AM_S_INVALID;
+    var retry : u64 = 0;
+    const n : usize = @as(usize, @intCast(w[AM_W_BUFLEN]));
+    if (am_wline_parse(b[AM_B_WBUF .. AM_B_WBUF + n], f[0..6])) {
+        const v : u32 = am_result_apply(w, f[0..6], now_ms);
+        if (v == AM_R_APPLIED) {
+            st = @as(u32, @intCast(f[3]));
+            retry = f[5];
+        } else if (v == AM_R_STALE) {
+            st = AM_S_NOT_CHECKED;
+        } else {
+            am_request_fail(w, AM_S_INVALID, now_ms);
+        }
+    } else {
+        am_request_fail(w, AM_S_INVALID, now_ms);
+    }
+    ac_close(fd);
+    w[AM_W_REAP] = pid;
+    w[AM_W_REAP_M] = @as(u64, m);
+    w[AM_W_REAPN] = 0;
+    // its output ended, so it has exited or is exiting: one wait now usually confirms it (else api_tick asks)
+    if (ac_reap(pid) == AC_GONE) { w[AM_W_REAP] = 0; }
+    if (m < AM_PROVIDERS) {
+        if (inbatch) {
+            am_batch_after(w, k, st, retry, now_s);
+        } else {
+            am_single_after(w, m, st, retry, now_s);
+            if (st == AM_S_RATE) {
+                am_say(w, m, AM_MSG_PAUSED);
+                if (am_held(w, m)) { am_say(w, m, AM_MSG_HOLD); }
+            }
+        }
+    }
+    am_touch(w);
+}
+
+/// Stop listening to the worker in flight before it answered: Stop (cancelled), an overdue answer (network or
+/// timeout) or an oversized output (invalid). The window sends no signal: the synchronous request cannot be
+/// interrupted cooperatively, so the worker runs on until it answers or its own wall (api_check_host: alarm at
+/// AM_WORKER_WALL_S) ends it. Its late output can never apply: the request id is cleared and the pipe closed
+/// here. Its pid stays in REAP, and no other worker starts, until api_tick's wait confirms it ended.
+fn api_cut(w: []u64, b: []u8, st: u32, now_s: u64) -> void {
+    if (w[AM_W_PID] == 0) { return; }
+    const pid : u64 = w[AM_W_PID];
+    const fd : u64 = w[AM_W_FD];
+    const m : u32 = @as(u32, @intCast(w[AM_W_REQ_M] % 256));
+    const k : u32 = @as(u32, @intCast(w[AM_W_REQ_SLOT] % 64));
+    const inbatch : bool = w[AM_W_BATCH] == w[AM_W_REQ_M];
+    am_request_fail(w, st, now_s * 1000);
+    ac_close(fd);
+    w[AM_W_REAP] = pid;
+    w[AM_W_REAP_M] = @as(u64, m);
+    w[AM_W_REAPN] = 0;
+    if (inbatch and m < AM_PROVIDERS and st != AM_S_CANCELLED) { am_batch_after(w, k, st, 0, now_s); }
+}
+
+/// Stop in provider m's view: the request in flight is cancelled (api_cut), a running "check all" ends, nothing new
+/// starts. Pressing it
+/// again changes nothing: api_cut returns at once when no request is in flight.
+fn api_stop(w: []u64, b: []u8, m: u32, now_s: u64) -> void {
+    api_cut(w, b, AM_S_CANCELLED, now_s);
+    if (w[AM_W_BATCH] < @as(u64, AM_PROVIDERS)) { am_end_batch(w, @as(u32, @intCast(w[AM_W_BATCH])), AM_MSG_STOPPED); }
+    // the words belong to the provider whose Stop was pressed: they never show in the other provider's view
+    am_say(w, m, AM_MSG_STOPPED);
+    if (w[AM_W_REAP] != 0 and w[AM_W_REAP_M] == @as(u64, m)) { am_say(w, m, AM_MSG_STOPPING); }
+}
+
+/// API management, once a frame; it never waits for the network: the reap of a finished worker (its own pid only,
+/// WNOHANG), one Keychain slot of a running scan (one /usr/bin/security run), the worker's output (poll with
+/// timeout 0), the overdue guard, and the next key of a running "check all". While the panel is open, a provider
+/// whose saved keys were not read this session is read (only that provider, once).
+fn api_tick(w: []u64, b: []u8, exe: []const u8, now_s: u64, open: bool) -> void {
+    // a worker the window stopped listening to is kept until a wait confirms its end: a reap of its pid or
+    // ECHILD. Still running or an interrupted wait keeps it (REAPN only counts frames, for the status line); no
+    // other worker starts meanwhile, and nothing is ever sent to the pid
+    if (w[AM_W_REAP] != 0) {
+        const rr : u32 = ac_reap(w[AM_W_REAP]);
+        if (rr == AC_GONE) {
+            w[AM_W_REAP] = 0;
+            w[AM_W_REAPN] = 0;
+            // its provider's "Stopping" line becomes "Stopped": the end is confirmed now
+            if (w[AM_W_REAP_M] < @as(u64, AM_PROVIDERS)) {
+                const rm : u32 = @as(u32, @intCast(w[AM_W_REAP_M]));
+                if (am_msg_for(w, rm) == AM_MSG_STOPPING) { am_say(w, rm, AM_MSG_STOPPED); }
+            }
+            am_touch(w);
+        } else {
+            w[AM_W_REAPN] = w[AM_W_REAPN] + 1;
+        }
+    }
+    if (am_scanning(w)) {
+        const sm : u32 = @as(u32, @intCast(w[AM_W_SCAN_M]));
+        const sk : u32 = @as(u32, @intCast(w[AM_W_SCAN_NEXT]));
+        var res : [2]u32 = [0, 0];
+        const ma : usize = am_mask_at(sm, sk);
+        ac_scan_slot(am_provider(sm), sk, res[0..2], b[ma .. ma + AM_MASK_CAP]);
+        am_scan_record(w, sk, res[0] == 1, res[1] == 1);
+    } else if (open) {
+        var pm : u32 = 0;
+        var started : bool = false;
+        while (pm < AM_PROVIDERS and started == false) {
+            if (w[AM_W_LOADED + @as(usize, pm)] == 0) {
+                am_scan_begin(w, pm);
+                started = true;
+            }
+            pm = pm + 1;
+        }
+    }
+    if (w[AM_W_PID] != 0) {
+        if (api_drain(w, b)) {
+            api_finish(w, b, now_s);
+        } else if (w[AM_W_BUFLEN] >= @as(u64, AM_WLINE_MAX)) {
+            api_cut(w, b, AM_S_INVALID, now_s);
+        } else if (now_s * 1000 >= w[AM_W_REQ_START] + AM_WORKER_WAIT_MS) {
+            api_cut(w, b, AM_S_NETWORK, now_s);
+        }
+    }
+    if (w[AM_W_PID] == 0 and w[AM_W_REAP] == 0 and w[AM_W_BATCH] < @as(u64, AM_PROVIDERS)) {
+        const bm : u32 = @as(u32, @intCast(w[AM_W_BATCH]));
+        const k : u32 = am_batch_next(w);
+        if (k != AM_NONE) {
+            if (api_start(w, b, exe, bm, k, now_s) == false) { am_end_batch(w, bm, AM_MSG_SPAWN); }
+        }
+    }
+}
+
+/// Is any API work running (a worker, its reap, a scan or a "check all")? The frame loop keeps ticking meanwhile.
+fn api_busy(w: []const u64) -> bool {
+    return w[AM_W_PID] != 0 or w[AM_W_REAP] != 0 or am_scanning(w) or w[AM_W_BATCH] < @as(u64, AM_PROVIDERS);
+}
+
+fn draw_keys_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, stored: []const u64, mask: []const u8, mlen: []const u32, kst: []const u32, kfail: []const u32, kopen: []const u64, now: u64, kedit: u32, kbuf: []const u8, klen: u32, karm: u32, kstate: u32, kemask: u32, kewhy: u32, ktpick: u32) -> void {
+    const kbusy : u32 = kstate % 256;
+    const kpage : u32 = kstate / 256 % 2;
+    const kerror : u32 = kstate / 512 % 8;
     const l : f64 = qp_left(sw);
     const t : f64 = WS_TOP;
     const x : f64 = l + QP_PAD;
@@ -5339,18 +6488,31 @@ fn draw_keys_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, sto
     var n : usize = csv_field(KEYS_WORDS, 0, w[0..48]);
     draw_bytes(c, kit, w[0..48], n, x, t + 25.0, 11.5, WEIGHT_SEMIBOLD, false);
     draw_close_x(c, sw - QP_PAD - 8.0, t + 20.0, on_panel_close(mx, my, sw, t), 1.0);
+    var paging : str = "1 / 2  >";
+    if (kpage == 1) { paging = "<  2 / 2"; }
+    draw_bytes(c, kit, paging, paging.len, l + 92.0, t + 25.0, 10.0, WEIGHT_SEMIBOLD, false);
     var hint : u32 = 8;
     if (kedit != KY_NONE) { hint = 9; }
     n = csv_field(KEYS_WORDS, hint, w[0..48]);
     cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+    if (kerror == 1) { n = put_bytes(w[0..48], 0, "Could not save. Retry or Esc."); }
+    if (kerror == 2) { n = put_bytes(w[0..48], 0, "Invalid key. Check the pasted text."); }
+    if (kerror == 3) { n = put_bytes(w[0..48], 0, "This key is already stored."); }
+    if (kerror == 4) {
+        // the limit is keys.t27 MAX_KEYS (64 a provider): "All 64 key slots are full."
+        n = put_bytes(w[0..48], 0, "All ");
+        n = put_dec(w[0..48], n, @as(u64, MAX_KEYS));
+        n = put_bytes(w[0..48], n, " key slots are full.");
+    }
     draw_bytes(c, kit, w[0..48], n, x, t + 46.0, 9.5, 0.0, false);
-    var p : u32 = 0;
-    while (p < PROVIDER_COUNT) {
-        const y : f64 = ky_row_top(t, p);
+    var row : u32 = 0;
+    while (row < KY_PAGE_ROWS) {
+        const p : u32 = ky_provider(kpage, row);
+        const y : f64 = ky_row_top(t, row);
         const has : bool = stored[p] > 0;
         const st : u32 = status_shown(has, provider_status(kst, p, stored[p]), kfail[p], kopen[p], now);
         cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
-        n = provider_name(p, w[0..48]);
+        n = provider_label(p, w[0..48]);
         const nw : f64 = draw_bytes(c, kit, w[0..48], n, x, y + 14.0, 11.0, WEIGHT_SEMIBOLD, false);
         // how many keys the provider holds ("zai  7 keys"), right after its name; the line below shows the newest key, masked
         n = key_count_text(slot_count(stored[p]), w[0..48]);
@@ -5359,10 +6521,10 @@ fn draw_keys_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, sto
             draw_bytes(c, kit, w[0..48], n, x + nw + 8.0, y + 14.0, 9.5, 0.0, false);
         }
         cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
-        draw_dot(c, status_dot(st), x + 112.0, y + 10.0, 1.0);
+        draw_dot(c, status_dot(st), x + 164.0, y + 10.0, 1.0);
         n = key_status_text(st, kst, p, stored[p], w[0..48]);
         cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
-        draw_bytes(c, kit, w[0..48], n, x + 124.0, y + 14.0, 9.5, 0.0, false);
+        draw_bytes(c, kit, w[0..48], n, x + 176.0, y + 14.0, 9.5, 0.0, false);
         // the key as typed (masked, with a caret) while it is being entered; else the stored key, masked
         cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
         if (kedit == p) {
@@ -5377,7 +6539,7 @@ fn draw_keys_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, sto
             n = csv_field(KEYS_WORDS, 7, w[0..48]);
             draw_bytes(c, kit, w[0..48], n, x, y + 33.0, 10.0, 0.0, false);
         }
-        const hit : u32 = ky_hit(mx, my, l, QP_W, QP_PAD, t);
+        const hit : u32 = ky_page_action(kpage, ky_hit(mx, my, l, QP_W, QP_PAD, t));
         const by : f64 = y + KY_BTN_DY;
         const setw : u32 = ky_set_word(stored[p]);
         draw_key_btn(c, kit, ky_btn_x(l, QP_W, QP_PAD, B_SET), by, setw, false, setw == 1, hit == p * 4 + B_SET);
@@ -5389,7 +6551,7 @@ fn draw_keys_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, sto
         draw_key_btn(c, kit, ky_btn_x(l, QP_W, QP_PAD, B_CHECK), by, chkw, kbusy == p, has and probe_has(p), hit == p * 4 + B_CHECK);
         cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LINE_WHITE));
         cg_fill_rect(c, x, y + KY_ROW_H - 2.0, QP_W - 2.0 * QP_PAD, HAIR);
-        p = p + 1;
+        row = row + 1;
     }
     // the claude profile and why (keys.t27 profile_why): which provider a new claude pane gets; no key text
     var sm : u32 = 0;
@@ -5403,7 +6565,7 @@ fn draw_keys_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, sto
     cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
     // the foot (editors.t27 foot_*): the status row, then OPEN IN, then the chips, each in a band of its own
     // below the provider rows, so no two text rows share a y band (the status line sat on the chips)
-    const ft : f64 = ky_row_top(t, PROVIDER_COUNT);
+    const ft : f64 = ky_row_top(t, KY_PAGE_ROWS);
     if (foot_status_fits(ft, sh)) {
         draw_bytes(c, kit, wy[0..96], n, x, foot_status_top(ft) + FT_BASE, 9.5, 0.0, false);
     }
@@ -5434,7 +6596,7 @@ fn draw_keys_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, sto
         }
     }
     // K2. Devices (keysync.t27), below the chips
-    draw_devices_section(c, kit, x, foot_bottom(ft, sh, strip_count(kemask, ktpick)) + 8.0, sh, mask[144..544]);
+    draw_devices_section(c, kit, x, foot_bottom(ft, sh, strip_count(kemask, ktpick)) + 8.0, sh, mask[KY_MASK_BYTES..KY_BUFFER_BYTES]);
 }
 
 // ---- K2. the Devices section of the KEYS panel (keysync.t27): this device's fingerprint, the other devices, the sync status ----
@@ -8723,7 +9885,7 @@ fn draw_profile_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, 
     }
 }
 
-fn draw(c: u64, kit: [48]u64, frame: u32, state: u32, hov: u32, ma: f64, shown: u32, task: u32, space: u32, sp: u32, ss: u64, cur: u32, collapsed: bool, mx: f64, my: f64, z: f64, sw: f64, sh: f64, ws: u32, full: bool, qp: bool, ring: [8]u64, n: u32, now: u64, sug: u32, god: bool, glow: f64, dk: [128]u64, dp: bool, darmed: u32, doff: u32, dgo: u32, dlive: bool, dlabel: u64, tst: []const u32, tcells: []const u32, topen: u32, tcur: bool, kyp: bool, kstored: []const u32, kmask: []const u8, kmlen: []const u32, kst: []const u32, kfail: []const u32, kopen: []const u64, kedit: u32, kbuf: []const u8, klen: u32, karm: u32, kbusy: u32, kemask: u32, kewhy: u32, ktpick: u32, hs: u32, cons: bool, dc: []u64, gal: []const u8, gt: []const u32, evd: u32, evpk: u64, pb: []const u8, sst: []const u32, tg: []const u64, tb: []const u8) -> void {
+fn draw(c: u64, kit: [48]u64, frame: u32, state: u32, hov: u32, ma: f64, shown: u32, task: u32, space: u32, sp: u32, ss: u64, cur: u32, collapsed: bool, mx: f64, my: f64, z: f64, sw: f64, sh: f64, ws: u32, full: bool, qp: bool, ring: [8]u64, n: u32, now: u64, sug: u32, god: bool, glow: f64, dk: [128]u64, dp: bool, darmed: u32, doff: u32, dgo: u32, dlive: bool, dlabel: u64, tst: []const u32, tcells: []const u32, topen: u32, tcur: bool, kyp: bool, kstored: []const u64, kmask: []const u8, kmlen: []const u32, kst: []const u32, kfail: []const u32, kopen: []const u64, kedit: u32, kbuf: []const u8, klen: u32, karm: u32, kstate: u32, kemask: u32, kewhy: u32, ktpick: u32, hs: u32, cons: bool, dc: []u64, gal: []const u8, gt: []const u32, evd: u32, evpk: u64, pb: []const u8, sst: []const u32, tg: []const u64, tb: []const u8) -> void {
     // evp, evn2 and evpr travel packed (the draw call is at the 64 parameter limit)
     const evp : u32 = @as(u32, @intCast(evpk % 1048576));
     const evn2 : u32 = @as(u32, @intCast(evpk / 1048576 % 1048576));
@@ -8754,10 +9916,12 @@ fn draw(c: u64, kit: [48]u64, frame: u32, state: u32, hov: u32, ma: f64, shown: 
         draw_qdash(c, kit, tg, sst, tb, qd_area_x(ws, collapsed), WS_TOP, qd_area_w(sw, ws, collapsed, qp or dp or kyp or pfp), qd_area_h(sh), mx, my, full, ma);
     }
     // exactly one right-hand panel is drawn (the Queen's, else DOCTOR's, else KEYS'): its ground first
-    if (qp or dp or kyp or pfp) { draw_panel_ground(c, sw, sh, full); }
+    if (qp or dp or kyp or pfp or kstate / 4096 % 4 > 0) { draw_panel_ground(c, sw, sh, full); }
+    // the old provider panel (cells 1 and 2) is drawn here; the API panel (API_PCELL) is drawn after draw() on this ground
+    if (kstate / 4096 % 4 > 0 and kstate / 4096 % 4 < API_PCELL) { draw_provider_panel(c, kit, sw, sh, mx, my, kstate); }
     if (qp) { draw_queen_panel(c, kit, sw, sh, mx, my, view_of(menu_open(state), shown), space, ss, cur, ring, n, now, sug, god, evd, evp, evn2, evpr); }
     if (dp and qp == false) { draw_doctor_panel(c, kit, dk, sw, sh, mx, my, darmed, doff, dgo, dlive); }
-    if (kyp and qp == false and dp == false) { draw_keys_panel(c, kit, sw, sh, mx, my, kstored, kmask, kmlen, kst, kfail, kopen, now, kedit, kbuf, klen, karm, kbusy, kemask, kewhy, ktpick); }
+    if (kyp and qp == false and dp == false) { draw_keys_panel(c, kit, sw, sh, mx, my, kstored, kmask, kmlen, kst, kfail, kopen, now, kedit, kbuf, klen, karm, kstate, kemask, kewhy, ktpick); }
     if (pfp and qp == false and dp == false and kyp == false) { draw_profile_panel(c, kit, sw, sh, mx, my, tb[TBO_PF .. TBO_PF + PF_CAP], tg[TPG_PF_IMG]); }
     if (ma > 0.0) {
         var uws : u32 = ws;
@@ -9676,6 +10840,14 @@ fn set_prefill(dc: []u64, pb: []u8, line: []const u8) -> void {
 // ---- the app ----
 
 pub fn main() -> void {
+    // API management (api_check_host.t27): a launch whose first argument is the worker flag runs one check and
+    // exits here, before any window, Dock icon or other state exists
+    if (ac_worker_main()) {
+        sys_exit(0);
+        return;
+    }
+    // A restarted pane server must produce a failed socket write, not terminate the window.
+    sys_signal(13, 1);
     const s_alloc : u64 = sel("alloc");
     const app : u64 = msg0(cls("NSApplication"), sel("sharedApplication"));
     msg1(app, sel("setActivationPolicy:"), 0);
@@ -9839,6 +11011,19 @@ pub fn main() -> void {
     var task : u32 = CARD_SLOTS;
     var space : u32 = 0;
     var ss : u64 = 0;
+    var ppins : u64 = 0;
+    var ppanes : [7]u32 = undefined;
+    var pinit : usize = 0;
+    while (pinit < 7) { ppanes[pinit] = PANE_NONE; pinit = pinit + 1; }
+    var pcell : u32 = 0;
+    var ppage : u32 = 0;
+    var perror : u32 = 0;
+    // API management (api_manage.t27): the panel's words and bytes (open while pcell == API_PCELL); the selection
+    // (model and key per provider) and the chat bindings persist, results never do
+    var amw : [704]u64 = undefined;
+    var amb : [2864]u8 = undefined;
+    am_init(amw[0..704], amb[0..2864]);
+    api_load(amw[0..704], amb[0..2864]);
     var sp : u32 = SPACES_SEED;
     var cur : u32 = SESSION_NONE;
     // Q. the Queen panel (queen.t27): open, GOD MODE, the ring of recent events, a dismissed suggestion
@@ -9872,6 +11057,7 @@ pub fn main() -> void {
     const k_space : u64 = cf("t27os.space");
     // sessions2: the session byte became 1 + agent * 8 + space when spaces grew to six slots
     const k_ss : u64 = cf("t27os.sessions2");
+    const k_ppins : u64 = cf("t27os.provider-pins1");
     const k_sp : u64 = cf("t27os.spaces");
     const k_cur : u64 = cf("t27os.cur");
     const k_hs : u64 = cf("t27os.hs");
@@ -10207,17 +11393,19 @@ pub fn main() -> void {
     // bytes, wiped after use), the DELETE that waits for its second click, the check in flight (the provider
     // and the next number it reads), and the editors found
     var kyp : bool = false;
-    var kstored : [9]u32 = undefined;
-    var kmask : [544]u8 = undefined;
-    var kmlen : [9]u32 = undefined;
-    var kst : [72]u32 = undefined;
-    var kfail : [9]u32 = undefined;
-    var kopen : [9]u64 = undefined;
+    var kstored : [10]u64 = undefined;
+    var kmask : [560]u8 = undefined;
+    var kmlen : [10]u32 = undefined;
+    var kst : [640]u32 = undefined;
+    var kfail : [10]u32 = undefined;
+    var kopen : [10]u64 = undefined;
     var kbuf : [256]u8 = undefined;
     var klen : u32 = 0;
     var kedit : u32 = KY_NONE;
     var karm : u32 = KY_NONE;
     var kbusy : u32 = KY_NONE;
+    var kpage : u32 = 0;
+    var kerror : u32 = 0;
     var kemask : u32 = 0;
     var kewhy : u32 = OPEN_NONE;
     // the terminal editor the strip's first chip opens inside (editors.t27 term_pick; TERM_NONE when none was
@@ -10239,7 +11427,7 @@ pub fn main() -> void {
     var kbk : u32 = 0;
     var kpre : u32 = 0;
     var ki : u32 = 0;
-    while (ki < 9) {
+    while (ki < PROVIDER_COUNT) {
         kstored[ki] = 0;
         kmlen[ki] = 0;
         kfail[ki] = 0;
@@ -10247,13 +11435,13 @@ pub fn main() -> void {
         ki = ki + 1;
     }
     var kz : u32 = 0;
-    while (kz < 72) {
+    while (kz < PROVIDER_COUNT * MAX_KEYS) {
         kst[kz] = ST_STORED;
         kz = kz + 1;
     }
-    // the Devices view (keysync.t27) after the 144 mask bytes starts empty
-    var kdv : usize = 144;
-    while (kdv < 544) {
+    // the Devices view (keysync.t27) after the provider mask bytes starts empty
+    var kdv : usize = KY_MASK_BYTES;
+    while (kdv < KY_BUFFER_BYTES) {
         kmask[kdv] = 0;
         kdv = kdv + 1;
     }
@@ -10328,6 +11516,7 @@ pub fn main() -> void {
         task = @as(u32, @intCast(msg1(defs, sel("integerForKey:"), k_task)));
         space = @as(u32, @intCast(msg1(defs, sel("integerForKey:"), k_space)));
         ss = msg1(defs, sel("integerForKey:"), k_ss);
+        ppins = msg1(defs, sel("integerForKey:"), k_ppins);
         sp = @as(u32, @intCast(msg1(defs, sel("integerForKey:"), k_sp)));
         if (spaces_shown(sp) == 0) { sp = SPACES_SEED; }
         if (space_is_open(sp, space) == false) { space = space_at_row(sp, 0); }
@@ -10425,6 +11614,8 @@ pub fn main() -> void {
                         kyp = false;
                         karm = KY_NONE;
                         kedit = KY_NONE;
+                        keys_wipe(kbuf[0..256]);
+                        kerror = 0;
                         klen = 0;
                     }
                     tsince = 0;
@@ -10442,24 +11633,25 @@ pub fn main() -> void {
                         const url : u64 = msg1(cls("NSURL"), sel("URLWithString:"), cf(REPO_URL));
                         msg1(msg0(cls("NSWorkspace"), sel("sharedWorkspace")), sel("openURL:"), url);
                         ctl = C_REPO_LINK;
-                    } else if (screen and (on_keys_foot(mx, my, sw, sh) or sbp == PG_KEYS)) {
-                        // K. KEYS in the foot opens or closes the panel; it takes the Queen and DOCTOR panels' place
-                        kyp = kyp == false;
+                    } else if ((screen or hscreen) and (on_keys_foot(mx, my, sw, sh) or sbp == PG_KEYS)) {
+                        // K. KEYS in the foot opens or closes the API keys panel (api_manage.t27): NVIDIA and Z.ai first,
+                        // the other providers and the settings one click further (the KEYS panel); opening sends nothing
+                        // and reads only the saved keys not read yet this session, a slot a frame
                         karm = KY_NONE;
                         kedit = KY_NONE;
+                        keys_wipe(kbuf[0..256]);
+                        kerror = 0;
                         klen = 0;
-                        if (kyp) {
+                        if (pcell == API_PCELL or kyp) {
+                            pcell = 0;
+                            kyp = false;
+                        } else {
+                            pcell = API_PCELL;
+                            api_open(amw[0..704], AM_NONE);
                             qp = false;
                             god = false;
                             pfp = false;
                             dp = false;
-                            keys_refresh(kstored[0..9], kmask[0..144], kmlen[0..9]);
-                            // the refresh also hands the server every numbered key again (a server that restarted forgot them)
-                            if (tfd >= 0) { keys_sync(tfd, kst[0..72], tout[0..4100]); }
-                            const khn : usize = ns_bytes(home_dir(), khome[0..256]);
-                            kemask = installed_mask(khome[0..khn]);
-                            ktpick = term_pick(term_mask());
-                            kewhy = OPEN_NONE;
                         }
                     } else if (on_doctor_link(mx, my, sw, sh) or sbp == PG_DOCTOR) {
                         dp = dp == false;
@@ -10526,6 +11718,263 @@ pub fn main() -> void {
                     // T. the Retry button of the pane server banner: start the server again
                     srvretry = true;
                     tsince = 0;
+                } else if (pcell == API_PCELL and on_panel(mx, my, sw, WS_TOP)) {
+                    // the API panel (api_manage.t27 am_hit): only Check, Check all and Open chat reach the network, each
+                    // on this click; Delete asks twice and names its slot; a model or key choice persists at once
+                    const am : u32 = @as(u32, @intCast(amw[AM_W_PROV] % 2));
+                    const ap : u32 = am_provider(am);
+                    const ah : u32 = am_hit(amw[0..704], mx, my, qp_left(sw), QP_W, WS_TOP, sh);
+                    const ak : u32 = am_hit_kind(ah);
+                    const aa : u32 = am_hit_arg(ah);
+                    const amode : u32 = @as(u32, @intCast(amw[AM_W_MODE]));
+                    if (ak != AM_K_NONE) { am_say(amw[0..704], am, AM_MSG_NONE); }
+                    if (on_panel_close(mx, my, sw, WS_TOP)) {
+                        pcell = 0;
+                        amw[AM_W_ARM] = @as(u64, AM_NONE);
+                        kedit = KY_NONE;
+                        keys_wipe(kbuf[0..256]);
+                        klen = 0;
+                        kerror = 0;
+                    } else if (ak == AM_K_MANAGE) {
+                        api_open(amw[0..704], aa);
+                    } else if (ak == AM_K_OTHER) {
+                        // the other providers and the settings: the KEYS panel, with its Claude profile line, the editors
+                        // and the devices (the one place that still reads every provider's Keychain numbers)
+                        pcell = 0;
+                        kyp = true;
+                        kpage = 0;
+                        kerror = 0;
+                        karm = KY_NONE;
+                        kedit = KY_NONE;
+                        klen = 0;
+                        keys_wipe(kbuf[0..256]);
+                        keys_refresh(kstored[0..10], kmask[0..560], kmlen[0..10]);
+                        if (tfd >= 0) { keys_sync(tfd, kstored[0..10], kst[0..640], tout[0..4100]); }
+                        const ohn : usize = ns_bytes(home_dir(), khome[0..256]);
+                        kemask = installed_mask(khome[0..ohn]);
+                        ktpick = term_pick(term_mask());
+                        kewhy = OPEN_NONE;
+                    } else if (ak == AM_K_BACK) {
+                        if (amode == AM_M_DETAIL) {
+                            amw[AM_W_MODE] = @as(u64, AM_M_OVERVIEW);
+                            amw[AM_W_ARM] = @as(u64, AM_NONE);
+                        } else if (amode == AM_M_CUSTOM) {
+                            amw[AM_W_MODE] = @as(u64, AM_M_MODELS);
+                        } else {
+                            amw[AM_W_MODE] = @as(u64, AM_M_DETAIL);
+                        }
+                        if (amode == AM_M_ADD) {
+                            kedit = KY_NONE;
+                            keys_wipe(kbuf[0..256]);
+                            klen = 0;
+                            kerror = 0;
+                        }
+                    } else if (ak == AM_K_MODEL) {
+                        amw[AM_W_MODE] = @as(u64, AM_M_MODELS);
+                        amw[AM_W_MPAGE] = 0;
+                        amw[AM_W_ARM] = @as(u64, AM_NONE);
+                    } else if (ak == AM_K_USE) {
+                        // a catalog model: the provider's results stop being current, a running check of it stops
+                        if (amw[AM_W_PID] != 0 and amw[AM_W_REQ_M] == @as(u64, am)) { api_cut(amw[0..704], amb[0..2864], AM_S_CANCELLED, now); }
+                        const ucode : u32 = am_set_model(amw[0..704], amb[0..2864], am, pc_model(aa));
+                        am_say(amw[0..704], am, ucode);
+                        if (ucode == AM_MSG_SAVED) {
+                            api_save_cfg(amw[0..704], amb[0..2864]);
+                            amw[AM_W_MODE] = @as(u64, AM_M_DETAIL);
+                        }
+                    } else if (ak == AM_K_CUSTOM) {
+                        // the field opens holding the id in use, all of it selected: one key or a paste replaces it
+                        am_custom_begin(amw[0..704], amb[0..2864], am);
+                    } else if (ak == AM_K_SAVE and amode == AM_M_CUSTOM) {
+                        if (amw[AM_W_PID] != 0 and amw[AM_W_REQ_M] == @as(u64, am)) { api_cut(amw[0..704], amb[0..2864], AM_S_CANCELLED, now); }
+                        const ccode : u32 = am_set_model(amw[0..704], amb[0..2864], am, am_input(amb[0..2864]));
+                        am_say(amw[0..704], am, ccode);
+                        if (ccode == AM_MSG_SAVED) {
+                            api_save_cfg(amw[0..704], amb[0..2864]);
+                            amw[AM_W_MODE] = @as(u64, AM_M_DETAIL);
+                        }
+                    } else if (ak == AM_K_SAVE and amode == AM_M_ADD) {
+                        kerror = api_add_key(amw[0..704], amb[0..2864], am, kbuf[0..256], klen, kstored[0..10], tfd, tout[0..4100]);
+                        if (kerror == 0) {
+                            keys_wipe(kbuf[0..256]);
+                            klen = 0;
+                            kedit = KY_NONE;
+                            amw[AM_W_MODE] = @as(u64, AM_M_DETAIL);
+                            am_say(amw[0..704], am, AM_MSG_KEY_ADDED);
+                        }
+                    } else if (ak == AM_K_CANCEL and amode == AM_M_CUSTOM) {
+                        amw[AM_W_MODE] = @as(u64, AM_M_MODELS);
+                    } else if (ak == AM_K_CANCEL and amode == AM_M_ADD) {
+                        kedit = KY_NONE;
+                        keys_wipe(kbuf[0..256]);
+                        klen = 0;
+                        kerror = 0;
+                        amw[AM_W_MODE] = @as(u64, AM_M_DETAIL);
+                    } else if (ak == AM_K_CANCEL) {
+                        amw[AM_W_ARM] = @as(u64, AM_NONE);
+                    } else if (ak == AM_K_CHECK) {
+                        const ck : u32 = am_active_key(amw[0..704], am);
+                        if (ck == AM_NONE) {
+                            am_say(amw[0..704], am, am_key_problem(amw[0..704], am));
+                        } else if (am_block_reason(amw[0..704], am) != AM_MSG_NONE) {
+                            // one worker at a time: say whose check is in the way, in this provider's own words
+                            am_say(amw[0..704], am, am_block_reason(amw[0..704], am));
+                        } else if (am_held(amw[0..704], am)) {
+                            am_say(amw[0..704], am, AM_MSG_HOLD);
+                        } else if (am_can_start(amw[0..704], am, now) == false) {
+                            am_say(amw[0..704], am, AM_MSG_PAUSED);
+                        } else if (api_start(amw[0..704], amb[0..2864], ubp[0..ubn], am, ck, now) == false) {
+                            am_say(amw[0..704], am, AM_MSG_SPAWN);
+                        }
+                    } else if (ak == AM_K_CHECK_ALL) {
+                        if (am_held(amw[0..704], am)) {
+                            am_resume(amw[0..704], am);
+                            am_say(amw[0..704], am, AM_MSG_RESUMED);
+                        } else if (amw[AM_W_LOADED + @as(usize, am)] == 0) {
+                            am_say(amw[0..704], am, AM_MSG_SCANNING);
+                        } else if (amw[AM_W_STORED + @as(usize, am)] == 0) {
+                            am_say(amw[0..704], am, AM_MSG_NO_KEY);
+                        } else if (am_block_reason(amw[0..704], am) != AM_MSG_NONE) {
+                            // one worker at a time: say whose check is in the way, in this provider's own words
+                            am_say(amw[0..704], am, am_block_reason(amw[0..704], am));
+                        } else if (am_can_start(amw[0..704], am, now) == false) {
+                            am_say(amw[0..704], am, AM_MSG_PAUSED);
+                        } else {
+                            // every saved key of this provider on its model, one at a time; api_tick starts the first
+                            am_batch_begin(amw[0..704], am);
+                        }
+                    } else if (ak == AM_K_STOP) {
+                        api_stop(amw[0..704], amb[0..2864], am, now);
+                    } else if (ak == AM_K_OPEN) {
+                        // a chat on exactly this provider, model and key: an open one with the same binding in this space
+                        // (so the same folder) is reused, never one on another key or model; the server checks again
+                        const ok3 : u32 = am_active_key(amw[0..704], am);
+                        if (ok3 == AM_NONE) {
+                            am_say(amw[0..704], am, am_key_problem(amw[0..704], am));
+                        } else {
+                            var bt : [64]u8 = undefined;
+                            const btn : usize = am_bind_token(am, ok3, am_model(amb[0..2864], am), bt[0..64]);
+                            var existing : u32 = SESSION_NONE;
+                            var bi2 : u32 = 0;
+                            while (bi2 < session_count(ss)) {
+                                if (btn > 0 and session_space(ss, bi2) == space and pc_raw(ppins, bi2) == PC_BOUND and same_bytes(am_sb_get(amb[0..2864], bi2), bt[0..btn])) { existing = bi2; }
+                                bi2 = bi2 + 1;
+                            }
+                            if (existing == SESSION_NONE and btn > 0) {
+                                const before : u32 = session_count(ss);
+                                ss = add_session(ss, 3, space);
+                                if (session_count(ss) > before) {
+                                    if (am_sb_set(amb[0..2864], before, bt[0..btn])) {
+                                        ppins = pc_set_raw(ppins, before, PC_BOUND);
+                                        existing = before;
+                                    }
+                                    ppanes[before] = PANE_NONE;
+                                    api_save_binds(amb[0..2864]);
+                                }
+                            }
+                            if (existing != SESSION_NONE) {
+                                cur = existing;
+                                task = 3;
+                                pcell = 0;
+                                topen = PANE_NONE;
+                            } else {
+                                am_say(amw[0..704], am, AM_MSG_CHAT_FULL);
+                            }
+                        }
+                    } else if (ak == AM_K_ADD) {
+                        if (amw[AM_W_LOADED + @as(usize, am)] == 0) {
+                            am_say(amw[0..704], am, AM_MSG_SCANNING);
+                        } else {
+                            amw[AM_W_MODE] = @as(u64, AM_M_ADD);
+                            amw[AM_W_ARM] = @as(u64, AM_NONE);
+                            kedit = ap;
+                            keys_wipe(kbuf[0..256]);
+                            klen = 0;
+                            kerror = 0;
+                            if (next_free_key(am_listed(amw[0..704], am)) >= MAX_KEYS) { kerror = 4; }
+                        }
+                    } else if (ak == AM_K_ROW) {
+                        amw[AM_W_ARM] = @as(u64, AM_NONE);
+                        if (am_select_key(amw[0..704], am, aa)) {
+                            api_save_cfg(amw[0..704], amb[0..2864]);
+                            am_say(amw[0..704], am, AM_MSG_SELECTED);
+                        }
+                    } else if (ak == AM_K_DEL) {
+                        amw[AM_W_ARM] = @as(u64, aa);
+                    } else if (ak == AM_K_CONFIRM) {
+                        // the exact armed slot, never the newest: the server first (it retires every pane bound to that
+                        // slot, so none relaunches on a later key there), then the Keychain; no server, nothing deleted.
+                        // A chat already running keeps the key it started with until it exits.
+                        amw[AM_W_ARM] = @as(u64, AM_NONE);
+                        if (tfd < 0) { tfd = term_connect(thome[0..256]); }
+                        var srv_ok : bool = false;
+                        if (tfd >= 0) {
+                            const dn2 : usize = client_set_key_n(tfd, ap, aa, "", tout[0..4100]);
+                            srv_ok = client_reply_ok(tout[0..4100], dn2);
+                        }
+                        if (srv_ok == false) {
+                            am_say(amw[0..704], am, AM_MSG_NO_SERVER);
+                        } else {
+                            if (am_sb_retire(amb[0..2864], ap, aa) > 0) { api_save_binds(amb[0..2864]); }
+                            if (kc_del_n(ap, aa)) {
+                                am_slot_changed(amw[0..704], am, aa, false);
+                                keys_wipe(amb[am_mask_at(am, aa) .. am_mask_at(am, aa) + AM_MASK_CAP]);
+                                kstored[ap] = slot_drop(kstored[ap], aa);
+                                kst[key_index(ap, aa)] = ST_STORED;
+                                am_say(amw[0..704], am, AM_MSG_DELETED);
+                            } else {
+                                // the Keychain kept it: the server gets it back, its bound chats stay retired
+                                const kn4 : usize = kc_get_n(ap, aa, ktmp[0..256]);
+                                if (kn4 > 0) { client_set_key_n(tfd, ap, aa, ktmp[0..kn4], tout[0..4100]); }
+                                keys_wipe(ktmp[0..256]);
+                                am_say(amw[0..704], am, AM_MSG_KC_FAIL);
+                            }
+                        }
+                    } else if (ak == AM_K_PREV) {
+                        if (amode == AM_M_MODELS) {
+                            if (amw[AM_W_MPAGE] > 0) { amw[AM_W_MPAGE] = amw[AM_W_MPAGE] - 1; }
+                        } else if (amw[AM_W_PAGE] > 0) {
+                            amw[AM_W_PAGE] = amw[AM_W_PAGE] - 1;
+                        }
+                    } else if (ak == AM_K_NEXT) {
+                        if (amode == AM_M_MODELS) {
+                            if (amw[AM_W_MPAGE] + 1 < @as(u64, am_mpages(am, am_mrows_fit(WS_TOP, sh)))) { amw[AM_W_MPAGE] = amw[AM_W_MPAGE] + 1; }
+                        } else if (amw[AM_W_PAGE] + 1 < @as(u64, am_pages(am_listed(amw[0..704], am), am_rows_fit(WS_TOP, sh)))) {
+                            amw[AM_W_PAGE] = amw[AM_W_PAGE] + 1;
+                        }
+                    }
+                    am_touch(amw[0..704]);
+                    tsince = 0;
+                } else if (pcell > 0 and on_panel(mx, my, sw, WS_TOP)) {
+                    if (on_panel_close(mx, my, sw, WS_TOP)) { pcell = 0; }
+                    else if (in_box(mx, my, qp_left(sw) + 220.0, WS_TOP + 5.0, 70.0, 30.0)) {
+                        pcell = 0; kyp = true; kpage = 0; kerror = 0;
+                        keys_refresh(kstored[0..10], kmask[0..560], kmlen[0..10]);
+                    } else if (in_box(mx, my, qp_left(sw) + 120.0, WS_TOP + 5.0, 85.0, 30.0)) {
+                        ppage = (ppage + 1) % pc_page_count(pcell);
+                    } else {
+                        const pick : u32 = pc_hit(mx, my, sw, pcell, ppage);
+                        if (pick < PC_COUNT) {
+                            perror = 0;
+                            if (kstored[pc_provider(pick)] == 0) { perror = 1; }
+                            else {
+                                var existing : u32 = SESSION_NONE;
+                                var pi : u32 = 0;
+                                while (pi < session_count(ss)) {
+                                    if (session_space(ss, pi) == space and pc_get(ppins, pi) == pick) { existing = pi; }
+                                    pi = pi + 1;
+                                }
+                                if (existing == SESSION_NONE) {
+                                    const before : u32 = session_count(ss);
+                                    ss = add_session(ss, 3, space);
+                                    if (session_count(ss) > before) { ppins = pc_set(ppins, before, pick); ppanes[before] = PANE_NONE; existing = before; }
+                                }
+                                if (existing != SESSION_NONE) { cur = existing; task = 3; pcell = 0; topen = PANE_NONE; }
+                                else { perror = 3; }
+                            }
+                        }
+                    }
+                    tsince = 0;
                 } else if (pfp and on_panel(mx, my, sw, WS_TOP)) {
                     // P. the PROFILE panel: close, the big circle and CHOOSE PICTURE, REMOVE PICTURE, the nickname field, SAVE, CANCEL
                     const pfh : u32 = prf_panel_hit_d(mx, my, qp_left(sw), QP_W, WS_TOP, pf_has(tbv[TBO_PF .. TBO_PF + PF_CAP]), prf_squeeze(WS_TOP, sh));
@@ -10590,19 +12039,44 @@ pub fn main() -> void {
                         kyp = false;
                         karm = KY_NONE;
                         kedit = KY_NONE;
+                        keys_wipe(kbuf[0..256]);
+                        kerror = 0;
                         klen = 0;
                     } else {
-                        const kh : u32 = ky_hit(mx, my, kl, QP_W, QP_PAD, WS_TOP);
+                        if (ky_page_hit(mx, my, kl, WS_TOP)) {
+                            kpage = 1 - kpage;
+                            keys_wipe(kbuf[0..256]);
+                            kedit = KY_NONE;
+                            karm = KY_NONE;
+                            klen = 0;
+                            kerror = 0;
+                        }
+                        const kh : u32 = ky_page_action(kpage, ky_hit(mx, my, kl, QP_W, QP_PAD, WS_TOP));
                         const kq : u32 = kh / 4;
-                        if (kh != KY_NONE) {
+                        if (kh != KY_NONE and (kq == P_NVIDIA or kq == P_ZAI)) {
+                            // NVIDIA and Z.ai Coding Plan are managed in the API panel (model, active key, checks on the
+                            // launcher route); their rows here open it instead of the old newest-key delete and probe
+                            kyp = false;
+                            karm = KY_NONE;
+                            kedit = KY_NONE;
+                            keys_wipe(kbuf[0..256]);
+                            klen = 0;
+                            kerror = 0;
+                            pcell = API_PCELL;
+                            api_open(amw[0..704], am_index(kq));
+                        } else if (kh != KY_NONE) {
                             const kact : u32 = ky_click(kh % 4, kstored[kq] > 0, next_free_key(kstored[kq]) >= MAX_KEYS, probe_has(kq), karm, kq);
                             if (kact == KA_EDIT) {
                                 kedit = kq;
+                                keys_wipe(kbuf[0..256]);
                                 klen = 0;
+                                kerror = 0;
                                 karm = KY_NONE;
                             } else if (kact == KA_ARM) {
                                 karm = kq;
                                 kedit = KY_NONE;
+                                keys_wipe(kbuf[0..256]);
+                                kerror = 0;
                                 klen = 0;
                             } else if (kact == KA_DELETE) {
                                 // the row's DELETE removes the newest key only (keys.t27 newest_key), from the Keychain and the server
@@ -10610,12 +12084,12 @@ pub fn main() -> void {
                                 if (kdn < MAX_KEYS) {
                                     if (kc_del_n(kq, kdn)) {
                                         kst[key_index(kq, kdn)] = ST_STORED;
-                                        if (tfd >= 0) { client_set_key(tfd, setkey_byte(kq, kdn), "", tout[0..4100]); }
+                                        if (tfd >= 0) { client_set_key_n(tfd, kq, kdn, "", tout[0..4100]); }
                                     }
                                 }
                                 karm = KY_NONE;
                                 kfail[kq] = 0;
-                                keys_refresh(kstored[0..9], kmask[0..544], kmlen[0..9]);
+                                keys_refresh(kstored[0..10], kmask[0..560], kmlen[0..10]);
                             } else if (kact == KA_CHECK) {
                                 kbusy = kq;
                                 kbk = 0;
@@ -10626,7 +12100,7 @@ pub fn main() -> void {
                             }
                         } else {
                             karm = KY_NONE;
-                            const kft : f64 = ky_row_top(WS_TOP, PROVIDER_COUNT);
+                            const kft : f64 = ky_row_top(WS_TOP, KY_PAGE_ROWS);
                             const keh : u32 = ed_hit(mx, my, kl, QP_PAD, foot_chips_top(kft), foot_chips(kft, sh, strip_count(kemask, ktpick)));
                             if (keh != ED_NONE) {
                                 // the editor opens the folder of the space on screen (home when it is unbound)
@@ -10841,13 +12315,37 @@ pub fn main() -> void {
                     }
                 } else if (screen and on_new_chat(mx, my, sw, ws)) {
                     // N. "+" opens one more chat of the selected agent in this space and selects it
-                    const nk : u32 = new_chat_agent(task);
-                    const before : u32 = session_count(ss);
-                    ss = add_session(ss, nk, space);
-                    if (session_count(ss) > before) { cur = before; task = nk; }
-                    ctl = C_NEW_CHAT;
-                    carg = nk;
+                    if (pc_raw(ppins, cur) != 0) {
+                        // "+" beside a pinned or bound chat opens its provider in the API panel: the next chat's model and
+                        // key are chosen there
+                        var nm : u32 = AM_NV;
+                        if (pc_get(ppins, cur) < PC_COUNT and pc_provider(pc_get(ppins, cur)) == P_ZAI) { nm = AM_ZA; }
+                        const ntk : []const u8 = am_sb_get(amb[0..2864], cur);
+                        if (pc_raw(ppins, cur) == PC_BOUND and ntk.len > 0 and ntk[0] == 122) { nm = AM_ZA; }
+                        pcell = API_PCELL;
+                        api_open(amw[0..704], nm);
+                        ppage = 0; perror = 0;
+                        qp = false; dp = false; kyp = false; pfp = false;
+                    } else {
+                        const nk : u32 = new_chat_agent(task);
+                        const before : u32 = session_count(ss);
+                        ss = add_session(ss, nk, space);
+                        if (session_count(ss) > before) { ppins = pc_set(ppins, before, PC_NONE); cur = before; task = nk; }
+                        ctl = C_NEW_CHAT;
+                        carg = nk;
+                    }
+                } else if (screen and card_live(term_up(screen, topen), mx, my, sw, sh, ws, collapsed) >= 9 and card_live(term_up(screen, topen), mx, my, sw, sh, ws, collapsed) < CARD_SLOTS) {
+                    // the NVIDIA and Z.ai cells open that provider in the API panel: its model, key and checks; no
+                    // rescan of every provider's Keychain numbers, nothing sent
+                    var cellm : u32 = AM_NV;
+                    if (card_live(false, mx, my, sw, sh, ws, collapsed) == 10) { cellm = AM_ZA; }
+                    pcell = API_PCELL;
+                    api_open(amw[0..704], cellm);
+                    ppage = 0; perror = 0;
+                    qp = false; dp = false; kyp = false; pfp = false;
+                    kedit = KY_NONE; klen = 0; keys_wipe(kbuf[0..256]);
                 } else if (screen and card_live(term_up(screen, topen), mx, my, sw, sh, ws, collapsed) != CARD_SLOTS) {
+                    pcell = 0;
                     // A. a tap on a cell opens that agent's chat here, or a first one if there is none
                     task = card_live(term_up(screen, topen), mx, my, sw, sh, ws, collapsed);
                     ctl = C_CELL;
@@ -10855,6 +12353,14 @@ pub fn main() -> void {
                     cur = SESSION_NONE;
                     if (task != AGENT_QUEEN) {
                         cur = first_of(ss, task, space);
+                        if (task == 3) {
+                            cur = SESSION_NONE;
+                            var oi : u32 = 0;
+                            while (oi < session_count(ss)) {
+                                if (cur == SESSION_NONE and session_agent(ss, oi) == 3 and session_space(ss, oi) == space and pc_raw(ppins, oi) == 0) { cur = oi; }
+                                oi = oi + 1;
+                            }
+                        }
                         if (cur == SESSION_NONE) {
                             const before : u32 = session_count(ss);
                             ss = add_session(ss, task, space);
@@ -10874,20 +12380,22 @@ pub fn main() -> void {
                     // U. the update line above the foot: Update now (install as soon as no pane is busy) or try again
                     tgv[TPG_U_GO] = 1;
                     tg_bump(tgv[0..256]);
-                } else if (screen and on_keys_foot(mx, my, sw, sh)) {
+                } else if ((screen or hscreen) and on_keys_foot(mx, my, sw, sh)) {
                     // K. KEYS in the foot opens or closes the panel; it takes the Queen and DOCTOR panels' place
                     kyp = kyp == false;
                     karm = KY_NONE;
                     kedit = KY_NONE;
+                    keys_wipe(kbuf[0..256]);
+                    kerror = 0;
                     klen = 0;
                     if (kyp) {
                         qp = false;
                         god = false;
                         pfp = false;
                         dp = false;
-                        keys_refresh(kstored[0..9], kmask[0..544], kmlen[0..9]);
+                        keys_refresh(kstored[0..10], kmask[0..560], kmlen[0..10]);
                         // the refresh also hands the server every numbered key again (a server that restarted forgot them)
-                        if (tfd >= 0) { keys_sync(tfd, kst[0..72], tout[0..4100]); }
+                        if (tfd >= 0) { keys_sync(tfd, kstored[0..10], kst[0..640], tout[0..4100]); }
                         const khn : usize = ns_bytes(home_dir(), khome[0..256]);
                         kemask = installed_mask(khome[0..khn]);
                         ktpick = term_pick(term_mask());
@@ -10919,6 +12427,16 @@ pub fn main() -> void {
                         ctl = C_CLOSE_SPACE;
                         carg = rs;
                         cur = after_drop(cur, ss, rs);
+                        var pfrom : u32 = 0;
+                        var pto : u32 = 0;
+                        while (pfrom < session_count(ss)) {
+                            if (session_space(ss, pfrom) != rs) { ppanes[pto] = ppanes[pfrom]; sst[pto] = sst[pfrom]; pto = pto + 1; }
+                            pfrom = pfrom + 1;
+                        }
+                        while (pto < 7) { ppanes[pto] = PANE_NONE; sst[pto] = S_STOPPED; pto = pto + 1; }
+                        ppins = pc_drop_space(ppins, ss, rs);
+                        am_sb_drop_space(amb[0..2864], ss, rs);
+                        api_save_binds(amb[0..2864]);
                         ss = drop_sessions_in(ss, rs);
                         sp = remove_space(sp, rs);
                         // D. a space bound to a repository hides it: the walk keeps it, the sidebar does not
@@ -10946,6 +12464,12 @@ pub fn main() -> void {
                         ctl = C_CLOSE_CHAT;
                         topen = PANE_NONE;
                         carg = session_agent(ss, si);
+                        var pmove : u32 = si;
+                        while (pmove + 1 < 7) { ppanes[pmove] = ppanes[pmove + 1]; sst[pmove] = sst[pmove + 1]; pmove = pmove + 1; }
+                        ppanes[6] = PANE_NONE; sst[6] = S_STOPPED;
+                        ppins = pc_drop(ppins, si);
+                        am_sb_drop(amb[0..2864], si);
+                        api_save_binds(amb[0..2864]);
                         ss = remove_session(ss, si);
                         cur = after_remove(cur, si);
                     } else {
@@ -11212,6 +12736,124 @@ pub fn main() -> void {
                     } else {
                         used = false;
                     }
+                } else if (pcell == API_PCELL and amw[AM_W_MODE] == @as(u64, AM_M_CUSTOM)) {
+                    // the exact model id: it opens all selected (api_manage am_custom_begin); Cmd+A selects all again; a
+                    // character, Backspace or Cmd+V replaces a selection whole, else appends or erases the last
+                    // character; an arrow, Home or End ends the selection; Return saves, Esc goes back to the list.
+                    // Characters and spaces are kept (a wrong one is shown, then refused on save, never cut)
+                    const ik2 : u32 = am_input_key(@as(u32, @intCast(key)), cmd);
+                    const ck2 : u32 = ky_key(@as(u32, @intCast(key)), cmd);
+                    const cm2 : u32 = @as(u32, @intCast(amw[AM_W_PROV] % 2));
+                    am_say(amw[0..704], cm2, AM_MSG_NONE);
+                    if (ik2 == AM_IK_SELECT_ALL) {
+                        am_input_select_all(amw[0..704], amb[0..2864]);
+                    } else if (ik2 == AM_IK_DESELECT) {
+                        am_input_deselect(amw[0..704]);
+                    } else if (ck2 == KE_CANCEL) {
+                        amw[AM_W_MODE] = @as(u64, AM_M_MODELS);
+                    } else if (ck2 == KE_BACK) {
+                        am_input_erase(amw[0..704], amb[0..2864]);
+                    } else if (ck2 == KE_SAVE) {
+                        if (amw[AM_W_PID] != 0 and amw[AM_W_REQ_M] == @as(u64, cm2)) { api_cut(amw[0..704], amb[0..2864], AM_S_CANCELLED, now); }
+                        const scode : u32 = am_set_model(amw[0..704], amb[0..2864], cm2, am_input(amb[0..2864]));
+                        am_say(amw[0..704], cm2, scode);
+                        if (scode == AM_MSG_SAVED) {
+                            api_save_cfg(amw[0..704], amb[0..2864]);
+                            amw[AM_W_MODE] = @as(u64, AM_M_DETAIL);
+                        }
+                    } else if (ck2 == KE_PASTE) {
+                        const cpb : u64 = msg0(cls("NSPasteboard"), sel("generalPasteboard"));
+                        const cps : u64 = msg1(cpb, sel("stringForType:"), cf("public.utf8-plain-text"));
+                        if (cps != 0) {
+                            const cpn : usize = ns_bytes(cps, ktmp[0..256]);
+                            if (cpn >= 256 or am_input_put(amw[0..704], amb[0..2864], ktmp[0..cpn]) == false) { am_say(amw[0..704], cm2, AM_MSG_PASTE); }
+                            keys_wipe(ktmp[0..256]);
+                        }
+                    } else if (ck2 == KE_CHAR) {
+                        const cc2 : u64 = msg0(ev, s_chars);
+                        var cn2 : u64 = 0;
+                        if (cc2 != 0) { cn2 = dk_len(dk, cc2); }
+                        var cj2 : u64 = 0;
+                        while (cj2 < cn2) {
+                            const ch2 : u32 = @as(u32, @intCast(msg_char(cc2, s_char_at, cj2) & 65535));
+                            // a printable character the full field cannot take is said; a function key is not text
+                            if (am_input_type(amw[0..704], amb[0..2864], ch2) == false and ch2 >= 32 and ch2 <= 126) { am_say(amw[0..704], cm2, AM_MSG_ID_BASE + AM_ID_LONG); }
+                            cj2 = cj2 + 1;
+                        }
+                    } else {
+                        used = false;
+                    }
+                    am_touch(amw[0..704]);
+                } else if (pcell == API_PCELL and amw[AM_W_MODE] == @as(u64, AM_M_ADD)) {
+                    // a key typed for the add view, as the KEYS panel types it: masked on screen, wiped after use
+                    const ak2 : u32 = ky_key(@as(u32, @intCast(key)), cmd);
+                    if (ak2 == KE_CANCEL) {
+                        kedit = KY_NONE;
+                        keys_wipe(kbuf[0..256]);
+                        klen = 0;
+                        kerror = 0;
+                        amw[AM_W_MODE] = @as(u64, AM_M_DETAIL);
+                    } else if (ak2 == KE_BACK) {
+                        kerror = 0;
+                        if (klen > 0) {
+                            klen = klen - 1;
+                            kbuf[@as(usize, klen)] = 0;
+                        }
+                    } else if (ak2 == KE_SAVE) {
+                        const am3 : u32 = @as(u32, @intCast(amw[AM_W_PROV] % 2));
+                        kerror = api_add_key(amw[0..704], amb[0..2864], am3, kbuf[0..256], klen, kstored[0..10], tfd, tout[0..4100]);
+                        if (kerror == 0) {
+                            keys_wipe(kbuf[0..256]);
+                            klen = 0;
+                            kedit = KY_NONE;
+                            amw[AM_W_MODE] = @as(u64, AM_M_DETAIL);
+                            am_say(amw[0..704], am3, AM_MSG_KEY_ADDED);
+                        }
+                    } else if (ak2 == KE_PASTE) {
+                        kerror = 0;
+                        const apb : u64 = msg0(cls("NSPasteboard"), sel("generalPasteboard"));
+                        const aps : u64 = msg1(apb, sel("stringForType:"), cf("public.utf8-plain-text"));
+                        if (aps != 0) {
+                            const apn : usize = ns_bytes(aps, ktmp[0..256]);
+                            const atn : usize = trim_key(ktmp[0..apn], kbuf[0..256]);
+                            klen = @as(u32, @intCast(atn));
+                            if (klen > MAX_KEY_CHARS) { klen = MAX_KEY_CHARS; }
+                            keys_wipe(ktmp[0..256]);
+                        }
+                    } else if (ak2 == KE_CHAR) {
+                        kerror = 0;
+                        const ac2 : u64 = msg0(ev, s_chars);
+                        var an2 : u64 = 0;
+                        if (ac2 != 0) { an2 = dk_len(dk, ac2); }
+                        var aj2 : u64 = 0;
+                        while (aj2 < an2) {
+                            const ach : u32 = @as(u32, @intCast(msg_char(ac2, s_char_at, aj2) & 65535));
+                            if (ky_accepts(klen, ach)) {
+                                kbuf[@as(usize, klen)] = @as(u8, @intCast(ach));
+                                klen = klen + 1;
+                            }
+                            aj2 = aj2 + 1;
+                        }
+                    } else {
+                        used = false;
+                    }
+                    am_touch(amw[0..704]);
+                } else if (pcell == API_PCELL and key == KEY_ESCAPE and cmd == false) {
+                    // Escape: an armed delete is cancelled first, then one view back; the overview closes the panel
+                    const emode : u32 = @as(u32, @intCast(amw[AM_W_MODE]));
+                    if (amw[AM_W_ARM] < @as(u64, AM_SLOTS)) {
+                        amw[AM_W_ARM] = @as(u64, AM_NONE);
+                    } else if (emode == AM_M_MODELS) {
+                        amw[AM_W_MODE] = @as(u64, AM_M_DETAIL);
+                    } else if (emode == AM_M_DETAIL) {
+                        amw[AM_W_MODE] = @as(u64, AM_M_OVERVIEW);
+                    } else {
+                        pcell = 0;
+                    }
+                    am_say(amw[0..704], @as(u32, @intCast(amw[AM_W_PROV] % 2)), AM_MSG_NONE);
+                    am_touch(amw[0..704]);
+                } else if (pcell > 0 and key == KEY_ESCAPE and cmd == false) {
+                    pcell = 0;
                 } else if (pfp and key == KEY_ESCAPE and cmd == false) {
                     // P. Escape outside an edit closes the PROFILE panel
                     pf_leave(tbv[TBO_PF .. TBO_PF + PF_CAP], PRF_EV_CLOSE);
@@ -11220,31 +12862,44 @@ pub fn main() -> void {
                     // K. a key is being typed: Return saves it to the Keychain, Esc cancels, Cmd+V pastes
                     const kk : u32 = ky_key(@as(u32, @intCast(key)), cmd);
                     if (kk == KE_CANCEL) {
-                        keys_wipe(kbuf[0..256]);
+                        kerror = 0;
                         kedit = KY_NONE;
+                        keys_wipe(kbuf[0..256]);
+                        kerror = 0;
                         klen = 0;
                     } else if (kk == KE_BACK) {
+                        kerror = 0;
                         if (klen > 0) {
                             klen = klen - 1;
                             kbuf[@as(usize, klen)] = 0;
                         }
                     } else if (kk == KE_SAVE) {
+                        kerror = 2;
                         if (sec_key_safe(kbuf[0 .. @as(usize, klen)])) {
                             // the key takes the lowest free number of its provider, never an existing one
                             const ksn : u32 = next_free_key(kstored[kedit]);
-                            if (ksn < MAX_KEYS) {
+                            kerror = 4;
+                            if (kc_find(kedit, kbuf[0 .. @as(usize, klen)]) < MAX_KEYS) {
+                                kerror = 3;
+                            } else if (ksn < MAX_KEYS) {
+                                kerror = 1;
                                 if (kc_put_n(kedit, ksn, kbuf[0 .. @as(usize, klen)])) {
+                                    kerror = 0;
                                     kst[key_index(kedit, ksn)] = ST_STORED;
                                     kfail[kedit] = 0;
-                                    if (tfd >= 0) { client_set_key(tfd, setkey_byte(kedit, ksn), kbuf[0 .. @as(usize, klen)], tout[0..4100]); }
+                                    if (tfd >= 0) { client_set_key_n(tfd, kedit, ksn, kbuf[0 .. @as(usize, klen)], tout[0..4100]); }
                                 }
                             }
-                            keys_wipe(kbuf[0..256]);
-                            keys_refresh(kstored[0..9], kmask[0..544], kmlen[0..9]);
-                            kedit = KY_NONE;
-                            klen = 0;
+                            if (kerror == 0) {
+                                keys_wipe(kbuf[0..256]);
+                                keys_refresh(kstored[0..10], kmask[0..560], kmlen[0..10]);
+                                kedit = KY_NONE;
+                                kerror = 0;
+                                klen = 0;
+                            }
                         }
                     } else if (kk == KE_PASTE) {
+                        kerror = 0;
                         const pb : u64 = msg0(cls("NSPasteboard"), sel("generalPasteboard"));
                         const ps : u64 = msg1(pb, sel("stringForType:"), cf("public.utf8-plain-text"));
                         if (ps != 0) {
@@ -11255,6 +12910,7 @@ pub fn main() -> void {
                             keys_wipe(ktmp[0..256]);
                         }
                     } else if (kk == KE_CHAR) {
+                        kerror = 0;
                         const kc : u64 = msg0(ev, s_chars);
                         var kn : u64 = 0;
                         if (kc != 0) { kn = dk_len(dk, kc); }
@@ -11504,6 +13160,8 @@ pub fn main() -> void {
                 msg_rect(dcv[D_WEB], sel("setFrame:"), view_x(live_x(wcx), fr[2], sw, wsc), view_y(live_y(wvt), live_h(sh, wvt), fr[3], sh, wsc), live_w(sw, wcx) * wsc, live_h(sh, wvt) * wsc);
             }
         }
+        // API management: one Keychain slot of a running scan, the worker's output, the next key of a check all
+        api_tick(amw[0..704], amb[0..2864], ubp[0..ubn], now, pcell == API_PCELL);
         // K. a check button: the frame after the click shows "checking", then one number of the provider is
         // read and probed per frame (a probe blocks up to PROBE_TIMEOUT_S); its HTTP answer sets that key's status
         // and feeds the circuit breaker (keys.t27). Every stored key of the provider is checked, none is skipped.
@@ -11527,9 +13185,9 @@ pub fn main() -> void {
                     // that passed is handed over again
                     if (tfd >= 0) {
                         if (key_withheld(kst[kix])) {
-                            client_set_key(tfd, setkey_byte(kbusy, kbk), "", tout[0..4100]);
+                            client_set_key_n(tfd, kbusy, kbk, "", tout[0..4100]);
                         } else {
-                            client_set_key(tfd, setkey_byte(kbusy, kbk), ktmp[0 .. kn2], tout[0..4100]);
+                            client_set_key_n(tfd, kbusy, kbk, ktmp[0 .. kn2], tout[0..4100]);
                         }
                     }
                 }
@@ -11539,10 +13197,12 @@ pub fn main() -> void {
         }
         // K. pre-flight (M12): once at start, check the stored key behind each claude profile, in the order
         // keys.t27 PROFILE_PROVIDER gives (all PROFILE_COUNT of them), so the first pane already avoids a dead key
+        // NVIDIA and Z.ai are never probed at launch: their keys are checked only from the API panel, on the click,
+        // with the model and route the launcher uses (api_manage.t27); opening a panel sends nothing
         if (kbusy == KY_NONE and kpre < PROFILE_COUNT) {
             const kpp : u32 = PROFILE_PROVIDER[kpre];
             kpre = kpre + 1;
-            if (probe_has(kpp) and kc_has(kpp)) {
+            if (probe_has(kpp) and kc_has(kpp) and kpp != P_NVIDIA and kpp != P_ZAI) {
                 kbusy = kpp;
                 kbk = 0;
                 kpend = 0;
@@ -11709,9 +13369,10 @@ pub fn main() -> void {
                     tpid = PANE_NONE;
                     if (tfd < 0) { tfd = term_connect(thome[0..256]); }
                     if (tfd >= 0) {
-                        if (want == VIEW_EDITOR) { tpid = epane; } else { tpid = term_open(tfd, ss, cur, tcwd, tout[0..4100], tdir[0..512]); }
+                        if (want == VIEW_EDITOR) { tpid = epane; } else { tpid = term_open(tfd, ss, ppins, am_sb_get(amb[0..2864], cur), cur, tcwd, tout[0..4100], tdir[0..512]); }
                     }
                     if (tpid != PANE_NONE and client_attach(tfd, tpid, tout[0..4100]) == 0) { tpid = PANE_NONE; }
+                    if (want != VIEW_EDITOR and cur < 7 and pc_raw(ppins, cur) != 0) { ppanes[cur] = tpid; }
                     if (tpid == PANE_NONE) { tlink = PANE_OFFLINE; } else { tlink = PANE_LIVE; }
                     // the editor pane is gone (the server restarted, or it was killed): back to the chat
                     if (tpid == PANE_NONE and want == VIEW_EDITOR) {
@@ -11721,6 +13382,8 @@ pub fn main() -> void {
                     if (tpid == PANE_NONE and tfd >= 0) {
                         sys_close(tfd);
                         tfd = -1;
+                        pinit = 0;
+                        while (pinit < 7) { ppanes[pinit] = PANE_NONE; pinit = pinit + 1; }
                     }
                 }
                 // the pty takes the new grid before the replay, so the program redraws at the full width
@@ -11742,6 +13405,8 @@ pub fn main() -> void {
                         tlink = PANE_OFFLINE;
                         sys_close(tfd);
                         tfd = -1;
+                        pinit = 0;
+                        while (pinit < 7) { ppanes[pinit] = PANE_NONE; pinit = pinit + 1; }
                     } else {
                         const dn : usize = tp_data_len(tout[0..4100], rn);
                         if (dn > 0) {
@@ -11769,7 +13434,11 @@ pub fn main() -> void {
             const sln : usize = client_list(tfd, tout[0..4100]);
             var sj : u32 = 0;
             while (sj < 32 and sj < session_count(ss)) {
-                sst[sj] = tp_state_of(tout[0..4100], sln, session_agent(ss, sj), tp_ordinal(ss, sj));
+                if (pc_raw(ppins, sj) == 0) {
+                    sst[sj] = tp_state_of(tout[0..4100], sln, session_agent(ss, sj), pc_ordinal(ppins, ss, sj));
+                } else {
+                    sst[sj] = tp_state_id(tout[0..4100], sln, ppanes[sj]);
+                }
                 sj = sj + 1;
             }
         }
@@ -11906,7 +13575,36 @@ pub fn main() -> void {
         fk = fg_mix(fg_mix(fg_mix(fk, @as(u64, sst[SST_QRUN] * 1000 + sst[SST_QBLK])), @as(u64, sst[SST_DISK])), @as(u64, sst[SST_SRV]));
         fk = fg_mix(fg_mix(fk, tgv[TPG_G_LAST]), tgv[TPG_G_NEXT]);
         fk = fg_mix(fg_mix(fk, @as(u64, sst[SST_QDASH])), tgv[TPG_QD_FLAGS]);
+        if (qp or dp or kyp or pfp) { pcell = 0; }
+        fk = fg_mix(fk, @as(u64, pcell + ppage * 4 + perror * 16));
+        if (pcell == API_PCELL) {
+            // the API panel: its state generation (every change of view, result, scan step, message or typed byte),
+            // the scan position, the add view's typed length and error, and the clock while a rate pause counts down
+            fk = fg_mix(fg_mix(fg_mix(fk, amw[AM_W_GEN]), amw[AM_W_SCAN_NEXT]), @as(u64, klen) * 16 + @as(u64, kerror));
+            if (amw[AM_W_PAUSE] > now or amw[AM_W_PAUSE + 1] > now) { fk = fg_mix(fk, now); }
+        }
+        if (pcell > 0 and on_panel(mx, my, sw, WS_TOP)) { on_control = true; }
         fk = fg_mix(fk, tgv[TPG_PF_IMG]);
+        fk = fg_mix(fk, fg_flag(kyp));
+        if (kyp) {
+            fk = fg_mix(fg_mix(fg_mix(fk, @as(u64, kpage)), @as(u64, kerror)), @as(u64, kedit));
+            fk = fg_mix(fg_mix(fg_mix(fk, @as(u64, klen)), @as(u64, karm)), @as(u64, kbusy));
+            var fkb : usize = 0;
+            while (fkb < @as(usize, klen)) {
+                fk = fg_mix(fk, @as(u64, kbuf[fkb]));
+                fkb = fkb + 1;
+            }
+            var fkp : usize = 0;
+            while (fkp < @as(usize, PROVIDER_COUNT)) {
+                fk = fg_mix(fg_mix(fg_mix(fk, @as(u64, kstored[fkp])), @as(u64, kfail[fkp])), kopen[fkp]);
+                var fkk : usize = 0;
+                while (fkk < @as(usize, MAX_KEYS)) {
+                    fk = fg_mix(fk, @as(u64, kst[fkp * @as(usize, MAX_KEYS) + fkk]));
+                    fkk = fkk + 1;
+                }
+                fkp = fkp + 1;
+            }
+        }
         var fki2 : usize = 0;
         while (fki2 < 144) {
             fk = fg_mix(fk, @as(u64, tbv[TBO_PF + fki2]));
@@ -11917,7 +13615,7 @@ pub fn main() -> void {
         fk = fg_mix(fg_mix(fg_mix(fk, tgv[TPG_GEN]), fg_flag(open2)), tgv[TPG_DASH]);
         fk = fg_mix(fg_mix(fk, tgv[TPG_O_SEL]), tgv[TPG_O_N]);
         if (open2) { fk = fg_mix(fk, now); }
-        const tbusy : bool = tgv[TPG_BN_PID] != 0 or tgv[TPG_BA_PID] != 0 or tgv[TPG_K_PID] != 0 or tgv[TPG_Q_PID] != 0;
+        const tbusy : bool = tgv[TPG_BN_PID] != 0 or tgv[TPG_BA_PID] != 0 or tgv[TPG_K_PID] != 0 or tgv[TPG_Q_PID] != 0 or api_busy(amw[0..704]);
         // the clock shows only in the queen panel's ages; outside it a ticking second must not count as a change
         if (qp) { fk = fg_mix(fk, now); }
         fk = fg_mix(fg_mix(fg_mix(fg_mix(fk, fg_flag(god)), fg_level(glow)), fg_flag(dp)), @as(u64, darmed));
@@ -11946,14 +13644,16 @@ pub fn main() -> void {
         fwait = fg_wait_anim(fquiet, tlink == PANE_LIVE and topen != PANE_NONE, fanim, FRAME_S);
         msg_flag(tx_cls, s_quiet, true);
         if (fdraw and narrow) {
-            draw(cc, kit, frame, state, hov, ma, shown, task, space, sp, ss, cur, collapsed, mx, my, z, sw, sh, ws, full, qp, ring, evn, now, sug, god, glow, dk, dp, darmed, doff, dgo, walking, dlabel, tst[0..32], tcells[0..960000], topen, tcur, kyp, kstored[0..9], kmask[0..544], kmlen[0..9], kst[0..72], kfail[0..9], kopen[0..9], kedit, kbuf[0..256], klen, karm, kbusy, kemask, kewhy, ktpick, hs, cons2, dcv[0..512], gal[0..49152], gt[0..2560], evd, @as(u64, evp) + @as(u64, evn2) * 1048576 + @as(u64, evpr) * 1099511627776, pbuf[0..4160], sst[0..560], tgv[0..256], tbv[0..77312]);
+            draw(cc, kit, frame, state, hov, ma, shown, task, space, sp, ss, cur, collapsed, mx, my, z, sw, sh, ws, full, qp, ring, evn, now, sug, god, glow, dk, dp, darmed, doff, dgo, walking, dlabel, tst[0..32], tcells[0..960000], topen, tcur, kyp, kstored[0..10], kmask[0..560], kmlen[0..10], kst[0..640], kfail[0..10], kopen[0..10], kedit, kbuf[0..256], klen, karm, kbusy + kpage * 256 + kerror * 512 + pcell * 4096 + ppage * 16384 + perror * 65536, kemask, kewhy, ktpick, hs, cons2, dcv[0..512], gal[0..49152], gt[0..2560], evd, @as(u64, evp) + @as(u64, evn2) * 1048576 + @as(u64, evpr) * 1099511627776, pbuf[0..4160], sst[0..560], tgv[0..256], tbv[0..77312]);
+            if (pcell == API_PCELL) { draw_api_panel(cc, kit, sw, sh, mx, my, amw[0..704], amb[0..2864], now, kbuf[0..256], klen, kerror); }
             const whole : u64 = cg_image(cc);
             const img : u64 = cg_crop(whole, 0.0, 0.0, sw * RETINA, sh * RETINA);
             msg1(layer, s_contents, img);
             cg_image_release(img);
             cg_image_release(whole);
         } else if (fdraw) {
-            draw(c, kit, frame, state, hov, ma, shown, task, space, sp, ss, cur, collapsed, mx, my, z, sw, sh, ws, full, qp, ring, evn, now, sug, god, glow, dk, dp, darmed, doff, dgo, walking, dlabel, tst[0..32], tcells[0..960000], topen, tcur, kyp, kstored[0..9], kmask[0..544], kmlen[0..9], kst[0..72], kfail[0..9], kopen[0..9], kedit, kbuf[0..256], klen, karm, kbusy, kemask, kewhy, ktpick, hs, cons2, dcv[0..512], gal[0..49152], gt[0..2560], evd, @as(u64, evp) + @as(u64, evn2) * 1048576 + @as(u64, evpr) * 1099511627776, pbuf[0..4160], sst[0..560], tgv[0..256], tbv[0..77312]);
+            draw(c, kit, frame, state, hov, ma, shown, task, space, sp, ss, cur, collapsed, mx, my, z, sw, sh, ws, full, qp, ring, evn, now, sug, god, glow, dk, dp, darmed, doff, dgo, walking, dlabel, tst[0..32], tcells[0..960000], topen, tcur, kyp, kstored[0..10], kmask[0..560], kmlen[0..10], kst[0..640], kfail[0..10], kopen[0..10], kedit, kbuf[0..256], klen, karm, kbusy + kpage * 256 + kerror * 512 + pcell * 4096 + ppage * 16384 + perror * 65536, kemask, kewhy, ktpick, hs, cons2, dcv[0..512], gal[0..49152], gt[0..2560], evd, @as(u64, evp) + @as(u64, evn2) * 1048576 + @as(u64, evpr) * 1099511627776, pbuf[0..4160], sst[0..560], tgv[0..256], tbv[0..77312]);
+            if (pcell == API_PCELL) { draw_api_panel(c, kit, sw, sh, mx, my, amw[0..704], amb[0..2864], now, kbuf[0..256], klen, kerror); }
             const whole : u64 = cg_image(c);
             const img : u64 = cg_crop(whole, 0.0, 0.0, sw * WIDE_RETINA, sh * WIDE_RETINA);
             msg1(layer, s_contents, img);
@@ -11963,7 +13663,7 @@ pub fn main() -> void {
         if (fdraw) { vt_clean(tst[0..32]); }
         // K. keep what the window shows: write it once a change has held still (window_keep.t27)
         const wk_fl : u64 = wk_flags(collapsed, dash, qp, god, dp, auto_open);
-        const wk_k : u64 = fg_mix(wk_key(state, shown, task, space, ss, sp, cur, wk_fl, evn), @as(u64, hs));
+        const wk_k : u64 = fg_mix(fg_mix(wk_key(state, shown, task, space, ss, sp, cur, wk_fl, evn), @as(u64, hs)), ppins);
         wk_n = wk_still(wk_n, wk_k, wk_last);
         wk_last = wk_k;
         if (frame == 0) { wk_saved = wk_k; }
@@ -11979,6 +13679,7 @@ pub fn main() -> void {
             msg2(defs, sel("setInteger:forKey:"), @as(u64, task), k_task);
             msg2(defs, sel("setInteger:forKey:"), @as(u64, space), k_space);
             msg2(defs, sel("setInteger:forKey:"), ss, k_ss);
+            msg2(defs, sel("setInteger:forKey:"), ppins, k_ppins);
             msg2(defs, sel("setInteger:forKey:"), @as(u64, sp), k_sp);
             msg2(defs, sel("setInteger:forKey:"), @as(u64, cur), k_cur);
             msg2(defs, sel("setInteger:forKey:"), @as(u64, hs), k_hs);
@@ -12016,6 +13717,7 @@ pub fn main() -> void {
                 msg2(defs, sel("setInteger:forKey:"), @as(u64, task), k_task);
                 msg2(defs, sel("setInteger:forKey:"), @as(u64, space), k_space);
                 msg2(defs, sel("setInteger:forKey:"), ss, k_ss);
+                msg2(defs, sel("setInteger:forKey:"), ppins, k_ppins);
                 msg2(defs, sel("setInteger:forKey:"), @as(u64, sp), k_sp);
                 msg2(defs, sel("setInteger:forKey:"), @as(u64, cur), k_cur);
                 msg2(defs, sel("setInteger:forKey:"), @as(u64, hs), k_hs);
@@ -12325,6 +14027,17 @@ test logo_is_the_brand_mark_and_title_says_trinity_once {
 }
 
 test the_comb_holds_the_agents_with_the_queen_in_the_middle {
+    assert CARD_SLOTS == 11;
+    var pi : u32 = 9;
+    while (pi < CARD_SLOTS) {
+        const px : f64 = hex_c(pi, 0, body_left(W_PT, WS_EXPANDED, false), body_top(WS_EXPANDED), body_w(W_PT, WS_EXPANDED, false), body_h(W_PT, H_PT, WS_EXPANDED, false));
+        const py : f64 = hex_c(pi, 1, body_left(W_PT, WS_EXPANDED, false), body_top(WS_EXPANDED), body_w(W_PT, WS_EXPANDED, false), body_h(W_PT, H_PT, WS_EXPANDED, false));
+        assert card_at(px, py, W_PT, H_PT, WS_EXPANDED, false) == pi;
+        pi = pi + 1;
+    }
+    assert pc_hit(qp_left(W_PT) + 25.0, WS_TOP + 85.0, W_PT, 1, 0) == 0;
+    // the Z.ai cell's third row is GLM-4.6V-Flash, row 10 since ordinary GLM-5.3 joined NVIDIA's rows
+    assert pc_hit(qp_left(W_PT) + 25.0, WS_TOP + 150.0, W_PT, 2, 0) == 10;
     // A. the Queen is the middle cell of the middle row
     assert AGENT_QUEEN / 3 == 1;
     assert AGENT_QUEEN % 3 == 1;
@@ -12536,8 +14249,8 @@ test an_open_panel_takes_its_width_from_the_terminal {
 }
 
 test the_keys_foot_gives_the_status_the_open_in_row_and_each_chip_row_a_band_at_960_by_540 {
-    const ft : f64 = ky_row_top(WS_TOP, PROVIDER_COUNT);
-    const last : f64 = ky_row_top(WS_TOP, PROVIDER_COUNT - 1);
+    const ft : f64 = ky_row_top(WS_TOP, KY_PAGE_ROWS);
+    const last : f64 = ky_row_top(WS_TOP, KY_PAGE_ROWS - 1);
     // the foot starts below the last provider row's buttons and plates
     assert last + KY_BTN_DY + KY_BTN_H + 2.0 <= foot_status_top(ft);
     // the bench Mac's six chips (T27 OS, Cursor, Xcode, Antigravity, Antigravity IDE, ZCode) are two rows
@@ -12558,8 +14271,8 @@ test the_keys_foot_gives_the_status_the_open_in_row_and_each_chip_row_a_band_at_
     assert foot_chips(ft, 900.0, EDITOR_COUNT) == EDITOR_COUNT;
     assert foot_chips(ft, 1440.0, EDITOR_COUNT) == EDITOR_COUNT;
     assert foot_bottom(ft, 900.0, EDITOR_COUNT) <= 900.0;
-    // the window's own height holds six chips of a longer table: whole rows only, never a partial one
-    assert foot_chips(ft, H_PT, EDITOR_COUNT) == 6;
+    // Paging leaves room for every editor chip at the normal window height.
+    assert foot_chips(ft, H_PT, EDITOR_COUNT) == EDITOR_COUNT;
 }
 
 /// Test helper: how many sampled points of the terminal's rectangle (every 12 pt) a window control answers at.

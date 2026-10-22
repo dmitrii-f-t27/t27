@@ -490,7 +490,7 @@ pub fn qd_light_word(l : u32) -> str {
 pub fn qd_popcount9(m : u32) -> u32 {
     var c : u32 = 0;
     var i : u32 = 0;
-    while (i < 9) {
+    while (i < 10) {
         if ((m >> i) % 2 == 1) { c = c + 1; }
         i = i + 1;
     }
@@ -498,7 +498,7 @@ pub fn qd_popcount9(m : u32) -> u32 {
 }
 pub fn qd_keys_line1(out : []u8, mask : u32) -> usize {
     var w : usize = put_dec(out, 0, qd_popcount9(mask) as u64);
-    return put_bytes(out, w, " of 9 providers hold keys");
+    return put_bytes(out, w, " of 10 providers hold keys");
 }
 pub fn qd_keys_line2(out : []u8, light : u32) -> usize {
     var w : usize = put_bytes(out, 0, "worst light ");
@@ -708,7 +708,7 @@ test the_plan_the_hive_and_the_tile_texts_are_read_from_their_files {
     assert(qd_q_eq(t[0..96], qd_no_feed(t[0..96]), "no feed"));
     assert(qd_q_eq(t[0..96], qd_board_line1(t[0..96], 4, 2, 1), "running 4  idle 2  blocked 1"));
     assert(qd_q_eq(t[0..96], qd_board_line2(t[0..96], 3, 9), "review 3  backlog 9"));
-    assert(qd_q_eq(t[0..96], qd_keys_line1(t[0..96], 7), "3 of 9 providers hold keys"));
+    assert(qd_q_eq(t[0..96], qd_keys_line1(t[0..96], 7), "3 of 10 providers hold keys"));
     assert(qd_q_eq(t[0..96], qd_keys_line2(t[0..96], 3), "worst light red"));
     assert(qd_q_eq(t[0..96], qd_machine_line1(t[0..96], 67, 56), "cpu 67  ram 56"));
     assert(qd_q_eq(t[0..96], qd_machine_line1(t[0..96], QD_NOT_READ, QD_NOT_READ), "no heartbeat"));

@@ -1,0 +1,3300 @@
+// SPDX-License-Identifier: Apache-2.0
+// specs/t27os/api_manage.t27 -- API management for the providers the owner connected (NVIDIA and Z.ai Coding Plan):
+// one path provider -> model -> active key -> check -> open chat, and a truthful health model. dmitrii-f-t27/t27#6.
+// Owner, 2026-10-21: choose the model I need, show whether all APIs work, and make API management understandable.
+//
+// WHAT THIS SPEC DECIDES (pure, every rule tested; the window draws and the host spawns, reads and sends):
+//   - managed providers (NVIDIA = provider 9, Z.ai Coding Plan = provider 4), their exact launcher routes and the
+//     catalog rows they own (provider_catalog.t27);
+//   - an exact custom API model ID: allowed bytes, length, shape; refused input never replaces the previous choice;
+//   - the binding token a chat is pinned with: "n1:SS:<model id>" / "z1:SS:<model id>" (SS = key number 01..64).
+//     It fits the session model field (session_store MODEL_MAX 60). A binding whose key slot changed is retired
+//     ("n0:" / "z0:") by the PTY server and never launches again until the person chooses a key: a deleted or
+//     replaced key is never silently swapped for another credential;
+//   - health of every SAVED key for the provider's CURRENT model: thirteen states, an identity (model generation,
+//     slot generation) per result, so a result of another model or of a key that changed is not current; counts
+//     that partition the stored keys (9 working of 11 reads "9/11 working, 2 not checked", never 9/9);
+//   - the HTTP + JSON verdict of one check: an HTTP 2xx is not enough, the body must be a complete chat completion
+//     with a choices[0].message; reasoning-only output is "accepted, no text", never "working";
+//   - the one-line result a check worker prints (never a key, never a body), its strict parser, the request body;
+//   - the controller: one request in flight, a request id that late or cancelled output cannot satisfy, "check
+//     all" one stored key at a time, a 429 pauses the provider (no next key, no other key), Stop sends no new one;
+//   - the persisted selection (model and key per provider) and the per-chat binding table that compacts exactly
+//     like provider_catalog pc_drop / pc_drop_space;
+//   - the panel layout and its hit tests, which adapt to the panel height (window minimum 320 points).
+// ASCII only (L3). No key, key suffix or response body ever passes through anything here except the masked text
+// keys.t27 mask_key makes.
+
+module T27osApiManage;
+
+use t27os::keys::MAX_KEYS;
+use t27os::keys::P_NVIDIA;
+use t27os::keys::P_ZAI;
+use t27os::keys::PR_NVIDIA;
+use t27os::keys::PR_ZAI;
+use t27os::keys::slot_taken;
+use t27os::keys::slot_add;
+use t27os::keys::slot_drop;
+use t27os::keys::slot_count;
+use t27os::provider_catalog::PC_COUNT;
+use t27os::provider_catalog::PC_NONE;
+use t27os::provider_catalog::PC_NVIDIA_COUNT;
+use t27os::provider_catalog::pc_model;
+use t27os::provider_catalog::pc_note;
+use t27os::provider_catalog::pc_note_short;
+use t27os::provider_catalog::PC_GLM53;
+use t27os::provider_catalog::pc_drop;
+use t27os::provider_catalog::pc_drop_space;
+use t27os::provider_catalog::pc_set;
+use t27os::provider_catalog::pc_get;
+use t27os::provider_catalog::pc_raw;
+use t27os::provider_catalog::pc_set_raw;
+use t27os::provider_catalog::PC_BOUND;
+use t27os::provider_catalog::pc_find;
+use t27os::provider_catalog::pc_provider;
+use t27os::provider_catalog::pc_profile;
+use t27os::provider_catalog::pc_reserved;
+use t27os::keys::oai_base_url;
+use t27os::session_store::put_bytes;
+use t27os::session_store::put_dec;
+use t27os::session_store::model_ok;
+use t27os::session_store::MODEL_MAX;
+use t27os::editors::same_bytes;
+use t27os::windows::session_space;
+use t27os::windows::add_session;
+
+// ---------------------------------------------------------------- 1. the managed providers
+
+pub const AM_NONE : u32 = 255;
+pub const AM_PROVIDERS : u32 = 2;
+pub const AM_NV : u32 = 0;
+pub const AM_ZA : u32 = 1;
+pub const AM_SLOTS : u32 = 64;
+
+/// The provider id (keys.t27 P_*) of managed provider m; AM_NONE for any other m.
+pub fn am_provider(m: u32) -> u32 {
+    if (m == AM_NV) { return P_NVIDIA; }
+    if (m == AM_ZA) { return P_ZAI; }
+    return AM_NONE;
+}
+
+/// The managed index of provider p; AM_NONE when p is not managed here (its keys stay in the old KEYS rows).
+pub fn am_index(p: u32) -> u32 {
+    if (p == P_NVIDIA) { return AM_NV; }
+    if (p == P_ZAI) { return AM_ZA; }
+    return AM_NONE;
+}
+
+/// The claude-chain profile (keys.t27 PR_*) whose OpenAI-compatible route a pinned OpenCode chat uses.
+pub fn am_profile(m: u32) -> u32 {
+    if (m == AM_NV) { return PR_NVIDIA; }
+    if (m == AM_ZA) { return PR_ZAI; }
+    return AM_NONE;
+}
+
+pub fn am_name(m: u32) -> str {
+    if (m == AM_NV) { return "NVIDIA"; }
+    if (m == AM_ZA) { return "Z.ai Coding Plan"; }
+    return "";
+}
+
+/// The exact chat-completions endpoint a pinned chat of provider m uses and a check must use. Z.ai is the Coding
+/// Plan route only (the Standard /api/paas/v4 route bills differently and is never used here).
+pub fn am_route(m: u32) -> str {
+    if (m == AM_NV) { return "https://integrate.api.nvidia.com/v1/chat/completions"; }
+    if (m == AM_ZA) { return "https://api.z.ai/api/coding/paas/v4/chat/completions"; }
+    return "";
+}
+
+/// The first catalog row of provider m and how many it owns.
+pub fn am_catalog_first(m: u32) -> u32 {
+    if (m == AM_ZA) { return PC_NVIDIA_COUNT; }
+    return 0;
+}
+
+pub fn am_catalog_count(m: u32) -> u32 {
+    if (m == AM_NV) { return PC_NVIDIA_COUNT; }
+    if (m == AM_ZA) { return PC_COUNT - PC_NVIDIA_COUNT; }
+    return 0;
+}
+
+/// The catalog row whose model id is exactly `id` and which belongs to provider m; PC_NONE for a custom id.
+pub fn am_catalog_of(m: u32, id: []const u8) -> u32 {
+    var i : u32 = am_catalog_first(m);
+    const end : u32 = i + am_catalog_count(m);
+    while (i < end) {
+        if (same_bytes(id, pc_model(i))) { return i; }
+        i = i + 1;
+    }
+    return PC_NONE;
+}
+
+/// The dated warning of the model id `id` of provider m (provider_catalog pc_note: ordinary GLM-5.3 on NVIDIA is
+/// deprecated 2026-10-27 and unsupported after 2026-10-28); "" for a model without one. The same exact id typed as
+/// a custom id carries it too: the warning belongs to the model, not to how it was chosen.
+pub fn am_model_note(m: u32, id: []const u8) -> str {
+    const row : u32 = am_catalog_of(m, id);
+    if (row == PC_NONE) { return ""; }
+    return pc_note(row);
+}
+
+/// The part of that warning that must stay visible in a narrow place (pc_note_short).
+pub fn am_model_note_short(m: u32, id: []const u8) -> str {
+    const row : u32 = am_catalog_of(m, id);
+    if (row == PC_NONE) { return ""; }
+    return pc_note_short(row);
+}
+
+// ---------------------------------------------------------------- 2. exact custom model IDs
+
+/// The longest model id: a binding token "n1:SS:" + id must fit session_store MODEL_MAX (60).
+pub const AM_MODEL_MAX : usize = 54;
+/// The input field holds more than AM_MODEL_MAX, so an overlong paste is shown and refused, never cut.
+pub const AM_INPUT_CAP : usize = 96;
+
+pub const AM_ID_OK : u32 = 0;
+pub const AM_ID_EMPTY : u32 = 1;
+pub const AM_ID_LONG : u32 = 2;
+pub const AM_ID_CHAR : u32 = 3;
+pub const AM_ID_SHAPE : u32 = 4;
+
+fn am_alnum(c: u8) -> bool {
+    return (c >= 48 and c <= 57) or (c >= 65 and c <= 90) or (c >= 97 and c <= 122);
+}
+
+/// A byte a model id may hold: letters, digits and - . _ / : (NVIDIA "vendor/name", Z.ai "glm-4.7-flash").
+pub fn am_id_char_ok(c: u8) -> bool {
+    return am_alnum(c) or c == 45 or c == 46 or c == 95 or c == 47 or c == 58;
+}
+
+/// Is `id` a model id the launcher and a check may use? AM_ID_OK, or why not. Nothing is ever shortened.
+pub fn am_model_id_check(id: []const u8) -> u32 {
+    if (id.len == 0) { return AM_ID_EMPTY; }
+    if (id.len > AM_MODEL_MAX) { return AM_ID_LONG; }
+    var i : usize = 0;
+    while (i < id.len) {
+        if (am_id_char_ok(id[i]) == false) { return AM_ID_CHAR; }
+        i = i + 1;
+    }
+    if (am_alnum(id[0]) == false) { return AM_ID_SHAPE; }
+    const last : u8 = id[id.len - 1];
+    if (last == 47 or last == 58 or last == 46) { return AM_ID_SHAPE; }
+    var j : usize = 1;
+    while (j < id.len) {
+        if (id[j] == 46 and id[j - 1] == 46) { return AM_ID_SHAPE; }
+        if (id[j] == 47 and id[j - 1] == 47) { return AM_ID_SHAPE; }
+        j = j + 1;
+    }
+    return AM_ID_OK;
+}
+
+pub fn am_id_error_text(code: u32) -> str {
+    if (code == AM_ID_EMPTY) { return "Type the exact API model ID."; }
+    if (code == AM_ID_LONG) { return "Model ID is longer than 54 characters."; }
+    if (code == AM_ID_CHAR) { return "Use only letters, digits and - . _ / :"; }
+    if (code == AM_ID_SHAPE) { return "Start with a letter or digit; no .. or //."; }
+    return "";
+}
+
+// ---------------------------------------------------------------- 3. binding tokens
+
+/// Two decimal digits of n (0..99) at `at`.
+fn am_put2(out: []u8, at: usize, n: u32) -> usize {
+    out[at] = @as(u8, @intCast(48 + n / 10 % 10));
+    out[at + 1] = @as(u8, @intCast(48 + n % 10));
+    return at + 2;
+}
+
+/// The binding token of a chat of managed provider m on key slot `slot` (0-based) and model `id`; 0 when any part
+/// is invalid or out is too small. "n1:07:meta/muse-glimmer-30b" names key 7 of NVIDIA.
+pub fn am_bind_token(m: u32, slot: u32, id: []const u8, out: []u8) -> usize {
+    if (m >= AM_PROVIDERS or slot >= AM_SLOTS or am_model_id_check(id) != AM_ID_OK) { return 0; }
+    if (out.len < 6 + id.len) { return 0; }
+    out[0] = 110;
+    if (m == AM_ZA) { out[0] = 122; }
+    out[1] = 49;
+    out[2] = 58;
+    var n : usize = am_put2(out, 3, slot + 1);
+    out[n] = 58;
+    n = put_bytes(out, n + 1, id);
+    return n;
+}
+
+/// The byte layout every binding shares: [n|z][0|1]:[digit][digit]:<id>. f[0] = managed index, f[1] = slot,
+/// f[2] = start of the id, f[3] = its length, f[4] = 1 live / 0 retired. False when the shape or the id is wrong.
+fn am_bind_fields(t: []const u8, f: []u64) -> bool {
+    if (t.len < 7 or t.len > MODEL_MAX or f.len < 5) { return false; }
+    var m : u32 = AM_NONE;
+    if (t[0] == 110) { m = AM_NV; }
+    if (t[0] == 122) { m = AM_ZA; }
+    if (m == AM_NONE or (t[1] != 48 and t[1] != 49) or t[2] != 58 or t[5] != 58) { return false; }
+    if (t[3] < 48 or t[3] > 57 or t[4] < 48 or t[4] > 57) { return false; }
+    const n : u32 = @as(u32, t[3] - 48) * 10 + @as(u32, t[4] - 48);
+    if (n < 1 or n > AM_SLOTS) { return false; }
+    if (am_model_id_check(t[6..t.len]) != AM_ID_OK) { return false; }
+    f[0] = @as(u64, m);
+    f[1] = @as(u64, n - 1);
+    f[2] = 6;
+    f[3] = @as(u64, t.len - 6);
+    f[4] = @as(u64, t[1] - 48);
+    return true;
+}
+
+/// A live binding: f[0] managed index, f[1] slot, f[2] id start, f[3] id length. A retired one is not live.
+pub fn am_bind_parse(t: []const u8, f: []u64) -> bool {
+    var g : [5]u64 = [0, 0, 0, 0, 0];
+    if (am_bind_fields(t, g[0..5]) == false or g[4] != 1 or f.len < 4) { return false; }
+    f[0] = g[0];
+    f[1] = g[1];
+    f[2] = g[2];
+    f[3] = g[3];
+    return true;
+}
+
+/// A binding whose key slot changed after it was made: it never launches again until a key is chosen.
+pub fn am_bind_retired(t: []const u8) -> bool {
+    var g : [5]u64 = [0, 0, 0, 0, 0];
+    return am_bind_fields(t, g[0..5]) and g[4] == 0;
+}
+
+/// Does the token use a binding prefix (live or retired, valid or not)? Such a token is never a free-text model:
+/// a hook cannot replace it and an invalid one never launches.
+pub fn am_bind_reserved(t: []const u8) -> bool {
+    return t.len >= 3 and t[2] == 58 and (t[0] == 110 or t[0] == 122) and (t[1] == 48 or t[1] == 49);
+}
+
+/// Retire a live binding in place ("n1:" -> "n0:"); false when it is not a live binding.
+pub fn am_bind_retire(t: []u8) -> bool {
+    var f : [4]u64 = [0, 0, 0, 0];
+    if (am_bind_parse(t, f[0..4]) == false) { return false; }
+    t[1] = 48;
+    return true;
+}
+
+/// Is `t` a live binding to key slot `slot` of provider id p?
+pub fn am_bind_matches(t: []const u8, p: u32, slot: u32) -> bool {
+    var f : [4]u64 = [0, 0, 0, 0];
+    if (am_bind_parse(t, f[0..4]) == false) { return false; }
+    return am_provider(@as(u32, @intCast(f[0]))) == p and f[1] == @as(u64, slot);
+}
+
+/// Is `t` a launchable pin of OpenCode: a live binding (the catalog pins are provider_catalog pc_find's)?
+pub fn am_bind_ok(t: []const u8) -> bool {
+    var f : [4]u64 = [0, 0, 0, 0];
+    return am_bind_parse(t, f[0..4]);
+}
+
+/// The OpenCode pin a session model token names, read the same way by the PTY server, the window and the tests:
+/// f[0] provider id (keys P_*), f[1] profile (keys PR_*), f[2] the bound key slot (AM_NONE for a catalog pin, whose
+/// key the server's rotation picks), f[3] start and f[4] length of the exact API model id inside t. False for
+/// anything else: free text, a retired, malformed or reserved binding, an unknown catalog token.
+pub fn am_pin_of(t: []const u8, f: []u64) -> bool {
+    if (f.len < 5) { return false; }
+    const c : u32 = pc_find(t);
+    if (c < PC_COUNT) {
+        f[0] = @as(u64, pc_provider(c));
+        f[1] = @as(u64, pc_profile(c));
+        f[2] = @as(u64, AM_NONE);
+        f[3] = 3;
+        f[4] = @as(u64, t.len - 3);
+        return true;
+    }
+    var g : [4]u64 = [0, 0, 0, 0];
+    if (am_bind_parse(t, g[0..4]) == false) { return false; }
+    const m : u32 = @as(u32, @intCast(g[0]));
+    f[0] = @as(u64, am_provider(m));
+    f[1] = @as(u64, am_profile(m));
+    f[2] = g[1];
+    f[3] = g[2];
+    f[4] = g[3];
+    return true;
+}
+
+/// Is t a model token only an explicit choice may hold: a catalog token or any binding prefix, live or not? A
+/// hook or a transcript never writes or replaces such a token, and one that is not a live pin never launches.
+pub fn am_token_reserved(t: []const u8) -> bool {
+    return pc_reserved(t) or am_bind_reserved(t);
+}
+
+/// Do two model tokens name the same exact chat identity (provider, profile, key binding, model id)? Pane reuse
+/// takes only an exact match: the same model on another key is another chat.
+pub fn am_same_pin(a: []const u8, b: []const u8) -> bool {
+    var f : [5]u64 = [0, 0, 0, 0, 0];
+    if (am_pin_of(a, f[0..5]) == false) { return false; }
+    return same_bytes(a, b);
+}
+
+// ---------------------------------------------------------------- 4. health of saved keys for the current model
+
+pub const AM_S_NOT_CHECKED : u32 = 0;
+pub const AM_S_CHECKING : u32 = 1;
+pub const AM_S_WORKING : u32 = 2;
+pub const AM_S_ACCEPTED : u32 = 3;
+pub const AM_S_AUTH : u32 = 4;
+pub const AM_S_DENIED : u32 = 5;
+pub const AM_S_RATE : u32 = 6;
+pub const AM_S_SERVICE : u32 = 7;
+pub const AM_S_NETWORK : u32 = 8;
+pub const AM_S_INVALID : u32 = 9;
+pub const AM_S_CANCELLED : u32 = 10;
+pub const AM_S_KEYCHAIN : u32 = 11;
+pub const AM_S_NO_KEY : u32 = 12;
+pub const AM_S_COUNT : u32 = 13;
+
+/// The words every state reads as; a status is never shown by colour alone.
+pub fn am_state_text(s: u32) -> str {
+    if (s == AM_S_NOT_CHECKED) { return "Not checked"; }
+    if (s == AM_S_CHECKING) { return "Checking"; }
+    if (s == AM_S_WORKING) { return "Working"; }
+    if (s == AM_S_ACCEPTED) { return "Accepted, no text"; }
+    if (s == AM_S_AUTH) { return "Key rejected"; }
+    if (s == AM_S_DENIED) { return "Denied or model unavailable"; }
+    if (s == AM_S_RATE) { return "Rate limited or quota"; }
+    if (s == AM_S_SERVICE) { return "Service error"; }
+    if (s == AM_S_NETWORK) { return "Network or timeout"; }
+    if (s == AM_S_INVALID) { return "Invalid response"; }
+    if (s == AM_S_CANCELLED) { return "Cancelled"; }
+    if (s == AM_S_KEYCHAIN) { return "Keychain unreadable"; }
+    if (s == AM_S_NO_KEY) { return "No key in slot"; }
+    return "Unknown";
+}
+
+/// The short word of a state for a key row (the full words, am_state_text, show for the row under the pointer).
+pub fn am_state_short(s: u32) -> str {
+    if (s == AM_S_NOT_CHECKED) { return "Not checked"; }
+    if (s == AM_S_CHECKING) { return "Checking"; }
+    if (s == AM_S_WORKING) { return "Working"; }
+    if (s == AM_S_ACCEPTED) { return "No text"; }
+    if (s == AM_S_AUTH) { return "Rejected"; }
+    if (s == AM_S_DENIED) { return "Denied"; }
+    if (s == AM_S_RATE) { return "Rate limit"; }
+    if (s == AM_S_SERVICE) { return "Service"; }
+    if (s == AM_S_NETWORK) { return "Network"; }
+    if (s == AM_S_INVALID) { return "Invalid"; }
+    if (s == AM_S_CANCELLED) { return "Cancelled"; }
+    if (s == AM_S_KEYCHAIN) { return "Unreadable"; }
+    if (s == AM_S_NO_KEY) { return "No key"; }
+    return "Unknown";
+}
+
+/// "Key07": the stable label of key slot k (0-based), the same number the Keychain item and a binding carry.
+pub fn am_key_label(k: u32, out: []u8) -> usize {
+    const n : usize = put_bytes(out, 0, "Key");
+    return am_put2(out, n, k + 1);
+}
+
+/// The age of a verdict in a key row: "-" none this session, "now", "4m", "3h", "2d".
+pub fn am_ago_short(now_ms: u64, then_ms: u64, out: []u8) -> usize {
+    if (then_ms == 0 or then_ms > now_ms) { return put_bytes(out, 0, "-"); }
+    const s : u64 = (now_ms - then_ms) / 1000;
+    if (s < 60) { return put_bytes(out, 0, "now"); }
+    if (s < 3600) { return put_bytes(out, put_dec(out, 0, s / 60), "m"); }
+    if (s < 86400) { return put_bytes(out, put_dec(out, 0, s / 3600), "h"); }
+    return put_bytes(out, put_dec(out, 0, s / 86400), "d");
+}
+
+/// A result that says nothing yet: not checked, a check in flight, or one that was stopped.
+pub fn am_state_pending(s: u32) -> bool {
+    return s == AM_S_NOT_CHECKED or s == AM_S_CHECKING or s == AM_S_CANCELLED;
+}
+
+/// A result that says the key did not work on this model and endpoint.
+pub fn am_state_failed(s: u32) -> bool {
+    return s >= AM_S_AUTH and s <= AM_S_INVALID or s == AM_S_KEYCHAIN or s == AM_S_NO_KEY;
+}
+
+/// The identity a result belongs to: the provider's model generation and the slot's key generation. A result
+/// whose identity is not the slot's current one is not current (another model, or a key that changed).
+pub fn am_ident(mgen: u64, sgen: u64) -> u64 {
+    return (mgen % 4294967296) * 4294967296 + sgen % 4294967296;
+}
+
+/// The state a slot shows: its result when the result is of the current identity, else "not checked".
+pub fn am_shown(status: u64, ident: u64, cur: u64) -> u32 {
+    if (status >= @as(u64, AM_S_COUNT)) { return AM_S_NOT_CHECKED; }
+    if (ident != cur) { return AM_S_NOT_CHECKED; }
+    return @as(u32, @intCast(status));
+}
+
+/// Counts of provider m from its stored mask, the slots whose Keychain read failed (`unknown`) and the window
+/// words (w, layout in section 7). out[0] stored, out[1] working, out[2] pending (not checked, checking,
+/// cancelled, stale), out[3] failed, out[4] accepted with no text, out[5] checking, out[6] unreadable slots.
+/// out[1] + out[2] + out[3] + out[4] == out[0]: every stored key is in exactly one group.
+pub fn am_counts(w: []const u64, m: u32, out: []u32) -> void {
+    var i : usize = 0;
+    while (i < 7) {
+        out[i] = 0;
+        i = i + 1;
+    }
+    const stored : u64 = w[AM_W_STORED + @as(usize, m)];
+    const unknown : u64 = w[AM_W_UNKNOWN + @as(usize, m)];
+    out[6] = slot_count(unknown);
+    var k : u32 = 0;
+    while (k < AM_SLOTS) {
+        if (slot_taken(stored, k)) {
+            out[0] = out[0] + 1;
+            const s : u32 = am_slot_state(w, m, k);
+            if (s == AM_S_WORKING) {
+                out[1] = out[1] + 1;
+            } else if (s == AM_S_ACCEPTED) {
+                out[4] = out[4] + 1;
+            } else if (am_state_failed(s)) {
+                out[3] = out[3] + 1;
+            } else {
+                out[2] = out[2] + 1;
+                if (s == AM_S_CHECKING) { out[5] = out[5] + 1; }
+            }
+        }
+        k = k + 1;
+    }
+}
+
+/// All green: at least one key is stored, every stored key works on the current model, no slot is unreadable.
+pub fn am_all_green(c: []const u32) -> bool {
+    return c[0] > 0 and c[1] == c[0] and c[6] == 0;
+}
+
+/// "No key", "Keys unreadable", or "9/11 working" with ", 2 not checked", ", 1 failed", ", 1 no text".
+pub fn am_summary(c: []const u32, out: []u8) -> usize {
+    if (c[0] == 0 and c[6] > 0) { return put_bytes(out, 0, "Keychain unreadable"); }
+    if (c[0] == 0) { return put_bytes(out, 0, "No key"); }
+    var n : usize = put_dec(out, 0, @as(u64, c[1]));
+    n = put_bytes(out, n, "/");
+    n = put_dec(out, n, @as(u64, c[0]));
+    n = put_bytes(out, n, " working");
+    if (c[2] > 0) {
+        n = put_bytes(out, n, ", ");
+        n = put_dec(out, n, @as(u64, c[2]));
+        n = put_bytes(out, n, " not checked");
+    }
+    if (c[3] > 0) {
+        n = put_bytes(out, n, ", ");
+        n = put_dec(out, n, @as(u64, c[3]));
+        n = put_bytes(out, n, " failed");
+    }
+    if (c[4] > 0) {
+        n = put_bytes(out, n, ", ");
+        n = put_dec(out, n, @as(u64, c[4]));
+        n = put_bytes(out, n, " no text");
+    }
+    if (c[6] > 0) {
+        n = put_bytes(out, n, ", ");
+        n = put_dec(out, n, @as(u64, c[6]));
+        n = put_bytes(out, n, " unreadable");
+    }
+    return n;
+}
+
+/// "not checked this session", "checked just now", "checked 3 min ago", "checked 2 h ago".
+pub fn am_ago_text(now_ms: u64, then_ms: u64, out: []u8) -> usize {
+    if (then_ms == 0 or then_ms > now_ms) { return put_bytes(out, 0, "not checked this session"); }
+    const s : u64 = (now_ms - then_ms) / 1000;
+    if (s < 60) { return put_bytes(out, 0, "checked just now"); }
+    var n : usize = put_bytes(out, 0, "checked ");
+    if (s < 3600) {
+        n = put_dec(out, n, s / 60);
+        return put_bytes(out, n, " min ago");
+    }
+    n = put_dec(out, n, s / 3600);
+    return put_bytes(out, n, " h ago");
+}
+
+// ---------------------------------------------------------------- 5. the verdict of one check
+
+pub const AM_J_TEXT : u32 = 0;
+pub const AM_J_NO_TEXT : u32 = 1;
+pub const AM_J_ERROR : u32 = 2;
+pub const AM_J_BAD : u32 = 3;
+/// The most body bytes a check classifies; a longer body is no verdict (invalid response). This bounds what is
+/// copied and parsed, not what the network stack buffers: NSURLConnection hands the worker the whole body (see
+/// api_check_host.t27); the 1024-token answer budget and the worker's wall time are the bounds on that.
+pub const AM_BODY_MAX : usize = 65536;
+/// How deep a body may nest before it is refused.
+pub const AM_JSON_DEPTH : usize = 24;
+/// The longest member name the verdict decodes; a longer name is never one of the names it looks for.
+pub const AM_JKEY_CAP : usize = 16;
+
+fn am_ws(c: u8) -> bool {
+    return c == 32 or c == 9 or c == 10 or c == 13;
+}
+
+fn am_digit(c: u8) -> bool {
+    return c >= 48 and c <= 57;
+}
+
+/// The value of one hex digit, 16 when c is not one.
+fn am_hex(c: u8) -> u32 {
+    if (c >= 48 and c <= 57) { return @as(u32, c - 48); }
+    if (c >= 97 and c <= 102) { return @as(u32, c - 87); }
+    if (c >= 65 and c <= 70) { return @as(u32, c - 55); }
+    return 16;
+}
+
+/// The length of the well-formed UTF-8 sequence that starts at b[j] (a byte from 0x80); 0 when it is not one:
+/// a stray continuation byte, an overlong form, a UTF-16 surrogate, a code point above U+10FFFF, a cut sequence.
+fn am_utf8_len(b: []const u8, j: usize) -> usize {
+    const c : u8 = b[j];
+    var n : usize = 0;
+    if (c >= 194 and c <= 223) { n = 2; }
+    if (c >= 224 and c <= 239) { n = 3; }
+    if (c >= 240 and c <= 244) { n = 4; }
+    if (n == 0 or j + n > b.len) { return 0; }
+    var lo : u8 = 128;
+    var hi : u8 = 191;
+    if (c == 224) { lo = 160; }
+    if (c == 237) { hi = 159; }
+    if (c == 240) { lo = 144; }
+    if (c == 244) { hi = 143; }
+    if (b[j + 1] < lo or b[j + 1] > hi) { return 0; }
+    var k : usize = 2;
+    while (k < n) {
+        if (b[j + k] < 128 or b[j + k] > 191) { return 0; }
+        k = k + 1;
+    }
+    return n;
+}
+
+/// Scan the JSON string whose opening quote is at b[i] (RFC 8259 section 7): every escape is one of \" \\ \/ \b
+/// \f \n \r \t \uXXXX, no raw byte is below 0x20, every byte from 0x80 starts a well-formed UTF-8 sequence. A
+/// \uXXXX escape is checked for four hex digits only; an unpaired surrogate escape is legal JSON text and never
+/// part of a name looked for here. Returns the index after the closing quote, 0 when the string is not valid or
+/// not closed. key gets the decoded text while it is ASCII and fits: s[0] = its length, 255 when it is not such a
+/// name; s[1] = 1 when the string holds a character above U+0020 (text that is not only blanks or controls).
+fn am_jstr(b: []const u8, i: usize, key: []u8, s: []u32) -> usize {
+    s[0] = 0;
+    s[1] = 0;
+    var kn : u32 = 0;
+    var j : usize = i + 1;
+    while (j < b.len) {
+        const c : u8 = b[j];
+        if (c == 34) {
+            s[0] = kn;
+            return j + 1;
+        }
+        if (c < 32) { return 0; }
+        // v: the decoded character, 256 for any character outside ASCII
+        var v : u32 = 0;
+        if (c == 92) {
+            if (j + 1 >= b.len) { return 0; }
+            const e : u8 = b[j + 1];
+            if (e == 34 or e == 92 or e == 47) {
+                v = @as(u32, e);
+                j = j + 2;
+            } else if (e == 98) {
+                v = 8;
+                j = j + 2;
+            } else if (e == 102) {
+                v = 12;
+                j = j + 2;
+            } else if (e == 110) {
+                v = 10;
+                j = j + 2;
+            } else if (e == 114) {
+                v = 13;
+                j = j + 2;
+            } else if (e == 116) {
+                v = 9;
+                j = j + 2;
+            } else if (e == 117) {
+                if (j + 6 > b.len) { return 0; }
+                var h : u32 = 0;
+                var k : usize = 2;
+                while (k < 6) {
+                    const d : u32 = am_hex(b[j + k]);
+                    if (d > 15) { return 0; }
+                    h = h * 16 + d;
+                    k = k + 1;
+                }
+                v = h;
+                if (v > 127) { v = 256; }
+                j = j + 6;
+            } else {
+                return 0;
+            }
+        } else if (c >= 128) {
+            const n : usize = am_utf8_len(b, j);
+            if (n == 0) { return 0; }
+            v = 256;
+            j = j + n;
+        } else {
+            v = @as(u32, c);
+            j = j + 1;
+        }
+        if (v > 32) { s[1] = 1; }
+        if (kn != 255) {
+            if (v > 127 or @as(usize, kn) >= key.len) {
+                kn = 255;
+            } else {
+                key[@as(usize, kn)] = @as(u8, @intCast(v));
+                kn = kn + 1;
+            }
+        }
+    }
+    return 0;
+}
+
+/// Scan a JSON number at b[i]: -?(0|[1-9][0-9]*)(.[0-9]+)?([eE][+-]?[0-9]+)?. Returns the index after it, 0 when
+/// none starts there ("-", "1.", "1e", "+1", ".5" are not numbers; "01" ends after its 0, and the grammar then
+/// refuses the 1).
+fn am_jnum(b: []const u8, i: usize) -> usize {
+    var j : usize = i;
+    if (j < b.len and b[j] == 45) { j = j + 1; }
+    if (j >= b.len or am_digit(b[j]) == false) { return 0; }
+    if (b[j] == 48) {
+        j = j + 1;
+    } else {
+        while (j < b.len and am_digit(b[j])) { j = j + 1; }
+    }
+    if (j < b.len and b[j] == 46) {
+        j = j + 1;
+        if (j >= b.len or am_digit(b[j]) == false) { return 0; }
+        while (j < b.len and am_digit(b[j])) { j = j + 1; }
+    }
+    if (j < b.len and (b[j] == 101 or b[j] == 69)) {
+        j = j + 1;
+        if (j < b.len and (b[j] == 43 or b[j] == 45)) { j = j + 1; }
+        if (j >= b.len or am_digit(b[j]) == false) { return 0; }
+        while (j < b.len and am_digit(b[j])) { j = j + 1; }
+    }
+    return j;
+}
+
+/// Do the bytes at b[i] spell the literal w?
+fn am_jlit(b: []const u8, i: usize, w: []const u8) -> bool {
+    if (i + w.len > b.len) { return false; }
+    return same_bytes(b[i .. i + w.len], w);
+}
+
+// The places on the path the verdict reads. A container is the root object (1), the root's "choices" array (2),
+// the first element of that array when it is an object (3) or that element's "message" object (4); any other
+// container is 0. A member is the root's "error" (1) or "choices" (2), choices[0]'s "message" (4) or message's
+// "content" (5); any other member is 0. choices[0] (3) is the array's first element whatever its type.
+fn am_jmember(role: u32, key: []const u8) -> u32 {
+    if (role == 1 and same_bytes(key, "error")) { return 1; }
+    if (role == 1 and same_bytes(key, "choices")) { return 2; }
+    if (role == 3 and same_bytes(key, "message")) { return 4; }
+    if (role == 4 and same_bytes(key, "content")) { return 5; }
+    return 0;
+}
+
+/// What a response body is. The whole body is checked against the JSON grammar first-to-last (RFC 8259: objects,
+/// arrays, strings with valid escapes and UTF-8, numbers, the three literals, white space; nothing after the root;
+/// at most AM_JSON_DEPTH deep and AM_BODY_MAX long) while one pass follows the path; nothing is kept.
+///   AM_J_ERROR   valid JSON whose root object has an "error" member that is not null;
+///   AM_J_TEXT    otherwise a root object whose "choices" is an array, whose FIRST element is an object with a
+///                "message" object whose "content" is a string holding a character other than blanks/controls;
+///   AM_J_NO_TEXT the same with "content" null, empty, only blanks, or absent (a model that only reasoned, or
+///                answered with tool calls);
+///   AM_J_BAD     anything else: invalid JSON anywhere (missing comma or colon, trailing comma, unknown literal,
+///                bad number, bad escape, raw control byte, bad UTF-8, extra data), a root that is not an object,
+///                no choices[0].message object, a "content" that is an object, array, number or boolean, or the
+///                same structural member twice in one object ("choices", "error", "message", "content"; an
+///                escaped spelling of the name is the same name).
+pub fn am_json_classify(b: []const u8) -> u32 {
+    if (b.len == 0 or b.len > AM_BODY_MAX) { return AM_J_BAD; }
+    // one level a container: lk 1 object / 2 array; ls 0 just opened, 1 after a comma, 2 wants a colon,
+    // 3 wants a member value, 4 after a value; lr its role; lm the member whose value comes next; lseen the
+    // structural members it already holds; ln the elements an array has had
+    var lk : [24]u8 = undefined;
+    var ls : [24]u8 = undefined;
+    var lr : [24]u8 = undefined;
+    var lm : [24]u8 = undefined;
+    var lseen : [24]u8 = undefined;
+    var ln : [24]u32 = undefined;
+    var z : usize = 0;
+    while (z < AM_JSON_DEPTH) {
+        lk[z] = 0;
+        ls[z] = 0;
+        lr[z] = 0;
+        lm[z] = 0;
+        lseen[z] = 0;
+        ln[z] = 0;
+        z = z + 1;
+    }
+    var key : [16]u8 = undefined;
+    var s : [2]u32 = [0, 0];
+    var saw_error : bool = false;
+    var saw_message : bool = false;
+    var shape_bad : bool = false;
+    // content: 0 absent, 1 null/empty/blank, 2 text, 3 not a string
+    var content : u32 = 0;
+    var i : usize = 0;
+    while (i < b.len and am_ws(b[i])) { i = i + 1; }
+    if (i >= b.len or b[i] != 123) { return AM_J_BAD; }
+    lk[0] = 1;
+    lr[0] = 1;
+    var depth : usize = 1;
+    i = i + 1;
+    while (depth > 0) {
+        while (i < b.len and am_ws(b[i])) { i = i + 1; }
+        if (i >= b.len) { return AM_J_BAD; }
+        const c : u8 = b[i];
+        const d : usize = depth - 1;
+        // vrole: the member role of a value that starts at b[i]; 99 when no value starts here
+        var vrole : u32 = 99;
+        if (lk[d] == 1) {
+            if (ls[d] == 0 and c == 125) {
+                depth = depth - 1;
+                i = i + 1;
+            } else if (ls[d] == 0 or ls[d] == 1) {
+                if (c != 34) { return AM_J_BAD; }
+                const e : usize = am_jstr(b, i, key[0..16], s[0..2]);
+                if (e == 0) { return AM_J_BAD; }
+                var mr : u32 = 0;
+                if (s[0] != 255) { mr = am_jmember(@as(u32, lr[d]), key[0 .. @as(usize, s[0])]); }
+                if (mr != 0) {
+                    var bit : u8 = 1;
+                    if (mr == 2) { bit = 2; }
+                    if (lseen[d] / bit % 2 == 1) { return AM_J_BAD; }
+                    lseen[d] = lseen[d] + bit;
+                }
+                lm[d] = @as(u8, @intCast(mr));
+                ls[d] = 2;
+                i = e;
+            } else if (ls[d] == 2) {
+                if (c != 58) { return AM_J_BAD; }
+                ls[d] = 3;
+                i = i + 1;
+            } else if (ls[d] == 3) {
+                vrole = @as(u32, lm[d]);
+                ls[d] = 4;
+            } else if (c == 44) {
+                ls[d] = 1;
+                i = i + 1;
+            } else if (c == 125) {
+                depth = depth - 1;
+                i = i + 1;
+            } else {
+                return AM_J_BAD;
+            }
+        } else {
+            if (ls[d] == 0 and c == 93) {
+                depth = depth - 1;
+                i = i + 1;
+            } else if (ls[d] == 0 or ls[d] == 1) {
+                vrole = 0;
+                if (lr[d] == 2 and ln[d] == 0) { vrole = 3; }
+                ln[d] = ln[d] + 1;
+                ls[d] = 4;
+            } else if (c == 44) {
+                ls[d] = 1;
+                i = i + 1;
+            } else if (c == 93) {
+                depth = depth - 1;
+                i = i + 1;
+            } else {
+                return AM_J_BAD;
+            }
+        }
+        if (vrole != 99) {
+            // one value; what it means depends on the member it is the value of
+            if (vrole == 1 and am_jlit(b, i, "null") == false) { saw_error = true; }
+            if (vrole == 2 and c != 91) { shape_bad = true; }
+            if (c == 123 or c == 91) {
+                if (depth >= AM_JSON_DEPTH) { return AM_J_BAD; }
+                var role : u8 = 0;
+                if (c == 91 and vrole == 2) { role = 2; }
+                if (c == 123 and vrole == 3) { role = 3; }
+                if (c == 123 and vrole == 4) {
+                    role = 4;
+                    saw_message = true;
+                }
+                if (vrole == 5) { content = 3; }
+                lk[depth] = 1;
+                if (c == 91) { lk[depth] = 2; }
+                ls[depth] = 0;
+                lr[depth] = role;
+                lm[depth] = 0;
+                lseen[depth] = 0;
+                ln[depth] = 0;
+                depth = depth + 1;
+                i = i + 1;
+            } else if (c == 34) {
+                const e : usize = am_jstr(b, i, key[0..16], s[0..2]);
+                if (e == 0) { return AM_J_BAD; }
+                if (vrole == 5) {
+                    content = 1;
+                    if (s[1] == 1) { content = 2; }
+                }
+                i = e;
+            } else if (am_jlit(b, i, "true")) {
+                if (vrole == 5) { content = 3; }
+                i = i + 4;
+            } else if (am_jlit(b, i, "false")) {
+                if (vrole == 5) { content = 3; }
+                i = i + 5;
+            } else if (am_jlit(b, i, "null")) {
+                if (vrole == 5) { content = 1; }
+                i = i + 4;
+            } else {
+                const e : usize = am_jnum(b, i);
+                if (e == 0) { return AM_J_BAD; }
+                if (vrole == 5) { content = 3; }
+                i = e;
+            }
+        }
+    }
+    while (i < b.len and am_ws(b[i])) { i = i + 1; }
+    if (i != b.len) { return AM_J_BAD; }
+    if (saw_error) { return AM_J_ERROR; }
+    if (shape_bad or saw_message == false or content == 3) { return AM_J_BAD; }
+    if (content == 2) { return AM_J_TEXT; }
+    return AM_J_NO_TEXT;
+}
+
+/// The state of one check from its HTTP status (0 = no answer: network error or timeout) and its body verdict.
+/// A 403 is "denied or model unavailable", never claimed to be a bad key; only a 401 is "key rejected".
+pub fn am_classify(http: u32, j: u32) -> u32 {
+    if (http == 0) { return AM_S_NETWORK; }
+    if (http >= 200 and http < 300) {
+        if (j == AM_J_TEXT) { return AM_S_WORKING; }
+        if (j == AM_J_NO_TEXT) { return AM_S_ACCEPTED; }
+        if (j == AM_J_ERROR) { return AM_S_SERVICE; }
+        return AM_S_INVALID;
+    }
+    if (http == 401) { return AM_S_AUTH; }
+    if (http == 400 or http == 403 or http == 404 or http == 422) { return AM_S_DENIED; }
+    if (http == 429) { return AM_S_RATE; }
+    if (http == 408) { return AM_S_NETWORK; }
+    return AM_S_SERVICE;
+}
+
+/// Seconds a Retry-After header asks for (digits only, at most one day); 0 when there is none or it is not digits.
+pub fn am_retry_after(t: []const u8) -> u64 {
+    if (t.len == 0 or t.len > 6) { return 0; }
+    var v : u64 = 0;
+    var i : usize = 0;
+    while (i < t.len) {
+        if (t[i] < 48 or t[i] > 57) { return 0; }
+        v = v * 10 + @as(u64, t[i] - 48);
+        i = i + 1;
+    }
+    if (v > 86400) { return 86400; }
+    return v;
+}
+
+/// How long a provider pauses after a 429 that named no Retry-After.
+pub const AM_RATE_PAUSE_S : u64 = 60;
+/// The Retry-After value a worker reports when the header names a time it cannot read (or more than a day): the
+/// provider stays paused until the person resumes it, never for a guessed shorter time.
+pub const AM_RETRY_MANUAL : u64 = 86401;
+/// The pause word of a provider held until the person resumes it.
+pub const AM_PAUSE_HOLD : u64 = 4611686018427387904;
+
+/// The answer budget of one check. The catalog's reasoning models (GLM-4.7-Flash, Nemotron 3.5 Super and others)
+/// count reasoning tokens against max_tokens, so a small budget (64) can end a working key's answer before any
+/// final text and read "accepted, no text". 1024 leaves room for a short reasoning pass and the one-word answer;
+/// a model that stops early uses less, the body stays far below AM_BODY_MAX, and the bound is explicit. Whether
+/// it suffices for each reasoning model is a live acceptance item: an answer that is still reasoning-only stays
+/// "accepted, no text", never "working", and is never retried automatically.
+pub const AM_CHECK_MAX_TOKENS : u64 = 1024;
+
+/// The request body of a check: the exact model, one harmless prompt, a bounded answer, no stream, no other
+/// parameter (nothing model-specific). The id is checked first, so it holds no quote or backslash; 0 when it is
+/// not a valid id or out is too small.
+pub fn am_check_body(id: []const u8, out: []u8) -> usize {
+    if (am_model_id_check(id) != AM_ID_OK or out.len < 200) { return 0; }
+    var n : usize = put_bytes(out, 0, "{\"model\":\"");
+    n = put_bytes(out, n, id);
+    n = put_bytes(out, n, "\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with the single word OK.\"}],\"max_tokens\":");
+    n = put_dec(out, n, AM_CHECK_MAX_TOKENS);
+    return put_bytes(out, n, ",\"stream\":false}");
+}
+
+/// A check waits this long for an answer (a reasoning model may take a while). The window never signals a worker:
+/// the worker ends itself at AM_WORKER_WALL_S (alarm(3) with SIGALRM's default action, set in the worker), and
+/// the window stops waiting for its answer at AM_WORKER_WAIT_MS ("network or timeout": inconclusive, never a
+/// verdict) but keeps the worker's pid, and starts no other worker, until a wait confirms it ended.
+pub const AM_CHECK_TIMEOUT_S : u32 = 60;
+pub const AM_WORKER_WALL_S : u32 = 70;
+pub const AM_WORKER_WAIT_MS : u64 = 75000;
+
+// ---------------------------------------------------------------- 6. the worker's one-line result
+
+/// The window starts its own executable with this first argument to run one check (glass_window main).
+pub const AM_WORKER_FLAG : str = "--t27os-api-check";
+pub const AM_WLINE_MAX : usize = 96;
+
+/// "T27AC1 <request> <provider> <slot> <state> <http> <retry-after>\n": numbers only, never a key or a body.
+pub fn am_wline(req: u64, p: u32, slot: u32, state: u32, http: u32, retry: u64, out: []u8) -> usize {
+    if (out.len < AM_WLINE_MAX) { return 0; }
+    var n : usize = put_bytes(out, 0, "T27AC1 ");
+    n = put_dec(out, n, req);
+    n = put_bytes(out, n, " ");
+    n = put_dec(out, n, @as(u64, p));
+    n = put_bytes(out, n, " ");
+    n = put_dec(out, n, @as(u64, slot));
+    n = put_bytes(out, n, " ");
+    n = put_dec(out, n, @as(u64, state));
+    n = put_bytes(out, n, " ");
+    n = put_dec(out, n, @as(u64, http));
+    n = put_bytes(out, n, " ");
+    n = put_dec(out, n, retry);
+    return put_bytes(out, n, "\n");
+}
+
+/// Parse a worker line strictly: the prefix, exactly six decimal fields separated by one space, one newline at
+/// the end, nothing else, every field in range. f[0] request, f[1] provider, f[2] slot, f[3] state, f[4] http,
+/// f[5] retry. A partial, oversized or malformed line is false: it never counts as a success.
+pub fn am_wline_parse(b: []const u8, f: []u64) -> bool {
+    if (b.len < 8 or b.len > AM_WLINE_MAX or f.len < 6) { return false; }
+    if (same_bytes(b[0..7], "T27AC1 ") == false or b[b.len - 1] != 10) { return false; }
+    var i : usize = 7;
+    var k : usize = 0;
+    while (k < 6) {
+        var v : u64 = 0;
+        var digits : u32 = 0;
+        while (i < b.len - 1 and b[i] >= 48 and b[i] <= 57) {
+            if (digits >= 15) { return false; }
+            v = v * 10 + @as(u64, b[i] - 48);
+            digits = digits + 1;
+            i = i + 1;
+        }
+        if (digits == 0) { return false; }
+        f[k] = v;
+        k = k + 1;
+        if (k < 6) {
+            if (i >= b.len - 1 or b[i] != 32) { return false; }
+            i = i + 1;
+        }
+    }
+    if (i != b.len - 1) { return false; }
+    if (am_index(@as(u32, @intCast(f[1] % 256))) == AM_NONE or f[1] > 255) { return false; }
+    if (f[2] >= @as(u64, AM_SLOTS) or f[3] >= @as(u64, AM_S_COUNT) or f[4] > 999 or f[5] > AM_RETRY_MANUAL) { return false; }
+    return true;
+}
+
+// ---------------------------------------------------------------- 7. the window's state and the controller
+
+pub const AM_M_CLOSED : u32 = 0;
+pub const AM_M_OVERVIEW : u32 = 1;
+pub const AM_M_DETAIL : u32 = 2;
+pub const AM_M_MODELS : u32 = 3;
+pub const AM_M_CUSTOM : u32 = 4;
+pub const AM_M_ADD : u32 = 5;
+
+pub const AM_W_MODE : usize = 0;
+pub const AM_W_PROV : usize = 1;
+pub const AM_W_PAGE : usize = 2;
+pub const AM_W_MPAGE : usize = 3;
+pub const AM_W_ARM : usize = 4;
+pub const AM_W_MSG : usize = 5;
+pub const AM_W_GEN : usize = 6;
+pub const AM_W_SEL : usize = 8;
+pub const AM_W_MGEN : usize = 10;
+pub const AM_W_STORED : usize = 12;
+pub const AM_W_UNKNOWN : usize = 14;
+pub const AM_W_LOADED : usize = 16;
+pub const AM_W_SCAN_M : usize = 18;
+pub const AM_W_SCAN_NEXT : usize = 19;
+pub const AM_W_PID : usize = 20;
+pub const AM_W_FD : usize = 21;
+pub const AM_W_REQ : usize = 22;
+pub const AM_W_REQ_M : usize = 23;
+pub const AM_W_REQ_SLOT : usize = 24;
+pub const AM_W_REQ_IDENT : usize = 25;
+pub const AM_W_REQ_START : usize = 26;
+pub const AM_W_SEQ : usize = 27;
+pub const AM_W_BUFLEN : usize = 28;
+pub const AM_W_REAP : usize = 29;
+pub const AM_W_BATCH : usize = 30;
+pub const AM_W_BNEXT : usize = 31;
+pub const AM_W_BDONE : usize = 32;
+pub const AM_W_BTOTAL : usize = 33;
+pub const AM_W_PAUSE : usize = 34;
+pub const AM_W_BSTOP : usize = 36;
+/// Frames the window has tried to reap a finished or killed worker, and whether its output reached end of file
+/// (the worker exited: it is never signalled after that).
+pub const AM_W_REAPN : usize = 37;
+pub const AM_W_EOF : usize = 38;
+/// Whose a message (MSG), a batch end (BSTOP) and a worker still finishing (REAP) are: each shows only in that
+/// provider's view, so a stopped NVIDIA check never describes Z.ai (live QA 2026-10-21).
+pub const AM_W_MSG_M : usize = 39;
+pub const AM_W_BSTOP_M : usize = 40;
+pub const AM_W_REAP_M : usize = 41;
+/// 1 while the whole custom model id is selected: the next character, Backspace or paste replaces all of it.
+pub const AM_W_INSEL : usize = 42;
+pub const AM_W_LAST : usize = 43;
+pub const AM_W_SGEN : usize = 64;
+pub const AM_W_STATUS : usize = 192;
+pub const AM_W_TIME : usize = 320;
+pub const AM_W_IDENT : usize = 448;
+pub const AM_W_HTTP : usize = 576;
+pub const AM_WORDS : usize = 704;
+
+pub const AM_B_MODEL : usize = 0;
+pub const AM_B_INPUT : usize = 128;
+pub const AM_B_WBUF : usize = 240;
+pub const AM_B_MASK : usize = 368;
+pub const AM_MASK_CAP : usize = 16;
+pub const AM_B_BIND : usize = 2416;
+pub const AM_BIND_CAP : usize = 64;
+pub const AM_SESSIONS : u32 = 7;
+pub const AM_BYTES : usize = 2864;
+
+/// Messages the panel shows on its status line (am_msg_text).
+pub const AM_MSG_NONE : u32 = 0;
+pub const AM_MSG_NO_KEY : u32 = 1;
+pub const AM_MSG_KEY_MISSING : u32 = 2;
+pub const AM_MSG_BUSY : u32 = 3;
+pub const AM_MSG_PAUSED : u32 = 4;
+pub const AM_MSG_RATE_STOP : u32 = 5;
+pub const AM_MSG_STOPPED : u32 = 6;
+pub const AM_MSG_DONE : u32 = 7;
+pub const AM_MSG_SAVED : u32 = 8;
+pub const AM_MSG_NO_SERVER : u32 = 9;
+pub const AM_MSG_SPAWN : u32 = 10;
+pub const AM_MSG_DELETED : u32 = 11;
+pub const AM_MSG_CHAT_FULL : u32 = 12;
+pub const AM_MSG_SCANNING : u32 = 13;
+pub const AM_MSG_KEY_ADDED : u32 = 14;
+pub const AM_MSG_HOLD : u32 = 15;
+pub const AM_MSG_RESUMED : u32 = 16;
+pub const AM_MSG_CHAT_GONE : u32 = 17;
+pub const AM_MSG_SELECTED : u32 = 18;
+pub const AM_MSG_KC_FAIL : u32 = 19;
+pub const AM_MSG_PASTE : u32 = 20;
+pub const AM_MSG_STOPPING : u32 = 21;
+pub const AM_MSG_WAIT : u32 = 22;
+pub const AM_MSG_OTHER : u32 = 23;
+pub const AM_MSG_ID_BASE : u32 = 32;
+
+pub fn am_msg_text(code: u32) -> str {
+    if (code == AM_MSG_NO_KEY) { return "No key stored. Add a key first."; }
+    if (code == AM_MSG_KEY_MISSING) { return "The selected key is not stored. Choose a key."; }
+    if (code == AM_MSG_BUSY) { return "A check is running. Stop it first."; }
+    if (code == AM_MSG_PAUSED) { return "Rate limited: wait before checking again."; }
+    if (code == AM_MSG_RATE_STOP) { return "Stopped at a rate limit; the rest stay not checked."; }
+    if (code == AM_MSG_STOPPED) { return "Stopped; unchecked keys stay not checked."; }
+    if (code == AM_MSG_DONE) { return "Check finished."; }
+    if (code == AM_MSG_SAVED) { return "Saved. New chats use this choice."; }
+    if (code == AM_MSG_NO_SERVER) { return "Session server not connected. Try again."; }
+    if (code == AM_MSG_SPAWN) { return "Could not start the check."; }
+    if (code == AM_MSG_DELETED) { return "Key deleted. Its chats will not relaunch; running ones keep it."; }
+    if (code == AM_MSG_CHAT_FULL) { return "Close a chat before opening another one."; }
+    if (code == AM_MSG_SCANNING) { return "Reading saved keys..."; }
+    if (code == AM_MSG_KEY_ADDED) { return "Key added. Check it with the selected model."; }
+    if (code == AM_MSG_HOLD) { return "Rate limited, no readable wait time. Resume when ready."; }
+    if (code == AM_MSG_RESUMED) { return "Resumed. Nothing was sent; check when ready."; }
+    if (code == AM_MSG_CHAT_GONE) { return "This chat's key was deleted or replaced. Open a new chat."; }
+    if (code == AM_MSG_SELECTED) { return "Key selected. New chats use it."; }
+    if (code == AM_MSG_KC_FAIL) { return "Keychain kept the key; its chats will not relaunch on it."; }
+    if (code == AM_MSG_PASTE) { return "Paste refused: not one line of text, or longer than the field."; }
+    if (code == AM_MSG_STOPPING) { return "Stopping: the running check ends by itself within 70 s; its answer is discarded."; }
+    if (code == AM_MSG_WAIT) { return "The other provider's stopped check is still finishing (up to 70 s)."; }
+    if (code == AM_MSG_OTHER) { return "The other provider's check is running; stop it there or wait."; }
+    if (code > AM_MSG_ID_BASE) { return am_id_error_text(code - AM_MSG_ID_BASE); }
+    return "";
+}
+
+/// The window's words and bytes as a fresh start: nothing checked this session, nothing selected, no worker, the
+/// first catalog model of each provider, an empty input and no chat binding.
+pub fn am_init(w: []u64, b: []u8) -> void {
+    var i : usize = 0;
+    while (i < AM_WORDS) {
+        w[i] = 0;
+        i = i + 1;
+    }
+    i = 0;
+    while (i < AM_BYTES) {
+        b[i] = 0;
+        i = i + 1;
+    }
+    w[AM_W_PROV] = @as(u64, AM_NV);
+    w[AM_W_ARM] = @as(u64, AM_NONE);
+    w[AM_W_SEL] = @as(u64, AM_NONE);
+    w[AM_W_SEL + 1] = @as(u64, AM_NONE);
+    w[AM_W_SCAN_M] = @as(u64, AM_NONE);
+    w[AM_W_BATCH] = @as(u64, AM_NONE);
+    w[AM_W_MSG_M] = @as(u64, AM_NONE);
+    w[AM_W_BSTOP_M] = @as(u64, AM_NONE);
+    w[AM_W_REAP_M] = @as(u64, AM_NONE);
+    w[AM_W_REQ_M] = @as(u64, AM_NONE);
+    var m : u32 = 0;
+    while (m < AM_PROVIDERS) {
+        am_store_model(b, m, pc_model(am_catalog_first(m)));
+        m = m + 1;
+    }
+}
+
+fn am_store_model(b: []u8, m: u32, id: []const u8) -> void {
+    const at : usize = AM_B_MODEL + @as(usize, m) * 64;
+    b[at] = @as(u8, @intCast(id.len));
+    var i : usize = 0;
+    while (i < id.len) {
+        b[at + 1 + i] = id[i];
+        i = i + 1;
+    }
+}
+
+/// Where the masked form of key slot k of provider m sits in the window bytes: [length][masked text], 16 bytes.
+pub fn am_mask_at(m: u32, k: u32) -> usize {
+    return AM_B_MASK + (@as(usize, m) * 64 + @as(usize, k % 64)) * AM_MASK_CAP;
+}
+
+/// The masked form of key slot k of provider m (keys.t27 mask_key), empty when the scan read none.
+pub fn am_mask(b: []const u8, m: u32, k: u32) -> []const u8 {
+    const at : usize = am_mask_at(m, k);
+    var n : usize = @as(usize, b[at]);
+    if (n > AM_MASK_CAP - 1) { n = AM_MASK_CAP - 1; }
+    return b[at + 1 .. at + 1 + n];
+}
+
+/// The model id provider m is set to.
+pub fn am_model(b: []const u8, m: u32) -> []const u8 {
+    const at : usize = AM_B_MODEL + @as(usize, m) * 64;
+    return b[at + 1 .. at + 1 + @as(usize, b[at])];
+}
+
+/// Bump the redraw generation (the frame key mixes it in).
+pub fn am_touch(w: []u64) -> void {
+    w[AM_W_GEN] = w[AM_W_GEN] + 1;
+}
+
+/// The current identity of slot k of provider m.
+pub fn am_cur_ident(w: []const u64, m: u32, k: u32) -> u64 {
+    return am_ident(w[AM_W_MGEN + @as(usize, m)], w[AM_W_SGEN + @as(usize, m) * 64 + @as(usize, k)]);
+}
+
+/// The state slot k of provider m shows now (a stale result reads "not checked").
+pub fn am_slot_state(w: []const u64, m: u32, k: u32) -> u32 {
+    const ix : usize = @as(usize, m) * 64 + @as(usize, k);
+    return am_shown(w[AM_W_STATUS + ix], w[AM_W_IDENT + ix], am_cur_ident(w, m, k));
+}
+
+/// The time of the newest current verdict on a stored key of provider m (0 when none this session). A check that
+/// was cancelled, is running or was reset by a new run is not a verdict and gives no time.
+pub fn am_last_time(w: []const u64, m: u32) -> u64 {
+    var t : u64 = 0;
+    var k : u32 = 0;
+    while (k < AM_SLOTS) {
+        const ix : usize = @as(usize, m) * 64 + @as(usize, k);
+        const s : u32 = am_slot_state(w, m, k);
+        const counted : bool = slot_taken(w[AM_W_STORED + @as(usize, m)], k) and am_state_pending(s) == false;
+        if (counted and w[AM_W_TIME + ix] > t) { t = w[AM_W_TIME + ix]; }
+        k = k + 1;
+    }
+    return t;
+}
+
+/// Is a worker in flight?
+pub fn am_busy(w: []const u64) -> bool {
+    return w[AM_W_PID] != 0;
+}
+
+/// Is a check in flight or a batch running for provider m?
+pub fn am_checking(w: []const u64, m: u32) -> bool {
+    return (am_busy(w) and w[AM_W_REQ_M] == @as(u64, m)) or w[AM_W_BATCH] == @as(u64, m);
+}
+
+/// Set provider m's model to `id` (a catalog id or a custom one). A refused id changes nothing and returns
+/// AM_MSG_ID_BASE + the reason. A different id bumps the model generation (every result of m is no longer
+/// current) and stops a running check of m, whose late answer can then no longer apply. Returns AM_MSG_SAVED.
+pub fn am_set_model(w: []u64, b: []u8, m: u32, id: []const u8) -> u32 {
+    const code : u32 = am_model_id_check(id);
+    if (code != AM_ID_OK) { return AM_MSG_ID_BASE + code; }
+    if (same_bytes(am_model(b, m), id)) { return AM_MSG_SAVED; }
+    am_store_model(b, m, id);
+    w[AM_W_MGEN + @as(usize, m)] = w[AM_W_MGEN + @as(usize, m)] + 1;
+    if (w[AM_W_BATCH] == @as(u64, m)) { am_end_batch(w, m, AM_MSG_STOPPED); }
+    am_touch(w);
+    return AM_MSG_SAVED;
+}
+
+/// The lowest stored slot: the deterministic first key a provider is set to; AM_NONE with no key.
+pub fn am_default_key(stored: u64) -> u32 {
+    var k : u32 = 0;
+    while (k < AM_SLOTS) {
+        if (slot_taken(stored, k)) { return k; }
+        k = k + 1;
+    }
+    return AM_NONE;
+}
+
+/// The key a new chat or a single check of provider m uses: the selected slot when it is stored; the default
+/// key when none was ever selected; AM_NONE when the selection names a slot that is no longer stored (the person
+/// must choose: a key is never swapped silently) or no key is stored.
+pub fn am_active_key(w: []const u64, m: u32) -> u32 {
+    const stored : u64 = w[AM_W_STORED + @as(usize, m)];
+    const sel : u64 = w[AM_W_SEL + @as(usize, m)];
+    if (sel < @as(u64, AM_SLOTS)) {
+        if (slot_taken(stored, @as(u32, @intCast(sel)))) { return @as(u32, @intCast(sel)); }
+        return AM_NONE;
+    }
+    return am_default_key(stored);
+}
+
+/// Why provider m has no active key: AM_MSG_NO_KEY with nothing stored, AM_MSG_KEY_MISSING for a selection that
+/// names an empty slot, AM_MSG_NONE when it has one.
+pub fn am_key_problem(w: []const u64, m: u32) -> u32 {
+    if (am_active_key(w, m) != AM_NONE) { return AM_MSG_NONE; }
+    if (w[AM_W_STORED + @as(usize, m)] == 0) { return AM_MSG_NO_KEY; }
+    return AM_MSG_KEY_MISSING;
+}
+
+/// Select slot k of provider m; false (nothing changes) when k is not stored.
+pub fn am_select_key(w: []u64, m: u32, k: u32) -> bool {
+    if (k >= AM_SLOTS or slot_taken(w[AM_W_STORED + @as(usize, m)], k) == false) { return false; }
+    w[AM_W_SEL + @as(usize, m)] = @as(u64, k);
+    am_touch(w);
+    return true;
+}
+
+/// Slot k of provider m was added, replaced or deleted: its key generation moves, so its result is no longer
+/// current; the stored mask follows `present`. A deletion of the selected slot keeps the selection (now
+/// missing): the next chat or check asks for a key instead of taking another one.
+pub fn am_slot_changed(w: []u64, m: u32, k: u32, present: bool) -> void {
+    if (k >= AM_SLOTS) { return; }
+    const ix : usize = @as(usize, m) * 64 + @as(usize, k);
+    w[AM_W_SGEN + ix] = w[AM_W_SGEN + ix] + 1;
+    w[AM_W_STATUS + ix] = @as(u64, AM_S_NOT_CHECKED);
+    // keys.t27 slot_add / slot_drop, not slot_bit: windows.t27 declares a private slot_bit (u32) and this module
+    // imports windows, so the name slot_bit is never used here
+    if (present) {
+        w[AM_W_STORED + @as(usize, m)] = slot_add(w[AM_W_STORED + @as(usize, m)], k);
+    } else {
+        w[AM_W_STORED + @as(usize, m)] = slot_drop(w[AM_W_STORED + @as(usize, m)], k);
+    }
+    w[AM_W_UNKNOWN + @as(usize, m)] = slot_drop(w[AM_W_UNKNOWN + @as(usize, m)], k);
+    am_touch(w);
+}
+
+/// Start the read of provider m's saved keys, one slot per frame (am_scan_step), so the window never blocks on
+/// 64 Keychain reads and shows progress.
+pub fn am_scan_begin(w: []u64, m: u32) -> void {
+    w[AM_W_SCAN_M] = @as(u64, m);
+    w[AM_W_SCAN_NEXT] = 0;
+    w[AM_W_STORED + @as(usize, m)] = 0;
+    w[AM_W_UNKNOWN + @as(usize, m)] = 0;
+    w[AM_W_LOADED + @as(usize, m)] = 0;
+    am_touch(w);
+}
+
+/// Record one slot read of the scan: `found` the slot holds a key, `unreadable` its read failed or was denied
+/// (keys_import_logic import_read_class: neither a key nor "no such item"); such a slot is never "no key".
+/// Returns true while slots remain.
+pub fn am_scan_record(w: []u64, k: u32, found: bool, unreadable: bool) -> bool {
+    if (w[AM_W_SCAN_M] >= @as(u64, AM_PROVIDERS)) { return false; }
+    const m : usize = @as(usize, @intCast(w[AM_W_SCAN_M]));
+    if (found) { w[AM_W_STORED + m] = slot_add(w[AM_W_STORED + m], k); }
+    if (unreadable) { w[AM_W_UNKNOWN + m] = slot_add(w[AM_W_UNKNOWN + m], k); }
+    w[AM_W_SCAN_NEXT] = @as(u64, k) + 1;
+    if (k + 1 >= AM_SLOTS) {
+        w[AM_W_LOADED + m] = 1;
+        w[AM_W_SCAN_M] = @as(u64, AM_NONE);
+        am_touch(w);
+        return false;
+    }
+    return true;
+}
+
+/// Is a scan running, and which slot does it read next?
+pub fn am_scanning(w: []const u64) -> bool {
+    return w[AM_W_SCAN_M] < @as(u64, AM_PROVIDERS);
+}
+
+/// May a check of provider m start at `now_s`? No worker in flight and no rate pause running for m.
+pub fn am_can_start(w: []const u64, m: u32, now_s: u64) -> bool {
+    return am_busy(w) == false and now_s >= w[AM_W_PAUSE + @as(usize, m)];
+}
+
+/// The request of a check of slot k of provider m starts: a new request id (never reused), the identity it is for,
+/// the slot shows "checking". The caller spawns the worker and stores its pid and fd. Returns the request id.
+pub fn am_request_begin(w: []u64, m: u32, k: u32, now_ms: u64) -> u64 {
+    w[AM_W_SEQ] = w[AM_W_SEQ] + 1;
+    const req : u64 = w[AM_W_SEQ];
+    const ix : usize = @as(usize, m) * 64 + @as(usize, k);
+    w[AM_W_REQ] = req;
+    w[AM_W_REQ_M] = @as(u64, m);
+    w[AM_W_REQ_SLOT] = @as(u64, k);
+    w[AM_W_REQ_IDENT] = am_cur_ident(w, m, k);
+    w[AM_W_REQ_START] = now_ms;
+    w[AM_W_BUFLEN] = 0;
+    w[AM_W_EOF] = 0;
+    // a new check of m makes m's earlier message and batch end old news (another provider's stay its own)
+    if (w[AM_W_MSG_M] == @as(u64, m)) { w[AM_W_MSG] = 0; }
+    if (w[AM_W_BSTOP_M] == @as(u64, m) and w[AM_W_BATCH] != @as(u64, m)) { w[AM_W_BSTOP] = 0; }
+    w[AM_W_STATUS + ix] = @as(u64, AM_S_CHECKING);
+    w[AM_W_IDENT + ix] = w[AM_W_REQ_IDENT];
+    am_touch(w);
+    return req;
+}
+
+pub const AM_R_APPLIED : u32 = 0;
+pub const AM_R_STALE : u32 = 1;
+pub const AM_R_FOREIGN : u32 = 2;
+
+/// Apply a parsed worker line f (am_wline_parse) at now_ms. A line of another request, provider or slot is
+/// FOREIGN and changes nothing. A line of this request whose identity is no longer current (the model or the key
+/// changed while it ran) is STALE: it clears the in-flight request but never writes a result. Otherwise the
+/// result is written with its identity and time and APPLIED. The caller has reaped (or will reap) the worker.
+pub fn am_result_apply(w: []u64, f: []const u64, now_ms: u64) -> u32 {
+    if (w[AM_W_REQ_M] >= @as(u64, AM_PROVIDERS)) { return AM_R_FOREIGN; }
+    const m : u32 = @as(u32, @intCast(w[AM_W_REQ_M]));
+    if (f[0] != w[AM_W_REQ] or f[1] != @as(u64, am_provider(m)) or f[2] != w[AM_W_REQ_SLOT]) { return AM_R_FOREIGN; }
+    const k : u32 = @as(u32, @intCast(f[2]));
+    const ix : usize = @as(usize, m) * 64 + @as(usize, k);
+    var verdict : u32 = AM_R_APPLIED;
+    if (w[AM_W_REQ_IDENT] != am_cur_ident(w, m, k)) {
+        verdict = AM_R_STALE;
+    } else {
+        w[AM_W_STATUS + ix] = f[3];
+        w[AM_W_IDENT + ix] = w[AM_W_REQ_IDENT];
+        w[AM_W_TIME + ix] = now_ms;
+        w[AM_W_HTTP + ix] = f[4];
+    }
+    am_request_clear(w);
+    return verdict;
+}
+
+/// The in-flight request is over (applied, stale, cancelled or failed to start): nothing is in flight.
+pub fn am_request_clear(w: []u64) -> void {
+    w[AM_W_REQ] = 0;
+    w[AM_W_REQ_M] = @as(u64, AM_NONE);
+    w[AM_W_PID] = 0;
+    w[AM_W_FD] = 0;
+    w[AM_W_BUFLEN] = 0;
+    am_touch(w);
+}
+
+/// The in-flight request of slot k could not finish (the worker died, timed out or printed no valid line): the
+/// slot gets `state` (network/timeout or invalid response) if its identity is still current.
+pub fn am_request_fail(w: []u64, state: u32, now_ms: u64) -> void {
+    if (w[AM_W_REQ_M] < @as(u64, AM_PROVIDERS)) {
+        const m : u32 = @as(u32, @intCast(w[AM_W_REQ_M]));
+        const k : u32 = @as(u32, @intCast(w[AM_W_REQ_SLOT]));
+        const ix : usize = @as(usize, m) * 64 + @as(usize, k);
+        if (w[AM_W_REQ_IDENT] == am_cur_ident(w, m, k)) {
+            w[AM_W_STATUS + ix] = @as(u64, state);
+            w[AM_W_IDENT + ix] = w[AM_W_REQ_IDENT];
+            w[AM_W_TIME + ix] = now_ms;
+            w[AM_W_HTTP + ix] = 0;
+        }
+    }
+    am_request_clear(w);
+}
+
+/// Stop: the in-flight request (if any) is cancelled -- its slot reads "cancelled", its late output can never
+/// apply because the request id is cleared -- and a batch ends; no new request starts. The synchronous request
+/// in the worker cannot be interrupted cooperatively: the worker runs on until it answers or its own wall
+/// (AM_WORKER_WALL_S) ends it, and the window never signals it. Returns the pid the window keeps reaping (0 for
+/// none; REAP holds it, and no other worker starts until a wait confirms it ended).
+pub fn am_stop(w: []u64, now_ms: u64) -> u64 {
+    const pid : u64 = w[AM_W_PID];
+    if (pid != 0) {
+        w[AM_W_REAP_M] = w[AM_W_REQ_M];
+        am_request_fail(w, AM_S_CANCELLED, now_ms);
+        w[AM_W_REAP] = pid;
+    }
+    if (w[AM_W_BATCH] < @as(u64, AM_PROVIDERS)) { am_end_batch(w, @as(u32, @intCast(w[AM_W_BATCH])), AM_MSG_STOPPED); }
+    am_touch(w);
+    return pid;
+}
+
+/// End the running "check all" of provider m with `code` (finished, stopped, rate limit, could not start); the
+/// line belongs to m and shows only in m's view.
+pub fn am_end_batch(w: []u64, m: u32, code: u32) -> void {
+    w[AM_W_BATCH] = @as(u64, AM_NONE);
+    w[AM_W_BSTOP] = @as(u64, code);
+    w[AM_W_BSTOP_M] = @as(u64, m);
+    am_touch(w);
+}
+
+/// Say `code` (AM_MSG_*, 0 to clear) about provider m: it shows only in m's view and replaces m's last message.
+pub fn am_say(w: []u64, m: u32, code: u32) -> void {
+    w[AM_W_MSG] = @as(u64, code);
+    w[AM_W_MSG_M] = @as(u64, m);
+    am_touch(w);
+}
+
+/// The message provider m's view shows; 0 when the last message is another provider's.
+pub fn am_msg_for(w: []const u64, m: u32) -> u32 {
+    if (w[AM_W_MSG_M] != @as(u64, m)) { return AM_MSG_NONE; }
+    return @as(u32, @intCast(w[AM_W_MSG] % 256));
+}
+
+/// How provider m's last "check all" ended; 0 when none, it runs again, or the last one was another provider's.
+pub fn am_bstop_for(w: []const u64, m: u32) -> u32 {
+    if (w[AM_W_BSTOP_M] != @as(u64, m) or w[AM_W_BATCH] == @as(u64, m)) { return AM_MSG_NONE; }
+    return @as(u32, @intCast(w[AM_W_BSTOP] % 256));
+}
+
+/// Why a new check of provider m cannot start now, rate pauses aside (0 when it can): a check or a "check all" in
+/// flight (BUSY when it is m's, OTHER when the other provider's), or a stopped worker still finishing on its own
+/// (STOPPING when it was m's, WAIT when the other provider's). One worker runs at a time.
+pub fn am_block_reason(w: []const u64, m: u32) -> u32 {
+    if (w[AM_W_PID] != 0 or w[AM_W_BATCH] < @as(u64, AM_PROVIDERS)) {
+        if (w[AM_W_BATCH] == @as(u64, m) or (w[AM_W_PID] != 0 and w[AM_W_REQ_M] == @as(u64, m))) { return AM_MSG_BUSY; }
+        return AM_MSG_OTHER;
+    }
+    if (w[AM_W_REAP] != 0) {
+        if (w[AM_W_REAP_M] == @as(u64, m)) { return AM_MSG_STOPPING; }
+        return AM_MSG_WAIT;
+    }
+    return AM_MSG_NONE;
+}
+
+/// Start "check all" for provider m: one request per stored key, in slot order, one at a time.
+pub fn am_batch_begin(w: []u64, m: u32) -> void {
+    // this run replaces every earlier result of the keys it covers: a slot reads "not checked" (and has no check
+    // time) until this run reaches it, so a Stop or a rate limit can never leave an old green that looks like
+    // part of a complete new sweep
+    const stored : u64 = w[AM_W_STORED + @as(usize, m)];
+    var k : u32 = 0;
+    while (k < AM_SLOTS) {
+        if (slot_taken(stored, k)) {
+            const ix : usize = @as(usize, m) * 64 + @as(usize, k);
+            w[AM_W_STATUS + ix] = @as(u64, AM_S_NOT_CHECKED);
+            w[AM_W_TIME + ix] = 0;
+            w[AM_W_HTTP + ix] = 0;
+        }
+        k = k + 1;
+    }
+    w[AM_W_BATCH] = @as(u64, m);
+    w[AM_W_BNEXT] = 0;
+    w[AM_W_BDONE] = 0;
+    w[AM_W_BTOTAL] = @as(u64, slot_count(w[AM_W_STORED + @as(usize, m)]));
+    w[AM_W_BSTOP] = 0;
+    w[AM_W_BSTOP_M] = @as(u64, m);
+    am_say(w, m, AM_MSG_NONE);
+    am_touch(w);
+}
+
+/// The next slot the running batch checks (a stored slot at or after BNEXT); AM_NONE when the batch has none
+/// left, which also ends it with "check finished".
+pub fn am_batch_next(w: []u64) -> u32 {
+    if (w[AM_W_BATCH] >= @as(u64, AM_PROVIDERS)) { return AM_NONE; }
+    const m : usize = @as(usize, @intCast(w[AM_W_BATCH]));
+    var k : u32 = @as(u32, @intCast(w[AM_W_BNEXT]));
+    while (k < AM_SLOTS) {
+        if (slot_taken(w[AM_W_STORED + m], k)) { return k; }
+        k = k + 1;
+    }
+    am_end_batch(w, @as(u32, @intCast(m)), AM_MSG_DONE);
+    am_touch(w);
+    return AM_NONE;
+}
+
+/// Where a rate limit leaves provider m paused until: now_s + the Retry-After seconds (AM_RATE_PAUSE_S when the
+/// answer named none), or AM_PAUSE_HOLD when it named a time the worker could not read (AM_RETRY_MANUAL): then the
+/// pause never ends by itself and only the person's Resume (am_resume) lifts it. Nothing is ever retried.
+pub fn am_pause_until(retry: u64, now_s: u64) -> u64 {
+    if (retry >= AM_RETRY_MANUAL) { return AM_PAUSE_HOLD; }
+    if (retry == 0) { return now_s + AM_RATE_PAUSE_S; }
+    return now_s + retry;
+}
+
+/// Is provider m held by a rate limit until the person resumes it?
+pub fn am_held(w: []const u64, m: u32) -> bool {
+    return w[AM_W_PAUSE + @as(usize, m)] == AM_PAUSE_HOLD;
+}
+
+/// The person's Resume: lift provider m's rate pause. It sends nothing; the next check is the person's own click.
+pub fn am_resume(w: []u64, m: u32) -> void {
+    w[AM_W_PAUSE + @as(usize, m)] = 0;
+    am_touch(w);
+}
+
+/// A batch request of slot k ended with `state` at now_s (retry: api_check_host's Retry-After seconds, 0 when
+/// none, AM_RETRY_MANUAL when unreadable). A rate limit pauses provider m (am_pause_until) and ENDS the batch: no
+/// next key and no other key is tried, the rest stay not checked. Any other result moves the batch on to the
+/// next slot (an invalid key does not stop independent keys).
+pub fn am_batch_after(w: []u64, k: u32, state: u32, retry: u64, now_s: u64) -> void {
+    if (w[AM_W_BATCH] >= @as(u64, AM_PROVIDERS)) { return; }
+    const m : usize = @as(usize, @intCast(w[AM_W_BATCH]));
+    w[AM_W_BDONE] = w[AM_W_BDONE] + 1;
+    w[AM_W_BNEXT] = @as(u64, k) + 1;
+    if (state == AM_S_RATE) {
+        w[AM_W_PAUSE + m] = am_pause_until(retry, now_s);
+        am_end_batch(w, @as(u32, @intCast(m)), AM_MSG_RATE_STOP);
+    }
+    am_touch(w);
+}
+
+/// A single check of slot k ended with `state`: a rate limit pauses provider m as a batch would.
+pub fn am_single_after(w: []u64, m: u32, state: u32, retry: u64, now_s: u64) -> void {
+    if (state != AM_S_RATE) { return; }
+    w[AM_W_PAUSE + @as(usize, m)] = am_pause_until(retry, now_s);
+}
+
+/// "Checking 5 of 34" while a batch runs.
+pub fn am_progress_text(w: []const u64, out: []u8) -> usize {
+    if (w[AM_W_BATCH] >= @as(u64, AM_PROVIDERS)) { return 0; }
+    var n : usize = put_bytes(out, 0, "Checking ");
+    var at : u64 = w[AM_W_BDONE] + 1;
+    if (at > w[AM_W_BTOTAL]) { at = w[AM_W_BTOTAL]; }
+    n = put_dec(out, n, at);
+    n = put_bytes(out, n, " of ");
+    return put_dec(out, n, w[AM_W_BTOTAL]);
+}
+
+// ---------------------------------------------------------------- 8. persistence: the selection and the chat bindings
+
+/// The persisted selection, one value a line: "t27os.api.v1", then nvidia.model=, nvidia.key=, zai.model=,
+/// zai.key= (key = the key number 1..64, or "-" for none chosen). Results are never persisted: after a restart
+/// every key reads "not checked this session".
+pub fn am_cfg_emit(w: []const u64, b: []const u8, out: []u8) -> usize {
+    if (out.len < 200) { return 0; }
+    var n : usize = put_bytes(out, 0, "t27os.api.v1\n");
+    var m : u32 = 0;
+    while (m < AM_PROVIDERS) {
+        var tag : str = "nvidia";
+        if (m == AM_ZA) { tag = "zai"; }
+        n = put_bytes(out, n, tag);
+        n = put_bytes(out, n, ".model=");
+        n = put_bytes(out, n, am_model(b, m));
+        n = put_bytes(out, n, "\n");
+        n = put_bytes(out, n, tag);
+        n = put_bytes(out, n, ".key=");
+        const sel : u64 = w[AM_W_SEL + @as(usize, m)];
+        if (sel < @as(u64, AM_SLOTS)) { n = put_dec(out, n, sel + 1); } else { n = put_bytes(out, n, "-"); }
+        n = put_bytes(out, n, "\n");
+        m = m + 1;
+    }
+    return n;
+}
+
+fn am_line_value(t: []const u8, a: usize, e: usize, name: []const u8) -> usize {
+    if (e - a < name.len) { return e + 1; }
+    if (same_bytes(t[a .. a + name.len], name) == false) { return e + 1; }
+    return a + name.len;
+}
+
+/// Read a persisted selection into w/b: a valid model id and a key number 1..64 are taken; anything else keeps
+/// the fresh value (am_init). False when the header is wrong (nothing is taken then).
+pub fn am_cfg_parse(t: []const u8, w: []u64, b: []u8) -> bool {
+    if (t.len < 13 or same_bytes(t[0..13], "t27os.api.v1\n") == false) { return false; }
+    var a : usize = 13;
+    while (a < t.len) {
+        var e : usize = a;
+        while (e < t.len and t[e] != 10) { e = e + 1; }
+        var m : u32 = 0;
+        while (m < AM_PROVIDERS) {
+            var mt : str = "nvidia.model=";
+            var kt : str = "nvidia.key=";
+            if (m == AM_ZA) { mt = "zai.model="; kt = "zai.key="; }
+            const vm : usize = am_line_value(t, a, e, mt);
+            if (vm <= e) {
+                if (am_model_id_check(t[vm..e]) == AM_ID_OK) { am_store_model(b, m, t[vm..e]); }
+            }
+            const vk : usize = am_line_value(t, a, e, kt);
+            if (vk < e and e - vk <= 2) {
+                var v : u32 = 0;
+                var ok : bool = true;
+                var i : usize = vk;
+                while (i < e) {
+                    if (t[i] < 48 or t[i] > 57) { ok = false; } else { v = v * 10 + @as(u32, t[i] - 48); }
+                    i = i + 1;
+                }
+                if (ok and v >= 1 and v <= AM_SLOTS) { w[AM_W_SEL + @as(usize, m)] = @as(u64, v - 1); }
+            }
+            m = m + 1;
+        }
+        a = e + 1;
+    }
+    return true;
+}
+
+/// The binding token of window chat i (empty for a chat that is not bound).
+pub fn am_sb_get(b: []const u8, i: u32) -> []const u8 {
+    if (i >= AM_SESSIONS) { return b[0..0]; }
+    const at : usize = AM_B_BIND + @as(usize, i) * AM_BIND_CAP;
+    return b[at + 1 .. at + 1 + @as(usize, b[at])];
+}
+
+/// Bind window chat i to `token` (empty clears): a live binding, or a retired one the chat keeps so it asks for a
+/// key instead of becoming an unpinned chat; false (nothing changes) for any other token.
+pub fn am_sb_set(b: []u8, i: u32, token: []const u8) -> bool {
+    if (i >= AM_SESSIONS) { return false; }
+    if (token.len > 0 and am_bind_ok(token) == false and am_bind_retired(token) == false) { return false; }
+    if (token.len >= AM_BIND_CAP) { return false; }
+    const at : usize = AM_B_BIND + @as(usize, i) * AM_BIND_CAP;
+    b[at] = @as(u8, @intCast(token.len));
+    var k : usize = 0;
+    while (k < AM_BIND_CAP - 1) {
+        if (k < token.len) { b[at + 1 + k] = token[k]; } else { b[at + 1 + k] = 0; }
+        k = k + 1;
+    }
+    return true;
+}
+
+/// Retire, in the window's table, every chat bound to slot k of provider id p (the PTY server retires its panes in
+/// the same step): such a chat never opens on whatever key the slot holds later. Returns how many were retired.
+pub fn am_sb_retire(b: []u8, p: u32, k: u32) -> u32 {
+    var n : u32 = 0;
+    var i : u32 = 0;
+    while (i < AM_SESSIONS) {
+        if (am_bind_matches(am_sb_get(b, i), p, k)) {
+            b[AM_B_BIND + @as(usize, i) * AM_BIND_CAP + 2] = 48;
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+fn am_sb_copy(b: []u8, to: u32, from: u32) -> void {
+    const s : usize = AM_B_BIND + @as(usize, from) * AM_BIND_CAP;
+    const d : usize = AM_B_BIND + @as(usize, to) * AM_BIND_CAP;
+    var k : usize = 0;
+    while (k < AM_BIND_CAP) {
+        b[d + k] = b[s + k];
+        k = k + 1;
+    }
+}
+
+fn am_sb_clear(b: []u8, i: u32) -> void {
+    const at : usize = AM_B_BIND + @as(usize, i) * AM_BIND_CAP;
+    var k : usize = 0;
+    while (k < AM_BIND_CAP) {
+        b[at + k] = 0;
+        k = k + 1;
+    }
+}
+
+/// Chat i was closed: the chats after it move up one, exactly as provider_catalog pc_drop moves their pins.
+pub fn am_sb_drop(b: []u8, i: u32) -> void {
+    if (i >= AM_SESSIONS) { return; }
+    var j : u32 = i;
+    while (j + 1 < AM_SESSIONS) {
+        am_sb_copy(b, j, j + 1);
+        j = j + 1;
+    }
+    am_sb_clear(b, AM_SESSIONS - 1);
+}
+
+/// The chats of `space` were closed: the others close up in order, exactly as pc_drop_space moves the pins.
+pub fn am_sb_drop_space(b: []u8, ss: u64, space: u32) -> void {
+    var at : u32 = 0;
+    var i : u32 = 0;
+    while (i < AM_SESSIONS) {
+        if (session_space(ss, i) != space) {
+            if (at != i) { am_sb_copy(b, at, i); }
+            at = at + 1;
+        }
+        i = i + 1;
+    }
+    while (at < AM_SESSIONS) {
+        am_sb_clear(b, at);
+        at = at + 1;
+    }
+}
+
+/// The persisted binding table: one line a chat, "<i>=<token>" for a bound chat only.
+pub fn am_sb_emit(b: []const u8, out: []u8) -> usize {
+    var n : usize = 0;
+    var i : u32 = 0;
+    while (i < AM_SESSIONS) {
+        const t : []const u8 = am_sb_get(b, i);
+        if (t.len > 0 and n + t.len + 4 <= out.len) {
+            n = put_dec(out, n, @as(u64, i));
+            n = put_bytes(out, n, "=");
+            n = put_bytes(out, n, t);
+            n = put_bytes(out, n, "\n");
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+/// Read a persisted binding table; a line that is not "<digit 0..6>=<live or retired binding>" is skipped. A
+/// retired binding is kept: its chat asks for a key. Returns how many chats were bound.
+pub fn am_sb_parse(t: []const u8, b: []u8) -> u32 {
+    var got : u32 = 0;
+    var a : usize = 0;
+    while (a < t.len) {
+        var e : usize = a;
+        while (e < t.len and t[e] != 10) { e = e + 1; }
+        if (e - a >= 3 and t[a] >= 48 and t[a] <= 54 and t[a + 1] == 61) {
+            if (am_sb_set(b, @as(u32, t[a] - 48), t[a + 2 .. e])) { got = got + 1; }
+        }
+        a = e + 1;
+    }
+    return got;
+}
+
+/// Is chat i a bound chat: its pin byte is provider_catalog PC_BOUND (a byte no catalog row uses, so pc_get reads it
+/// as PC_NONE and no catalog path takes it; pc_drop / pc_drop_space keep it in place) and the table holds its
+/// live binding?
+pub fn am_session_bound(pins: u64, b: []const u8, i: u32) -> bool {
+    if (i >= AM_SESSIONS) { return false; }
+    return pc_raw(pins, i) == PC_BOUND and am_sb_get(b, i).len > 0;
+}
+
+// ---------------------------------------------------------------- 9. the panel: layout and hit tests
+
+pub const AM_PAD : f64 = 16.0;
+pub const AM_ROW_H : f64 = 24.0;
+pub const AM_BTN_H : f64 = 22.0;
+pub const AM_CARD_H : f64 = 96.0;
+/// The detail view, top to bottom from the panel top t: header 6..34, model row (Change) 38..60, the full model
+/// id on its own line (baseline AM_D_ID_Y), active key row (Check) 80..102, the three actions 108..132, the
+/// summary and status lines, then the key list from AM_LIST_TOP.
+pub const AM_D_MODEL_Y : f64 = 38.0;
+pub const AM_D_ID_Y : f64 = 73.0;
+pub const AM_D_KEY_Y : f64 = 80.0;
+pub const AM_D_ACT_Y : f64 = 108.0;
+pub const AM_D_SUM_Y : f64 = 146.0;
+pub const AM_D_MSG_Y : f64 = 160.0;
+pub const AM_LIST_TOP : f64 = 168.0;
+pub const AM_FOOT_H : f64 = 46.0;
+pub const AM_MROW_H : f64 = 30.0;
+pub const AM_MLIST_TOP : f64 = 52.0;
+
+pub const AM_K_NONE : u32 = 0;
+pub const AM_K_MANAGE : u32 = 1;
+pub const AM_K_OTHER : u32 = 2;
+pub const AM_K_BACK : u32 = 3;
+pub const AM_K_MODEL : u32 = 4;
+pub const AM_K_CHECK : u32 = 5;
+pub const AM_K_CHECK_ALL : u32 = 6;
+pub const AM_K_STOP : u32 = 7;
+pub const AM_K_OPEN : u32 = 8;
+pub const AM_K_ADD : u32 = 9;
+pub const AM_K_ROW : u32 = 10;
+pub const AM_K_DEL : u32 = 11;
+pub const AM_K_CONFIRM : u32 = 12;
+pub const AM_K_CANCEL : u32 = 13;
+pub const AM_K_PREV : u32 = 14;
+pub const AM_K_NEXT : u32 = 15;
+pub const AM_K_USE : u32 = 16;
+pub const AM_K_CUSTOM : u32 = 17;
+pub const AM_K_FIELD : u32 = 18;
+pub const AM_K_SAVE : u32 = 19;
+
+/// A hit: kind * 256 + argument (a managed index, a slot or a catalog row).
+pub fn am_hit_code(kind: u32, arg: u32) -> u32 {
+    return kind * 256 + arg % 256;
+}
+
+pub fn am_hit_kind(h: u32) -> u32 {
+    return h / 256;
+}
+
+pub fn am_hit_arg(h: u32) -> u32 {
+    return h % 256;
+}
+
+fn am_in(x: f64, y: f64, bx: f64, by: f64, bw: f64, bh: f64) -> bool {
+    return x >= bx and x < bx + bw and y >= by and y < by + bh;
+}
+
+/// The overview card height at panel top t and height sh: AM_CARD_H when two cards and the "Other providers" row
+/// fit, else what is left (never below 64).
+pub fn am_card_h(t: f64, sh: f64) -> f64 {
+    var h : f64 = (sh - t - 52.0 - 34.0) / 2.0 - 8.0;
+    if (h > AM_CARD_H) { h = AM_CARD_H; }
+    if (h < 64.0) { h = 64.0; }
+    return h;
+}
+
+/// The top of overview card m.
+pub fn am_card_y(t: f64, sh: f64, m: u32) -> f64 {
+    return t + 52.0 + @as(f64, @floatFromInt(m)) * (am_card_h(t, sh) + 8.0);
+}
+
+/// The "Manage" button of card m: right-aligned in the card's last band.
+pub fn am_manage_x(l: f64, w: f64) -> f64 {
+    return l + w - AM_PAD - 72.0;
+}
+
+pub fn am_manage_y(t: f64, sh: f64, m: u32) -> f64 {
+    return am_card_y(t, sh, m) + am_card_h(t, sh) - AM_BTN_H - 6.0;
+}
+
+/// The "Other providers" row under the two cards.
+pub fn am_other_y(t: f64, sh: f64) -> f64 {
+    return am_card_y(t, sh, AM_PROVIDERS);
+}
+
+/// How many key rows fit on one page of the detail list at panel height sh (at least 1).
+pub fn am_rows_fit(t: f64, sh: f64) -> u32 {
+    const room : f64 = sh - AM_FOOT_H - (t + AM_LIST_TOP);
+    if (room < AM_ROW_H) { return 1; }
+    return @as(u32, @intFromFloat(room / AM_ROW_H));
+}
+
+/// The slots a provider's list shows: every slot that holds a key or whose read failed (all 64 are supported;
+/// an empty slot is not a row).
+pub fn am_listed(w: []const u64, m: u32) -> u64 {
+    return w[AM_W_STORED + @as(usize, m)] | w[AM_W_UNKNOWN + @as(usize, m)];
+}
+
+/// The detail page on screen: the stored page, or the last one when keys went away under it (draw and hit agree).
+pub fn am_page_shown(w: []const u64, m: u32, per: u32) -> u32 {
+    const pages : u32 = am_pages(am_listed(w, m), per);
+    if (w[AM_W_PAGE] >= @as(u64, pages)) { return pages - 1; }
+    return @as(u32, @intCast(w[AM_W_PAGE]));
+}
+
+/// The slot of row r on page `page` with `per` rows a page: the listed slots in order, each under its own stable
+/// physical label (Key07 stays Key07 however many holes come before it, and Key64 is always reachable); AM_NONE
+/// past the end.
+pub fn am_row_slot(listed: u64, page: u32, per: u32, r: u32) -> u32 {
+    if (r >= per) { return AM_NONE; }
+    const want : u32 = page * per + r;
+    var seen : u32 = 0;
+    var k : u32 = 0;
+    while (k < AM_SLOTS) {
+        if (slot_taken(listed, k)) {
+            if (seen == want) { return k; }
+            seen = seen + 1;
+        }
+        k = k + 1;
+    }
+    return AM_NONE;
+}
+
+/// How many pages the listed slots take with `per` rows a page (one page when none is listed).
+pub fn am_pages(listed: u64, per: u32) -> u32 {
+    const n : u32 = slot_count(listed);
+    if (n == 0 or per == 0) { return 1; }
+    return (n + per - 1) / per;
+}
+
+/// The page that shows listed slot k; AM_NONE when k is not listed.
+pub fn am_page_of(listed: u64, k: u32, per: u32) -> u32 {
+    if (per == 0 or k >= AM_SLOTS or slot_taken(listed, k) == false) { return AM_NONE; }
+    var i : u32 = 0;
+    var j : u32 = 0;
+    while (j < k) {
+        if (slot_taken(listed, j)) { i = i + 1; }
+        j = j + 1;
+    }
+    return i / per;
+}
+
+/// The row of listed slot k on its page.
+pub fn am_row_of(listed: u64, k: u32, per: u32) -> u32 {
+    if (per == 0 or k >= AM_SLOTS or slot_taken(listed, k) == false) { return AM_NONE; }
+    var i : u32 = 0;
+    var j : u32 = 0;
+    while (j < k) {
+        if (slot_taken(listed, j)) { i = i + 1; }
+        j = j + 1;
+    }
+    return i % per;
+}
+
+/// The top of key row r.
+pub fn am_row_y(t: f64, r: u32) -> f64 {
+    return t + AM_LIST_TOP + @as(f64, @floatFromInt(r)) * AM_ROW_H;
+}
+
+/// The three action buttons of the detail view, left to right: Check all (Stop while checking), Open chat, Add key.
+pub fn am_act_x(l: f64, w: f64, b: u32) -> f64 {
+    const bw : f64 = (w - 2.0 * AM_PAD - 16.0) / 3.0;
+    return l + AM_PAD + @as(f64, @floatFromInt(b)) * (bw + 8.0);
+}
+
+pub fn am_act_w(w: f64) -> f64 {
+    return (w - 2.0 * AM_PAD - 16.0) / 3.0;
+}
+
+/// How many model rows fit in the model list at panel height sh (at least 1).
+pub fn am_mrows_fit(t: f64, sh: f64) -> u32 {
+    const room : f64 = sh - AM_FOOT_H - (t + AM_MLIST_TOP) - AM_MROW_H;
+    if (room < AM_MROW_H) { return 1; }
+    return @as(u32, @intFromFloat(room / AM_MROW_H));
+}
+
+/// The hit of a click (x, y) on the panel (left l, width w, top t, height sh) in the window's state.
+pub fn am_hit(w: []const u64, x: f64, y: f64, l: f64, pw: f64, t: f64, sh: f64) -> u32 {
+    const mode : u32 = @as(u32, @intCast(w[AM_W_MODE]));
+    const px : f64 = l + AM_PAD;
+    const inner : f64 = pw - 2.0 * AM_PAD;
+    const m : u32 = @as(u32, @intCast(w[AM_W_PROV] % 2));
+    if (mode == AM_M_OVERVIEW) {
+        var c : u32 = 0;
+        while (c < AM_PROVIDERS) {
+            if (am_in(x, y, am_manage_x(l, pw), am_manage_y(t, sh, c), 72.0, AM_BTN_H)) { return am_hit_code(AM_K_MANAGE, c); }
+            if (am_in(x, y, px, am_card_y(t, sh, c), inner, am_card_h(t, sh))) { return am_hit_code(AM_K_MANAGE, c); }
+            c = c + 1;
+        }
+        if (am_in(x, y, px, am_other_y(t, sh), inner, 24.0)) { return am_hit_code(AM_K_OTHER, 0); }
+        return AM_K_NONE;
+    }
+    if (am_in(x, y, px, t + 6.0, 60.0, 28.0)) { return am_hit_code(AM_K_BACK, 0); }
+    if (mode == AM_M_DETAIL) {
+        if (am_in(x, y, l + pw - AM_PAD - 72.0, t + AM_D_MODEL_Y, 72.0, AM_BTN_H)) { return am_hit_code(AM_K_MODEL, 0); }
+        if (am_in(x, y, l + pw - AM_PAD - 72.0, t + AM_D_KEY_Y, 72.0, AM_BTN_H)) { return am_hit_code(AM_K_CHECK, 0); }
+        if (am_in(x, y, am_act_x(l, pw, 0), t + AM_D_ACT_Y, am_act_w(pw), AM_BTN_H + 2.0)) {
+            if (am_checking(w, m)) { return am_hit_code(AM_K_STOP, 0); }
+            return am_hit_code(AM_K_CHECK_ALL, 0);
+        }
+        if (am_in(x, y, am_act_x(l, pw, 1), t + AM_D_ACT_Y, am_act_w(pw), AM_BTN_H + 2.0)) { return am_hit_code(AM_K_OPEN, 0); }
+        if (am_in(x, y, am_act_x(l, pw, 2), t + AM_D_ACT_Y, am_act_w(pw), AM_BTN_H + 2.0)) { return am_hit_code(AM_K_ADD, 0); }
+        const fy : f64 = sh - AM_FOOT_H;
+        if (w[AM_W_ARM] < @as(u64, AM_SLOTS)) {
+            if (am_in(x, y, px, fy + 2.0, 120.0, AM_BTN_H)) { return am_hit_code(AM_K_CONFIRM, @as(u32, @intCast(w[AM_W_ARM]))); }
+            if (am_in(x, y, px + 128.0, fy + 2.0, 80.0, AM_BTN_H)) { return am_hit_code(AM_K_CANCEL, 0); }
+        } else {
+            if (am_in(x, y, px, fy + 2.0, 60.0, AM_BTN_H)) { return am_hit_code(AM_K_PREV, 0); }
+            if (am_in(x, y, l + pw - AM_PAD - 60.0, fy + 2.0, 60.0, AM_BTN_H)) { return am_hit_code(AM_K_NEXT, 0); }
+        }
+        const per : u32 = am_rows_fit(t, sh);
+        var r : u32 = 0;
+        while (r < per) {
+            const ry : f64 = am_row_y(t, r);
+            const k : u32 = am_row_slot(am_listed(w, m), am_page_shown(w, m, per), per, r);
+            if (k != AM_NONE) {
+                // Delete exists only on a row that holds a key (an unreadable row has none); select refuses it too
+                const has : bool = slot_taken(w[AM_W_STORED + @as(usize, m)], k);
+                if (has and am_in(x, y, l + pw - AM_PAD - 52.0, ry + 2.0, 52.0, AM_ROW_H - 4.0)) { return am_hit_code(AM_K_DEL, k); }
+                if (am_in(x, y, px, ry, inner - 58.0, AM_ROW_H)) { return am_hit_code(AM_K_ROW, k); }
+            }
+            r = r + 1;
+        }
+        return AM_K_NONE;
+    }
+    if (mode == AM_M_MODELS) {
+        const per : u32 = am_mrows_fit(t, sh);
+        const first : u32 = am_catalog_first(m);
+        const count : u32 = am_catalog_count(m);
+        const page : u32 = @as(u32, @intCast(w[AM_W_MPAGE]));
+        var r : u32 = 0;
+        while (r < per) {
+            const at : u32 = page * per + r;
+            const ry : f64 = t + AM_MLIST_TOP + @as(f64, @floatFromInt(r)) * AM_MROW_H;
+            if (at < count) {
+                if (am_in(x, y, px, ry, inner, AM_MROW_H - 2.0)) { return am_hit_code(AM_K_USE, first + at); }
+            } else if (at == count) {
+                if (am_in(x, y, px, ry, inner, AM_MROW_H - 2.0)) { return am_hit_code(AM_K_CUSTOM, 0); }
+            }
+            r = r + 1;
+        }
+        const fy : f64 = sh - AM_FOOT_H;
+        if (am_in(x, y, px, fy + 2.0, 60.0, AM_BTN_H)) { return am_hit_code(AM_K_PREV, 0); }
+        if (am_in(x, y, l + pw - AM_PAD - 60.0, fy + 2.0, 60.0, AM_BTN_H)) { return am_hit_code(AM_K_NEXT, 0); }
+        return AM_K_NONE;
+    }
+    if (mode == AM_M_CUSTOM or mode == AM_M_ADD) {
+        if (am_in(x, y, px, t + 60.0, inner, 26.0)) { return am_hit_code(AM_K_FIELD, 0); }
+        if (am_in(x, y, px, t + 120.0, 84.0, AM_BTN_H + 2.0)) { return am_hit_code(AM_K_SAVE, 0); }
+        if (am_in(x, y, px + 92.0, t + 120.0, 84.0, AM_BTN_H + 2.0)) { return am_hit_code(AM_K_CANCEL, 0); }
+        return AM_K_NONE;
+    }
+    return AM_K_NONE;
+}
+
+/// How many model pages provider m's list takes (the catalog rows plus the "Other model ID" row).
+pub fn am_mpages(m: u32, per: u32) -> u32 {
+    const n : u32 = am_catalog_count(m) + 1;
+    if (per == 0) { return 1; }
+    return (n + per - 1) / per;
+}
+
+// ---------------------------------------------------------------- 10. the custom model ID input
+
+/// The input text (custom model id) held in b.
+pub fn am_input(b: []const u8) -> []const u8 {
+    return b[AM_B_INPUT + 1 .. AM_B_INPUT + 1 + @as(usize, b[AM_B_INPUT])];
+}
+
+pub fn am_input_clear(b: []u8) -> void {
+    var i : usize = 0;
+    while (i <= AM_INPUT_CAP) {
+        b[AM_B_INPUT + i] = 0;
+        i = i + 1;
+    }
+}
+
+/// Put the current model id of provider m into the input (the field starts from what is in use).
+pub fn am_input_from_model(b: []u8, m: u32) -> void {
+    am_input_clear(b);
+    const id : []const u8 = am_model(b, m);
+    var i : usize = 0;
+    while (i < id.len and i < AM_INPUT_CAP) {
+        b[AM_B_INPUT + 1 + i] = id[i];
+        i = i + 1;
+    }
+    b[AM_B_INPUT] = @as(u8, @intCast(i));
+}
+
+/// One typed character: printable ASCII and the space are kept (validation happens on Save, so a wrong character
+/// is shown and refused there, never dropped silently); false when the field is full (AM_INPUT_CAP) or the
+/// character is a control or not ASCII.
+pub fn am_input_char(b: []u8, ch: u32) -> bool {
+    const n : usize = @as(usize, b[AM_B_INPUT]);
+    if (ch < 32 or ch > 126 or n >= AM_INPUT_CAP) { return false; }
+    b[AM_B_INPUT + 1 + n] = @as(u8, @intCast(ch));
+    b[AM_B_INPUT] = @as(u8, @intCast(n + 1));
+    return true;
+}
+
+pub fn am_input_back(b: []u8) -> void {
+    const n : usize = @as(usize, b[AM_B_INPUT]);
+    if (n == 0) { return; }
+    b[AM_B_INPUT + n] = 0;
+    b[AM_B_INPUT] = @as(u8, @intCast(n - 1));
+}
+
+/// Would a paste of src fit after `have` bytes: its trimmed text printable ASCII (spaces kept, they are refused
+/// on Save) and the total within AM_INPUT_CAP?
+fn am_paste_ok(src: []const u8, have: usize) -> bool {
+    var a : usize = 0;
+    var e : usize = src.len;
+    while (a < e and am_ws(src[a])) { a = a + 1; }
+    while (e > a and am_ws(src[e - 1])) { e = e - 1; }
+    if (have + (e - a) > AM_INPUT_CAP) { return false; }
+    var i : usize = a;
+    while (i < e) {
+        if (src[i] < 32 or src[i] > 126) { return false; }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// A paste: its leading and trailing white space are trimmed; the rest is taken whole when it fits the field and
+/// is printable ASCII, else nothing changes and the paste is refused (false).
+pub fn am_input_paste(b: []u8, src: []const u8) -> bool {
+    var a : usize = 0;
+    var e : usize = src.len;
+    while (a < e and am_ws(src[a])) { a = a + 1; }
+    while (e > a and am_ws(src[e - 1])) { e = e - 1; }
+    const n : usize = @as(usize, b[AM_B_INPUT]);
+    if (am_paste_ok(src, n) == false) { return false; }
+    var i : usize = a;
+    var k : usize = n;
+    while (i < e) {
+        b[AM_B_INPUT + 1 + k] = src[i];
+        k = k + 1;
+        i = i + 1;
+    }
+    b[AM_B_INPUT] = @as(u8, @intCast(k));
+    return true;
+}
+
+// The whole-text selection of the custom id field (live QA 2026-10-21: the field opens holding the current id, and
+// Cmd+A then Backspace erased one character, so a new id needed 36 Backspaces). The field has no caret: the text
+// is either all selected -- the next character, Backspace or paste replaces it -- or not, and then typing appends
+// and Backspace erases the last character.
+
+/// macOS virtual key codes the field reads beyond keys.t27 ky_key.
+pub const AM_KEY_A : u32 = 0;
+pub const AM_KEY_LEFT : u32 = 123;
+pub const AM_KEY_RIGHT : u32 = 124;
+pub const AM_KEY_HOME : u32 = 115;
+pub const AM_KEY_END : u32 = 119;
+pub const AM_IK_OTHER : u32 = 0;
+pub const AM_IK_SELECT_ALL : u32 = 1;
+pub const AM_IK_DESELECT : u32 = 2;
+
+/// What a key does in the field before keys.t27 ky_key: Cmd+A selects all; Left, Right, Home and End end the
+/// selection (the text stays, the next character appends); anything else is ky_key's (a plain "a" is a letter).
+pub fn am_input_key(code: u32, cmd: bool) -> u32 {
+    if (cmd and code == AM_KEY_A) { return AM_IK_SELECT_ALL; }
+    if (cmd) { return AM_IK_OTHER; }
+    if (code == AM_KEY_LEFT or code == AM_KEY_RIGHT or code == AM_KEY_HOME or code == AM_KEY_END) { return AM_IK_DESELECT; }
+    return AM_IK_OTHER;
+}
+
+/// Select the whole text of the field (an empty field selects nothing).
+pub fn am_input_select_all(w: []u64, b: []const u8) -> void {
+    w[AM_W_INSEL] = 0;
+    if (am_input(b).len > 0) { w[AM_W_INSEL] = 1; }
+    am_touch(w);
+}
+
+pub fn am_input_selected(w: []const u64) -> bool {
+    return w[AM_W_INSEL] != 0;
+}
+
+pub fn am_input_deselect(w: []u64) -> void {
+    w[AM_W_INSEL] = 0;
+    am_touch(w);
+}
+
+/// Begin editing provider m's exact model id: the field holds the id in use, all of it selected, so typing or a
+/// paste replaces it at once; m's last message is cleared.
+pub fn am_custom_begin(w: []u64, b: []u8, m: u32) -> void {
+    am_input_from_model(b, m);
+    w[AM_W_MODE] = @as(u64, AM_M_CUSTOM);
+    am_say(w, m, AM_MSG_NONE);
+    am_input_select_all(w, b);
+}
+
+/// A typed character: with the text selected it replaces all of it. False (nothing changes, the selection stays)
+/// for a control or non-ASCII character, or a full field.
+pub fn am_input_type(w: []u64, b: []u8, ch: u32) -> bool {
+    if (ch < 32 or ch > 126) { return false; }
+    if (w[AM_W_INSEL] != 0) {
+        am_input_clear(b);
+        w[AM_W_INSEL] = 0;
+    }
+    const ok : bool = am_input_char(b, ch);
+    am_touch(w);
+    return ok;
+}
+
+/// Backspace: with the text selected it erases all of it, else the last character.
+pub fn am_input_erase(w: []u64, b: []u8) -> void {
+    if (w[AM_W_INSEL] != 0) {
+        am_input_clear(b);
+        w[AM_W_INSEL] = 0;
+    } else {
+        am_input_back(b);
+    }
+    am_touch(w);
+}
+
+/// A paste: with the text selected it replaces all of it, else it is appended. A refused paste (not one line of
+/// printable text, or too long for the field) changes nothing, the selection included.
+pub fn am_input_put(w: []u64, b: []u8, src: []const u8) -> bool {
+    if (w[AM_W_INSEL] != 0) {
+        if (am_paste_ok(src, 0) == false) { return false; }
+        am_input_clear(b);
+        w[AM_W_INSEL] = 0;
+    }
+    const ok : bool = am_input_paste(b, src);
+    am_touch(w);
+    return ok;
+}
+
+/// The age of a provider's newest verdict, short enough for its own field beside the summary: "" when there is
+/// none this session, "just now", "5m ago", "2h ago", "1d ago" (the summary keeps its counts whole).
+pub fn am_ago_compact(now_ms: u64, then_ms: u64, out: []u8) -> usize {
+    if (then_ms == 0 or then_ms > now_ms) { return 0; }
+    if ((now_ms - then_ms) / 1000 < 60) { return put_bytes(out, 0, "just now"); }
+    const n : usize = am_ago_short(now_ms, then_ms, out);
+    return put_bytes(out, n, " ago");
+}
+
+// ---------------------------------------------------------------- tests
+
+fn am_t_state(w: []u64, b: []u8) -> void {
+    am_init(w, b);
+}
+
+fn am_t_low(n: u32) -> u64 {
+    var mask : u64 = 0;
+    var k : u32 = 0;
+    while (k < n) {
+        mask = slot_add(mask, k);
+        k = k + 1;
+    }
+    return mask;
+}
+
+/// Write result `s` for slot k of provider m as a check of the current identity would.
+fn am_t_result(w: []u64, m: u32, k: u32, s: u32, now: u64) -> bool {
+    const req : u64 = am_request_begin(w, m, k, now);
+    w[AM_W_PID] = 4242;
+    var f : [6]u64 = [0, 0, 0, 0, 0, 0];
+    f[0] = req;
+    f[1] = @as(u64, am_provider(m));
+    f[2] = @as(u64, k);
+    f[3] = @as(u64, s);
+    f[4] = 200;
+    return am_result_apply(w, f[0..6], now) == AM_R_APPLIED;
+}
+
+test managed_providers_routes_and_catalog_rows {
+    assert am_provider(AM_NV) == P_NVIDIA and am_provider(AM_ZA) == P_ZAI and am_provider(2) == AM_NONE;
+    assert am_index(P_NVIDIA) == AM_NV and am_index(P_ZAI) == AM_ZA and am_index(0) == AM_NONE;
+    assert am_profile(AM_NV) == PR_NVIDIA and am_profile(AM_ZA) == PR_ZAI;
+    assert same_bytes(am_route(AM_NV), "https://integrate.api.nvidia.com/v1/chat/completions");
+    assert same_bytes(am_route(AM_ZA), "https://api.z.ai/api/coding/paas/v4/chat/completions");
+    assert am_catalog_count(AM_NV) + am_catalog_count(AM_ZA) == PC_COUNT;
+    assert am_catalog_of(AM_ZA, "glm-4.7-flash") == PC_NVIDIA_COUNT;
+    assert am_catalog_of(AM_NV, "glm-4.7-flash") == PC_NONE;
+    assert am_catalog_of(AM_NV, "meta/muse-glimmer-30b") == 5;
+    assert am_catalog_of(AM_NV, "meta/muse-glimmer-30") == PC_NONE;
+}
+
+test a_check_uses_the_launcher_route_and_a_pin_names_its_exact_identity {
+    // the route a check calls is the launcher's base URL (keys.t27) plus /chat/completions, per provider
+    var u : [96]u8 = undefined;
+    var m : u32 = 0;
+    while (m < AM_PROVIDERS) {
+        var n : usize = oai_base_url(am_profile(m), u[0..96]);
+        assert n > 0;
+        n = put_bytes(u[0..96], n, "/chat/completions");
+        assert same_bytes(u[0..n], am_route(m));
+        m = m + 1;
+    }
+    // a catalog token: the rotation picks its key, the id is the catalog model
+    var f : [5]u64 = [0, 0, 0, 0, 0];
+    const cat : str = "nv:meta/muse-glimmer-30b";
+    assert am_pin_of(cat, f[0..5]);
+    assert f[0] == P_NVIDIA and f[1] == PR_NVIDIA and f[2] == AM_NONE;
+    assert same_bytes(cat[@as(usize, @intCast(f[3])) .. @as(usize, @intCast(f[3] + f[4]))], "meta/muse-glimmer-30b");
+    // a binding: its provider's profile, its exact slot and its exact custom id
+    var t : [64]u8 = undefined;
+    const tn : usize = am_bind_token(AM_ZA, 10, "glm-5-custom", t[0..64]);
+    assert am_pin_of(t[0..tn], f[0..5]);
+    assert f[0] == P_ZAI and f[1] == PR_ZAI and f[2] == 10;
+    assert same_bytes(t[@as(usize, @intCast(f[3])) .. @as(usize, @intCast(f[3] + f[4]))], "glm-5-custom");
+    // free text, a retired binding and an unknown catalog token are no pin; the last two stay reserved
+    assert am_pin_of("glm-4.7-flash", f[0..5]) == false and am_token_reserved("glm-4.7-flash") == false;
+    assert am_bind_retire(t[0..tn]);
+    assert am_pin_of(t[0..tn], f[0..5]) == false and am_token_reserved(t[0..tn]);
+    assert am_pin_of("za:glm-5.3", f[0..5]) == false and am_token_reserved("za:glm-5.3");
+    // reuse is exact: another key or another provider with the same model is a different chat
+    var a : [64]u8 = undefined;
+    var c : [64]u8 = undefined;
+    const an : usize = am_bind_token(AM_NV, 4, "meta/muse-glimmer-30b", a[0..64]);
+    const cn : usize = am_bind_token(AM_NV, 5, "meta/muse-glimmer-30b", c[0..64]);
+    assert am_same_pin(a[0..an], a[0..an]);
+    assert am_same_pin(a[0..an], c[0..cn]) == false;
+    assert am_same_pin(a[0..an], cat) == false;
+    assert am_same_pin("free text", "free text") == false;
+}
+
+test exact_custom_model_ids_are_checked_and_never_cut {
+    assert am_model_id_check("nvidia/nemotron-3-ultra-550b-a55b") == AM_ID_OK;
+    assert am_model_id_check("glm-4.7-flash") == AM_ID_OK;
+    assert am_model_id_check("deepseek-ai/deepseek-v4.1-flash") == AM_ID_OK;
+    assert am_model_id_check("vendor/model:tag_1.2") == AM_ID_OK;
+    assert am_model_id_check("") == AM_ID_EMPTY;
+    // 54 bytes are fine, 55 are refused, never shortened
+    var long : [60]u8 = undefined;
+    var i : usize = 0;
+    while (i < 60) {
+        long[i] = 97;
+        i = i + 1;
+    }
+    assert am_model_id_check(long[0..54]) == AM_ID_OK;
+    assert am_model_id_check(long[0..55]) == AM_ID_LONG;
+    // unsafe bytes and shapes
+    assert am_model_id_check("glm 4") == AM_ID_CHAR;
+    assert am_model_id_check("glm\"4") == AM_ID_CHAR;
+    assert am_model_id_check("glm;rm") == AM_ID_CHAR;
+    assert am_model_id_check("a$b") == AM_ID_CHAR;
+    assert am_model_id_check("-glm") == AM_ID_SHAPE;
+    assert am_model_id_check("/glm") == AM_ID_SHAPE;
+    assert am_model_id_check("glm/") == AM_ID_SHAPE;
+    assert am_model_id_check("a/../b") == AM_ID_SHAPE;
+    assert am_model_id_check("a//b") == AM_ID_SHAPE;
+    assert am_id_error_text(AM_ID_LONG).len > 0 and am_id_error_text(AM_ID_OK).len == 0;
+}
+
+test a_binding_names_provider_key_and_exact_model_and_fits_a_session_record {
+    var o : [64]u8 = undefined;
+    var n : usize = am_bind_token(AM_NV, 6, "meta/muse-glimmer-30b", o[0..64]);
+    assert same_bytes(o[0..n], "n1:07:meta/muse-glimmer-30b");
+    assert model_ok(o[0..n]) and n <= MODEL_MAX;
+    var f : [4]u64 = [0, 0, 0, 0];
+    assert am_bind_parse(o[0..n], f[0..4]);
+    assert f[0] == AM_NV and f[1] == 6 and f[2] == 6 and f[3] == 21;
+    assert am_bind_matches(o[0..n], P_NVIDIA, 6);
+    assert am_bind_matches(o[0..n], P_NVIDIA, 7) == false;
+    assert am_bind_matches(o[0..n], P_ZAI, 6) == false;
+    // slot 63 (key 64) and the longest id
+    var id : [54]u8 = undefined;
+    var i : usize = 0;
+    while (i < 54) {
+        id[i] = 122;
+        i = i + 1;
+    }
+    n = am_bind_token(AM_ZA, 63, id[0..54], o[0..64]);
+    assert n == 60 and o[0] == 122 and o[3] == 54 and o[4] == 52;
+    assert am_bind_parse(o[0..n], f[0..4]) and f[1] == 63 and f[0] == AM_ZA;
+    // invalid parts build nothing
+    assert am_bind_token(AM_NV, 64, "glm-4.7-flash", o[0..64]) == 0;
+    assert am_bind_token(2, 0, "glm-4.7-flash", o[0..64]) == 0;
+    assert am_bind_token(AM_NV, 0, "bad id", o[0..64]) == 0;
+    // malformed tokens never parse
+    assert am_bind_parse("n1:00:glm-4.7-flash", f[0..4]) == false;
+    assert am_bind_parse("n1:65:glm-4.7-flash", f[0..4]) == false;
+    assert am_bind_parse("n2:01:glm-4.7-flash", f[0..4]) == false;
+    assert am_bind_parse("x1:01:glm-4.7-flash", f[0..4]) == false;
+    assert am_bind_parse("n1:1:glm", f[0..4]) == false;
+    assert am_bind_parse("n1:01:", f[0..4]) == false;
+    assert am_bind_parse("nv:glm-4.7-flash", f[0..4]) == false;
+    assert am_bind_reserved("n1:zz") and am_bind_reserved("z0:01:x");
+    assert am_bind_reserved("nv:glm") == false and am_bind_reserved("glm-4.7-flash") == false;
+}
+
+test a_retired_binding_never_launches_and_a_live_one_retires_once {
+    var t : [32]u8 = undefined;
+    const n : usize = am_bind_token(AM_ZA, 2, "glm-4.7-flash", t[0..32]);
+    assert am_bind_ok(t[0..n]) and am_bind_retired(t[0..n]) == false;
+    assert am_bind_retire(t[0..n]);
+    assert t[1] == 48;
+    assert am_bind_ok(t[0..n]) == false and am_bind_retired(t[0..n]);
+    assert am_bind_matches(t[0..n], P_ZAI, 2) == false;
+    assert am_bind_reserved(t[0..n]);
+    assert am_bind_retire(t[0..n]) == false;
+}
+
+test counts_partition_all_stored_keys_and_9_of_11_shows_2_not_checked {
+    var w : [704]u64 = undefined;
+    var b : [2864]u8 = undefined;
+    am_t_state(w[0..704], b[0..2864]);
+    w[AM_W_STORED + 1] = am_t_low(11);
+    var k : u32 = 0;
+    while (k < 9) {
+        assert am_t_result(w[0..704], AM_ZA, k, AM_S_WORKING, 1000);
+        k = k + 1;
+    }
+    var c : [7]u32 = [0, 0, 0, 0, 0, 0, 0];
+    am_counts(w[0..704], AM_ZA, c[0..7]);
+    assert c[0] == 11 and c[1] == 9 and c[2] == 2 and c[3] == 0 and c[4] == 0;
+    assert c[1] + c[2] + c[3] + c[4] == c[0];
+    assert am_all_green(c[0..7]) == false;
+    var o : [80]u8 = undefined;
+    const n : usize = am_summary(c[0..7], o[0..80]);
+    assert same_bytes(o[0..n], "9/11 working, 2 not checked");
+    // the last two: one rejected, one reasoning-only
+    assert am_t_result(w[0..704], AM_ZA, 9, AM_S_AUTH, 1000);
+    assert am_t_result(w[0..704], AM_ZA, 10, AM_S_ACCEPTED, 1000);
+    am_counts(w[0..704], AM_ZA, c[0..7]);
+    assert c[1] == 9 and c[2] == 0 and c[3] == 1 and c[4] == 1;
+    assert c[1] + c[2] + c[3] + c[4] == c[0];
+    const m : usize = am_summary(c[0..7], o[0..80]);
+    assert same_bytes(o[0..m], "9/11 working, 1 failed, 1 no text");
+}
+
+test all_green_only_when_every_stored_key_works_on_the_current_identity {
+    var w : [704]u64 = undefined;
+    var b : [2864]u8 = undefined;
+    am_t_state(w[0..704], b[0..2864]);
+    var c : [7]u32 = [0, 0, 0, 0, 0, 0, 0];
+    // zero keys are never green
+    am_counts(w[0..704], AM_NV, c[0..7]);
+    assert c[0] == 0 and am_all_green(c[0..7]) == false;
+    var o : [40]u8 = undefined;
+    assert same_bytes(o[0..am_summary(c[0..7], o[0..40])], "No key");
+    w[AM_W_STORED] = am_t_low(3);
+    assert am_t_result(w[0..704], AM_NV, 0, AM_S_WORKING, 1000);
+    assert am_t_result(w[0..704], AM_NV, 1, AM_S_WORKING, 1000);
+    assert am_t_result(w[0..704], AM_NV, 2, AM_S_WORKING, 1000);
+    am_counts(w[0..704], AM_NV, c[0..7]);
+    assert am_all_green(c[0..7]);
+    // an unreadable slot is never green and never "no key"
+    w[AM_W_UNKNOWN] = slot_add(0, 40);
+    am_counts(w[0..704], AM_NV, c[0..7]);
+    assert am_all_green(c[0..7]) == false and c[6] == 1;
+    w[AM_W_UNKNOWN] = 0;
+    w[AM_W_STORED] = 0;
+    w[AM_W_UNKNOWN] = slot_add(0, 0);
+    am_counts(w[0..704], AM_NV, c[0..7]);
+    assert same_bytes(o[0..am_summary(c[0..7], o[0..40])], "Keychain unreadable");
+}
+
+test a_timeout_or_5xx_replaces_the_current_green_and_never_keeps_it {
+    var w : [704]u64 = undefined;
+    var b : [2864]u8 = undefined;
+    am_t_state(w[0..704], b[0..2864]);
+    w[AM_W_STORED] = am_t_low(1);
+    assert am_t_result(w[0..704], AM_NV, 0, AM_S_WORKING, 1000);
+    assert am_slot_state(w[0..704], AM_NV, 0) == AM_S_WORKING;
+    assert am_t_result(w[0..704], AM_NV, 0, AM_S_NETWORK, 2000);
+    assert am_slot_state(w[0..704], AM_NV, 0) == AM_S_NETWORK;
+    assert am_t_result(w[0..704], AM_NV, 0, AM_S_WORKING, 3000);
+    assert am_t_result(w[0..704], AM_NV, 0, am_classify(503, AM_J_BAD), 4000);
+    assert am_slot_state(w[0..704], AM_NV, 0) == AM_S_SERVICE;
+    var c : [7]u32 = [0, 0, 0, 0, 0, 0, 0];
+    am_counts(w[0..704], AM_NV, c[0..7]);
+    assert am_all_green(c[0..7]) == false and c[3] == 1;
+    // a worker that died is network/timeout, not the old green
+    assert am_t_result(w[0..704], AM_NV, 0, AM_S_WORKING, 5000);
+    assert am_request_begin(w[0..704], AM_NV, 0, 6000) > 0;
+    w[AM_W_PID] = 7;
+    am_request_fail(w[0..704], AM_S_NETWORK, 7000);
+    assert am_slot_state(w[0..704], AM_NV, 0) == AM_S_NETWORK;
+    assert am_busy(w[0..704]) == false;
+}
+
+test a_model_change_and_a_key_add_or_delete_invalidate_results {
+    var w : [704]u64 = undefined;
+    var b : [2864]u8 = undefined;
+    am_t_state(w[0..704], b[0..2864]);
+    w[AM_W_STORED] = am_t_low(3);
+    assert am_t_result(w[0..704], AM_NV, 0, AM_S_WORKING, 1000);
+    assert am_t_result(w[0..704], AM_NV, 1, AM_S_WORKING, 1000);
+    assert am_t_result(w[0..704], AM_NV, 2, AM_S_WORKING, 1000);
+    // the same model again changes nothing
+    assert am_set_model(w[0..704], b[0..2864], AM_NV, am_model(b[0..2864], AM_NV)) == AM_MSG_SAVED;
+    assert am_slot_state(w[0..704], AM_NV, 1) == AM_S_WORKING;
+    // another model: every result of NVIDIA is not current, Z.ai is untouched
+    assert am_set_model(w[0..704], b[0..2864], AM_NV, "meta/muse-glimmer-30b") == AM_MSG_SAVED;
+    assert am_slot_state(w[0..704], AM_NV, 0) == AM_S_NOT_CHECKED;
+    assert am_slot_state(w[0..704], AM_NV, 2) == AM_S_NOT_CHECKED;
+    assert same_bytes(am_model(b[0..2864], AM_NV), "meta/muse-glimmer-30b");
+    // a refused id changes neither the model nor the results
+    assert am_t_result(w[0..704], AM_NV, 0, AM_S_WORKING, 2000);
+    assert am_set_model(w[0..704], b[0..2864], AM_NV, "bad id") == AM_MSG_ID_BASE + AM_ID_CHAR;
+    assert same_bytes(am_model(b[0..2864], AM_NV), "meta/muse-glimmer-30b");
+    assert am_slot_state(w[0..704], AM_NV, 0) == AM_S_WORKING;
+    // a key added, replaced or deleted makes only its own slot not current
+    assert am_t_result(w[0..704], AM_NV, 1, AM_S_WORKING, 2000);
+    am_slot_changed(w[0..704], AM_NV, 1, true);
+    assert am_slot_state(w[0..704], AM_NV, 1) == AM_S_NOT_CHECKED;
+    assert am_slot_state(w[0..704], AM_NV, 0) == AM_S_WORKING;
+    am_slot_changed(w[0..704], AM_NV, 0, false);
+    assert slot_taken(w[AM_W_STORED], 0) == false;
+    var c : [7]u32 = [0, 0, 0, 0, 0, 0, 0];
+    am_counts(w[0..704], AM_NV, c[0..7]);
+    assert c[0] == 2;
+}
+
+test a_stale_or_foreign_worker_result_cannot_apply {
+    var w : [704]u64 = undefined;
+    var b : [2864]u8 = undefined;
+    am_t_state(w[0..704], b[0..2864]);
+    w[AM_W_STORED] = am_t_low(2);
+    const req : u64 = am_request_begin(w[0..704], AM_NV, 1, 1000);
+    w[AM_W_PID] = 99;
+    var f : [6]u64 = [0, 0, 0, 0, 0, 0];
+    f[0] = req;
+    f[1] = @as(u64, P_NVIDIA);
+    f[2] = 1;
+    f[3] = @as(u64, AM_S_WORKING);
+    f[4] = 200;
+    // another request id, provider or slot: nothing changes, the request stays in flight
+    f[0] = req + 1;
+    assert am_result_apply(w[0..704], f[0..6], 2000) == AM_R_FOREIGN;
+    assert am_busy(w[0..704]);
+    f[0] = req;
+    f[1] = @as(u64, P_ZAI);
+    assert am_result_apply(w[0..704], f[0..6], 2000) == AM_R_FOREIGN;
+    f[1] = @as(u64, P_NVIDIA);
+    f[2] = 0;
+    assert am_result_apply(w[0..704], f[0..6], 2000) == AM_R_FOREIGN;
+    f[2] = 1;
+    // the model changed while the request ran: the late "working" is stale and never shown
+    assert am_set_model(w[0..704], b[0..2864], AM_NV, "meta/muse-glimmer-30b") == AM_MSG_SAVED;
+    assert am_result_apply(w[0..704], f[0..6], 2000) == AM_R_STALE;
+    assert am_slot_state(w[0..704], AM_NV, 1) == AM_S_NOT_CHECKED;
+    assert am_busy(w[0..704]) == false;
+    // after a stop and an immediate new check, the cancelled request's output cannot satisfy the new one
+    const r1 : u64 = am_request_begin(w[0..704], AM_NV, 1, 3000);
+    w[AM_W_PID] = 100;
+    assert am_stop(w[0..704], 3100) == 100;
+    assert am_slot_state(w[0..704], AM_NV, 1) == AM_S_CANCELLED;
+    const r2 : u64 = am_request_begin(w[0..704], AM_NV, 1, 3200);
+    w[AM_W_PID] = 101;
+    assert r2 != r1;
+    f[0] = r1;
+    assert am_result_apply(w[0..704], f[0..6], 3300) == AM_R_FOREIGN;
+    assert am_slot_state(w[0..704], AM_NV, 1) == AM_S_CHECKING;
+    f[0] = r2;
+    assert am_result_apply(w[0..704], f[0..6], 3400) == AM_R_APPLIED;
+    assert am_slot_state(w[0..704], AM_NV, 1) == AM_S_WORKING;
+}
+
+test cancel_and_a_rate_limit_stop_the_batch_without_a_next_request {
+    var w : [704]u64 = undefined;
+    var b : [2864]u8 = undefined;
+    am_t_state(w[0..704], b[0..2864]);
+    w[AM_W_STORED] = am_t_low(5);
+    am_batch_begin(w[0..704], AM_NV);
+    assert w[AM_W_BTOTAL] == 5;
+    var k : u32 = am_batch_next(w[0..704]);
+    assert k == 0;
+    var o : [40]u8 = undefined;
+    assert same_bytes(o[0..am_progress_text(w[0..704], o[0..40])], "Checking 1 of 5");
+    am_batch_after(w[0..704], k, AM_S_AUTH, 0, 100);
+    // an invalid key does not stop independent keys
+    k = am_batch_next(w[0..704]);
+    assert k == 1;
+    // a rate limit pauses the provider and ends the batch: no next key, the rest stay not checked
+    am_batch_after(w[0..704], k, AM_S_RATE, 30, 100);
+    assert w[AM_W_BATCH] == AM_NONE;
+    assert w[AM_W_BSTOP] == AM_MSG_RATE_STOP;
+    assert am_batch_next(w[0..704]) == AM_NONE;
+    assert am_can_start(w[0..704], AM_NV, 129) == false;
+    assert am_can_start(w[0..704], AM_NV, 130);
+    assert am_can_start(w[0..704], AM_ZA, 100);
+    assert am_slot_state(w[0..704], AM_NV, 3) == AM_S_NOT_CHECKED;
+    // no Retry-After: the default pause
+    am_batch_begin(w[0..704], AM_ZA);
+    w[AM_W_STORED + 1] = am_t_low(2);
+    w[AM_W_BTOTAL] = 2;
+    am_batch_after(w[0..704], 0, AM_S_RATE, 0, 1000);
+    assert w[AM_W_PAUSE + 1] == 1000 + AM_RATE_PAUSE_S;
+    // Stop: the in-flight slot is cancelled, the batch ends, the worker's pid stays held for its reap (never signalled)
+    am_batch_begin(w[0..704], AM_NV);
+    w[AM_W_PAUSE] = 0;
+    k = am_batch_next(w[0..704]);
+    assert am_request_begin(w[0..704], AM_NV, k, 2000) > 0;
+    w[AM_W_PID] = 555;
+    assert am_stop(w[0..704], 2100) == 555;
+    assert w[AM_W_BATCH] == AM_NONE and am_busy(w[0..704]) == false;
+    assert w[AM_W_REAP] == 555;
+    assert am_batch_next(w[0..704]) == AM_NONE;
+    // a batch that reaches its end finishes
+    am_batch_begin(w[0..704], AM_NV);
+    w[AM_W_BNEXT] = 5;
+    assert am_batch_next(w[0..704]) == AM_NONE and w[AM_W_BSTOP] == AM_MSG_DONE;
+}
+
+test an_unreadable_retry_after_holds_the_provider_until_the_person_resumes {
+    var w : [704]u64 = undefined;
+    var b : [2864]u8 = undefined;
+    am_t_state(w[0..704], b[0..2864]);
+    w[AM_W_STORED] = am_t_low(3);
+    am_batch_begin(w[0..704], AM_NV);
+    const k : u32 = am_batch_next(w[0..704]);
+    assert am_t_result(w[0..704], AM_NV, k, AM_S_RATE, 1000);
+    am_batch_after(w[0..704], k, AM_S_RATE, AM_RETRY_MANUAL, 100);
+    // never a guessed shorter pause: held until Resume, even ten days later; no next key
+    assert am_held(w[0..704], AM_NV) and am_batch_next(w[0..704]) == AM_NONE;
+    assert am_can_start(w[0..704], AM_NV, 100 + 10 * 86400) == false;
+    assert am_can_start(w[0..704], AM_ZA, 100);
+    am_resume(w[0..704], AM_NV);
+    assert am_held(w[0..704], AM_NV) == false and am_can_start(w[0..704], AM_NV, 101);
+    // a wait the worker could read (seconds, or an HTTP date turned into seconds) is kept exactly
+    am_single_after(w[0..704], AM_NV, AM_S_RATE, 1800, 200);
+    assert am_can_start(w[0..704], AM_NV, 1999) == false and am_can_start(w[0..704], AM_NV, 2000);
+    assert am_pause_until(0, 50) == 50 + AM_RATE_PAUSE_S and am_pause_until(AM_RETRY_MANUAL + 5, 50) == AM_PAUSE_HOLD;
+    // the worker line carries the hold value; one more is malformed
+    var o : [96]u8 = undefined;
+    const n : usize = am_wline(7, P_NVIDIA, 0, AM_S_RATE, 429, AM_RETRY_MANUAL, o[0..96]);
+    var f : [6]u64 = [0, 0, 0, 0, 0, 0];
+    assert am_wline_parse(o[0..n], f[0..6]) and f[5] == AM_RETRY_MANUAL;
+    assert am_wline_parse("T27AC1 7 9 0 6 429 86402\n", f[0..6]) == false;
+}
+
+test the_active_key_is_selected_or_deterministic_and_a_missing_one_blocks {
+    var w : [704]u64 = undefined;
+    var b : [2864]u8 = undefined;
+    am_t_state(w[0..704], b[0..2864]);
+    assert am_active_key(w[0..704], AM_NV) == AM_NONE and am_key_problem(w[0..704], AM_NV) == AM_MSG_NO_KEY;
+    // holes keep numbers: keys 5, 32, 64 stored; the default is the lowest
+    w[AM_W_STORED] = slot_add(slot_add(slot_add(0, 4), 31), 63);
+    assert am_active_key(w[0..704], AM_NV) == 4;
+    // slot 63 (key 64) can be selected, an empty slot cannot
+    assert am_select_key(w[0..704], AM_NV, 63);
+    assert am_active_key(w[0..704], AM_NV) == 63;
+    assert am_select_key(w[0..704], AM_NV, 62) == false;
+    assert am_active_key(w[0..704], AM_NV) == 63;
+    // the selected key is deleted: no silent switch to another key
+    am_slot_changed(w[0..704], AM_NV, 63, false);
+    assert am_active_key(w[0..704], AM_NV) == AM_NONE;
+    assert am_key_problem(w[0..704], AM_NV) == AM_MSG_KEY_MISSING;
+    // adding a key into slot 63 again makes it stored; the selection now names a stored slot again
+    am_slot_changed(w[0..704], AM_NV, 63, true);
+    assert am_active_key(w[0..704], AM_NV) == 63;
+    // providers are isolated
+    assert am_active_key(w[0..704], AM_ZA) == AM_NONE;
+    assert am_select_key(w[0..704], AM_ZA, 4) == false;
+}
+
+test the_json_verdict_needs_a_complete_chat_completion {
+    assert am_json_classify("{\"id\":\"x\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"OK\"},\"finish_reason\":\"stop\"}],\"usage\":{\"total_tokens\":9}}") == AM_J_TEXT;
+    // reasoning only: accepted, no final text
+    assert am_json_classify("{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"\",\"reasoning_content\":\"thinking\"}}]}") == AM_J_NO_TEXT;
+    assert am_json_classify("{\"choices\":[{\"message\":{\"content\":null,\"reasoning_content\":\"hm\"}}]}") == AM_J_NO_TEXT;
+    // a top-level error object
+    assert am_json_classify("{\"error\":{\"code\":\"1113\",\"message\":\"x\"}}") == AM_J_ERROR;
+    // escapes inside strings do not end them
+    assert am_json_classify("{\"choices\":[{\"message\":{\"content\":\"say \\\"OK\\\"\"}}]}") == AM_J_TEXT;
+    // a content key elsewhere does not count
+    assert am_json_classify("{\"data\":{\"message\":{\"content\":\"OK\"}}}") == AM_J_BAD;
+    assert am_json_classify("{\"choices\":[]}") == AM_J_BAD;
+    // truncated, trailing bytes, not an object, empty, wrong closers
+    assert am_json_classify("{\"choices\":[{\"message\":{\"content\":\"OK\"}}]") == AM_J_BAD;
+    assert am_json_classify("{\"choices\":[{\"message\":{\"content\":\"OK\"}}]} x") == AM_J_BAD;
+    assert am_json_classify("[1,2]") == AM_J_BAD;
+    assert am_json_classify("") == AM_J_BAD;
+    assert am_json_classify("{\"choices\":[{\"message\":{\"content\":\"OK\"]}]}") == AM_J_BAD;
+    assert am_json_classify("{\"choices\":[{\"message\":{\"content\":\"OK") == AM_J_BAD;
+    // the second choice does not stand in for a missing first message
+    assert am_json_classify("{\"choices\":[{\"text\":\"a\"},{\"message\":{\"content\":\"OK\"}}]}") == AM_J_BAD;
+}
+
+test a_malformed_but_plausible_body_is_never_working {
+    // a missing comma or colon, a doubled colon, a leading or trailing comma
+    assert am_json_classify("{\"choices\":[{\"message\":{\"role\":\"assistant\" \"content\":\"OK\"}}]}") == AM_J_BAD;
+    assert am_json_classify("{\"choices\":[{\"message\":{\"content\" \"OK\"}}]}") == AM_J_BAD;
+    assert am_json_classify("{\"choices\"::[{\"message\":{\"content\":\"OK\"}}]}") == AM_J_BAD;
+    assert am_json_classify("{\"choices\":[{\"message\":{\"content\":\"OK\",}}]}") == AM_J_BAD;
+    assert am_json_classify("{\"choices\":[{\"message\":{\"content\":\"OK\"}},]}") == AM_J_BAD;
+    assert am_json_classify("{\"choices\":[{\"message\":{\"content\":\"OK\"}}],}") == AM_J_BAD;
+    assert am_json_classify("{,\"choices\":[{\"message\":{\"content\":\"OK\"}}]}") == AM_J_BAD;
+    assert am_json_classify("{\"choices\":[,{\"message\":{\"content\":\"OK\"}}]}") == AM_J_BAD;
+    // unknown literals and malformed numbers anywhere in the document, not only on the path
+    assert am_json_classify("{\"choices\":[{\"message\":{\"content\":\"OK\"}}],\"x\":yes}") == AM_J_BAD;
+    assert am_json_classify("{\"choices\":[{\"message\":{\"content\":\"OK\"}}],\"x\":nul}") == AM_J_BAD;
+    assert am_json_classify("{\"choices\":[{\"message\":{\"content\":\"OK\"}}],\"x\":True}") == AM_J_BAD;
+    assert am_json_classify("{\"choices\":[{\"message\":{\"content\":\"OK\"}}],\"x\":nullx}") == AM_J_BAD;
+    assert am_json_classify("{\"choices\":[{\"index\":01,\"message\":{\"content\":\"OK\"}}]}") == AM_J_BAD;
+    assert am_json_classify("{\"choices\":[{\"index\":1.,\"message\":{\"content\":\"OK\"}}]}") == AM_J_BAD;
+    assert am_json_classify("{\"choices\":[{\"index\":-,\"message\":{\"content\":\"OK\"}}]}") == AM_J_BAD;
+    assert am_json_classify("{\"choices\":[{\"index\":1e,\"message\":{\"content\":\"OK\"}}]}") == AM_J_BAD;
+    assert am_json_classify("{\"choices\":[{\"index\":+1,\"message\":{\"content\":\"OK\"}}]}") == AM_J_BAD;
+    assert am_json_classify("{\"choices\":[{\"index\":.5,\"message\":{\"content\":\"OK\"}}]}") == AM_J_BAD;
+    assert am_json_classify("{\"usage\":{\"t\":[1,2 3]},\"choices\":[{\"message\":{\"content\":\"OK\"}}]}") == AM_J_BAD;
+    // every legal value kind in the same places is fine
+    assert am_json_classify("{\"choices\":[{\"index\":-0.5e+10,\"logprobs\":null,\"a\":true,\"b\":false,\"c\":[],\"d\":{},\"message\":{\"content\":\"OK\"}}]}") == AM_J_TEXT;
+    // invalid escapes and raw control bytes in any string
+    assert am_json_classify("{\"choices\":[{\"message\":{\"content\":\"O\\qK\"}}]}") == AM_J_BAD;
+    assert am_json_classify("{\"choices\":[{\"message\":{\"content\":\"\\u12\"}}]}") == AM_J_BAD;
+    assert am_json_classify("{\"choices\":[{\"message\":{\"content\":\"\\x41\"}}]}") == AM_J_BAD;
+    assert am_json_classify("{\"choices\":[{\"message\":{\"content\":\"O\nK\"}}]}") == AM_J_BAD;
+    assert am_json_classify("{\"choices\":[{\"message\":{\"content\":\"O\tK\"}}]}") == AM_J_BAD;
+    assert am_json_classify("{\"id\":\"a\nb\",\"choices\":[{\"message\":{\"content\":\"OK\"}}]}") == AM_J_BAD;
+    assert am_json_classify("{\"choices\":[{\"message\":{\"content\":\"OK\\") == AM_J_BAD;
+    // the legal escapes, including \/ and \u, are text
+    assert am_json_classify("{\"choices\":[{\"message\":{\"content\":\"\\/\\b\\u004F\\u004b\"}}]}") == AM_J_TEXT;
+    // extra data after the root, in any form
+    assert am_json_classify("{\"choices\":[{\"message\":{\"content\":\"OK\"}}]}{}") == AM_J_BAD;
+    assert am_json_classify("{\"choices\":[{\"message\":{\"content\":\"OK\"}}]}]") == AM_J_BAD;
+    assert am_json_classify("{\"choices\":[{\"message\":{\"content\":\"OK\"}}]} \"x\"") == AM_J_BAD;
+    assert am_json_classify("{\"choices\":[{\"message\":{\"content\":\"OK\"}}]} \n ") == AM_J_TEXT;
+}
+
+test escaped_names_duplicates_and_value_types_on_the_path {
+    // an escaped spelling of a member name is that name
+    assert am_json_classify("{\"cho\\u0069ces\":[{\"mess\\u0061ge\":{\"con\\u0074ent\":\"OK\"}}]}") == AM_J_TEXT;
+    // the same structural member twice in one object is refused, also when one spelling is escaped
+    assert am_json_classify("{\"choices\":[{\"message\":{\"content\":\"\",\"content\":\"OK\"}}]}") == AM_J_BAD;
+    assert am_json_classify("{\"choices\":[{\"message\":{\"content\":\"\",\"c\\u006fntent\":\"OK\"}}]}") == AM_J_BAD;
+    assert am_json_classify("{\"choices\":[{\"message\":{\"content\":\"OK\"}}],\"choices\":[]}") == AM_J_BAD;
+    assert am_json_classify("{\"choices\":[{\"message\":{\"content\":\"\"},\"message\":{\"content\":\"OK\"}}]}") == AM_J_BAD;
+    assert am_json_classify("{\"error\":{\"a\":1},\"error\":null}") == AM_J_BAD;
+    // a repeated member off the path does not decide anything
+    assert am_json_classify("{\"id\":\"a\",\"id\":\"b\",\"choices\":[{\"message\":{\"content\":\"OK\"}}]}") == AM_J_TEXT;
+    // choices[0] is the first element whatever its type: content in the second choice never counts
+    assert am_json_classify("{\"choices\":[null,{\"message\":{\"content\":\"OK\"}}]}") == AM_J_BAD;
+    assert am_json_classify("{\"choices\":[1,{\"message\":{\"content\":\"OK\"}}]}") == AM_J_BAD;
+    assert am_json_classify("{\"choices\":[\"x\",{\"message\":{\"content\":\"OK\"}}]}") == AM_J_BAD;
+    assert am_json_classify("{\"choices\":[[],{\"message\":{\"content\":\"OK\"}}]}") == AM_J_BAD;
+    // content must be a string to be text; an object or array holding "OK" is not
+    assert am_json_classify("{\"choices\":[{\"message\":{\"content\":{\"text\":\"OK\"}}}]}") == AM_J_BAD;
+    assert am_json_classify("{\"choices\":[{\"message\":{\"content\":[\"OK\"]}}]}") == AM_J_BAD;
+    assert am_json_classify("{\"choices\":[{\"message\":{\"content\":1}}]}") == AM_J_BAD;
+    assert am_json_classify("{\"choices\":[{\"message\":{\"content\":true}}]}") == AM_J_BAD;
+    // blanks only, or no content member at all: accepted, no text
+    assert am_json_classify("{\"choices\":[{\"message\":{\"content\":\" \\n\\t \"}}]}") == AM_J_NO_TEXT;
+    assert am_json_classify("{\"choices\":[{\"message\":{\"role\":\"assistant\",\"tool_calls\":[]}}]}") == AM_J_NO_TEXT;
+    // choices that is not an array, a message that is not an object
+    assert am_json_classify("{\"choices\":{\"message\":{\"content\":\"OK\"}}}") == AM_J_BAD;
+    assert am_json_classify("{\"choices\":[{\"message\":\"OK\"}]}") == AM_J_BAD;
+    assert am_json_classify("{\"choices\":[{\"message\":null}]}") == AM_J_BAD;
+    // the path is the root's: the same names deeper are not on it
+    assert am_json_classify("{\"x\":{\"choices\":[{\"message\":{\"content\":\"OK\"}}]}}") == AM_J_BAD;
+    assert am_json_classify("{\"choices\":[{\"x\":{\"message\":{\"content\":\"OK\"}}}]}") == AM_J_BAD;
+    // "error": null is no error; any other error value is one, even beside a valid choice
+    assert am_json_classify("{\"error\":null,\"choices\":[{\"message\":{\"content\":\"OK\"}}]}") == AM_J_TEXT;
+    assert am_json_classify("{\"error\":\"quota\",\"choices\":[{\"message\":{\"content\":\"OK\"}}]}") == AM_J_ERROR;
+}
+
+test utf8_depth_and_size_bounds_of_a_body {
+    var b : [65600]u8 = undefined;
+    const pre : str = "{\"choices\":[{\"message\":{\"content\":\"";
+    const post : str = "\"}}]}";
+    // a well-formed two-byte character is text
+    var n : usize = put_bytes(b[0..65600], 0, pre);
+    b[n] = 195;
+    b[n + 1] = 169;
+    var e : usize = put_bytes(b[0..65600], n + 2, post);
+    assert am_json_classify(b[0..e]) == AM_J_TEXT;
+    // an overlong form, a stray continuation byte, a surrogate and a cut sequence are not UTF-8
+    b[n] = 192;
+    b[n + 1] = 128;
+    assert am_json_classify(b[0..e]) == AM_J_BAD;
+    b[n] = 128;
+    b[n + 1] = 65;
+    assert am_json_classify(b[0..e]) == AM_J_BAD;
+    b[n] = 237;
+    b[n + 1] = 160;
+    e = put_bytes(b[0..65600], n + 2, post);
+    assert am_json_classify(b[0..e]) == AM_J_BAD;
+    b[n] = 226;
+    b[n + 1] = 130;
+    e = put_bytes(b[0..65600], n + 2, post);
+    assert am_json_classify(b[0..e]) == AM_J_BAD;
+    b[n + 2] = 172;
+    e = put_bytes(b[0..65600], n + 3, post);
+    assert am_json_classify(b[0..e]) == AM_J_TEXT;
+    // nesting: 22 arrays inside the root (23 levels) is fine, 30 is refused
+    n = put_bytes(b[0..65600], 0, "{\"x\":");
+    var k : usize = 0;
+    while (k < 22) {
+        b[n] = 91;
+        n = n + 1;
+        k = k + 1;
+    }
+    k = 0;
+    while (k < 22) {
+        b[n] = 93;
+        n = n + 1;
+        k = k + 1;
+    }
+    n = put_bytes(b[0..65600], n, ",\"choices\":[{\"message\":{\"content\":\"OK\"}}]}");
+    assert am_json_classify(b[0..n]) == AM_J_TEXT;
+    n = put_bytes(b[0..65600], 0, "{\"x\":");
+    k = 0;
+    while (k < 30) {
+        b[n] = 91;
+        n = n + 1;
+        k = k + 1;
+    }
+    k = 0;
+    while (k < 30) {
+        b[n] = 93;
+        n = n + 1;
+        k = k + 1;
+    }
+    n = put_bytes(b[0..65600], n, ",\"choices\":[{\"message\":{\"content\":\"OK\"}}]}");
+    assert am_json_classify(b[0..n]) == AM_J_BAD;
+    // size: a valid body of exactly AM_BODY_MAX bytes is read, one more byte is no verdict
+    n = put_bytes(b[0..65600], 0, "{\"choices\":[{\"message\":{\"content\":\"OK\"}}],\"pad\":\"");
+    while (n < AM_BODY_MAX - 2) {
+        b[n] = 97;
+        n = n + 1;
+    }
+    b[n] = 34;
+    b[n + 1] = 125;
+    assert am_json_classify(b[0 .. n + 2]) == AM_J_TEXT;
+    b[n] = 97;
+    b[n + 1] = 34;
+    b[n + 2] = 125;
+    assert am_json_classify(b[0 .. n + 3]) == AM_J_BAD;
+}
+
+test a_new_check_all_resets_its_keys_so_stop_or_429_cannot_keep_an_old_green {
+    var w : [704]u64 = undefined;
+    var b : [2864]u8 = undefined;
+    am_t_state(w[0..704], b[0..2864]);
+    w[AM_W_STORED] = am_t_low(4);
+    var k : u32 = 0;
+    while (k < 4) {
+        assert am_t_result(w[0..704], AM_NV, k, AM_S_WORKING, 1000);
+        k = k + 1;
+    }
+    var c : [7]u32 = [0, 0, 0, 0, 0, 0, 0];
+    am_counts(w[0..704], AM_NV, c[0..7]);
+    assert am_all_green(c[0..7]) and am_last_time(w[0..704], AM_NV) == 1000;
+    // a new run: every key it covers reads "not checked" and the old check time is gone
+    am_batch_begin(w[0..704], AM_NV);
+    am_counts(w[0..704], AM_NV, c[0..7]);
+    assert c[1] == 0 and c[2] == 4 and am_all_green(c[0..7]) == false;
+    assert am_last_time(w[0..704], AM_NV) == 0;
+    // first response, then Stop during the second
+    k = am_batch_next(w[0..704]);
+    assert k == 0;
+    assert am_t_result(w[0..704], AM_NV, k, AM_S_WORKING, 2000);
+    am_batch_after(w[0..704], k, AM_S_WORKING, 0, 2);
+    k = am_batch_next(w[0..704]);
+    assert k == 1;
+    assert am_request_begin(w[0..704], AM_NV, k, 2100) > 0;
+    w[AM_W_PID] = 77;
+    assert am_stop(w[0..704], 2200) == 77;
+    am_counts(w[0..704], AM_NV, c[0..7]);
+    assert c[1] == 1 and c[2] == 3 and am_all_green(c[0..7]) == false;
+    var o : [64]u8 = undefined;
+    assert same_bytes(o[0..am_summary(c[0..7], o[0..64])], "1/4 working, 3 not checked");
+    assert am_last_time(w[0..704], AM_NV) == 2000;
+    // the same with a rate limit on the first key: no old green survives, the rest stay not checked
+    am_batch_begin(w[0..704], AM_NV);
+    k = am_batch_next(w[0..704]);
+    assert am_t_result(w[0..704], AM_NV, k, AM_S_RATE, 3000);
+    am_batch_after(w[0..704], k, AM_S_RATE, 0, 3);
+    assert am_batch_next(w[0..704]) == AM_NONE;
+    am_counts(w[0..704], AM_NV, c[0..7]);
+    assert c[1] == 0 and c[3] == 1 and c[2] == 3;
+}
+
+test http_status_and_body_give_one_of_the_states {
+    assert am_classify(200, AM_J_TEXT) == AM_S_WORKING;
+    assert am_classify(200, AM_J_NO_TEXT) == AM_S_ACCEPTED;
+    assert am_classify(200, AM_J_BAD) == AM_S_INVALID;
+    assert am_classify(200, AM_J_ERROR) == AM_S_SERVICE;
+    assert am_classify(401, AM_J_BAD) == AM_S_AUTH;
+    // a 403 is not claimed to be a bad key
+    assert am_classify(403, AM_J_ERROR) == AM_S_DENIED;
+    assert am_classify(404, AM_J_ERROR) == AM_S_DENIED;
+    assert am_classify(400, AM_J_ERROR) == AM_S_DENIED;
+    assert am_classify(429, AM_J_ERROR) == AM_S_RATE;
+    assert am_classify(500, AM_J_BAD) == AM_S_SERVICE;
+    assert am_classify(503, AM_J_BAD) == AM_S_SERVICE;
+    assert am_classify(0, AM_J_BAD) == AM_S_NETWORK;
+    assert am_classify(408, AM_J_BAD) == AM_S_NETWORK;
+    assert am_retry_after("30") == 30 and am_retry_after("") == 0 and am_retry_after("Wed, 21") == 0;
+    assert am_retry_after("999999") == 86400;
+    var s : u32 = 0;
+    while (s < AM_S_COUNT) {
+        assert am_state_text(s).len > 0 and am_state_short(s).len > 0 and am_state_short(s).len <= 11;
+        s = s + 1;
+    }
+    // row words: the stable slot label, a compact age, the masked form's place per slot
+    var o : [16]u8 = undefined;
+    assert same_bytes(o[0..am_key_label(0, o[0..16])], "Key01");
+    assert same_bytes(o[0..am_key_label(63, o[0..16])], "Key64");
+    assert same_bytes(o[0..am_ago_short(5000, 0, o[0..16])], "-");
+    assert same_bytes(o[0..am_ago_short(250000, 10000, o[0..16])], "4m");
+    assert same_bytes(o[0..am_ago_short(90000000, 10000, o[0..16])], "1d");
+    assert am_mask_at(AM_ZA, 63) + AM_MASK_CAP == AM_B_BIND;
+    assert am_mask_at(AM_NV, 0) == AM_B_MASK;
+}
+
+test the_worker_line_is_numbers_only_and_parsed_strictly {
+    var o : [96]u8 = undefined;
+    const n : usize = am_wline(12, P_NVIDIA, 63, AM_S_WORKING, 200, 0, o[0..96]);
+    assert same_bytes(o[0..n], "T27AC1 12 9 63 2 200 0\n");
+    var f : [6]u64 = [0, 0, 0, 0, 0, 0];
+    assert am_wline_parse(o[0..n], f[0..6]);
+    assert f[0] == 12 and f[1] == 9 and f[2] == 63 and f[3] == 2 and f[4] == 200 and f[5] == 0;
+    // partial, oversized, malformed or out of range lines never count
+    assert am_wline_parse(o[0 .. n - 1], f[0..6]) == false;
+    assert am_wline_parse("T27AC1 12 9 63 2 200\n", f[0..6]) == false;
+    assert am_wline_parse("T27AC1 12 9 64 2 200 0\n", f[0..6]) == false;
+    assert am_wline_parse("T27AC1 12 3 1 2 200 0\n", f[0..6]) == false;
+    assert am_wline_parse("T27AC1 12 9 1 13 200 0\n", f[0..6]) == false;
+    assert am_wline_parse("T27AC1 12  9 1 2 200 0\n", f[0..6]) == false;
+    assert am_wline_parse("T27AC1 12 9 1 2 200 0 \n", f[0..6]) == false;
+    assert am_wline_parse("T27AC2 12 9 1 2 200 0\n", f[0..6]) == false;
+    assert am_wline_parse("T27AC1 12 9 1 2 2000 0\n", f[0..6]) == false;
+    var big : [100]u8 = undefined;
+    var i : usize = 0;
+    while (i < 100) {
+        big[i] = 49;
+        i = i + 1;
+    }
+    assert am_wline_parse(big[0..100], f[0..6]) == false;
+}
+
+test the_check_request_body_is_bounded_and_uses_the_exact_model {
+    var o : [256]u8 = undefined;
+    const n : usize = am_check_body("glm-4.7-flash", o[0..256]);
+    assert n > 0;
+    assert same_bytes(o[0..23], "{\"model\":\"glm-4.7-flash");
+    // the body is itself a complete JSON document with the explicit answer budget
+    assert same_bytes(o[n - 34 .. n], ",\"max_tokens\":1024,\"stream\":false}");
+    assert AM_CHECK_MAX_TOKENS >= 64 and AM_CHECK_MAX_TOKENS <= 4096;
+    // the request times out before the worker's own wall, and the window stops waiting only after that wall
+    assert AM_CHECK_TIMEOUT_S < AM_WORKER_WALL_S and @as(u64, AM_WORKER_WALL_S) * 1000 < AM_WORKER_WAIT_MS;
+    assert am_check_body("bad\"id", o[0..256]) == 0;
+    assert am_check_body("glm-4.7-flash", o[0..100]) == 0;
+}
+
+test the_selection_persists_and_a_bad_line_keeps_the_fresh_value {
+    var w : [704]u64 = undefined;
+    var b : [2864]u8 = undefined;
+    am_t_state(w[0..704], b[0..2864]);
+    w[AM_W_STORED] = am_t_low(40);
+    assert am_select_key(w[0..704], AM_NV, 33);
+    assert am_set_model(w[0..704], b[0..2864], AM_NV, "my-vendor/custom-1") == AM_MSG_SAVED;
+    var o : [256]u8 = undefined;
+    const n : usize = am_cfg_emit(w[0..704], b[0..2864], o[0..256]);
+    var w2 : [704]u64 = undefined;
+    var b2 : [2864]u8 = undefined;
+    am_t_state(w2[0..704], b2[0..2864]);
+    assert am_cfg_parse(o[0..n], w2[0..704], b2[0..2864]);
+    assert same_bytes(am_model(b2[0..2864], AM_NV), "my-vendor/custom-1");
+    assert w2[AM_W_SEL] == 33 and w2[AM_W_SEL + 1] == AM_NONE;
+    assert same_bytes(am_model(b2[0..2864], AM_ZA), "glm-4.7-flash");
+    // a wrong header takes nothing; an unsafe model id or an out-of-range key is skipped
+    var w3 : [704]u64 = undefined;
+    var b3 : [2864]u8 = undefined;
+    am_t_state(w3[0..704], b3[0..2864]);
+    assert am_cfg_parse("t27os.api.v0\nnvidia.key=3\n", w3[0..704], b3[0..2864]) == false;
+    assert am_cfg_parse("t27os.api.v1\nnvidia.model=bad id\nnvidia.key=65\nzai.key=11\n", w3[0..704], b3[0..2864]);
+    assert same_bytes(am_model(b3[0..2864], AM_NV), "nvidia/nemotron-3.5-super-vl-120b-a12b");
+    assert w3[AM_W_SEL] == AM_NONE and w3[AM_W_SEL + 1] == 10;
+}
+
+test chat_bindings_compact_exactly_like_the_catalog_pins {
+    var b : [2864]u8 = undefined;
+    var w : [704]u64 = undefined;
+    am_t_state(w[0..704], b[0..2864]);
+    var t : [64]u8 = undefined;
+    var n : usize = am_bind_token(AM_NV, 0, "meta/muse-glimmer-30b", t[0..64]);
+    assert am_sb_set(b[0..2864], 1, t[0..n]);
+    n = am_bind_token(AM_ZA, 10, "glm-4.5-flash", t[0..64]);
+    assert am_sb_set(b[0..2864], 3, t[0..n]);
+    assert am_sb_set(b[0..2864], 4, "not a binding") == false;
+    var pins : u64 = 0;
+    pins = pc_set_raw(pins, 1, PC_BOUND);
+    pins = pc_set(pins, 2, 7);
+    pins = pc_set_raw(pins, 3, PC_BOUND);
+    assert pc_get(pins, 1) == PC_NONE and am_session_bound(pins, b[0..2864], 1);
+    assert am_session_bound(pins, b[0..2864], 2) == false;
+    // a close of chat 0 moves both the pins and the bindings up by one
+    pins = pc_drop(pins, 0);
+    am_sb_drop(b[0..2864], 0);
+    assert am_session_bound(pins, b[0..2864], 0);
+    assert pc_get(pins, 1) == 7;
+    assert am_session_bound(pins, b[0..2864], 2);
+    assert am_bind_matches(am_sb_get(b[0..2864], 2), P_ZAI, 10);
+    assert am_sb_get(b[0..2864], 6).len == 0;
+    // the table persists; a retired or broken line is skipped
+    var o : [512]u8 = undefined;
+    const e : usize = am_sb_emit(b[0..2864], o[0..512]);
+    var b2 : [2864]u8 = undefined;
+    am_t_state(w[0..704], b2[0..2864]);
+    assert am_sb_parse(o[0..e], b2[0..2864]) == 2;
+    assert same_bytes(am_sb_get(b2[0..2864], 0), am_sb_get(b[0..2864], 0));
+    // a retired binding is kept (its chat asks for a key); an index past 6 or a non-binding is skipped
+    assert am_sb_parse("0=n0:01:glm-4.7-flash\n9=n1:01:x\n1=junk\n", b2[0..2864]) == 1;
+    assert am_bind_retired(am_sb_get(b2[0..2864], 0)) and am_bind_ok(am_sb_get(b2[0..2864], 0)) == false;
+    // deleting NVIDIA key 64 retires exactly the window chats bound to it
+    var b4 : [2864]u8 = undefined;
+    am_t_state(w[0..704], b4[0..2864]);
+    n = am_bind_token(AM_NV, 63, "meta/muse-glimmer-30b", t[0..64]);
+    assert am_sb_set(b4[0..2864], 0, t[0..n]) and am_sb_set(b4[0..2864], 2, t[0..n]);
+    n = am_bind_token(AM_ZA, 63, "glm-4.7-flash", t[0..64]);
+    assert am_sb_set(b4[0..2864], 1, t[0..n]);
+    assert am_sb_retire(b4[0..2864], P_NVIDIA, 63) == 2;
+    assert am_bind_retired(am_sb_get(b4[0..2864], 0)) and am_bind_retired(am_sb_get(b4[0..2864], 2));
+    assert am_bind_ok(am_sb_get(b4[0..2864], 1));
+    assert am_sb_retire(b4[0..2864], P_NVIDIA, 63) == 0;
+    // closing a space: chats 0..2 in spaces 0, 1, 0; the bindings follow the pins exactly
+    var b3 : [2864]u8 = undefined;
+    am_t_state(w[0..704], b3[0..2864]);
+    n = am_bind_token(AM_NV, 63, "meta/muse-glimmer-30b", t[0..64]);
+    assert am_sb_set(b3[0..2864], 0, t[0..n]);
+    n = am_bind_token(AM_NV, 5, "custom-model.v2", t[0..64]);
+    assert am_sb_set(b3[0..2864], 2, t[0..n]);
+    const ss : u64 = add_session(add_session(add_session(0, 3, 0), 3, 1), 3, 0);
+    var p3 : u64 = pc_set_raw(pc_set(pc_set_raw(0, 0, PC_BOUND), 1, 8), 2, PC_BOUND);
+    p3 = pc_drop_space(p3, ss, 1);
+    am_sb_drop_space(b3[0..2864], ss, 1);
+    assert am_session_bound(p3, b3[0..2864], 0) and am_bind_matches(am_sb_get(b3[0..2864], 0), P_NVIDIA, 63);
+    assert am_session_bound(p3, b3[0..2864], 1) and am_bind_matches(am_sb_get(b3[0..2864], 1), P_NVIDIA, 5);
+    assert am_sb_get(b3[0..2864], 2).len == 0 and pc_raw(p3, 2) == 0;
+}
+
+test the_detail_list_reaches_slot_64_and_adapts_to_the_panel_height {
+    var w : [704]u64 = undefined;
+    var b : [2864]u8 = undefined;
+    am_t_state(w[0..704], b[0..2864]);
+    w[AM_W_MODE] = @as(u64, AM_M_DETAIL);
+    w[AM_W_STORED] = slot_add(am_t_low(34), 63);
+    // the minimum window (320 points high, panel top 40): at least one row, all rows inside the panel
+    const t : f64 = 40.0;
+    const per_min : u32 = am_rows_fit(t, 320.0);
+    assert per_min >= 1;
+    assert am_row_y(t, per_min - 1) + AM_ROW_H <= 320.0 - AM_FOOT_H;
+    const per : u32 = am_rows_fit(t, 540.0);
+    assert per > per_min;
+    assert am_row_y(t, per - 1) + AM_ROW_H <= 540.0 - AM_FOOT_H;
+    // the list shows the saved keys (and an unreadable slot), never empty capacity: 34 keys + key 64 + an
+    // unreadable slot 40 are 36 rows; each keeps its physical label, and key 64 is on the last page
+    w[AM_W_UNKNOWN] = slot_add(0, 40);
+    const listed : u64 = am_listed(w[0..704], AM_NV);
+    assert slot_count(listed) == 36;
+    const pages : u32 = am_pages(listed, per);
+    assert pages == (36 + per - 1) / per;
+    assert am_page_of(listed, 63, per) == pages - 1 and am_page_of(listed, 0, per) == 0;
+    assert am_page_of(listed, 50, per) == AM_NONE;
+    var seen : u64 = 0;
+    var pg : u32 = 0;
+    while (pg < pages) {
+        var r : u32 = 0;
+        while (r < per) {
+            const k : u32 = am_row_slot(listed, pg, per, r);
+            if (k != AM_NONE) {
+                assert slot_taken(seen, k) == false and slot_taken(listed, k);
+                seen = slot_add(seen, k);
+            }
+            r = r + 1;
+        }
+        pg = pg + 1;
+    }
+    assert seen == listed;
+    assert am_row_slot(listed, 0, per, per) == AM_NONE and am_row_slot(listed, pages, per, 0) == AM_NONE;
+    // 11 saved keys need no paging through 64 rows
+    assert am_pages(am_t_low(11), per) == 1 and am_pages(0, per) == 1;
+    // a page past the end (keys deleted under it) shows, and hits, the last page
+    w[AM_W_PAGE] = 99;
+    assert am_page_shown(w[0..704], AM_NV, per) == pages - 1;
+    // the delete button of a row names exactly that row's slot; selecting hits the row
+    w[AM_W_PAGE] = @as(u64, pages - 1);
+    const last_r : u32 = am_row_of(listed, 63, per);
+    const l : f64 = 660.0;
+    const pw : f64 = 300.0;
+    const ry : f64 = am_row_y(t, last_r) + 10.0;
+    const h1 : u32 = am_hit(w[0..704], l + pw - 30.0, ry, l, pw, t, 540.0);
+    assert am_hit_kind(h1) == AM_K_DEL and am_hit_arg(h1) == 63;
+    const h2 : u32 = am_hit(w[0..704], l + 40.0, ry, l, pw, t, 540.0);
+    assert am_hit_kind(h2) == AM_K_ROW and am_hit_arg(h2) == 63;
+    // a row below the page is nothing
+    assert am_hit(w[0..704], l + 40.0, am_row_y(t, per) + 5.0, l, pw, t, 540.0) == AM_K_NONE;
+    // the unreadable slot is a row under its own label, with no Delete
+    w[AM_W_PAGE] = @as(u64, am_page_of(listed, 40, per));
+    const er : f64 = am_row_y(t, am_row_of(listed, 40, per)) + 10.0;
+    assert am_hit_kind(am_hit(w[0..704], l + pw - 30.0, er, l, pw, t, 540.0)) != AM_K_DEL;
+    assert am_hit_arg(am_hit(w[0..704], l + 40.0, er, l, pw, t, 540.0)) == 40;
+    // at the minimum height the Delete of key 64 still names slot 63
+    w[AM_W_PAGE] = @as(u64, am_page_of(listed, 63, per_min));
+    const mr : f64 = am_row_y(t, am_row_of(listed, 63, per_min)) + 10.0;
+    const hm : u32 = am_hit(w[0..704], l + pw - 30.0, mr, l, pw, t, 320.0);
+    assert am_hit_kind(hm) == AM_K_DEL and am_hit_arg(hm) == 63;
+    // while a delete is armed the footer shows Confirm and Cancel instead of paging
+    w[AM_W_ARM] = 63;
+    const hc : u32 = am_hit(w[0..704], l + 30.0, 540.0 - AM_FOOT_H + 10.0, l, pw, t, 540.0);
+    assert am_hit_kind(hc) == AM_K_CONFIRM and am_hit_arg(hc) == 63;
+    assert am_hit_kind(am_hit(w[0..704], l + 16.0 + 140.0, 540.0 - AM_FOOT_H + 10.0, l, pw, t, 540.0)) == AM_K_CANCEL;
+    // Check all becomes Stop while NVIDIA checks
+    w[AM_W_ARM] = @as(u64, AM_NONE);
+    assert am_hit_kind(am_hit(w[0..704], am_act_x(l, pw, 0) + 5.0, t + AM_D_ACT_Y + 4.0, l, pw, t, 540.0)) == AM_K_CHECK_ALL;
+    w[AM_W_BATCH] = @as(u64, AM_NV);
+    assert am_hit_kind(am_hit(w[0..704], am_act_x(l, pw, 0) + 5.0, t + AM_D_ACT_Y + 4.0, l, pw, t, 540.0)) == AM_K_STOP;
+    // the three actions fit the panel width
+    assert am_act_x(l, pw, 2) + am_act_w(pw) <= l + pw - AM_PAD + 0.001;
+}
+
+test the_overview_and_model_list_fit_the_minimum_height {
+    var w : [704]u64 = undefined;
+    var b : [2864]u8 = undefined;
+    am_t_state(w[0..704], b[0..2864]);
+    w[AM_W_MODE] = @as(u64, AM_M_OVERVIEW);
+    const t : f64 = 40.0;
+    const l : f64 = 180.0;
+    const pw : f64 = 300.0;
+    // both cards and the Other providers row above the bottom of a 320-point window
+    assert am_other_y(t, 320.0) + 24.0 <= 320.0;
+    assert am_manage_y(t, 320.0, 1) + AM_BTN_H <= am_other_y(t, 320.0);
+    const hm : u32 = am_hit(w[0..704], am_manage_x(l, pw) + 4.0, am_manage_y(t, 320.0, 1) + 4.0, l, pw, t, 320.0);
+    assert am_hit_kind(hm) == AM_K_MANAGE and am_hit_arg(hm) == AM_ZA;
+    assert am_hit_kind(am_hit(w[0..704], l + 30.0, am_other_y(t, 320.0) + 5.0, l, pw, t, 320.0)) == AM_K_OTHER;
+    // the model list: NVIDIA's 7 rows and "Other model ID" are all reachable over the pages
+    w[AM_W_MODE] = @as(u64, AM_M_MODELS);
+    w[AM_W_PROV] = @as(u64, AM_NV);
+    const per : u32 = am_mrows_fit(t, 320.0);
+    assert per >= 1;
+    const pages : u32 = am_mpages(AM_NV, per);
+    var found : u32 = 0;
+    var custom : bool = false;
+    var pg : u32 = 0;
+    while (pg < pages) {
+        w[AM_W_MPAGE] = @as(u64, pg);
+        var r : u32 = 0;
+        while (r < per) {
+            const h : u32 = am_hit(w[0..704], l + 40.0, t + AM_MLIST_TOP + @as(f64, @floatFromInt(r)) * AM_MROW_H + 5.0, l, pw, t, 320.0);
+            if (am_hit_kind(h) == AM_K_USE) {
+                assert pc_model(am_hit_arg(h)).len > 0 and am_hit_arg(h) < PC_NVIDIA_COUNT;
+                found = found + 1;
+            }
+            if (am_hit_kind(h) == AM_K_CUSTOM) { custom = true; }
+            r = r + 1;
+        }
+        pg = pg + 1;
+    }
+    assert found == PC_NVIDIA_COUNT and custom;
+}
+
+test the_custom_id_field_holds_more_than_the_limit_and_refuses_bad_pastes {
+    var w : [704]u64 = undefined;
+    var b : [2864]u8 = undefined;
+    am_t_state(w[0..704], b[0..2864]);
+    am_input_from_model(b[0..2864], AM_ZA);
+    assert same_bytes(am_input(b[0..2864]), "glm-4.7-flash");
+    am_input_clear(b[0..2864]);
+    assert am_input_paste(b[0..2864], "  vendor/model-x  ");
+    assert same_bytes(am_input(b[0..2864]), "vendor/model-x");
+    // a paste with a control byte or that would overflow the field changes nothing
+    assert am_input_paste(b[0..2864], "a\tb") == false;
+    var big : [100]u8 = undefined;
+    var i : usize = 0;
+    while (i < 100) {
+        big[i] = 97;
+        i = i + 1;
+    }
+    assert am_input_paste(b[0..2864], big[0..90]) == false;
+    assert same_bytes(am_input(b[0..2864]), "vendor/model-x");
+    // typed characters: an overlong id is held and refused on Save, the old model stays
+    am_input_clear(b[0..2864]);
+    var k : usize = 0;
+    while (k < 60) {
+        assert am_input_char(b[0..2864], 98);
+        k = k + 1;
+    }
+    assert am_input(b[0..2864]).len == 60;
+    const before : usize = am_model(b[0..2864], AM_ZA).len;
+    assert am_set_model(w[0..704], b[0..2864], AM_ZA, am_input(b[0..2864])) == AM_MSG_ID_BASE + AM_ID_LONG;
+    assert am_model(b[0..2864], AM_ZA).len == before;
+    assert am_msg_text(AM_MSG_ID_BASE + AM_ID_LONG).len > 0;
+    am_input_back(b[0..2864]);
+    assert am_input(b[0..2864]).len == 59;
+    assert am_input_char(b[0..2864], 10) == false;
+}
+
+test a_scan_marks_unreadable_slots_and_never_reads_them_as_empty {
+    var w : [704]u64 = undefined;
+    var b : [2864]u8 = undefined;
+    am_t_state(w[0..704], b[0..2864]);
+    am_scan_begin(w[0..704], AM_ZA);
+    assert am_scanning(w[0..704]);
+    var k : u32 = 0;
+    var more : bool = true;
+    while (more) {
+        more = am_scan_record(w[0..704], k, k < 11, k == 20);
+        k = k + 1;
+    }
+    assert k == 64;
+    assert am_scanning(w[0..704]) == false;
+    assert w[AM_W_LOADED + 1] == 1;
+    assert slot_count(w[AM_W_STORED + 1]) == 11;
+    assert slot_taken(w[AM_W_UNKNOWN + 1], 20);
+    var c : [7]u32 = [0, 0, 0, 0, 0, 0, 0];
+    am_counts(w[0..704], AM_ZA, c[0..7]);
+    assert c[0] == 11 and c[6] == 1 and am_all_green(c[0..7]) == false;
+    // the ago text is truthful about this session
+    var o : [40]u8 = undefined;
+    assert same_bytes(o[0..am_ago_text(5000, 0, o[0..40])], "not checked this session");
+    assert same_bytes(o[0..am_ago_text(185000, 5000, o[0..40])], "checked 3 min ago");
+}
+
+test cmd_a_selects_the_prefilled_id_so_one_key_or_paste_replaces_it {
+    var w : [704]u64 = undefined;
+    var b : [2864]u8 = undefined;
+    am_t_state(w[0..704], b[0..2864]);
+    // the field opens holding the id in use, all of it selected
+    am_custom_begin(w[0..704], b[0..2864], AM_NV);
+    assert w[AM_W_MODE] == AM_M_CUSTOM and am_input_selected(w[0..704]);
+    assert same_bytes(am_input(b[0..2864]), am_model(b[0..2864], AM_NV)) and am_input(b[0..2864]).len > 30;
+    // one typed character replaces the whole prefilled id; the next appends
+    assert am_input_type(w[0..704], b[0..2864], 109);
+    assert same_bytes(am_input(b[0..2864]), "m") and am_input_selected(w[0..704]) == false;
+    assert am_input_type(w[0..704], b[0..2864], 120);
+    assert same_bytes(am_input(b[0..2864]), "mx");
+    // Cmd+A then Backspace empties the field in one key; a plain "a" stays a letter
+    assert am_input_key(AM_KEY_A, true) == AM_IK_SELECT_ALL and am_input_key(AM_KEY_A, false) == AM_IK_OTHER;
+    am_input_select_all(w[0..704], b[0..2864]);
+    am_input_erase(w[0..704], b[0..2864]);
+    assert am_input(b[0..2864]).len == 0 and am_input_selected(w[0..704]) == false;
+    // an empty field has nothing to select
+    am_input_select_all(w[0..704], b[0..2864]);
+    assert am_input_selected(w[0..704]) == false;
+    // a paste over the selection replaces it: the old id is never kept in front of the new one
+    am_custom_begin(w[0..704], b[0..2864], AM_NV);
+    assert am_input_put(w[0..704], b[0..2864], "  vendor/new-model  ");
+    assert same_bytes(am_input(b[0..2864]), "vendor/new-model");
+    // a refused paste over the selection changes nothing, the selection included
+    am_custom_begin(w[0..704], b[0..2864], AM_NV);
+    assert am_input_put(w[0..704], b[0..2864], "a\tb") == false;
+    assert am_input_selected(w[0..704]) and same_bytes(am_input(b[0..2864]), am_model(b[0..2864], AM_NV));
+    // a control character over the selection changes nothing either
+    assert am_input_type(w[0..704], b[0..2864], 10) == false and am_input_selected(w[0..704]);
+    // an arrow ends the selection: typing appends, Backspace takes only the last character
+    assert am_input_key(AM_KEY_RIGHT, false) == AM_IK_DESELECT and am_input_key(AM_KEY_END, false) == AM_IK_DESELECT;
+    am_input_deselect(w[0..704]);
+    var e : [96]u8 = undefined;
+    const en : usize = put_bytes(e[0..96], put_bytes(e[0..96], 0, am_model(b[0..2864], AM_NV)), "z");
+    assert am_input_type(w[0..704], b[0..2864], 122);
+    assert same_bytes(am_input(b[0..2864]), e[0..en]);
+    am_input_erase(w[0..704], b[0..2864]);
+    assert same_bytes(am_input(b[0..2864]), am_model(b[0..2864], AM_NV));
+    // the replaced id saves exactly
+    am_custom_begin(w[0..704], b[0..2864], AM_NV);
+    assert am_input_put(w[0..704], b[0..2864], "vendor/new-model");
+    assert am_set_model(w[0..704], b[0..2864], AM_NV, am_input(b[0..2864])) == AM_MSG_SAVED;
+    assert same_bytes(am_model(b[0..2864], AM_NV), "vendor/new-model");
+}
+
+test a_stopped_nvidia_check_never_describes_z_ai {
+    var w : [704]u64 = undefined;
+    var b : [2864]u8 = undefined;
+    am_t_state(w[0..704], b[0..2864]);
+    w[AM_W_STORED] = am_t_low(3);
+    w[AM_W_STORED + 1] = am_t_low(2);
+    // NVIDIA check all, stopped during its first key
+    am_batch_begin(w[0..704], AM_NV);
+    const k : u32 = am_batch_next(w[0..704]);
+    assert am_request_begin(w[0..704], AM_NV, k, 1000) > 0;
+    w[AM_W_PID] = 9;
+    assert am_stop(w[0..704], 1100) == 9;
+    am_say(w[0..704], AM_NV, AM_MSG_STOPPED);
+    assert am_msg_for(w[0..704], AM_NV) == AM_MSG_STOPPED and am_bstop_for(w[0..704], AM_NV) == AM_MSG_STOPPED;
+    // Z.ai's view shows none of it
+    assert am_msg_for(w[0..704], AM_ZA) == AM_MSG_NONE and am_bstop_for(w[0..704], AM_ZA) == AM_MSG_NONE;
+    // while the stopped NVIDIA worker finishes, each provider is told its own reason
+    assert am_block_reason(w[0..704], AM_NV) == AM_MSG_STOPPING and am_block_reason(w[0..704], AM_ZA) == AM_MSG_WAIT;
+    w[AM_W_REAP] = 0;
+    assert am_block_reason(w[0..704], AM_ZA) == AM_MSG_NONE;
+    // a new Z.ai single check: Z.ai shows nothing old, NVIDIA keeps its own lines
+    assert am_request_begin(w[0..704], AM_ZA, 0, 2000) > 0;
+    w[AM_W_PID] = 10;
+    assert am_msg_for(w[0..704], AM_ZA) == AM_MSG_NONE and am_bstop_for(w[0..704], AM_ZA) == AM_MSG_NONE;
+    assert am_msg_for(w[0..704], AM_NV) == AM_MSG_STOPPED and am_bstop_for(w[0..704], AM_NV) == AM_MSG_STOPPED;
+    assert am_block_reason(w[0..704], AM_ZA) == AM_MSG_BUSY and am_block_reason(w[0..704], AM_NV) == AM_MSG_OTHER;
+    // a new NVIDIA check makes NVIDIA's old lines go
+    am_request_fail(w[0..704], AM_S_NETWORK, 2100);
+    assert am_request_begin(w[0..704], AM_NV, 1, 3000) > 0;
+    assert am_msg_for(w[0..704], AM_NV) == AM_MSG_NONE and am_bstop_for(w[0..704], AM_NV) == AM_MSG_NONE;
+    // a batch end belongs to its provider: a Z.ai rate limit is Z.ai's
+    am_request_fail(w[0..704], AM_S_NETWORK, 3100);
+    am_batch_begin(w[0..704], AM_ZA);
+    am_batch_after(w[0..704], 0, AM_S_RATE, 30, 4);
+    assert am_bstop_for(w[0..704], AM_ZA) == AM_MSG_RATE_STOP and am_bstop_for(w[0..704], AM_NV) == AM_MSG_NONE;
+}
+
+test the_check_age_is_its_own_short_field_and_the_counts_stay_whole {
+    var o : [40]u8 = undefined;
+    assert am_ago_compact(5000, 0, o[0..40]) == 0;
+    assert same_bytes(o[0..am_ago_compact(130000, 100000, o[0..40])], "just now");
+    assert same_bytes(o[0..am_ago_compact(400000, 100000, o[0..40])], "5m ago");
+    assert same_bytes(o[0..am_ago_compact(7300000, 100000, o[0..40])], "2h ago");
+    assert same_bytes(o[0..am_ago_compact(86500000, 100000, o[0..40])], "1d ago");
+    // the line live QA saw cut ("... 1 failed - checked 5 mi..."): the summary carries no time and stays whole
+    var c : [7]u32 = [11, 0, 10, 1, 0, 0, 0];
+    var s : [80]u8 = undefined;
+    assert same_bytes(s[0..am_summary(c[0..7], s[0..80])], "0/11 working, 10 not checked, 1 failed");
+}
+
+test ordinary_glm_5_3_routes_binds_and_checks_as_its_own_nvidia_model {
+    var w : [704]u64 = undefined;
+    var b : [2864]u8 = undefined;
+    am_t_state(w[0..704], b[0..2864]);
+    // an NVIDIA catalog row of its own, distinct from Flash, never a Z.ai one; the ranges stay contiguous
+    assert am_catalog_of(AM_NV, "z-ai/glm-5.3") == PC_GLM53;
+    assert am_catalog_of(AM_NV, "z-ai/glm-5.3-flash") == 3;
+    assert am_catalog_of(AM_ZA, "z-ai/glm-5.3") == PC_NONE;
+    assert am_catalog_first(AM_ZA) == PC_NVIDIA_COUNT and am_catalog_count(AM_NV) == PC_NVIDIA_COUNT;
+    // the defaults are untouched: nothing is selected for the person
+    assert same_bytes(am_model(b[0..2864], AM_NV), "nvidia/nemotron-3.5-super-vl-120b-a12b");
+    assert same_bytes(am_model(b[0..2864], AM_ZA), "glm-4.7-flash");
+    // the dated warning belongs to GLM-5.3 only, chosen from the list or typed as the same exact id
+    assert am_model_note(AM_NV, "z-ai/glm-5.3").len > 0 and am_model_note_short(AM_NV, "z-ai/glm-5.3").len > 0;
+    assert am_model_note(AM_NV, "z-ai/glm-5.3-flash").len == 0 and am_model_note_short(AM_NV, "z-ai/glm-5.3-flash").len == 0;
+    assert am_model_note(AM_ZA, "glm-4.7-flash").len == 0 and am_model_note(AM_NV, "vendor/other").len == 0;
+    // Flash -> GLM-5.3: the Flash results stop being current, so no stale green shows under GLM-5.3
+    w[AM_W_STORED] = am_t_low(2);
+    assert am_set_model(w[0..704], b[0..2864], AM_NV, "z-ai/glm-5.3-flash") == AM_MSG_SAVED;
+    assert am_t_result(w[0..704], AM_NV, 0, AM_S_WORKING, 1000);
+    assert am_set_model(w[0..704], b[0..2864], AM_NV, pc_model(PC_GLM53)) == AM_MSG_SAVED;
+    assert am_slot_state(w[0..704], AM_NV, 0) == AM_S_NOT_CHECKED;
+    // the selection persists by its exact id, never by a row index
+    var o : [256]u8 = undefined;
+    const on : usize = am_cfg_emit(w[0..704], b[0..2864], o[0..256]);
+    var w2 : [704]u64 = undefined;
+    var b2 : [2864]u8 = undefined;
+    am_t_state(w2[0..704], b2[0..2864]);
+    assert am_cfg_parse(o[0..on], w2[0..704], b2[0..2864]);
+    assert same_bytes(am_model(b2[0..2864], AM_NV), "z-ai/glm-5.3");
+    // a check sends the exact id to NVIDIA's route
+    var cb : [256]u8 = undefined;
+    assert am_check_body("z-ai/glm-5.3", cb[0..256]) > 24;
+    assert same_bytes(cb[0..24], "{\"model\":\"z-ai/glm-5.3\",");
+    assert same_bytes(am_route(AM_NV), "https://integrate.api.nvidia.com/v1/chat/completions");
+    // a chat bound to it, and an older catalog pin, both run exactly z-ai/glm-5.3 on NVIDIA
+    var t : [64]u8 = undefined;
+    const tn : usize = am_bind_token(AM_NV, 33, "z-ai/glm-5.3", t[0..64]);
+    assert same_bytes(t[0..tn], "n1:34:z-ai/glm-5.3");
+    var f : [5]u64 = [0, 0, 0, 0, 0];
+    assert am_pin_of(t[0..tn], f[0..5]);
+    assert f[0] == P_NVIDIA and f[1] == PR_NVIDIA and f[2] == 33;
+    assert same_bytes(t[@as(usize, @intCast(f[3])) .. @as(usize, @intCast(f[3] + f[4]))], "z-ai/glm-5.3");
+    const ct : str = "nv:z-ai/glm-5.3";
+    assert am_pin_of(ct, f[0..5]);
+    assert f[0] == P_NVIDIA and f[2] == AM_NONE;
+    assert same_bytes(ct[@as(usize, @intCast(f[3])) .. @as(usize, @intCast(f[3] + f[4]))], "z-ai/glm-5.3");
+    // reuse is exact: GLM-5.3 and Flash on the same key are two chats
+    var u : [64]u8 = undefined;
+    const un : usize = am_bind_token(AM_NV, 33, "z-ai/glm-5.3-flash", u[0..64]);
+    assert am_same_pin(t[0..tn], u[0..un]) == false and am_same_pin(t[0..tn], t[0..tn]);
+}
+
+invariant the_state_layout_does_not_overlap {
+    assert AM_W_LAST <= AM_W_SGEN;
+    assert AM_W_MSG_M > AM_W_EOF and AM_W_INSEL + 1 == AM_W_LAST;
+    assert AM_W_SGEN + 128 <= AM_W_STATUS;
+    assert AM_W_STATUS + 128 <= AM_W_TIME;
+    assert AM_W_TIME + 128 <= AM_W_IDENT;
+    assert AM_W_IDENT + 128 <= AM_W_HTTP;
+    assert AM_W_HTTP + 128 <= AM_WORDS;
+    assert AM_B_MODEL + 128 <= AM_B_INPUT;
+    assert AM_B_INPUT + AM_INPUT_CAP + 1 <= AM_B_WBUF;
+    assert AM_B_WBUF + 128 <= AM_B_MASK;
+    assert AM_B_MASK + 128 * AM_MASK_CAP <= AM_B_BIND;
+    assert AM_B_BIND + 7 * AM_BIND_CAP == AM_BYTES;
+    assert AM_SLOTS == MAX_KEYS;
+    assert AM_MODEL_MAX + 6 <= MODEL_MAX;
+}

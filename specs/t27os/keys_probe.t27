@@ -25,6 +25,9 @@ use t27os::keys::probe_body;
 use t27os::keys::probe_needs_version;
 use t27os::pty_proto::get_u64;
 use t27os::pty_sys::sys_addr;
+use t27os::provider_catalog::pc_url;
+use t27os::provider_catalog::pc_body;
+use t27os::provider_catalog::PC_COUNT;
 
 pub const UTF8_ENC : u32 = 134217984;
 
@@ -105,6 +108,36 @@ pub fn probe(p: u32, key: []const u8) -> u32 {
         i = i + 1;
     }
     msg3(cls("NSURLConnection"), sel("sendSynchronousRequest:returningResponse:error:"), req, sys_addr(resp[0..8], resp[0..8], 0), sys_addr(err[0..8], err[0..8], 0));
+    const r : u64 = get_u64(resp[0..8], 0);
+    if (r == 0) { return 0; }
+    return @as(u32, @intCast(msg0(r, sel("statusCode"))));
+}
+
+/// Catalog validation on the configured endpoint. No secret or response body is logged.
+pub fn probe_model(i: u32, key: []const u8) -> u32 {
+    if (i >= PC_COUNT) { return 1; }
+    const us : u64 = cf(pc_url(i));
+    const url : u64 = msg1(cls("NSURL"), sel("URLWithString:"), us);
+    cf_release(us);
+    if (url == 0) { return 0; }
+    const req : u64 = msg1(cls("NSMutableURLRequest"), sel("requestWithURL:"), url);
+    msg_f(req, sel("setTimeoutInterval:"), 20.0);
+    var hv : [300]u8 = undefined;
+    const vl : usize = probe_header_value(9, key, hv[0..300]);
+    add_header(req, "Authorization", hv[0..vl]);
+    var bb : [256]u8 = undefined;
+    const bl : usize = pc_body(i, bb[0..256]);
+    const data : u64 = cf_data(0, bb[0..bl], @as(u64, bl));
+    const post : u64 = cf("POST");
+    msg1(req, sel("setHTTPMethod:"), post);
+    msg1(req, sel("setHTTPBody:"), data);
+    add_header(req, "content-type", "application/json");
+    cf_release(post); cf_release(data);
+    var resp : [8]u8 = [0,0,0,0,0,0,0,0];
+    var err : [8]u8 = [0,0,0,0,0,0,0,0];
+    msg3(cls("NSURLConnection"), sel("sendSynchronousRequest:returningResponse:error:"), req, sys_addr(resp[0..8], resp[0..8], 0), sys_addr(err[0..8], err[0..8], 0));
+    var j : usize = 0;
+    while (j < 300) { hv[j] = 0; j = j + 1; }
     const r : u64 = get_u64(resp[0..8], 0);
     if (r == 0) { return 0; }
     return @as(u32, @intCast(msg0(r, sel("statusCode"))));

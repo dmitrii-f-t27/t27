@@ -6,13 +6,18 @@
 ; Mirrors the trios SR-00 decisions (not the Swift): ModelProvider, ModelKeyRotation (least recently used
 ; plus cooldown), ProviderCircuitBreaker, ProviderStatusService, KeychainSecrets.
 ; Storage is the macOS Keychain, service "ai.t27.os", one item per key (account = provider name for key 1,
-; "<name>#2" .. "<name>#8" for the others, keychain_account_n).
+; "<name>#2" .. "<name>#64" for the others, keychain_account_n; MAX_KEYS = 64).
 ; Never a plain file and never the repo. The Keychain is reached only by running /usr/bin/security (the
 ; section "the Keychain through /usr/bin/security" at the end), never through SecItem calls. This spec holds
 ; no key and no syscall: the Keychain, the probe and the child environment are host calls (keys_host.t27,
 ; pty_server.t27); only the decisions live here, so they run their tests (a module with @extern imports
 ; cannot). Every test uses fake values.
 ; Refs gHashTag/t27#10782.
+; Refs dmitrii-f-t27/t27#6: native NVIDIA, owner Z.ai Coding Plan and local key import.
+; Provider IDs and Keychain accounts stay stable. NVIDIA speaks OpenAI, never Anthropic.
+; Owner 2026-10-21: Z.ai keys are Coding Plan only. OpenCode/Crush must use the coding
+; endpoint; no silent general-API billing fallback. Only supported coding tools use this plan.
+; KEYS has five rows per page, with NVIDIA and Z.ai first. Import is local and explicit.
 ; ---- MAP: the app.t27.ai account and its keys (read 2026-10-19, read-only; M12 follow-up) -----------------
 ; R = 999-multibots-telegraf apps/vibee-editor/render; Q = BrowserOS trios/agent-server/apps/server/src/api
 ; (queen-contributor-keys.ts lives at git commit 2b25f0bcf, not in the BrowserOS working tree).
@@ -40,11 +45,12 @@ use t27os::editors::same_bytes;
 use t27os::session_store::csv_field;
 use t27os::session_store::put_bytes;
 use t27os::session_store::put_dec;
+use t27os::session_store::model_ok;
 
 /// Keychain service every item is stored under.
 pub const KEYCHAIN_SERVICE : str = "ai.t27.os";
 
-pub const PROVIDER_COUNT : u32 = 9;
+pub const PROVIDER_COUNT : u32 = 10;
 pub const P_ANTHROPIC : u32 = 0;
 pub const P_OPENAI : u32 = 1;
 pub const P_GEMINI : u32 = 2;
@@ -54,11 +60,12 @@ pub const P_OLLAMA : u32 = 5;
 pub const P_GITHUB : u32 = 6;
 pub const P_CURSOR : u32 = 7;
 pub const P_GONKA : u32 = 8;
+pub const P_NVIDIA : u32 = 9;
 
 /// Provider names in cell order; also the Keychain account of each.
-pub const PROVIDER_NAMES : str = "anthropic,openai,gemini,openrouter,zai,ollama,github,cursor,gonka";
+pub const PROVIDER_NAMES : str = "anthropic,openai,gemini,openrouter,zai,ollama,github,cursor,gonka,nvidia";
 /// The environment variable the agent CLIs read the provider's key from.
-pub const PROVIDER_ENVS : str = "ANTHROPIC_API_KEY,OPENAI_API_KEY,GEMINI_API_KEY,OPENROUTER_API_KEY,ZAI_API_KEY,OLLAMA_API_KEY,GITHUB_TOKEN,CURSOR_API_KEY,GONKA_API_KEY";
+pub const PROVIDER_ENVS : str = "ANTHROPIC_API_KEY,OPENAI_API_KEY,GEMINI_API_KEY,OPENROUTER_API_KEY,ZAI_API_KEY,OLLAMA_API_KEY,GITHUB_TOKEN,CURSOR_API_KEY,GONKA_API_KEY,NVIDIA_API_KEY";
 
 pub const MAX_KEY_CHARS : u32 = 254;
 
@@ -245,12 +252,12 @@ test provider_tables_line_up {
     var out : [40]u8 = undefined;
     assert provider_name(P_ANTHROPIC, out[0..40]) == 9;
     assert provider_name(P_GONKA, out[0..40]) == 5;
-    assert provider_name(9, out[0..40]) == 0;
+    assert provider_name(PROVIDER_COUNT, out[0..40]) == 0;
     assert provider_env(P_ANTHROPIC, out[0..40]) == 17;
     assert out[0] == 65 and out[16] == 89;
     assert provider_env(P_GITHUB, out[0..40]) == 12;
     assert provider_env(P_GONKA, out[0..40]) == 13;
-    assert provider_env(9, out[0..40]) == 0;
+    assert provider_env(PROVIDER_COUNT, out[0..40]) == 0;
 }
 
 test a_key_is_masked_to_four_characters_at_most {
@@ -362,13 +369,13 @@ test a_key_longer_than_the_server_slot_is_refused {
 // A GET of the provider's model list (or whoami) with the key in a header -- never in the URL. The answer's
 // HTTP status is all that is read (status_after_probe). cursor and gonka have no such public endpoint: their
 // check stays "stored".
-pub const PROBE_URLS : str = "https://api.anthropic.com/v1/models,https://api.openai.com/v1/models,https://generativelanguage.googleapis.com/v1beta/models,https://openrouter.ai/api/v1/auth/key,https://api.z.ai/api/anthropic/v1/messages,https://ollama.com/api/tags,https://api.github.com/user,,";
+pub const PROBE_URLS : str = "https://api.anthropic.com/v1/models,https://api.openai.com/v1/models,https://generativelanguage.googleapis.com/v1beta/models,https://openrouter.ai/api/v1/auth/key,https://api.z.ai/api/anthropic/v1/messages,https://ollama.com/api/tags,https://api.github.com/user,,,https://integrate.api.nvidia.com/v1/chat/completions";
 pub const AUTH_NONE : u32 = 0;
 pub const AUTH_BEARER : u32 = 1;
 pub const AUTH_X_API_KEY : u32 = 2;
 pub const AUTH_X_GOOG : u32 = 3;
-pub const PROBE_AUTH : [9]u32 = [2, 1, 3, 1, 2, 1, 1, 0, 0];
-pub const PROBE_TIMEOUT_S : u32 = 6;
+pub const PROBE_AUTH : [10]u32 = [2, 1, 3, 1, 2, 1, 1, 0, 0, 1];
+pub const PROBE_TIMEOUT_S : u32 = 10;
 
 pub fn probe_url(p: u32, out: []u8) -> usize {
     return csv_field(PROBE_URLS, p, out);
@@ -412,7 +419,7 @@ test every_probe_has_a_url_and_a_header {
     }
     assert probe_has(P_CURSOR) == false;
     assert probe_has(P_GONKA) == false;
-    assert probe_has(9) == false;
+    assert probe_has(PROVIDER_COUNT) == false;
 }
 
 test the_key_travels_in_a_header_never_in_the_url {
@@ -440,13 +447,111 @@ test the_key_travels_in_a_header_never_in_the_url {
 // The window (glass_window.t27) only draws and forwards; every decision is a tested fn here.
 
 pub const KY_ROWS_Y : f64 = 56.0;
-pub const KY_ROW_H : f64 = 44.0;
+pub const KY_ROW_H : f64 = 40.0;
 pub const KY_BTN_W : f64 = 56.0;
 pub const KY_BTN_H : f64 = 18.0;
 pub const KY_BTN_DY : f64 = 20.0;
 pub const KY_BTN_GAP : f64 = 6.0;
 pub const KY_LINK_W : f64 = 44.0;
 pub const KY_NONE : u32 = 255;
+pub const KY_PAGE_ROWS : u32 = 5;
+pub const KY_MASK_BYTES : usize = 160;
+pub const KY_BUFFER_BYTES : usize = 560;
+
+/// Visual order is independent of the persistent provider IDs.
+pub fn ky_provider(page: u32, row: u32) -> u32 {
+    const order : [10]u32 = [9, 4, 0, 1, 2, 3, 5, 6, 7, 8];
+    if (page > 1 or row >= KY_PAGE_ROWS) { return KY_NONE; }
+    return order[page * KY_PAGE_ROWS + row];
+}
+
+pub fn provider_label(p: u32, out: []u8) -> usize {
+    if (p == P_NVIDIA) { return put_bytes(out, 0, "NVIDIA"); }
+    if (p == P_ZAI) { return put_bytes(out, 0, "Z.ai Coding"); }
+    return provider_name(p, out);
+}
+
+pub fn ky_page_hit(x: f64, y: f64, l: f64, t: f64) -> bool {
+    return x >= l + 84.0 and x <= l + 210.0 and y >= t + 7.0 and y <= t + 31.0;
+}
+
+pub fn ky_page_action(page: u32, hit: u32) -> u32 {
+    if (hit == KY_NONE or hit / 4 >= KY_PAGE_ROWS) { return KY_NONE; }
+    const p : u32 = ky_provider(page, hit / 4);
+    if (p == KY_NONE) { return KY_NONE; }
+    return p * 4 + hit % 4;
+}
+
+test nvidia_routes_only_to_openai_coding_clients {
+    var out : [800]u8 = undefined;
+    assert agent_profile_ok(AG_OPENCODE, PR_NVIDIA);
+    assert agent_profile_ok(AG_CRUSH, PR_NVIDIA);
+    assert agent_profile_ok(AG_CLAUDE, PR_NVIDIA) == false;
+    assert profile_var_count(PR_NVIDIA) == 0;
+    assert agent_var_count(AG_CLAUDE, PR_NVIDIA) == 0;
+    assert agent_var_count(AG_OPENCODE, PR_NVIDIA) == 2;
+    assert agent_strips(AG_OPENCODE, "NVIDIA_API_KEY");
+    assert agent_stored(AG_CLAUDE, 512) == 0;
+    assert agent_stored(AG_OPENCODE, 512) == 512;
+    var n : usize = opencode_config(PR_NVIDIA, 0, out[0..800]);
+    assert has_bytes(out[0..n], "https://integrate.api.nvidia.com/v1");
+    assert has_bytes(out[0..n], "{env:NVIDIA_API_KEY}");
+    assert has_bytes(out[0..n], "nvidia/nemotron-3-ultra-550b-a55b");
+    n = profile_why(512, 0, out[0..800]);
+    assert has_bytes(out[0..n], "nvidia") == false;
+    n = probe_url(P_NVIDIA, out[0..800]);
+    assert same_bytes(out[0..n], "https://integrate.api.nvidia.com/v1/chat/completions");
+    assert probe_post(P_NVIDIA) and probe_needs_version(P_NVIDIA) == false;
+    n = probe_header_name(P_NVIDIA, out[0..800]);
+    assert same_bytes(out[0..n], "Authorization");
+    n = probe_body(P_NVIDIA, out[0..800]);
+    assert has_bytes(out[0..n], "nvidia/nemotron-3-ultra-550b-a55b");
+    assert fo_action(FC_RATE_LIMITED, PR_NVIDIA, 512, 0, 0, true) == FA_GIVE_UP;
+}
+
+test coding_plan_routes_and_numbered_slots_preserve_original_accounts {
+    var out : [800]u8 = undefined;
+    var n : usize = oai_base_url(PR_ZAI, out[0..800]);
+    assert same_bytes(out[0..n], "https://api.z.ai/api/coding/paas/v4");
+    n = profile_base_url(PR_ZAI, out[0..800]);
+    assert same_bytes(out[0..n], "https://api.z.ai/api/anthropic");
+    n = keychain_account_n(P_ZAI, 0, out[0..800]);
+    assert same_bytes(out[0..n], "zai");
+    n = keychain_account_n(P_ZAI, 9, out[0..800]);
+    assert same_bytes(out[0..n], "zai#10");
+    n = keychain_account_n(P_NVIDIA, 11, out[0..800]);
+    assert same_bytes(out[0..n], "nvidia#12");
+    n = keychain_account_n(P_NVIDIA, 33, out[0..800]);
+    assert same_bytes(out[0..n], "nvidia#34");
+    assert key_index(P_NVIDIA, 11) == 587;
+    assert key_index(P_NVIDIA, 63) == 639;
+    assert setkey_number(setkey_byte(P_NVIDIA, 11)) == 11;
+    assert fo_action(FC_RATE_LIMITED, PR_ZAI, 16, 0, 0, true) == FA_GIVE_UP;
+}
+
+test provider_pages_cover_every_id_once_and_keep_storage_disjoint {
+    var seen : u32 = 0;
+    var page : u32 = 0;
+    while (page < 2) {
+        var row : u32 = 0;
+        while (row < KY_PAGE_ROWS) {
+            const p : u32 = ky_provider(page, row);
+            assert p < PROVIDER_COUNT and (seen >> p) % 2 == 0;
+            seen = seen | (1 << p);
+            assert ky_page_action(page, row * 4 + B_SET) == p * 4 + B_SET;
+            row = row + 1;
+        }
+        page = page + 1;
+    }
+    assert seen == 1023;
+    assert ky_provider(0, 0) == P_NVIDIA and ky_provider(0, 1) == P_ZAI;
+    assert ky_provider(2, 0) == KY_NONE;
+    assert ky_page_action(0, 20) == KY_NONE;
+    assert KY_MASK_BYTES == @as(usize, PROVIDER_COUNT) * 16;
+    assert KY_BUFFER_BYTES - KY_MASK_BYTES == 400;
+    assert ky_row_top(35.0, 4) + KY_BTN_DY + KY_BTN_H < 320.0 - 24.0;
+    assert ky_page_hit(100.0, 50.0, 0.0, 35.0);
+}
 
 pub const B_SET : u32 = 0;
 pub const B_DELETE : u32 = 1;
@@ -470,7 +575,7 @@ pub const KEY_BACKSPACE : u32 = 51;
 pub const KEY_ESC : u32 = 53;
 pub const KEY_V : u32 = 9;
 
-pub const KEYS_WORDS : str = "KEYS,add,full,delete,confirm,check,checking,no key,paste or type a key,enter saves  esc cancels,open in";
+pub const KEYS_WORDS : str = "KEYS,add,full,delete,confirm,check,checking,no key,add saves a new key to Keychain,enter saves  esc cancels,open in";
 
 /// Top edge of provider row r in a panel whose top is t.
 pub fn ky_row_top(t: f64, r: u32) -> f64 {
@@ -632,10 +737,11 @@ pub const PR_ANTHROPIC : u32 = 1;
 pub const PR_OPENROUTER : u32 = 2;
 pub const PR_OLLAMA_CLOUD : u32 = 3;
 pub const PR_NONE : u32 = 255;
-pub const PROFILE_COUNT : u32 = 4;
-pub const PROFILE_NAMES : str = "zai,anthropic-api,openrouter,ollama-cloud";
+pub const PR_NVIDIA : u32 = 4;
+pub const PROFILE_COUNT : u32 = 5;
+pub const PROFILE_NAMES : str = "zai,anthropic-api,openrouter,ollama-cloud,nvidia";
 /// The provider whose Keychain key backs each profile.
-pub const PROFILE_PROVIDER : [4]u32 = [4, 0, 3, 5];
+pub const PROFILE_PROVIDER : [5]u32 = [4, 0, 3, 5, 9];
 
 // ---- the tier order of the chain (gHashTag/t27#11285, FR-001) ----------------------------------------------
 // Owner, 2026-10-20: free z.ai flash by default, OpenRouter's free tokens as well, never run out of tokens,
@@ -653,7 +759,7 @@ pub const CT_OR_FREE : u32 = 1;
 pub const CT_PAID : u32 = 2;
 pub const CT_COUNT : u32 = 3;
 /// The tier of each profile, in PROFILE_NAMES order: zai, anthropic-api, openrouter, ollama-cloud.
-pub const PROFILE_TIER : [4]u32 = [0, 2, 1, 2];
+pub const PROFILE_TIER : [5]u32 = [0, 2, 1, 2, 2];
 // A profile exists only for a provider that documents an Anthropic-protocol base URL on its own pages, read
 // on 2026-10-20 (the page is named at each row below). None is used until its provider's key is stored.
 //   zai          https://docs.z.ai/devpack/tool/claude
@@ -711,13 +817,13 @@ pub const TIER_VARS : str = "ANTHROPIC_MODEL,ANTHROPIC_SMALL_FAST_MODEL,ANTHROPI
 ///   nvidia/nemotron-3.5-lightning:free    HTTP 200 twice with no parsable message body -> NOT verified, dropped
 ///                                         from MODELS_THIRD and never a default.
 /// Fields: zai, anthropic-api, openrouter, ollama-cloud. Ollama's page names one cloud model, used for every tier.
-pub const MODELS_DEFAULT : str = "glm-4.5-flash,,minimax/minimax-m3.1-flash:free,glm-5.3-flash";
+pub const MODELS_DEFAULT : str = "glm-4.5-flash,,minimax/minimax-m3.1-flash:free,glm-5.3-flash,nvidia/nemotron-3-ultra-550b-a55b";
 /// The second model of each profile's tier (empty = the profile has one model): what a pane moves to when
 /// every key of its provider failed on the default. The same fields as MODELS_DEFAULT.
-pub const MODELS_SECOND : str = "glm-4.7-flash,,nvidia/nemotron-3.5-super-vl:free,";
+pub const MODELS_SECOND : str = "glm-4.7-flash,,nvidia/nemotron-3.5-super-vl:free,,";
 /// The third model of each profile's tier (empty = the profile has fewer models). A profile that names a third
 /// model names a second one too (profile_models counts up to the first empty step).
-pub const MODELS_THIRD : str = ",,,";
+pub const MODELS_THIRD : str = ",,,,";
 /// How many models one profile's tier map can hold: step 0 is MODELS_DEFAULT, step 1 is MODELS_SECOND, step 2
 /// is MODELS_THIRD.
 pub const MODEL_STEPS : u32 = 3;
@@ -725,23 +831,23 @@ pub const MODEL_STEPS : u32 = 3;
 /// (nemotron-3.5-super-vl: 31 tokens of thinking, measured 2026-10-20); the other models answer at 16.
 pub const THINKING_MIN_TOKENS : u32 = 64;
 pub const PLAIN_MIN_TOKENS : u32 = 16;
-pub const MODELS_HAIKU : str = ",,,";
-pub const MODELS_SONNET : str = ",,,";
-pub const MODELS_OPUS : str = ",,,";
+pub const MODELS_HAIKU : str = ",,,,";
+pub const MODELS_SONNET : str = ",,,,";
+pub const MODELS_OPUS : str = ",,,,";
 /// The OpenAI-compatible base URL of each profile, for the agents that do not speak the Anthropic protocol
-/// (OpenCode, Crush); empty = the profile has none for them. z.ai general endpoint /api/paas/v4 (the owner named
+/// (OpenCode, Crush); empty = the profile has none for them. z.ai Coding Plan endpoint /api/coding/paas/v4 (the owner confirmed
 /// it); OpenRouter https://openrouter.ai/api/v1. anthropic-api needs none (both agents read ANTHROPIC_API_KEY
 /// themselves) and Ollama cloud's OpenAI route is not documented on a page this spec cites, so Ollama stays out of
 /// the chain of OpenCode and Crush (agent_profile_ok).
-pub const OAI_BASE_URLS : str = "https://api.z.ai/api/paas/v4,,https://openrouter.ai/api/v1,";
+pub const OAI_BASE_URLS : str = "https://api.z.ai/api/coding/paas/v4,,https://openrouter.ai/api/v1,,https://integrate.api.nvidia.com/v1";
 /// The Anthropic-protocol base URL of each profile; empty = Claude Code's own (the direct API).
-pub const PROFILE_BASE_URLS : str = "https://api.z.ai/api/anthropic,,https://openrouter.ai/api,https://ollama.com";
+pub const PROFILE_BASE_URLS : str = "https://api.z.ai/api/anthropic,,https://openrouter.ai/api,https://ollama.com,";
 /// The variable that carries the Keychain key: a bearer token for a gateway, the API key for Anthropic itself.
-pub const PROFILE_KEY_VARS : str = "ANTHROPIC_AUTH_TOKEN,ANTHROPIC_API_KEY,ANTHROPIC_AUTH_TOKEN,ANTHROPIC_AUTH_TOKEN";
+pub const PROFILE_KEY_VARS : str = "ANTHROPIC_AUTH_TOKEN,ANTHROPIC_API_KEY,ANTHROPIC_AUTH_TOKEN,ANTHROPIC_AUTH_TOKEN,";
 /// 1 when the profile also sets ANTHROPIC_API_KEY to the empty string: OpenRouter's and Ollama's pages both
 /// say a stray API key in the environment makes Claude Code authenticate against Anthropic instead of the
 /// gateway, so the variable is set empty rather than left to the parent shell.
-pub const PROFILE_EMPTY_API_KEY : [4]u32 = [0, 0, 1, 1];
+pub const PROFILE_EMPTY_API_KEY : [5]u32 = [0, 0, 1, 1, 0];
 
 /// The variables of a profile come from fixed slots, in this order; a slot with no value is skipped.
 pub const PS_BASE : u32 = 0;
@@ -866,7 +972,7 @@ pub fn profile_base_url(pr: u32, out: []u8) -> usize {
 
 /// Does profile pr set slot s (PS_*)? The key slot always; the others when they carry a value.
 fn slot_present(pr: u32, s: u32) -> bool {
-    if (pr >= PROFILE_COUNT) { return false; }
+    if (pr >= PROFILE_COUNT or pr == PR_NVIDIA) { return false; }
     if (s == PS_KEY) { return true; }
     if (s == PS_EMPTY_KEY) { return PROFILE_EMPTY_API_KEY[pr] == 1; }
     var tmp : [64]u8 = undefined;
@@ -1011,8 +1117,8 @@ pub fn pick_profile(stored: u32, bad: u32) -> u32 {
 /// May agent a run profile pr? Claude Code any; OpenCode and Crush the zai, anthropic-api and openrouter ones.
 pub fn agent_profile_ok(a: u32, pr: u32) -> bool {
     if (pr >= PROFILE_COUNT) { return false; }
-    if (a == AG_CLAUDE) { return true; }
-    if (a == AG_OPENCODE or a == AG_CRUSH) { return pr == PR_ZAI or pr == PR_ANTHROPIC or pr == PR_OPENROUTER; }
+    if (a == AG_CLAUDE) { return pr != PR_NVIDIA; }
+    if (a == AG_OPENCODE or a == AG_CRUSH) { return pr == PR_ZAI or pr == PR_ANTHROPIC or pr == PR_OPENROUTER or pr == PR_NVIDIA; }
     return false;
 }
 
@@ -1046,12 +1152,18 @@ pub fn oai_base_url(pr: u32, out: []u8) -> usize {
 /// provider named t27 whose key is read from the provider's variable, and the model. 0 for a profile with no
 /// OpenAI-compatible URL (anthropic-api needs no config). 600 bytes are enough. Holds no key.
 pub fn opencode_config(pr: u32, step: u32, out: []u8) -> usize {
-    var url : [64]u8 = undefined;
     var m : [64]u8 = undefined;
+    const ml : usize = tier_model_step(pr, TI_DEFAULT, step, m[0..64]);
+    return opencode_config_model(pr, m[0..ml], out);
+}
+
+/// A validated explicit model. Only t27 is enabled, so ambient config cannot route to another provider.
+pub fn opencode_config_model(pr: u32, m: []const u8, out: []u8) -> usize {
+    var url : [64]u8 = undefined;
     var ev : [40]u8 = undefined;
     const ul : usize = oai_base_url(pr, url[0..64]);
-    const ml : usize = tier_model_step(pr, TI_DEFAULT, step, m[0..64]);
-    if (ul == 0 or ml == 0) { return 0; }
+    const ml : usize = m.len;
+    if (ul == 0 or ml == 0 or ml > 60 or model_ok(m) == false) { return 0; }
     const el : usize = provider_env(PROFILE_PROVIDER[pr], ev[0..40]);
     var n : usize = put_bytes(out, 0, "{\"$schema\":\"https://opencode.ai/config.json\",\"provider\":{\"t27\":{\"npm\":\"@ai-sdk/openai-compatible\",\"name\":\"T27\",\"options\":{\"baseURL\":\"");
     n = put_bytes(out, n, url[0..ul]);
@@ -1063,7 +1175,7 @@ pub fn opencode_config(pr: u32, step: u32, out: []u8) -> usize {
     n = put_bytes(out, n, m[0..ml]);
     n = put_bytes(out, n, "\"}}}},\"model\":\"t27/");
     n = put_bytes(out, n, m[0..ml]);
-    return put_bytes(out, n, "\"}");
+    return put_bytes(out, n, "\",\"enabled_providers\":[\"t27\"]}");
 }
 
 /// Crush's crush.json for profile pr at model step `step`: the same provider, large and small model the one id.
@@ -1148,8 +1260,8 @@ pub fn agent_var_text_step(a: u32, pr: u32, k: u32, step: u32, home: []const u8,
 
 /// What OpenCode and Crush must not inherit from the shell that started the server: every key, endpoint and
 /// config variable of the providers they are given.
-pub const AGENT_STRIPS : str = "ZAI_API_KEY,OPENROUTER_API_KEY,ANTHROPIC_API_KEY,OPENAI_API_KEY,OPENCODE_CONFIG_CONTENT,OPENCODE_CONFIG,CRUSH_GLOBAL_CONFIG,OPENAI_BASE_URL,ANTHROPIC_BASE_URL";
-pub const AGENT_STRIP_COUNT : u32 = 9;
+pub const AGENT_STRIPS : str = "NVIDIA_API_KEY,ZAI_API_KEY,OPENROUTER_API_KEY,ANTHROPIC_API_KEY,OPENAI_API_KEY,OPENCODE_CONFIG_CONTENT,OPENCODE_CONFIG,CRUSH_GLOBAL_CONFIG,OPENAI_BASE_URL,ANTHROPIC_BASE_URL";
+pub const AGENT_STRIP_COUNT : u32 = 10;
 
 /// Is `name` a variable a pane of agent a starts without? Claude Code: claude_strips.
 pub fn agent_strips(a: u32, name: []const u8) -> bool {
@@ -1260,13 +1372,16 @@ pub fn shown_light_of(b: u32) -> u32 {
     return b / 64 % 4;
 }
 
-/// How many keys one provider may hold, numbered from 1 (Free Claude Code: "key 1 first"). Eight, since the
-/// owner stores seven z.ai keys and rotates over all of them (gHashTag/t27#11241).
-pub const MAX_KEYS : u32 = 8;
+/// How many keys one provider may hold, numbered from 1. Existing accounts keep their numbers ("zai",
+/// "zai#2", ...); the owner imports 34 NVIDIA and 11 Z.ai Coding Plan keys (dmitrii-f-t27/t27#6), so a
+/// provider holds up to 64 and a provider's stored-slot mask is a u64 (bit k = key k+1, slot_bit). The
+/// legacy OP_SETKEY byte can name keys 1 to SETKEY_LEGACY_KEYS only; every key travels in OP_SETKEY_WIDE
+/// (pty_proto), whose payload names the slot.
+pub const MAX_KEYS : u32 = 64;
 
 /// The Keychain item of key number k (0-based; the panel says "key k+1") of provider p. Key 1 keeps the
-/// plain label of keychain_label, so a key stored before numbering stays where it is; keys 2 to 8 add
-/// "#2" to "#8". 0 for an unknown provider or a number past MAX_KEYS.
+/// plain label of keychain_label, so a key stored before numbering stays where it is; keys 2 to 64 add
+/// "#2" to "#64". 0 for an unknown provider or a number past MAX_KEYS.
 pub fn keychain_label_n(p: u32, k: u32, out: []u8) -> usize {
     if (p >= PROVIDER_COUNT or k >= MAX_KEYS) { return 0; }
     var n : usize = keychain_label(p, out);
@@ -1293,13 +1408,54 @@ pub fn key_count_text(n: u32, out: []u8) -> usize {
     return put_bytes(out, c, " keys");
 }
 
-/// A key travels to the PTY server in an OP_SETKEY frame whose pane byte names the provider; the key number
-/// rides in the high nibble of that byte (k * 16 + p), so key 1 is the old frame byte for byte and an
-/// older server refuses the others instead of misreading them.
+/// LEGACY: OP_SETKEY's pane byte names the provider in its low nibble and the key number in the high one
+/// (k * 16 + p), so key 1 is the old frame byte for byte. That byte holds keys 1 to SETKEY_LEGACY_KEYS (16)
+/// only: a caller never builds it for a higher number (setkey_legacy_ok), and the window and keys_host send
+/// every key in OP_SETKEY_WIDE instead. The server still reads OP_SETKEY exactly as before.
 pub const SETKEY_STEP : u32 = 16;
+pub const SETKEY_LEGACY_KEYS : u32 = 16;
 
 pub fn setkey_byte(p: u32, k: u32) -> u32 {
     return k * SETKEY_STEP + p;
+}
+
+/// May (p, k) be sent in a legacy OP_SETKEY byte? Never past key SETKEY_LEGACY_KEYS: the byte would wrap.
+pub fn setkey_legacy_ok(p: u32, k: u32) -> bool {
+    return p < PROVIDER_COUNT and k < SETKEY_LEGACY_KEYS;
+}
+
+// OP_SETKEY_WIDE (pty_proto): the pane byte is the provider (no nibble), the payload's first byte the 0-based
+// key slot, the rest the key. A payload of the slot byte alone deletes that slot; an empty payload is refused.
+// Every field is checked before anything changes: provider < PROVIDER_COUNT, slot < MAX_KEYS, and a key that
+// key_fits (so at most MAX_KEY_CHARS bytes). A refused frame changes nothing: no truncation, and never a
+// different (low) slot.
+
+/// Is a wide SETKEY frame for provider p (the pane byte) with this payload acceptable?
+pub fn setkey_wide_ok(p: u32, payload: []const u8) -> bool {
+    if (p >= PROVIDER_COUNT or payload.len == 0) { return false; }
+    if (@as(u32, payload[0]) >= MAX_KEYS) { return false; }
+    if (payload.len == 1) { return true; }
+    return key_fits(payload[1..payload.len]);
+}
+
+/// The slot a wide payload names (its first byte); MAX_KEYS for an empty payload.
+pub fn setkey_wide_slot(payload: []const u8) -> u32 {
+    if (payload.len == 0) { return MAX_KEYS; }
+    return @as(u32, payload[0]);
+}
+
+/// Build a wide payload into out: the slot byte, then the key (an empty key = delete the slot). The length, or
+/// 0 when k or the key is out of range or out is too small; nothing is truncated.
+pub fn setkey_wide_payload(k: u32, key: []const u8, out: []u8) -> usize {
+    if (k >= MAX_KEYS or out.len < key.len + 1) { return 0; }
+    if (key.len > 0 and key_fits(key) == false) { return 0; }
+    out[0] = @as(u8, @intCast(k));
+    var i : usize = 0;
+    while (i < key.len) {
+        out[1 + i] = key[i];
+        i = i + 1;
+    }
+    return key.len + 1;
 }
 
 /// The provider and the key number an OP_SETKEY pane byte names; the provider is PROVIDER_COUNT or more when
@@ -1325,7 +1481,7 @@ pub fn bad_mask(st: []const u32) -> u32 {
 
 /// The "why" line of the KEYS tab: which profile a claude pane gets and why. No key value, ever.
 pub fn profile_why(stored: u32, bad: u32, out: []u8) -> usize {
-    const pr : u32 = pick_profile(stored, bad);
+    const pr : u32 = pick_profile(agent_stored(AG_CLAUDE, stored), bad);
     var tmp : [24]u8 = undefined;
     if (pr == PR_NONE) {
         if (stored == 0) { return put_bytes(out, 0, "claude: no key stored, the pane asks for a login"); }
@@ -1512,6 +1668,8 @@ pub fn fo_bad(class: u32, pr: u32, bad: u32) -> u32 {
 /// one in the chain; when none is left, or the cap is reached, the pane stays as it is.
 pub fn fo_action(class: u32, pr: u32, stored: u32, bad: u32, done: u32, alt: bool) -> u32 {
     if (class == FC_NONE or class == FC_OTHER) { return FA_KEEP; }
+    // Keep provider throttling in force; another stored key is not a quota bypass.
+    if (class == FC_RATE_LIMITED and (pr == PR_ZAI or pr == PR_NVIDIA)) { return FA_GIVE_UP; }
     if (done >= MAX_FAILOVERS) { return FA_GIVE_UP; }
     if (class != FC_SUBSCRIPTION and alt and pr < PROFILE_COUNT) { return FA_RESPAWN_KEY; }
     if (next_profile(pr, stored, fo_bad(class, pr, bad)) == PR_NONE) { return FA_GIVE_UP; }
@@ -1534,6 +1692,7 @@ pub fn fo_target(class: u32, pr: u32, stored: u32, bad: u32, done: u32, alt: boo
 /// leaves the profile.
 pub fn fo_next_model(class: u32, pr: u32, step: u32, done: u32, alt: bool) -> bool {
     if (class == FC_NONE or class == FC_OTHER or class == FC_SUBSCRIPTION) { return false; }
+    if (class == FC_RATE_LIMITED and (pr == PR_ZAI or pr == PR_NVIDIA)) { return false; }
     if (alt or done >= MAX_FAILOVERS) { return false; }
     return model_left(pr, step);
 }
@@ -1606,7 +1765,7 @@ pub fn rotate_pick_soft(n: u32, skip: u32, last_used: []const u64, rest_until: [
 /// z.ai has no cheap GET that proves a key opens the Anthropic-protocol route, so its check is one
 /// one-token message to the flash model (free); the answer is read by status only.
 pub fn probe_post(p: u32) -> bool {
-    return p == P_ZAI;
+    return p == P_ZAI or p == P_NVIDIA;
 }
 
 /// Providers whose route wants the anthropic-version header.
@@ -1615,6 +1774,9 @@ pub fn probe_needs_version(p: u32) -> bool {
 }
 
 pub fn probe_body(p: u32, out: []u8) -> usize {
+    if (p == P_NVIDIA) {
+        return put_bytes(out, 0, "{\"model\":\"nvidia/nemotron-3-ultra-550b-a55b\",\"max_tokens\":16,\"stream\":false,\"messages\":[{\"role\":\"user\",\"content\":\"Hi\"}]}");
+    }
     if (p != P_ZAI) { return 0; }
     var model : [64]u8 = undefined;
     const ml : usize = tier_model(PR_ZAI, TI_DEFAULT, model[0..64]);
@@ -1635,12 +1797,12 @@ test a_failed_key_hands_the_pane_to_the_next_profile {
     assert pick_profile(17, 16) == PR_ANTHROPIC;
     assert pick_profile(17, 1) == PR_ZAI;
     assert pick_profile(17, 17) == PR_NONE;
-    var st : [9]u32 = [1, 0, 0, 0, 3, 0, 0, 0, 0];
-    assert bad_mask(st[0..9]) == 16;
+    var st : [10]u32 = [1, 0, 0, 0, 3, 0, 0, 0, 0, 0];
+    assert bad_mask(st[0..10]) == 16;
     st[0] = ST_CIRCUIT_OPEN;
-    assert bad_mask(st[0..9]) == 17;
+    assert bad_mask(st[0..10]) == 17;
     st[4] = ST_RATE_LIMITED;
-    assert bad_mask(st[0..9]) == 1;
+    assert bad_mask(st[0..10]) == 1;
 }
 
 test the_zai_profile_sets_the_base_url_the_token_and_flash_everywhere {
@@ -1953,7 +2115,7 @@ test a_profile_is_never_offered_twice_by_one_walk {
         pr = next_profile(pr, 57, 0);
         steps = steps + 1;
     }
-    assert steps == PROFILE_COUNT;
+    assert steps == 4;
 }
 
 test the_tier_order_is_free_zai_then_free_openrouter_then_paid {
@@ -2006,7 +2168,7 @@ test with_no_openrouter_key_stored_the_free_tier_is_skipped_and_never_an_error_l
     assert pick_profile(8, 0) == PR_OPENROUTER;
     // with the key stored the tier is offered, and its own failure hands the pane to the paid profile
     assert next_profile(PR_ZAI, 25, 0) == PR_OPENROUTER;
-    assert fo_target(FC_RATE_LIMITED, PR_ZAI, 25, 0, 0, false) == PR_OPENROUTER;
+    assert fo_target(FC_RATE_LIMITED, PR_ZAI, 25, 0, 0, false) == PR_NONE;
     assert fo_target(FC_RATE_LIMITED, PR_OPENROUTER, 25, 16, 1, false) == PR_ANTHROPIC;
     // an OpenRouter key that failed its check is skipped like a missing one
     assert next_profile(PR_ZAI, 25, 8) == PR_ANTHROPIC;
@@ -2248,7 +2410,10 @@ test the_account_of_key_k_is_the_provider_name_with_a_number {
     assert a[9] == 35 and a[10] == 56;
     assert keychain_account_n(P_ZAI, MAX_KEYS, a[0..32]) == 0;
     assert keychain_account_n(PROVIDER_COUNT, 0, a[0..32]) == 0;
-    assert MAX_KEYS == 8;
+    assert MAX_KEYS == 64;
+    assert keychain_account_n(P_NVIDIA, 63, a[0..32]) == 9;
+    assert a[6] == 35 and a[7] == 54 and a[8] == 52;
+    assert keychain_account_n(P_NVIDIA, 64, a[0..32]) == 0;
     var l : [48]u8 = undefined;
     assert keychain_label_n(P_ZAI, 7, l[0..48]) == 15;
     assert l[13] == 35 and l[14] == 56;
@@ -2298,15 +2463,18 @@ test a_keys_row_says_how_many_keys_the_provider_holds {
     assert o[0] == 49 and o[2] == 107 and o[4] == 121;
     assert key_count_text(7, o[0..24]) == 6;
     assert o[0] == 55 and o[5] == 115;
-    assert key_count_text(MAX_KEYS, o[0..24]) == 6;
-    assert o[0] == 56;
+    assert key_count_text(MAX_KEYS, o[0..24]) == 7;
+    assert o[0] == 54 and o[1] == 52;
+    assert key_count_text(34, o[0..24]) == 7;
+    assert o[0] == 51 and o[1] == 52;
 }
 
-test the_key_number_rides_in_the_high_nibble_of_the_setkey_byte {
+test the_key_number_rides_in_the_high_nibble_of_the_legacy_setkey_byte {
     var p : u32 = 0;
     while (p < PROVIDER_COUNT) {
         var k : u32 = 0;
-        while (k < MAX_KEYS) {
+        while (k < SETKEY_LEGACY_KEYS) {
+            assert setkey_legacy_ok(p, k);
             const b : u32 = setkey_byte(p, k);
             assert b < 256;
             assert setkey_provider(b) == p;
@@ -2321,7 +2489,60 @@ test the_key_number_rides_in_the_high_nibble_of_the_setkey_byte {
     // a byte from a newer client that this table cannot hold reads as unknown
     assert setkey_provider(setkey_byte(11, 0)) >= PROVIDER_COUNT;
     assert PROVIDER_COUNT <= SETKEY_STEP;
-    assert MAX_KEYS * SETKEY_STEP <= 256;
+    assert SETKEY_LEGACY_KEYS * SETKEY_STEP <= 256;
+    // the legacy byte never names key 17 or later: it would wrap onto a low key of another byte
+    assert setkey_legacy_ok(P_NVIDIA, 15);
+    assert setkey_legacy_ok(P_NVIDIA, 16) == false;
+    assert setkey_legacy_ok(P_NVIDIA, 63) == false;
+    assert setkey_legacy_ok(PROVIDER_COUNT, 0) == false;
+    assert SETKEY_LEGACY_KEYS < MAX_KEYS;
+}
+
+test a_wide_setkey_names_every_slot_and_refuses_what_it_cannot_hold {
+    var pl : [260]u8 = undefined;
+    const key : []const u8 = "test-key-not-real-0123456789";
+    // slots 0, 11, 15, 16, 31, 32, 33 and 63 all travel and come back as the same slot
+    var want : [8]u32 = undefined;
+    want[0] = 0; want[1] = 11; want[2] = 15; want[3] = 16; want[4] = 31; want[5] = 32; want[6] = 33; want[7] = 63;
+    var i : usize = 0;
+    while (i < 8) {
+        const n : usize = setkey_wide_payload(want[i], key, pl[0..260]);
+        assert n == key.len + 1;
+        assert setkey_wide_ok(P_NVIDIA, pl[0..n]);
+        assert setkey_wide_slot(pl[0..n]) == want[i];
+        assert same_bytes(pl[1..n], key);
+        i = i + 1;
+    }
+    // slot 64 and provider 10 are refused; nothing is built for slot 64
+    assert setkey_wide_payload(64, key, pl[0..260]) == 0;
+    pl[0] = 64;
+    assert setkey_wide_ok(P_NVIDIA, pl[0..2]) == false;
+    pl[0] = 3;
+    assert setkey_wide_ok(PROVIDER_COUNT, pl[0..1]) == false;
+    // the slot byte alone deletes that slot (the highest one too); an empty payload is malformed
+    assert setkey_wide_payload(63, "", pl[0..260]) == 1;
+    assert pl[0] == 63;
+    assert setkey_wide_ok(P_NVIDIA, pl[0..1]);
+    assert setkey_wide_ok(P_NVIDIA, pl[0..0]) == false;
+    assert setkey_wide_slot(pl[0..0]) == MAX_KEYS;
+    // a key that would not fit the server slot, or holds a space, is refused whole, never truncated
+    var big : [256]u8 = undefined;
+    var b : usize = 0;
+    while (b < 256) {
+        big[b] = 97;
+        b = b + 1;
+    }
+    assert setkey_wide_payload(5, big[0..255], pl[0..260]) == 0;
+    assert setkey_wide_payload(5, big[0..254], pl[0..260]) == 255;
+    big[0] = 98;
+    big[1] = 32;
+    assert setkey_wide_payload(5, big[0..10], pl[0..260]) == 0;
+    pl[0] = 5;
+    pl[1] = 97;
+    pl[2] = 32;
+    assert setkey_wide_ok(P_ZAI, pl[0..3]) == false;
+    // a buffer one byte too small builds nothing
+    assert setkey_wide_payload(5, key, pl[0..key.len]) == 0;
 }
 
 test a_failure_marks_the_provider_bad_for_this_pane {
@@ -2353,9 +2574,9 @@ test a_dead_profile_hands_the_pane_to_the_next_one {
     assert fo_target(FC_NO_BALANCE, PR_ZAI, 33, 0, 0, false) == PR_ANTHROPIC;
 }
 
-test a_throttled_key_with_a_spare_swaps_the_key_and_keeps_the_profile {
-    assert fo_action(FC_RATE_LIMITED, PR_ZAI, 57, 0, 0, true) == FA_RESPAWN_KEY;
-    assert fo_target(FC_RATE_LIMITED, PR_ZAI, 57, 0, 0, true) == PR_ZAI;
+test throttling_stops_coding_plan_while_auth_failures_can_try_another_key {
+    assert fo_action(FC_RATE_LIMITED, PR_ZAI, 57, 0, 0, true) == FA_GIVE_UP;
+    assert fo_target(FC_RATE_LIMITED, PR_ZAI, 57, 0, 0, true) == PR_NONE;
     assert fo_bad(FC_RATE_LIMITED, PR_ZAI, 0) == 16;
     // an empty or a rejected key is one account's: another key of the provider is tried before the profile is left
     assert fo_action(FC_NO_BALANCE, PR_ZAI, 57, 0, 0, true) == FA_RESPAWN_KEY;
@@ -2408,7 +2629,7 @@ test a_pane_that_fails_on_every_profile_ends_in_give_up_after_each_was_tried_onc
         }
     }
     assert act == FA_GIVE_UP;
-    assert done == PROFILE_COUNT;
+    assert done == 4;
     assert tried == 15;
 }
 
@@ -2417,7 +2638,7 @@ test a_host_that_always_reports_a_spare_key_still_cannot_loop {
     while (done < 100 and fo_action(FC_RATE_LIMITED, PR_ZAI, 57, 0, done, true) == FA_RESPAWN_KEY) {
         done = done + 1;
     }
-    assert done == MAX_FAILOVERS;
+    assert done == 0;
     assert fo_action(FC_RATE_LIMITED, PR_ZAI, 57, 0, done, true) == FA_GIVE_UP;
     assert fo_action(FC_NO_BALANCE, PR_ZAI, 57, 0, MAX_FAILOVERS, false) == FA_GIVE_UP;
     assert MAX_FAILOVERS >= PROFILE_COUNT;
@@ -2445,7 +2666,7 @@ test a_pane_with_no_key_left_on_its_model_takes_the_next_model_of_the_tier_befor
     assert fo_action(FC_NO_BALANCE, PR_ZAI, 57, 0, 3, true) == FA_RESPAWN_KEY;
     assert fo_next_model(FC_NO_BALANCE, PR_ZAI, 0, 3, true) == false;
     assert fo_next_model(FC_NO_BALANCE, PR_ZAI, 0, 3, false);
-    assert fo_next_model(FC_RATE_LIMITED, PR_ZAI, 0, 3, false);
+    assert fo_next_model(FC_RATE_LIMITED, PR_ZAI, 0, 3, false) == false;
     assert fo_next_model(FC_OVERLOADED, PR_ZAI, 0, 3, false);
     assert fo_next_model(FC_LOGIN_REJECTED, PR_ZAI, 0, 3, false);
     // on its last model, a profile with one model, a row that names no key, or at the cap: no model step
@@ -2460,8 +2681,8 @@ test a_pane_with_no_key_left_on_its_model_takes_the_next_model_of_the_tier_befor
     assert fo_next_model(FC_RATE_LIMITED, PR_OPENROUTER, 0, 3, false);
     assert fo_next_model(FC_OVERLOADED, PR_OPENROUTER, 1, 3, false) == false;
     assert fo_next_model(FC_RATE_LIMITED, PR_OPENROUTER, 0, 3, true) == false;
-    // the cap leaves room for every key of each free provider on each model of its tier, then every profile
-    assert MAX_FAILOVERS >= MAX_KEYS * (profile_models(PR_ZAI) + profile_models(PR_OPENROUTER)) + PROFILE_COUNT;
+    // More storage never increases the existing retry budget.
+    assert MAX_FAILOVERS >= PROFILE_COUNT and MAX_FAILOVERS == 48;
     var o : [128]u8 = undefined;
     const n : usize = fo_why(FC_NO_BALANCE, PR_ZAI, FA_RESPAWN_MODEL, PR_ZAI, 3, o[0..128]);
     assert has_bytes(o[0..n], "claude: zai out of balance, every key tried, same profile on the next model");
@@ -2544,7 +2765,7 @@ test an_opencode_pane_gets_the_key_variable_and_one_inline_config_that_holds_no_
     // z.ai: the OpenAI-compatible endpoint, glm-4.5-flash first, the key by reference to its variable
     n = agent_var_text_step(AG_OPENCODE, PR_ZAI, 1, 0, "/h", o[0..700]);
     assert n > 0 and n < 700;
-    assert has_bytes(o[0..n], "\"baseURL\":\"https://api.z.ai/api/paas/v4\"");
+    assert has_bytes(o[0..n], "\"baseURL\":\"https://api.z.ai/api/coding/paas/v4\"");
     assert has_bytes(o[0..n], "\"apiKey\":\"{env:ZAI_API_KEY}\"");
     assert has_bytes(o[0..n], "\"model\":\"t27/glm-4.5-flash\"");
     assert has_bytes(o[0..n], "@ai-sdk/openai-compatible");
@@ -2582,7 +2803,7 @@ test a_crush_pane_gets_the_key_variable_and_the_directory_of_a_key_free_crush_js
     assert agent_config_file(AG_CRUSH, PR_ANTHROPIC) == false and agent_config_file(AG_OPENCODE, PR_ZAI) == false;
     n = crush_config_text(PR_ZAI, 0, o[0..800]);
     assert n > 0 and n < 800;
-    assert has_bytes(o[0..n], "\"base_url\":\"https://api.z.ai/api/paas/v4\"");
+    assert has_bytes(o[0..n], "\"base_url\":\"https://api.z.ai/api/coding/paas/v4\"");
     assert has_bytes(o[0..n], "\"api_key\":\"$ZAI_API_KEY\"");
     assert has_bytes(o[0..n], "\"large\":{\"provider\":\"t27\",\"model\":\"glm-4.5-flash\"}");
     assert has_bytes(o[0..n], "\"type\":\"openai-compat\"");
@@ -3176,31 +3397,50 @@ test what_the_tool_printed_becomes_a_key_only_when_it_is_one {
 }
 
 // ---- several keys per provider (owner, 2026-10-20: add several tokens to a provider so they rotate) ---------
-// A provider row owns up to MAX_KEYS numbered Keychain accounts. The window keeps which numbers are stored as
-// a bit mask (bit k set = key k+1 exists) and every decision below works from that mask: which number "add"
-// takes (the lowest free one, never an existing one), which key "delete" removes (the newest, the highest
-// number), whether "add" reads "full", what a row says after a check, which keys the server is not given.
-// A check keeps one status per key, in an array indexed p * MAX_KEYS + k (key_index), so a key that failed
-// is withheld alone and the others keep rotating.
+// A provider row owns up to MAX_KEYS (64) numbered Keychain accounts. The window keeps which numbers are stored
+// as a u64 bit mask (bit k set = key k+1 exists, slot_bit) and every decision below works from that mask: which
+// number "add" takes (the lowest free one, never an existing one), which key "delete" removes (the newest, the
+// highest number), whether "add" reads "full", what a row says after a check, which keys the server is not
+// given. A check keeps one status per key, in an array indexed p * MAX_KEYS + k (key_index), so a key that
+// failed is withheld alone and the others keep rotating. Provider masks (which providers hold a key, which are
+// bad) stay u32: there are PROVIDER_COUNT (10) providers.
+
+/// The bit of key k (0-based) in a stored-slot mask; 0 for k >= MAX_KEYS.
+pub fn slot_bit(k: u32) -> u64 {
+    if (k >= MAX_KEYS) { return 0; }
+    return @as(u64, 1) << @as(u64, k);
+}
+
+/// Is key k (0-based) in the mask?
+pub fn slot_taken(mask: u64, k: u32) -> bool {
+    return k < MAX_KEYS and (mask >> @as(u64, k)) % 2 == 1;
+}
+
+/// The mask with key k added (unchanged for k >= MAX_KEYS).
+pub fn slot_add(mask: u64, k: u32) -> u64 {
+    if (k >= MAX_KEYS or slot_taken(mask, k)) { return mask; }
+    return mask + slot_bit(k);
+}
+
+/// The mask without key k (unchanged when it is not there).
+pub fn slot_drop(mask: u64, k: u32) -> u64 {
+    if (slot_taken(mask, k) == false) { return mask; }
+    return mask - slot_bit(k);
+}
 
 /// How many numbers the mask holds.
-pub fn slot_count(mask: u32) -> u32 {
+pub fn slot_count(mask: u64) -> u32 {
     var c : u32 = 0;
     var k : u32 = 0;
     while (k < MAX_KEYS) {
-        if ((mask >> k) % 2 == 1) { c = c + 1; }
+        if (slot_taken(mask, k)) { c = c + 1; }
         k = k + 1;
     }
     return c;
 }
 
-/// Is key k (0-based) in the mask?
-pub fn slot_taken(mask: u32, k: u32) -> bool {
-    return k < MAX_KEYS and (mask >> k) % 2 == 1;
-}
-
 /// The number "add" stores under: the lowest free one; MAX_KEYS when all are taken ("full").
-pub fn next_free_key(mask: u32) -> u32 {
+pub fn next_free_key(mask: u64) -> u32 {
     var k : u32 = 0;
     while (k < MAX_KEYS) {
         if (slot_taken(mask, k) == false) { return k; }
@@ -3210,7 +3450,7 @@ pub fn next_free_key(mask: u32) -> u32 {
 }
 
 /// The newest key, the one "delete" removes: the highest stored number; MAX_KEYS when none is stored.
-pub fn newest_key(mask: u32) -> u32 {
+pub fn newest_key(mask: u64) -> u32 {
     var k : u32 = MAX_KEYS;
     while (k > 0) {
         k = k - 1;
@@ -3220,16 +3460,18 @@ pub fn newest_key(mask: u32) -> u32 {
 }
 
 /// The word of the "add" button (KEYS_WORDS): "add" while a number is free, "full" when none is.
-pub fn ky_set_word(mask: u32) -> u32 {
+pub fn ky_set_word(mask: u64) -> u32 {
     if (next_free_key(mask) >= MAX_KEYS) { return 2; }
     return 1;
 }
 
-/// A scan of one provider's numbers ends after this many misses in a row (a gap of one is stepped over). Each
-/// read is a run of /usr/bin/security (about 23 ms measured), so reading all 8 numbers of all 9 providers
-/// costs about 1.7 s; this keeps a scan to the numbers that exist and the first miss behind them. Set it to
-/// MAX_KEYS to read every number again.
-pub const SCAN_GAP_STOP : u32 = 2;
+/// A scan of one provider reads every number, 1 to MAX_KEYS (64): bounded and authoritative, so a key in a high
+/// slot is found whatever gaps lie below it (a key removed outside T27 OS, an import into a sparse table).
+/// SCAN_GAP_STOP is the misses-in-a-row limit scan_goes_on keeps; it equals MAX_KEYS, so no run of misses can end
+/// a scan early (an earlier two-miss and eight-miss stop could hide a valid high slot). Cost: one run of
+/// /usr/bin/security per number (about 23 ms measured), so about 1.5 s per provider scanned; a scan reads only
+/// the providers its caller asks for (load_wants, keys_refresh). The latency is to be measured on the Mac.
+pub const SCAN_GAP_STOP : u32 = 64;
 
 /// May a scan read number k after `misses` reads in a row that found nothing?
 pub fn scan_goes_on(k: u32, misses: u32) -> bool {
@@ -3247,7 +3489,7 @@ fn status_checked(s: u32) -> bool {
 }
 
 /// How many of the keys in `mask` of provider p passed their check.
-pub fn keys_valid(st: []const u32, p: u32, mask: u32) -> u32 {
+pub fn keys_valid(st: []const u32, p: u32, mask: u64) -> u32 {
     var c : u32 = 0;
     var k : u32 = 0;
     while (k < MAX_KEYS) {
@@ -3258,7 +3500,7 @@ pub fn keys_valid(st: []const u32, p: u32, mask: u32) -> u32 {
 }
 
 /// How many of the keys in `mask` of provider p have been checked.
-pub fn keys_checked(st: []const u32, p: u32, mask: u32) -> u32 {
+pub fn keys_checked(st: []const u32, p: u32, mask: u64) -> u32 {
     var c : u32 = 0;
     var k : u32 = 0;
     while (k < MAX_KEYS) {
@@ -3270,7 +3512,7 @@ pub fn keys_checked(st: []const u32, p: u32, mask: u32) -> u32 {
 
 /// The status of a provider from its keys: valid when one key is (it can serve), stored while a key is
 /// unchecked, then rate limited when one is, else invalid; missing with no key.
-pub fn provider_status(st: []const u32, p: u32, mask: u32) -> u32 {
+pub fn provider_status(st: []const u32, p: u32, mask: u64) -> u32 {
     if (mask == 0) { return ST_MISSING; }
     if (keys_valid(st, p, mask) > 0) { return ST_VALID; }
     if (keys_checked(st, p, mask) < slot_count(mask)) { return ST_STORED; }
@@ -3283,8 +3525,8 @@ pub fn provider_status(st: []const u32, p: u32, mask: u32) -> u32 {
 }
 
 /// The bad mask (bad_mask) from the keys: a provider is bad when it holds keys and none can serve. `stored[p]`
-/// is the mask of provider p's numbers.
-pub fn bad_mask_keys(st: []const u32, stored: []const u32) -> u32 {
+/// is the u64 mask of provider p's numbers; the result is a provider mask (u32, PROVIDER_COUNT bits).
+pub fn bad_mask_keys(st: []const u32, stored: []const u64) -> u32 {
     var m : u32 = 0;
     var p : u32 = 0;
     while (p < PROVIDER_COUNT and p < stored.len) {
@@ -3301,7 +3543,7 @@ pub fn key_withheld(s: u32) -> bool {
 
 /// What a row says next to its dot: "6/7 valid" once two or more keys were checked, else the status word.
 /// `shown` is the status the row shows (status_shown: missing, circuit-open and the rest win over the count).
-pub fn key_status_text(shown: u32, st: []const u32, p: u32, mask: u32, out: []u8) -> usize {
+pub fn key_status_text(shown: u32, st: []const u32, p: u32, mask: u64, out: []u8) -> usize {
     const checked : u32 = keys_checked(st, p, mask);
     if (checked >= 2 and shown != ST_CIRCUIT_OPEN and shown != ST_MISSING) {
         var n : usize = put_dec(out, 0, @as(u64, keys_valid(st, p, mask)));
@@ -3312,16 +3554,34 @@ pub fn key_status_text(shown: u32, st: []const u32, p: u32, mask: u32, out: []u8
     return csv_field(STATUS_NAMES, shown, out);
 }
 
+/// A test mask with keys 0 .. n-1 set (n <= 64), built without a literal above the i64 range.
+fn t_mask_low(n: u32) -> u64 {
+    var m : u64 = 0;
+    var k : u32 = 0;
+    while (k < n) {
+        m = slot_add(m, k);
+        k = k + 1;
+    }
+    return m;
+}
+
 test add_takes_the_lowest_free_number_and_stops_when_full {
     assert next_free_key(0) == 0;
     assert next_free_key(1) == 1;
     assert next_free_key(3) == 2;
     assert next_free_key(5) == 1;
     assert next_free_key(127) == 7;
-    assert next_free_key(255) == MAX_KEYS;
+    assert next_free_key(4095) == 12;
+    assert next_free_key(t_mask_low(15)) == 15;
+    assert next_free_key(t_mask_low(16)) == 16;
+    assert next_free_key(t_mask_low(33)) == 33;
+    assert next_free_key(t_mask_low(63)) == 63;
+    assert next_free_key(t_mask_low(64)) == MAX_KEYS;
+    // a hole is filled first, also above key 32
+    assert next_free_key(slot_drop(t_mask_low(40), 31)) == 31;
     assert ky_set_word(0) == 1;
-    assert ky_set_word(127) == 1;
-    assert ky_set_word(255) == 2;
+    assert ky_set_word(t_mask_low(63)) == 1;
+    assert ky_set_word(t_mask_low(64)) == 2;
     var w : [24]u8 = undefined;
     assert csv_field(KEYS_WORDS, 1, w[0..24]) == 3;
     assert w[0] == 97;
@@ -3336,13 +3596,20 @@ test delete_removes_the_newest_key_only {
     assert newest_key(255) == 7;
     assert newest_key(5) == 2;
     assert newest_key(2) == 1;
-    var mask : u32 = 127;
-    mask = mask - (1 << newest_key(mask));
+    var mask : u64 = 127;
+    mask = slot_drop(mask, newest_key(mask));
     assert mask == 63;
     assert newest_key(mask) == 5;
+    // the highest slot is the newest; removing it leaves 0 .. 62
+    var full : u64 = t_mask_low(64);
+    assert newest_key(full) == 63;
+    full = slot_drop(full, newest_key(full));
+    assert newest_key(full) == 62;
+    assert full == t_mask_low(63);
+    assert newest_key(slot_bit(33)) == 33;
 }
 
-test the_numbers_in_a_mask_are_counted {
+test the_numbers_in_a_mask_are_counted_up_to_bit_63 {
     assert slot_count(0) == 0;
     assert slot_count(127) == 7;
     assert slot_count(255) == 8;
@@ -3350,64 +3617,122 @@ test the_numbers_in_a_mask_are_counted {
     assert slot_taken(5, 0) and slot_taken(5, 2);
     assert slot_taken(5, 1) == false;
     assert slot_taken(5, MAX_KEYS) == false;
-    assert slot_taken(65535, 9) == false;
+    assert slot_taken(65535, 11);
+    assert slot_taken(65535, 15);
+    assert slot_taken(65535, 16) == false;
+    assert slot_taken(65535, MAX_KEYS) == false;
+    assert slot_count(t_mask_low(64)) == 64;
+    assert slot_count(t_mask_low(34)) == 34;
+    // bit 63 is a key like any other: set, counted, taken, removed
+    const top : u64 = slot_bit(63);
+    assert top == slot_bit(62) * 2;
+    assert slot_taken(top, 63);
+    assert slot_taken(top, 62) == false;
+    assert slot_count(top) == 1;
+    assert slot_count(slot_add(top, 0)) == 2;
+    assert slot_drop(top, 63) == 0;
+    assert slot_add(top, 63) == top;
+    assert slot_drop(top, 62) == top;
+    assert slot_bit(64) == 0;
+    assert slot_add(0, 64) == 0;
+    // slots 31, 32 and 33 straddle the old u32 edge
+    assert slot_taken(slot_bit(31) + slot_bit(32) + slot_bit(33), 32);
+    assert slot_count(slot_bit(31) + slot_bit(32) + slot_bit(33)) == 3;
 }
 
-test a_scan_steps_over_one_gap_and_stops_at_two {
+/// The keys a scan driven by scan_goes_on finds in `present`, and how many numbers it reads (out[0]).
+fn t_scan(present: u64, out: []u32) -> u64 {
+    var k : u32 = 0;
+    var misses : u32 = 0;
+    var reads : u32 = 0;
+    var found : u64 = 0;
+    while (scan_goes_on(k, misses)) {
+        reads = reads + 1;
+        if (slot_taken(present, k)) {
+            found = slot_add(found, k);
+            misses = 0;
+        } else {
+            misses = misses + 1;
+        }
+        k = k + 1;
+    }
+    out[0] = reads;
+    return found;
+}
+
+test a_scan_reads_all_64_numbers_and_finds_every_sparse_high_slot {
     assert scan_goes_on(0, 0);
     assert scan_goes_on(3, 1);
-    assert scan_goes_on(3, 2) == false;
+    assert scan_goes_on(63, 63);
     assert scan_goes_on(MAX_KEYS, 0) == false;
-    assert SCAN_GAP_STOP >= 1;
+    assert SCAN_GAP_STOP == MAX_KEYS;
+    var r : [2]u32 = undefined;
+    // a packed set of 34 keys (the owner's NVIDIA import): all found, 64 reads, never past 63
+    assert t_scan(t_mask_low(34), r[0..2]) == t_mask_low(34);
+    assert r[0] == 64;
+    // a full table of 64
+    assert t_scan(t_mask_low(64), r[0..2]) == t_mask_low(64);
+    assert r[0] == 64;
+    // an empty table still ends after 64 reads
+    assert t_scan(0, r[0..2]) == 0;
+    assert r[0] == 64;
+    // sparse high slots behind long gaps: 0 .. 9, 15, 40 and 63 are all found
+    const sparse : u64 = t_mask_low(10) + slot_bit(15) + slot_bit(40) + slot_bit(63);
+    assert t_scan(sparse, r[0..2]) == sparse;
+    // a lone key in the highest slot, and lone keys at 16, 31, 32, 33
+    assert t_scan(slot_bit(63), r[0..2]) == slot_bit(63);
+    assert t_scan(slot_bit(16) + slot_bit(31) + slot_bit(32) + slot_bit(33), r[0..2]) == slot_bit(16) + slot_bit(31) + slot_bit(32) + slot_bit(33);
 }
 
 test a_key_has_its_own_place_among_the_statuses {
     assert key_index(0, 0) == 0;
     assert key_index(0, 7) == 7;
-    assert key_index(4, 0) == 32;
-    assert key_index(4, 6) == 38;
-    assert key_index(8, 7) == 71;
+    assert key_index(4, 0) == 256;
+    assert key_index(4, 6) == 262;
+    assert key_index(8, 7) == 519;
+    assert key_index(9, 63) == 639;
+    assert key_index(9, 63) + 1 == @as(usize, PROVIDER_COUNT) * @as(usize, MAX_KEYS);
 }
 
 test a_provider_is_valid_while_one_key_is_and_bad_when_none_can_serve {
-    var st : [72]u32 = undefined;
+    var st : [640]u32 = undefined;
     var i : usize = 0;
-    while (i < 72) {
+    while (i < 640) {
         st[i] = ST_STORED;
         i = i + 1;
     }
-    assert provider_status(st[0..72], P_ZAI, 0) == ST_MISSING;
-    assert provider_status(st[0..72], P_ZAI, 127) == ST_STORED;
+    assert provider_status(st[0..640], P_ZAI, 0) == ST_MISSING;
+    assert provider_status(st[0..640], P_ZAI, 127) == ST_STORED;
     st[key_index(P_ZAI, 0)] = ST_INVALID;
-    assert provider_status(st[0..72], P_ZAI, 127) == ST_STORED;
+    assert provider_status(st[0..640], P_ZAI, 127) == ST_STORED;
     st[key_index(P_ZAI, 1)] = ST_VALID;
-    assert provider_status(st[0..72], P_ZAI, 127) == ST_VALID;
-    assert provider_status(st[0..72], P_ZAI, 1) == ST_INVALID;
-    assert provider_status(st[0..72], P_ZAI, 3) == ST_VALID;
+    assert provider_status(st[0..640], P_ZAI, 127) == ST_VALID;
+    assert provider_status(st[0..640], P_ZAI, 1) == ST_INVALID;
+    assert provider_status(st[0..640], P_ZAI, 3) == ST_VALID;
     var k : u32 = 0;
     while (k < 7) {
         st[key_index(P_ZAI, k)] = ST_INVALID;
         k = k + 1;
     }
-    assert provider_status(st[0..72], P_ZAI, 127) == ST_INVALID;
+    assert provider_status(st[0..640], P_ZAI, 127) == ST_INVALID;
     st[key_index(P_ZAI, 4)] = ST_RATE_LIMITED;
-    assert provider_status(st[0..72], P_ZAI, 127) == ST_RATE_LIMITED;
-    var stored : [9]u32 = undefined;
+    assert provider_status(st[0..640], P_ZAI, 127) == ST_RATE_LIMITED;
+    var stored : [10]u64 = undefined;
     var s : usize = 0;
-    while (s < 9) {
+    while (s < 10) {
         stored[s] = 0;
         s = s + 1;
     }
     stored[P_ZAI] = 127;
-    assert bad_mask_keys(st[0..72], stored[0..9]) == 0;
+    assert bad_mask_keys(st[0..640], stored[0..10]) == 0;
     st[key_index(P_ZAI, 4)] = ST_INVALID;
-    assert bad_mask_keys(st[0..72], stored[0..9]) == 16;
+    assert bad_mask_keys(st[0..640], stored[0..10]) == 16;
     stored[P_ANTHROPIC] = 1;
-    assert bad_mask_keys(st[0..72], stored[0..9]) == 16;
+    assert bad_mask_keys(st[0..640], stored[0..10]) == 16;
     st[key_index(P_ANTHROPIC, 0)] = ST_INVALID;
-    assert bad_mask_keys(st[0..72], stored[0..9]) == 17;
+    assert bad_mask_keys(st[0..640], stored[0..10]) == 17;
     st[key_index(P_ZAI, 6)] = ST_VALID;
-    assert bad_mask_keys(st[0..72], stored[0..9]) == 1;
+    assert bad_mask_keys(st[0..640], stored[0..10]) == 1;
 }
 
 test only_a_key_that_failed_is_withheld_from_the_server {
@@ -3419,9 +3744,9 @@ test only_a_key_that_failed_is_withheld_from_the_server {
 }
 
 test a_row_after_a_check_says_how_many_keys_are_valid {
-    var st : [72]u32 = undefined;
+    var st : [640]u32 = undefined;
     var i : usize = 0;
-    while (i < 72) {
+    while (i < 640) {
         st[i] = ST_STORED;
         i = i + 1;
     }
@@ -3437,33 +3762,33 @@ test a_row_after_a_check_says_how_many_keys_are_valid {
         k = k + 1;
     }
     st[key_index(P_ZAI, 3)] = ST_INVALID;
-    const n : usize = key_status_text(ST_VALID, st[0..72], P_ZAI, 127, out[0..32]);
+    const n : usize = key_status_text(ST_VALID, st[0..640], P_ZAI, 127, out[0..32]);
     assert n == 9;
     assert out[0] == 54 and out[1] == 47 and out[2] == 55 and out[3] == 32;
     assert out[4] == 118 and out[8] == 100;
-    assert key_status_text(ST_CIRCUIT_OPEN, st[0..72], P_ZAI, 127, out[0..32]) == 12;
+    assert key_status_text(ST_CIRCUIT_OPEN, st[0..640], P_ZAI, 127, out[0..32]) == 12;
     assert out[0] == 99;
-    assert key_status_text(ST_MISSING, st[0..72], P_ZAI, 0, out[0..32]) == 7;
-    assert key_status_text(ST_STORED, st[0..72], P_ANTHROPIC, 1, out[0..32]) == 6;
+    assert key_status_text(ST_MISSING, st[0..640], P_ZAI, 0, out[0..32]) == 7;
+    assert key_status_text(ST_STORED, st[0..640], P_ANTHROPIC, 1, out[0..32]) == 6;
     assert out[0] == 115;
     st[key_index(P_OPENAI, 0)] = ST_VALID;
-    assert key_status_text(ST_VALID, st[0..72], P_OPENAI, 1, out[0..32]) == 5;
+    assert key_status_text(ST_VALID, st[0..640], P_OPENAI, 1, out[0..32]) == 5;
     assert out[0] == 118;
     st[key_index(P_OPENAI, 1)] = ST_INVALID;
-    assert key_status_text(ST_VALID, st[0..72], P_OPENAI, 3, out[0..32]) == 9;
+    assert key_status_text(ST_VALID, st[0..640], P_OPENAI, 3, out[0..32]) == 9;
     assert out[0] == 49 and out[2] == 50;
 }
 
 test the_new_provider_status_agrees_with_the_old_one_for_a_single_key {
-    var st : [72]u32 = undefined;
+    var st : [640]u32 = undefined;
     var i : usize = 0;
-    while (i < 72) {
+    while (i < 640) {
         st[i] = ST_STORED;
         i = i + 1;
     }
-    var one : [9]u32 = undefined;
+    var one : [10]u32 = undefined;
     var j : usize = 0;
-    while (j < 9) {
+    while (j < 10) {
         one[j] = ST_STORED;
         j = j + 1;
     }
@@ -3471,18 +3796,18 @@ test the_new_provider_status_agrees_with_the_old_one_for_a_single_key {
     while (s <= ST_RATE_LIMITED) {
         st[key_index(P_GEMINI, 0)] = s;
         one[P_GEMINI] = s;
-        assert provider_status(st[0..72], P_GEMINI, 1) == s;
-        var sm : [9]u32 = undefined;
+        assert provider_status(st[0..640], P_GEMINI, 1) == s;
+        var sm : [10]u64 = undefined;
         var q : usize = 0;
-        while (q < 9) {
+        while (q < 10) {
             sm[q] = 0;
             q = q + 1;
         }
         sm[P_GEMINI] = 1;
         var bad : u32 = 0;
         if (s == ST_INVALID) { bad = 4; }
-        assert bad_mask_keys(st[0..72], sm[0..9]) == bad;
-        assert bad_mask(one[0..9]) == bad;
+        assert bad_mask_keys(st[0..640], sm[0..10]) == bad;
+        assert bad_mask(one[0..10]) == bad;
         s = s + 1;
     }
 }

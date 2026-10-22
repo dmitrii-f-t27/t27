@@ -29,9 +29,16 @@ pub const OP_RESIZE : u8 = 6;
 pub const OP_READ : u8 = 7;
 pub const OP_KILL : u8 = 8;
 pub const OP_HOOK : u8 = 9;
-/// SETKEY: the pane byte is the provider (keys.t27), the payload the key; the server keeps it in memory
-/// only and gives it to the panes it spawns afterwards. An empty payload forgets the key.
+/// SETKEY (legacy): the pane byte is the provider in its low nibble and the key number (keys 1 to 16) in its
+/// high one (keys.t27 setkey_byte), the payload the key; the server keeps it in memory only and gives it to
+/// the panes it spawns afterwards. An empty payload forgets the key. Kept byte for byte for older clients.
 pub const OP_SETKEY : u8 = 10;
+/// Idempotent provider SPAWN: same payload, exact catalog token required. Reuses only matching space/cwd/token.
+pub const OP_PROVIDER_OPEN : u8 = 11;
+/// SETKEY_WIDE (dmitrii-f-t27/t27#6): the pane byte is the provider; payload [slot u8][key bytes]. The slot is
+/// 0-based and below keys.t27 MAX_KEYS (64); a payload of the slot byte alone forgets that slot; an empty
+/// payload is refused (keys.t27 setkey_wide_ok). The reply is RE_OK only when the slot was set or cleared.
+pub const OP_SETKEY_WIDE : u8 = 12;
 pub const RE_OK : u8 = 128;
 pub const RE_ERR : u8 = 129;
 pub const RE_DATA : u8 = 130;
@@ -110,7 +117,7 @@ pub fn frame_complete(buf: []const u8) -> bool {
     return need > 1 and buf.len >= need;
 }
 
-pub fn is_request(op: u8) -> bool { return op >= OP_LIST and op <= OP_SETKEY; }
+pub fn is_request(op: u8) -> bool { return op >= OP_LIST and op <= OP_SETKEY_WIDE; }
 pub fn is_reply(op: u8) -> bool { return op >= RE_OK and op <= RE_LISTING; }
 
 /// The running count of the oldest byte still in the ring and how many bytes a reader at `cursor` gets,
@@ -292,8 +299,10 @@ test ops_are_split_into_requests_and_replies {
         assert !(is_request(op) and is_reply(op));
         op = op + 1;
     }
-    assert requests == 10;
+    assert requests == 12;
     assert replies == 4;
+    assert is_request(OP_SETKEY) and is_request(OP_SETKEY_WIDE);
+    assert OP_SETKEY_WIDE == 12;
 }
 
 test numbers_are_little_endian {

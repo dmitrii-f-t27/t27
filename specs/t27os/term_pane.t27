@@ -106,7 +106,7 @@ pub const TP_KEY_MAX : u32 = 8;
 
 /// Does a selected chat of this agent show a terminal pane?
 pub fn opens_pane(agent: u32) -> bool {
-    return agent == TERM_AGENT;
+    return agent == TERM_AGENT or agent == 3;
 }
 
 /// The grid that fits w x h points of content area (header excluded), clamped to the buffer.
@@ -228,7 +228,7 @@ pub fn tp_pick_pane(frame: []const u8, len: usize, agent: u32, k: u32) -> u32 {
     var found : u32 = PANE_NONE;
     var at : usize = HEADER;
     while (at + 4 <= len and found == PANE_NONE) {
-        if (@as(u32, frame[at + 1]) == agent) {
+        if (@as(u32, frame[at + 1]) == agent and frame[at + 3] / 8 % 2 == 0) {
             if (seen == k) { found = @as(u32, frame[at]); }
             seen = seen + 1;
         }
@@ -249,14 +249,26 @@ pub fn tp_pane_live(frame: []const u8, len: usize, pane: u32) -> bool {
     return false;
 }
 
-/// The state the server lists for the k-th pane of `agent` (entry byte 2, S_* of agents.t27), so a row shows
-/// what the pane really is: S_STOPPED when the server lists no such pane or its live flag (bit 0) is clear.
+/// The state of a previously validated pane ID; missing/dead panes are stopped.
+pub fn tp_state_id(frame: []const u8, len: usize, pane: u32) -> u32 {
+    if (len < HEADER or frame[0] != RE_LISTING) { return S_STOPPED; }
+    var at : usize = HEADER;
+    while (at + 4 <= len) {
+        if (@as(u32, frame[at]) == pane and frame[at + 3] % 2 == 1) {
+            const state : u32 = @as(u32, frame[at + 2]) % 64;
+            if (state <= S_DONE) { return state; }
+        }
+        at = at + 4;
+    }
+    return S_STOPPED;
+}
+
 pub fn tp_state_of(frame: []const u8, len: usize, agent: u32, k: u32) -> u32 {
     if (len < HEADER or frame[0] != RE_LISTING) { return S_STOPPED; }
     var seen : u32 = 0;
     var at : usize = HEADER;
     while (at + 4 <= len) {
-        if (@as(u32, frame[at + 1]) == agent) {
+        if (@as(u32, frame[at + 1]) == agent and frame[at + 3] / 8 % 2 == 0) {
             if (seen == k) {
                 if (frame[at + 3] % 2 == 0) { return S_STOPPED; }
                 const st : u32 = @as(u32, frame[at + 2]);
@@ -365,8 +377,21 @@ pub fn tp_retry_due(since_try: u32) -> bool {
 
 test claude_code_rows_open_a_pane {
     assert opens_pane(0);
+    assert opens_pane(3);
     assert opens_pane(1) == false;
     assert opens_pane(4) == false;
+}
+
+test provider_panes_do_not_change_legacy_ordinals_or_borrow_another_status {
+    var f : [16]u8 = undefined;
+    f[0] = RE_LISTING; f[1] = 0; f[2] = 12; f[3] = 0;
+    f[4] = 2; f[5] = 3; f[6] = 3; f[7] = 9;
+    f[8] = 5; f[9] = 3; f[10] = 1; f[11] = 1;
+    f[12] = 6; f[13] = 3; f[14] = 3; f[15] = 8;
+    assert tp_pick_pane(f[0..16], 16, 3, 0) == 5;
+    assert tp_state_of(f[0..16], 16, 3, 0) == 1;
+    assert tp_state_id(f[0..16], 16, 2) == 3;
+    assert tp_state_id(f[0..16], 16, 6) == S_STOPPED;
 }
 
 test the_grid_fits_the_content_area {

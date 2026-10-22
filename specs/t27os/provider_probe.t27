@@ -1,0 +1,40 @@
+// SPDX-License-Identifier: Apache-2.0
+// Explicit owner-authorized catalog verification. Prints model and HTTP status only.
+module T27osProviderProbe;
+use t27os::keys_host::kc_get_n;
+use t27os::keys_probe::probe_model;
+use t27os::provider_catalog::PC_COUNT;
+use t27os::provider_catalog::pc_provider;
+use t27os::provider_catalog::pc_model;
+use t27os::session_store::put_bytes;
+use t27os::session_store::put_dec;
+use t27os::pty_sys::sys_write;
+use t27os::pty_sys::sys_exit;
+pub fn main() -> void {
+    var i : u32 = 0;
+    var stop_nv : bool = false;
+    var stop_za : bool = false;
+    while (i < PC_COUNT) {
+        const p : u32 = pc_provider(i);
+        if ((p == 9 and stop_nv == false) or (p == 4 and stop_za == false)) {
+            var key : [256]u8 = undefined;
+            const kn : usize = kc_get_n(p, 0, key[0..256]);
+            var status : u32 = 1;
+            if (kn > 0) { status = probe_model(i, key[0..kn]); }
+            var j : usize = 0;
+            while (j < 256) { key[j] = 0; j = j + 1; }
+            var b : [128]u8 = undefined;
+            var n : usize = put_bytes(b[0..128], 0, pc_model(i));
+            n = put_bytes(b[0..128], n, " HTTP=");
+            n = put_dec(b[0..128], n, @as(u64, status));
+            n = put_bytes(b[0..128], n, "\n");
+            sys_write(1, b[0..n], @as(u64, n));
+            if (status == 429 or status == 401 or status == 403) {
+                if (p == 9) { stop_nv = true; } else { stop_za = true; }
+            }
+        }
+        i = i + 1;
+    }
+    sys_exit(0);
+}
+test catalog_has_two_provider_groups { assert pc_provider(0) != pc_provider(PC_COUNT - 1); }
