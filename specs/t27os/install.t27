@@ -541,6 +541,7 @@ pub fn plist_text(out : []u8, cap : usize, version : []const u8, version_len : u
     w = put_line(out, cap, w, "<key>LSMinimumSystemVersion</key><string>11.0</string>", 54);
     w = put_line(out, cap, w, "<key>NSHighResolutionCapable</key><true/>", 41);
     w = put_line(out, cap, w, "<key>NSMicrophoneUsageDescription</key><string>T27 OS uses the microphone during a call you answer or start.</string>", 117);
+    w = put_line(out, cap, w, "<key>NSCameraUsageDescription</key><string>T27 OS uses the camera during a call you answer or start.</string>", 109);
     w = put_line(out, cap, w, "<key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>", 88);
     w = put_line(out, cap, w, "</dict>", 7);
     w = put_line(out, cap, w, "</plist>", 8);
@@ -605,29 +606,30 @@ test a_build_number_is_a_plain_commit_count {
 }
 
 test the_plist_names_the_bundle_the_version_and_the_minimum_system {
-    var out : [1024]u8 = undefined;
-    const n : usize = plist_text(out[0..1024], 1024, "0.1.0", 5, "42", 2);
-    assert(n < 1024);
-    assert(buf_has(out[0..1024], n, "<key>CFBundleExecutable</key><string>T27OS</string>", 51));
-    assert(buf_has(out[0..1024], n, "<key>CFBundleIdentifier</key><string>ai.t27.os</string>", 55));
-    assert(buf_has(out[0..1024], n, "<key>CFBundlePackageType</key><string>APPL</string>", 51));
-    assert(buf_has(out[0..1024], n, "<key>CFBundleShortVersionString</key><string>0.1.0</string>", 59));
-    assert(buf_has(out[0..1024], n, "<key>CFBundleVersion</key><string>42</string>", 45));
-    assert(buf_has(out[0..1024], n, "<key>LSMinimumSystemVersion</key><string>11.0</string>", 54));
-    assert(buf_has(out[0..1024], n, "<key>NSHighResolutionCapable</key><true/>", 41));
-    assert(buf_has(out[0..1024], n, "<key>NSMicrophoneUsageDescription</key><string>T27 OS uses the microphone during a call you answer or start.</string>", 117));
-    assert(buf_has(out[0..1024], n, "<plist version='1.0'>", 21));
-    assert(buf_has(out[0..1024], n, "</plist>", 8));
+    var out : [2048]u8 = undefined;
+    const n : usize = plist_text(out[0..2048], 2048, "0.1.0", 5, "42", 2);
+    assert(n < 2048);
+    assert(buf_has(out[0..2048], n, "<key>CFBundleExecutable</key><string>T27OS</string>", 51));
+    assert(buf_has(out[0..2048], n, "<key>CFBundleIdentifier</key><string>ai.t27.os</string>", 55));
+    assert(buf_has(out[0..2048], n, "<key>CFBundlePackageType</key><string>APPL</string>", 51));
+    assert(buf_has(out[0..2048], n, "<key>CFBundleShortVersionString</key><string>0.1.0</string>", 59));
+    assert(buf_has(out[0..2048], n, "<key>CFBundleVersion</key><string>42</string>", 45));
+    assert(buf_has(out[0..2048], n, "<key>LSMinimumSystemVersion</key><string>11.0</string>", 54));
+    assert(buf_has(out[0..2048], n, "<key>NSHighResolutionCapable</key><true/>", 41));
+    assert(buf_has(out[0..2048], n, "<key>NSMicrophoneUsageDescription</key><string>T27 OS uses the microphone during a call you answer or start.</string>", 117));
+    assert(buf_has(out[0..2048], n, "<key>NSCameraUsageDescription</key><string>T27 OS uses the camera during a call you answer or start.</string>", 109));
+    assert(buf_has(out[0..2048], n, "<plist version='1.0'>", 21));
+    assert(buf_has(out[0..2048], n, "</plist>", 8));
     assert(out[n - 1] == 10);
     assert(out[0] == '<');
     assert(out[1] == '?');
 }
 
 test the_plist_is_deterministic_and_a_short_buffer_is_detected {
-    var a : [1024]u8 = undefined;
-    var b : [1024]u8 = undefined;
-    const na : usize = plist_text(a[0..1024], 1024, "1.2.3", 5, "7", 1);
-    const nb : usize = plist_text(b[0..1024], 1024, "1.2.3", 5, "7", 1);
+    var a : [2048]u8 = undefined;
+    var b : [2048]u8 = undefined;
+    const na : usize = plist_text(a[0..2048], 2048, "1.2.3", 5, "7", 1);
+    const nb : usize = plist_text(b[0..2048], 2048, "1.2.3", 5, "7", 1);
     assert(na == nb);
     var i : usize = 0;
     while (i < na) {
