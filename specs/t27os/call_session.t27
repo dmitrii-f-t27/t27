@@ -477,8 +477,8 @@ pub fn cs_open(s: []u8, me_fp: []const u8, bind_ip: u64, port: u64, audio: u32) 
     cs_p(s, CS_MODE, @as(u64, audio));
     cs_p(s, CS_SEEN, @as(u64, CK_IDLE));
     cs_p(s, CS_MAGIC, CS_MAGIC_V);
-    cs_p(s, CS_K_CALLING_MS, 30000);
-    cs_p(s, CS_K_RINGING_MS, 30000);
+    cs_p(s, CS_K_CALLING_MS, 60000);
+    cs_p(s, CS_K_RINGING_MS, 60000);
     cs_p(s, CS_K_VERIFY_MS, 60000);
     cs_p(s, CS_K_SILENT_MS, 5000);
     cs_p(s, CS_K_JB_TARGET, CBP_F_TARGET);
