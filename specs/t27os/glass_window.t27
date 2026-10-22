@@ -543,6 +543,10 @@ use t27os::call_video::cvl_start;
 use t27os::call_video::cvl_stop;
 use t27os::call_video::cvl_take;
 use t27os::call_video::cvl_stat;
+use t27os::call_video::cvl_tick;
+use t27os::call_video::cvs_use_camera;
+use t27os::call_video::CVS_IDLE;
+use t27os::call_video::CVS_FAILED;
 use t27os::call_session::cs_video_feed;
 use t27os::pty_sys::sys_exit;
 use t27os::ringtone::RT_BLOCK;
@@ -9218,6 +9222,9 @@ pub const CL_CAMST : usize = 127;
 pub const CL_VSER : usize = 128;
 pub const CL_VSHOWN : usize = 132;
 pub const CL_VSKIP : usize = 136;
+/// Drawn: the camera's capture state (call_video.t27 CVS_*); FAILED puts "camera unavailable" on the video line while
+/// the generator carries the call's video.
+pub const CL_CAMSTATE : usize = 140;
 pub const CL_VIMG : usize = 144;
 pub const CL_VIMG_END : usize = 152;
 /// Not drawn: the address of the live camera block (call_video.t27 cvl_new), two u32, low then high; 0 = none yet.
@@ -9485,9 +9492,11 @@ pub fn cl_camp(cl: []const u8) -> u64 {
     return cl_get32(cl, CL_CAMP) | (cl_get32(cl, CL_CAMP + 4) << 32);
 }
 
-/// The camera in a call (call_video.t27): while the call is ACTIVE with video on, the session is started once (the system
-/// asks for permission the first time; until frames come, or when it is refused, the test generator is the source), and
-/// every new camera JPEG is handed to cs_video_feed. When the call is over the session is stopped, the camera is free.
+/// The camera in a call (call_video.t27): while the call is ACTIVE with video on, the start is queued once (setup and
+/// startRunning run on the camera's own queue, the system asks for permission the first time); this pass never waits for
+/// it. Until a camera frame comes, when it is refused or when none came in 3 s (FAILED, "camera unavailable"), the test
+/// generator is the source; every new camera JPEG while LIVE is handed to cs_video_feed. When the call is over the stop
+/// is queued, the camera is free.
 pub fn cl_camera(cl: []u8, s: []u8) -> void {
     if (cl[CL_VSEND] == 0 or cl[CL_CAMOFF] != 0) { return; }
     const st : u32 = cs_state(s);
@@ -9495,6 +9504,7 @@ pub fn cl_camera(cl: []u8, s: []u8) -> void {
     if (st != CK_ACTIVE) {
         if (cp != 0 and cl[CL_CAMTRY] != 0) { cvl_stop(cp); }
         cl[CL_CAMTRY] = 0;
+        cl[CL_CAMSTATE] = @as(u8, @intCast(CVS_IDLE));
         return;
     }
     if (cl[CL_CAMTRY] == 0) {
@@ -9506,14 +9516,23 @@ pub fn cl_camera(cl: []u8, s: []u8) -> void {
             cl_put32(cl, CL_CAMP, cp & 4294967295);
             cl_put32(cl, CL_CAMP + 4, cp >> 32);
         }
-        if (cp == 0) { cl[CL_CAMST] = 3; return; }
+        if (cp == 0) { cl[CL_CAMST] = 3; cl[CL_CAMSTATE] = @as(u8, @intCast(CVS_FAILED)); return; }
         cl[CL_CAMST] = @as(u8, @intCast(cvl_start(cp)));
-        return;
     }
-    if (cp == 0 or cl[CL_CAMST] != 0) { return; }
+    if (cp == 0) { return; }
+    const cs : u32 = cvl_tick(cp);
+    cl[CL_CAMSTATE] = @as(u8, @intCast(cs));
+    const res : u64 = cvl_stat(cp, 14);
+    if (res != 0) { cl[CL_CAMST] = @as(u8, @intCast(res & 255)); }
+    if (!cvs_use_camera(cs, 1)) { return; }
     var jpeg : [24000]u8 = undefined;
     const n : usize = cvl_take(cp, jpeg[0..24000]);
-    if (n > 0) { cs_video_feed(s, jpeg[0..n]); }
+    if (cvs_use_camera(cs, @as(u64, n))) { cs_video_feed(s, jpeg[0..n]); }
+}
+
+/// The video line names a camera that gave up (FAILED) while the call goes on with the generator.
+pub fn cl_cam_unavailable(cl: []const u8) -> bool {
+    return cl[CL_VSEND] != 0 and cl[CL_CAMOFF] == 0 and @as(u32, cl[CL_CAMSTATE]) == CVS_FAILED;
 }
 
 /// The decoded picture held in the snapshot, 0 when none.
@@ -10043,17 +10062,18 @@ fn draw_cl_front(c: u64, kit: [48]u64, sh: f64, mx: f64, my: f64, l: f64, t: f64
 /// otherwise) and the frames shown / skipped, then the last picture at 4:3 in the width of the panel, as high as the
 /// window leaves room for; a dark box with a word while there is no picture yet.
 fn draw_cl_video(c: u64, kit: [48]u64, x: f64, right: f64, y: f64, sh: f64, cl: []const u8) -> void {
-    var line : [64]u8 = undefined;
+    var line : [96]u8 = undefined;
     const live : bool = cl[CL_VLIVE] != 0;
     draw_cl_dot(c, kit, x, y - 8.0, live);
     var n : usize = 0;
-    if (live) { n = put_bytes(line[0..64], 0, "VIDEO ON"); } else { n = put_bytes(line[0..64], 0, "NO VIDEO"); }
-    n = put_bytes(line[0..64], n, "   frames ");
-    n = put_dec(line[0..64], n, cl_get32(cl, CL_VSHOWN));
-    n = put_bytes(line[0..64], n, "   skipped ");
-    n = put_dec(line[0..64], n, cl_get32(cl, CL_VSKIP));
+    if (live) { n = put_bytes(line[0..96], 0, "VIDEO ON"); } else { n = put_bytes(line[0..96], 0, "NO VIDEO"); }
+    n = put_bytes(line[0..96], n, "   frames ");
+    n = put_dec(line[0..96], n, cl_get32(cl, CL_VSHOWN));
+    n = put_bytes(line[0..96], n, "   skipped ");
+    n = put_dec(line[0..96], n, cl_get32(cl, CL_VSKIP));
+    if (cl_cam_unavailable(cl)) { n = put_bytes(line[0..96], n, "   camera unavailable"); }
     cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
-    draw_fit(c, kit, line[0..64], n, x + 14.0, y, 9.5, WEIGHT_SEMIBOLD, true, right);
+    draw_fit(c, kit, line[0..96], n, x + 14.0, y, 9.5, WEIGHT_SEMIBOLD, true, right);
     const top : f64 = y + 10.0;
     var w : f64 = right - x;
     var h : f64 = w * 0.75;
@@ -15611,6 +15631,27 @@ test the_call_region_ends_the_text_store_and_draw_reads_only_folded_bytes {
     assert CL_AUTO < CL_VLIVE and CL_VSEND < CL_VSER and CL_VSER + 4 <= CL_VSHOWN and CL_VSHOWN + 4 <= CL_VSKIP;
     assert CL_VSKIP + 4 <= CL_VIMG and CL_VIMG + 8 == CL_VIMG_END and CL_VIMG_END <= 256 and CL_VIMG_END <= CL_KEY_N;
     assert CL_VSEND < CL_CAMOFF and CL_CAMST < CL_VSER and CL_CAMP == CL_VIMG_END and CL_CAMP + 8 <= CL_CAMTRY and CL_CAMTRY < FV_COUNT;
+    // the capture state is folded into the frame key too, so "camera unavailable" redraws the panel
+    assert CL_VSKIP + 4 <= CL_CAMSTATE and CL_CAMSTATE < CL_VIMG;
+}
+
+test camera_unavailable_shows_only_for_a_failed_camera_with_video_on {
+    var cl : [256]u8 = undefined;
+    var i : usize = 0;
+    while (i < 256) { cl[i] = 0; i = i + 1; }
+    cl[CL_VSEND] = 1;
+    cl[CL_CAMSTATE] = @as(u8, @intCast(CVS_FAILED));
+    assert cl_cam_unavailable(cl[0..256]);
+    cl[CL_CAMSTATE] = 2;
+    assert !cl_cam_unavailable(cl[0..256]);
+    cl[CL_CAMSTATE] = 1;
+    assert !cl_cam_unavailable(cl[0..256]);
+    cl[CL_CAMSTATE] = @as(u8, @intCast(CVS_FAILED));
+    cl[CL_CAMOFF] = 1;
+    assert !cl_cam_unavailable(cl[0..256]);
+    cl[CL_CAMOFF] = 0;
+    cl[CL_VSEND] = 0;
+    assert !cl_cam_unavailable(cl[0..256]);
 }
 
 test the_call_pill_stands_between_the_header_cluster_and_the_profile_circle {

@@ -554,9 +554,62 @@ const CVL_DUMPED : u64 = 232;
 const CVL_W : u64 = 233;
 const CVL_H : u64 = 234;
 const CVL_STARTS : u64 = 235;
+const CVL_STATE : u64 = 236;
+const CVL_REQ : u64 = 237;
+const CVL_DONE : u64 = 238;
+const CVL_RES : u64 = 239;
+const CVL_T0 : u64 = 240;
+const CVL_Q : u64 = 241;
+const CVL_ENC0 : u64 = 242;
+const CVL_FN_SETUP : u64 = 243;
+const CVL_FN_STOP : u64 = 244;
 const CVL_BUF : u64 = 4096;
 const CVL_BUF_MAX : u64 = 24000;
 const CVL_PERIOD_US : u64 = 90000;
+
+// The start never runs on the main thread (owner, 2026-10-22; a live call measured startRunning holding the main thread
+// about 2 s, 226 of 229 audio underruns in the first 4 s). cvl_start only queues cvl_setup_job on the block's own serial
+// queue (authorization, device, session, startRunning there) and cvl_stop queues cvl_stop_job (stopRunning) on the same
+// queue, so a stop always follows its start. The main thread is the only writer of the state; each pass cvl_tick reads
+// what the queue and the camera thread published (setup jobs done, their result, JPEG encoded) and moves it:
+//   IDLE --start--> STARTING --frame--> LIVE;  STARTING --setup failed / no frame in CVS_NOFRAME_US--> FAILED;
+//   FAILED --frame--> LIVE (a late camera, e.g. after the permission prompt);  any --stop--> IDLE.
+// The camera is the call's source only while LIVE; otherwise the test generator stays (cs_video_feed's freshness rule).
+pub const CVS_IDLE : u32 = 0;
+pub const CVS_STARTING : u32 = 1;
+pub const CVS_LIVE : u32 = 2;
+pub const CVS_FAILED : u32 = 3;
+pub const CVE_START : u32 = 0;
+pub const CVE_SETUP_OK : u32 = 1;
+pub const CVE_SETUP_FAIL : u32 = 2;
+pub const CVE_FRAME : u32 = 3;
+pub const CVE_TIMEOUT : u32 = 4;
+pub const CVE_STOP : u32 = 5;
+pub const CVS_NOFRAME_US : u64 = 3000000;
+
+/// The next capture state after event e; an event that does not apply leaves the state as it is.
+pub fn cvs_next(s: u32, e: u32) -> u32 {
+    if (e == CVE_STOP) { return CVS_IDLE; }
+    if (s == CVS_IDLE and e == CVE_START) { return CVS_STARTING; }
+    if (s == CVS_STARTING and (e == CVE_SETUP_FAIL or e == CVE_TIMEOUT)) { return CVS_FAILED; }
+    if ((s == CVS_STARTING or s == CVS_FAILED) and e == CVE_FRAME) { return CVS_LIVE; }
+    return s;
+}
+
+/// A start is queued only from IDLE: never a second one while starting, live or failed in the same call.
+pub fn cvs_may_start(s: u32) -> bool { return s == CVS_IDLE; }
+
+/// STARTING and no camera frame since the start for CVS_NOFRAME_US: give up on the camera for now.
+pub fn cvs_no_frames(s: u32, t0: u64, now: u64, frames: u64) -> bool {
+    if (s != CVS_STARTING or frames != 0 or now < t0) { return false; }
+    return now - t0 >= CVS_NOFRAME_US;
+}
+
+/// The setup job of the latest start has finished (the queue is serial, so done == requested means the newest one).
+pub fn cvs_setup_seen(req: u64, done: u64) -> bool { return req > 0 and done == req; }
+
+/// The camera's JPEG is the call's source only while LIVE and a new one was taken; the generator otherwise.
+pub fn cvs_use_camera(s: u32, taken: u64) -> bool { return s == CVS_LIVE and taken > 0; }
 
 /// Hand-made global block for requestAccessForMediaType:completionHandler: (answer in slot +40 of the block).
 fn cvl_block() -> u64 {
@@ -686,16 +739,80 @@ pub fn cvl_new(dump: u64) -> u64 {
     cv_put(st + 64, CV_MAGIC);
     cv_put(st + CVL_MODE * 8, 1);
     cv_put(st + CVL_DUMP * 8, dump);
-    // Never true: makes sure cv_frame and cv_granted are emitted and exported for dlsym.
-    if (cbp_get(st + 72) == 99) { cv_frame(0, 0, 0, 0, 0); cv_granted(0, 0); }
+    // Never true: makes sure cv_frame, cv_granted and the queue jobs are emitted and exported for dlsym.
+    if (cbp_get(st + 72) == 99) { cv_frame(0, 0, 0, 0, 0); cv_granted(0, 0); cvl_setup_job(0); cvl_stop_job(0); }
     if (dump != 0) { cv_mkdir("/tmp/camcall", 493); }
+    // the serial queue of the start and stop jobs, and their entry points, found once here
+    cv_put(st + CVL_Q * 8, cv_queue("t27.callvideo.setup", 0));
+    cv_put(st + CVL_FN_SETUP * 8, cv_dlsym(CV_RTLD_DEFAULT, "cvl_setup_job"));
+    cv_put(st + CVL_FN_STOP * 8, cv_dlsym(CV_RTLD_DEFAULT, "cvl_stop_job"));
     return st;
 }
 
-/// Start the camera for a call: 0 running (frames come once the system lets them), 1 restricted, 2 denied, 3 no camera
-/// or setup failed. Authorization status 0 makes the system ask (requestAccess + startRunning); nothing is bypassed.
+/// Queue the camera start for a call (main thread, returns at once): 0 queued (or already starting / live), 3 no block
+/// or no queue (the state is FAILED). The answer of the setup (1 restricted, 2 denied, 3 no camera) comes later through
+/// cvl_tick and cvl_stat 14.
 pub fn cvl_start(st: u64) -> u32 {
     if (st == 0 or cbp_get(st + 64) != CV_MAGIC) { return 3; }
+    const s : u32 = @as(u32, @intCast(cbp_get(st + CVL_STATE * 8)));
+    if (!cvs_may_start(s)) {
+        if (s == CVS_FAILED) { return 3; }
+        return 0;
+    }
+    cv_put(st + CVL_T0 * 8, cv_us());
+    cv_put(st + CVL_ENC0 * 8, cbp_get(st + CVL_ENC * 8));
+    cv_put(st + CVL_STATE * 8, @as(u64, cvs_next(s, CVE_START)));
+    const q : u64 = cbp_get(st + CVL_Q * 8);
+    const f : u64 = cbp_get(st + CVL_FN_SETUP * 8);
+    if (q == 0 or f == 0) {
+        cv_put(st + CVL_RES * 8, 3);
+        cv_put(st + CVL_STATE * 8, @as(u64, cvs_next(CVS_STARTING, CVE_SETUP_FAIL)));
+        return 3;
+    }
+    cv_put(st + CVL_REQ * 8, cbp_get(st + CVL_REQ * 8) + 1);
+    cv_put(st + CVL_STARTS * 8, cbp_get(st + CVL_STARTS * 8) + 1);
+    cv_async(q, st, f);
+    return 0;
+}
+
+/// The capture state after this pass (main thread, a few reads, never waits): the result of the latest setup job, the
+/// JPEG encoded since the start and the no-frame timeout move it (see cvs_next).
+pub fn cvl_tick(st: u64) -> u32 {
+    if (st == 0 or cbp_get(st + 64) != CV_MAGIC) { return CVS_IDLE; }
+    var s : u32 = @as(u32, @intCast(cbp_get(st + CVL_STATE * 8)));
+    if (s == CVS_IDLE or s == CVS_LIVE) { return s; }
+    if (cvs_setup_seen(cbp_get(st + CVL_REQ * 8), cbp_get(st + CVL_DONE * 8))) {
+        cv_fence();
+        if (cbp_get(st + CVL_RES * 8) != 0) { s = cvs_next(s, CVE_SETUP_FAIL); } else { s = cvs_next(s, CVE_SETUP_OK); }
+    }
+    const frames : u64 = cbp_get(st + CVL_ENC * 8) - cbp_get(st + CVL_ENC0 * 8);
+    if (frames > 0) { s = cvs_next(s, CVE_FRAME); }
+    if (cvs_no_frames(s, cbp_get(st + CVL_T0 * 8), cv_us(), frames)) { s = cvs_next(s, CVE_TIMEOUT); }
+    cv_put(st + CVL_STATE * 8, @as(u64, s));
+    return s;
+}
+
+/// The setup job, on the block's serial queue (never the main thread): authorization (status 0 makes the system ask,
+/// requestAccess + startRunning; nothing is bypassed), the session once, startRunning. Its result goes to CVL_RES
+/// (0 running, 1 restricted, 2 denied, 3 no camera or setup failed), then CVL_DONE counts the job.
+pub fn cvl_setup_job(st: u64) -> u64 {
+    if (st == 0 or cbp_get(st + 64) != CV_MAGIC) { return 0; }
+    cv_put(st + CVL_RES * 8, cvl_setup(st));
+    cv_fence();
+    cv_put(st + CVL_DONE * 8, cbp_get(st + CVL_DONE * 8) + 1);
+    return 0;
+}
+
+/// The stop job, on the same serial queue (after its start): stopRunning, the camera is free again.
+pub fn cvl_stop_job(st: u64) -> u64 {
+    if (st == 0 or cbp_get(st + 64) != CV_MAGIC) { return 0; }
+    if (cbp_get(st + CVL_RUN * 8) != 1) { return 0; }
+    msg0(cbp_get(st + CVL_SESS * 8), cv_sel("stopRunning"));
+    cv_put(st + CVL_RUN * 8, 0);
+    return 0;
+}
+
+fn cvl_setup(st: u64) -> u64 {
     if (cbp_get(st + CVL_RUN * 8) == 1) { return 0; }
     const media : u64 = cv_konst("AVMediaTypeVideo");
     const dev_cls : u64 = cv_objc_class("AVCaptureDevice");
@@ -742,16 +859,19 @@ pub fn cvl_start(st: u64) -> u32 {
     }
     msg0(sess, cv_sel("startRunning"));
     cv_put(st + CVL_RUN * 8, 1);
-    cv_put(st + CVL_STARTS * 8, cbp_get(st + CVL_STARTS * 8) + 1);
     return 0;
 }
 
-/// Stop the session (the camera is free again). The block stays for the next call.
+/// Stop the camera of a call (main thread, returns at once): the state is IDLE now, stopRunning is queued after the
+/// start. The block stays for the next call.
 pub fn cvl_stop(st: u64) -> void {
     if (st == 0 or cbp_get(st + 64) != CV_MAGIC) { return; }
-    if (cbp_get(st + CVL_RUN * 8) != 1) { return; }
-    msg0(cbp_get(st + CVL_SESS * 8), cv_sel("stopRunning"));
-    cv_put(st + CVL_RUN * 8, 0);
+    const s : u32 = @as(u32, @intCast(cbp_get(st + CVL_STATE * 8)));
+    if (s == CVS_IDLE) { return; }
+    cv_put(st + CVL_STATE * 8, @as(u64, cvs_next(s, CVE_STOP)));
+    const q : u64 = cbp_get(st + CVL_Q * 8);
+    const f : u64 = cbp_get(st + CVL_FN_STOP * 8);
+    if (q != 0 and f != 0) { cv_async(q, st, f); }
 }
 
 /// Copy the newest JPEG not yet taken into out; its length, 0 when there is none (or the writer was busy).
@@ -769,7 +889,8 @@ pub fn cvl_take(st: u64, out: []u8) -> usize {
 
 /// Counters of the live block: 0 callbacks, 1 JPEG encoded, 2 encode failures, 3 too big, 4 authorization (0..3),
 /// 5 running, 6 frame mean brightness x100 (last), 7 mean of the means x100, 8 smallest mean x100, 9 largest, 10 width,
-/// 11 height, 12 starts, 13 answer of the prompt (1 allow, 2 refuse, 0 none).
+/// 11 height, 12 starts, 13 answer of the prompt (1 allow, 2 refuse, 0 none), 14 result of the latest setup job (0 running
+/// or not finished, 1 restricted, 2 denied, 3 no camera), 15 capture state (CVS_*).
 pub fn cvl_stat(st: u64, k: u32) -> u64 {
     if (st == 0 or cbp_get(st + 64) != CV_MAGIC) { return 0; }
     if (k == 0) { return cbp_get(st + CVL_CB * 8); }
@@ -799,8 +920,16 @@ pub fn cvl_stat(st: u64, k: u32) -> u64 {
         if (blk == 0) { return 0; }
         return cbp_get(blk + 40);
     }
+    if (k == 14) {
+        if (!cvs_setup_seen(cbp_get(st + CVL_REQ * 8), cbp_get(st + CVL_DONE * 8))) { return 0; }
+        return cbp_get(st + CVL_RES * 8);
+    }
+    if (k == 15) { return cbp_get(st + CVL_STATE * 8); }
     return 0;
 }
+
+fn cv_async(q: u64, ctx: u64, f: u64) -> void { @extern("dispatch_async_f"); }
+fn cv_fence() -> void { @extern("OSMemoryBarrier"); }
 
 fn cv_copy(dst: u64, src: u64, n: u64) -> u64 { return @extern("memmove"); }
 fn cv_cf_mdata(alloc: u64, cap: u64) -> u64 { return @extern("CFDataCreateMutable"); }
@@ -850,4 +979,63 @@ test the_live_take_refuses_an_empty_block {
 test the_live_start_of_no_block_says_no_camera {
     // no block: "no camera or setup failed" (3), never "running" (0) or an authorization answer (1, 2)
     assert(cvl_start(0) == 3);
+}
+
+test the_capture_state_goes_idle_starting_live_and_stop_returns_to_idle {
+    var s : u32 = cvs_next(CVS_IDLE, CVE_START);
+    assert s == CVS_STARTING;
+    // a finished setup alone is not live: the camera is the source only once a frame came
+    s = cvs_next(s, CVE_SETUP_OK);
+    assert s == CVS_STARTING;
+    s = cvs_next(s, CVE_FRAME);
+    assert s == CVS_LIVE;
+    assert cvs_next(s, CVE_TIMEOUT) == CVS_LIVE and cvs_next(s, CVE_SETUP_FAIL) == CVS_LIVE;
+    assert cvs_next(s, CVE_STOP) == CVS_IDLE;
+}
+
+test the_capture_fails_on_a_refused_setup_or_on_no_frame_and_recovers_on_a_late_frame {
+    assert cvs_next(CVS_STARTING, CVE_SETUP_FAIL) == CVS_FAILED;
+    assert cvs_next(CVS_STARTING, CVE_TIMEOUT) == CVS_FAILED;
+    assert cvs_next(CVS_FAILED, CVE_TIMEOUT) == CVS_FAILED and cvs_next(CVS_FAILED, CVE_START) == CVS_FAILED;
+    assert cvs_next(CVS_FAILED, CVE_FRAME) == CVS_LIVE;
+    assert cvs_next(CVS_FAILED, CVE_STOP) == CVS_IDLE;
+    // idle ignores everything but a start: a stray frame or timeout does not make a camera
+    assert cvs_next(CVS_IDLE, CVE_FRAME) == CVS_IDLE and cvs_next(CVS_IDLE, CVE_TIMEOUT) == CVS_IDLE;
+    assert cvs_next(CVS_IDLE, CVE_SETUP_FAIL) == CVS_IDLE;
+}
+
+test a_second_start_is_refused_until_the_call_is_over {
+    assert cvs_may_start(CVS_IDLE);
+    assert !cvs_may_start(CVS_STARTING) and !cvs_may_start(CVS_LIVE) and !cvs_may_start(CVS_FAILED);
+    assert cvs_next(CVS_STARTING, CVE_START) == CVS_STARTING and cvs_next(CVS_LIVE, CVE_START) == CVS_LIVE;
+    assert cvs_may_start(cvs_next(CVS_FAILED, CVE_STOP));
+}
+
+test no_frame_for_three_seconds_gives_up_only_while_starting {
+    assert CVS_NOFRAME_US == 3000000;
+    const t0 : u64 = 50000000;
+    assert !cvs_no_frames(CVS_STARTING, t0, t0 + 2999999, 0);
+    assert cvs_no_frames(CVS_STARTING, t0, t0 + 3000000, 0);
+    // one frame, another state, or a clock before the start: no timeout
+    assert !cvs_no_frames(CVS_STARTING, t0, t0 + 9000000, 1);
+    assert !cvs_no_frames(CVS_LIVE, t0, t0 + 9000000, 0) and !cvs_no_frames(CVS_IDLE, t0, t0 + 9000000, 0);
+    assert !cvs_no_frames(CVS_FAILED, t0, t0 + 9000000, 0);
+    assert !cvs_no_frames(CVS_STARTING, t0, t0 - 1, 0);
+}
+
+test the_setup_result_counts_only_for_the_newest_start {
+    assert !cvs_setup_seen(0, 0);
+    assert !cvs_setup_seen(2, 1);
+    assert cvs_setup_seen(2, 2);
+}
+
+test the_camera_is_the_source_only_while_live_with_a_new_jpeg {
+    assert cvs_use_camera(CVS_LIVE, 1200);
+    assert !cvs_use_camera(CVS_LIVE, 0);
+    assert !cvs_use_camera(CVS_STARTING, 1200) and !cvs_use_camera(CVS_FAILED, 1200) and !cvs_use_camera(CVS_IDLE, 1200);
+}
+
+test the_new_live_slots_stand_before_the_buffer {
+    assert CVL_STARTS < CVL_STATE and CVL_FN_STOP * 8 + 8 <= CVL_BUF;
+    assert cvl_tick(0) == CVS_IDLE and cvl_stat(0, 15) == 0;
 }
