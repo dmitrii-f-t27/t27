@@ -7,6 +7,7 @@
 module T27osPtyLogic;
 use t27os::provider_catalog::pc_find;
 use t27os::provider_catalog::PC_COUNT;
+use t27os::api_manage::am_bind_ok;
 
 use t27os::agents::AGENT_COUNT;
 use t27os::agents::S_STOPPED;
@@ -105,6 +106,7 @@ use t27os::keys::agent_uses;
 use t27os::keys::spawn_mask;
 use t27os::keys::P_ZAI;
 use t27os::keys::P_ANTHROPIC;
+use t27os::keys::PR_NVIDIA;
 use t27os::keys::P_OPENROUTER;
 use t27os::keys::P_OPENAI;
 use t27os::keys::P_NVIDIA;
@@ -400,8 +402,9 @@ pub fn editor_spawn_ok(agent: u32, model: []const u8, cwd: []const u8) -> bool {
 /// its record, which keeps the editor in the model field and the path in the cwd), every other pane runs
 /// pane_command as before.
 pub fn launch_command(agent: u32, plan: u32, sid: []const u8, model: []const u8, home: []const u8, cwd: []const u8, out: []u8) -> usize {
-    // OpenCode 2.0.32: a private server keeps each pinned provider's environment independent.
-    if (agent == 3 and pc_find(model) < PC_COUNT) { return put_bytes(out, 0, "opencode --standalone"); }
+    // OpenCode 2.0.32: a private server keeps each pinned provider's environment independent; a chat bound to an
+    // exact key and model (api_manage.t27) is pinned the same way.
+    if (agent == 3 and (pc_find(model) < PC_COUNT or am_bind_ok(model))) { return put_bytes(out, 0, "opencode --standalone"); }
     if (wants_editor(agent, model) and term_path_fits(cwd)) {
         return editor_command(term_index(model), cwd, out);
     }
@@ -812,6 +815,27 @@ pub fn plan_pane_keys(st: []u64, i: usize, a: u32, now_ms: u64) -> void {
         }
         p = p + 1;
     }
+}
+
+/// The keys of a bound OpenCode pane (api_manage.t27 binding "n1:SS:<id>" / "z1:SS:<id>"): profile pr and
+/// exactly key `slot` of provider prov, never a rotation pick and never another key. The pin bit stops every
+/// failover (plan_failover gives up), so a 401, 403 or 429 never moves the chat to another key or provider. False
+/// -- the pane holds no key and does not start -- when that slot holds no key: a deleted or replaced key needs the
+/// person's choice, not a silent substitute.
+pub fn plan_bound_key(st: []u64, i: usize, a: u32, pr: u32, prov: u32, slot: u32, now_ms: u64) -> bool {
+    const pk : usize = G_PANEK + i * PK;
+    st[pk + PK_KEYS] = 0;
+    st[pk + PK_KEYS_HI] = 0;
+    st[pk + PK_STOP] = 0;
+    st[pk + PK_SKIP] = 0;
+    st[pk + PK_PROF] = @as(u64, pr);
+    st[pk + PK_BAD] = PK_PIN_BIT;
+    if (a < AGENT_COUNT) { pane_agent_set(st, i, a); }
+    if (pr >= PROFILE_COUNT or PROFILE_PROVIDER[pr] != prov) { return false; }
+    if (slot >= MAX_KEYS or key_present(st, prov, slot) == false) { return false; }
+    key_used(st, prov, slot, now_ms);
+    pane_key_set(st, i, prov, slot + 1);
+    return true;
 }
 
 /// How long a give-up leaves the pane's screen unread: at least GIVEUP_QUIET_MS, and at least as long as the
@@ -2475,6 +2499,37 @@ test explicit_provider_pin_survives_restart_and_stops_all_fallback {
     assert pane_mstep_get(st[0..1664], 0) == 0;
     const n : usize = launch_model(st[0..1664], 0, 3, false, "za:glm-4.7-flash", why[0..64]);
     assert n == 16 and begins_with(why[0..n], "za:glm-4.7-flash");
+}
+
+test a_bound_pane_runs_on_exactly_its_key_and_never_on_another {
+    var st : [1664]u64 = undefined;
+    var why : [128]u8 = undefined;
+    var wl : [2]u64 = undefined;
+    t_table(st[0..1664]);
+    // NVIDIA keys 1, 2 and 64 (slots 0, 1, 63); Z.ai key 1
+    t_key(st[0..1664], P_NVIDIA, 0);
+    t_key(st[0..1664], P_NVIDIA, 1);
+    t_key(st[0..1664], P_NVIDIA, 63);
+    t_key(st[0..1664], P_ZAI, 0);
+    assert plan_bound_key(st[0..1664], 0, 3, PR_NVIDIA, P_NVIDIA, 63, 1000000);
+    assert pane_key_get(st[0..1664], 0, P_NVIDIA) == 64 and pane_key_get(st[0..1664], 0, P_ZAI) == 0;
+    assert t_prof(st[0..1664], 0) == PR_NVIDIA;
+    // a rejected or rate-limited bound key gives up: no other key, no other provider
+    assert plan_failover(st[0..1664], 0, FC_OVERLOADED, 1001000, why[0..128], wl[0..2]) == FA_GIVE_UP;
+    assert pane_key_get(st[0..1664], 0, P_NVIDIA) == 64 and t_prof(st[0..1664], 0) == PR_NVIDIA;
+    // the slot emptied: no key at all, never key 1 or 2 instead
+    key_put(st[0..1664], P_NVIDIA, 63, false, false);
+    assert plan_bound_key(st[0..1664], 0, 3, PR_NVIDIA, P_NVIDIA, 63, 1002000) == false;
+    assert pane_key_get(st[0..1664], 0, P_NVIDIA) == 0 and pane_key_get(st[0..1664], 0, P_ZAI) == 0;
+    // a profile that is not the provider's, and slot 64, are refused
+    assert plan_bound_key(st[0..1664], 1, 3, PR_ZAI, P_NVIDIA, 0, 1003000) == false;
+    assert plan_bound_key(st[0..1664], 1, 3, PR_NVIDIA, P_NVIDIA, 64, 1003000) == false;
+    assert plan_bound_key(st[0..1664], 1, 3, PR_ZAI, P_ZAI, 0, 1003000);
+    assert pane_key_get(st[0..1664], 1, P_ZAI) == 1 and pane_key_get(st[0..1664], 1, P_NVIDIA) == 0;
+    // the launcher pins a live binding like a catalog token; a retired one is not a pin
+    var o : [64]u8 = undefined;
+    assert same_bytes(o[0..launch_command(3, R_RELAUNCH, "", "n1:64:my-model.v2", "/h", "/h", o[0..64])], "opencode --standalone");
+    assert same_bytes(o[0..launch_command(3, R_RELAUNCH, "", "n0:64:my-model.v2", "/h", "/h", o[0..64])], "opencode --standalone") == false;
 }
 
 test a_pinned_pane_on_a_high_key_slot_still_never_falls_back {

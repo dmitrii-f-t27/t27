@@ -1,0 +1,504 @@
+// SPDX-License-Identifier: Apache-2.0
+// specs/t27os/api_check_host.t27 -- the host side of API management (api_manage.t27 decides; this file only
+// touches the machine). dmitrii-f-t27/t27#6.
+//
+// One check runs in a worker: the window's own executable started again with api_manage AM_WORKER_FLAG and four
+// plain words (request id, provider id, key slot, model id). The worker reads the key from the login Keychain
+// itself (keys_host kc_read_n, the same /usr/bin/security path as every other read), sends ONE request to the
+// exact launcher route of the provider with the key in the Authorization header, reads the status, Retry-After
+// and the body, classifies them (api_manage am_json_classify, am_classify) and prints one line of numbers
+// (api_manage am_wline). Body boundary, precisely: NSURLConnection's synchronous call buffers the WHOLE body in
+// the worker before the worker sees its length; only a body of at most AM_BODY_MAX bytes is then copied and
+// classified, a longer one is an invalid response. There is no streaming cap on what the network stack buffers
+// (a capped download needs delegate callbacks, which an @extern cannot declare); the bounds on it are the
+// request's explicit 1024-token answer budget, the worker's 60-second request timeout and its own 70-second
+// wall (below), and the worker is a separate process whose memory ends with it. No key, key suffix or body ever
+// reaches argv, the environment, a file, a log or the line; the key and its header are wiped as soon as the
+// request returns.
+//
+// The window starts the worker with posix_spawn (POSIX_SPAWN_CLOEXEC_DEFAULT: the worker inherits no descriptor
+// but its standard input /dev/null, its standard output the pipe, its standard error /dev/null) and an empty
+// environment, reads the pipe without blocking (poll with timeout 0) and reaps the child with WNOHANG, so a
+// frame never waits for the network. Only the window imports this module: it links Foundation through the
+// Objective-C runtime, which the PTY server must never import (keys_probe.t27 says why).
+//
+// Lifecycle, without any signal from the window: the worker sets alarm(AM_WORKER_WALL_S) first, so it ends by
+// itself (SIGALRM, default action) even if the Keychain tool or the network never answers. Stop, an overdue
+// answer or an oversized output only make the window stop listening (the request id is cleared, the pipe is
+// closed) and keep the pid until ac_reap confirms the end: a reap of that pid, or ECHILD (it is no longer a child
+// of the window: it ended, and the kernel or a wait reaped it). An interrupted wait proves nothing and is asked
+// again; until the end is confirmed no other worker starts. Signal dispositions in the window (audited): the
+// window and the PTY server ignore SIGPIPE; editors_host.t27 sets SIGCHLD to ignore; keys_host.t27 sets SIGCHLD
+// to default for the length of one /usr/bin/security run and puts back what it found; no code waits on -1. Under
+// either SIGCHLD disposition a wait on this pid never takes another child's status (with ignore no wait returns
+// a status; with default the ended worker stays a zombie, holding its pid, until this wait reaps it), and the
+// window never sends a signal, so no other process can be hit. A window that quits or reloads leaves a running
+// worker to its own wall.
+//
+// Specs holding @extern cannot run tests under t27c; every rule this file follows is a tested fn in
+// api_manage.t27. Names carry the ac_ prefix: the window is one compilation unit.
+
+module T27osApiCheckHost;
+
+use t27os::api_manage::AM_WORKER_FLAG;
+use t27os::api_manage::AM_BODY_MAX;
+use t27os::api_manage::AM_CHECK_TIMEOUT_S;
+use t27os::api_manage::AM_WORKER_WALL_S;
+use t27os::api_manage::AM_WLINE_MAX;
+use t27os::api_manage::AM_NONE;
+use t27os::api_manage::AM_S_NO_KEY;
+use t27os::api_manage::AM_S_KEYCHAIN;
+use t27os::api_manage::AM_S_INVALID;
+use t27os::api_manage::AM_S_RATE;
+use t27os::api_manage::AM_J_BAD;
+use t27os::api_manage::am_index;
+use t27os::api_manage::am_route;
+use t27os::api_manage::am_model_id_check;
+use t27os::api_manage::AM_ID_OK;
+use t27os::api_manage::am_check_body;
+use t27os::api_manage::am_json_classify;
+use t27os::api_manage::am_classify;
+use t27os::api_manage::AM_RETRY_MANUAL;
+use t27os::api_manage::am_wline;
+use t27os::api_manage::AM_SLOTS;
+use t27os::keys::SEC_OK;
+use t27os::keys::SEC_NOT_FOUND;
+use t27os::keys::mask_key;
+use t27os::keys_host::kc_read_n;
+use t27os::session_store::put_bytes;
+use t27os::session_store::put_dec;
+use t27os::editors::same_bytes;
+use t27os::pty_proto::get_u64;
+use t27os::pty_logic::put_pollfd;
+use t27os::pty_logic::poll_revents;
+use t27os::pty_sys::sys_addr;
+use t27os::pty_sys::sys_peek;
+use t27os::pty_sys::sys_strlen;
+use t27os::pty_sys::sys_write;
+use t27os::pty_sys::sys_read;
+use t27os::pty_sys::sys_close;
+use t27os::pty_sys::sys_poll;
+use t27os::pty_sys::sys_waitpid;
+use t27os::pty_sys::sys_signal;
+
+pub const AC_UTF8 : u32 = 134217984;
+pub const AC_NS_UTF8 : u64 = 4;
+/// <spawn.h> POSIX_SPAWN_CLOEXEC_DEFAULT (Apple): only the descriptors the file actions name reach the child.
+pub const AC_CLOEXEC_DEFAULT : u32 = 16384;
+pub const AC_WNOHANG : i32 = 1;
+pub const AC_SIGALRM : i32 = 14;
+pub const AC_SIG_DFL : u64 = 0;
+pub const AC_ECHILD : u32 = 10;
+pub const AC_EINTR : u32 = 4;
+/// ac_reap: the worker is gone (reaped here, or no longer this process's child), still running, or the wait was
+/// interrupted and must be asked again.
+pub const AC_RUNNING : u32 = 0;
+pub const AC_GONE : u32 = 1;
+pub const AC_UNSURE : u32 = 2;
+
+fn ac_cf_str(alloc: u64, bytes: []const u8, n: usize, enc: u32, ext: bool) -> u64 { return @extern("CFStringCreateWithBytes"); }
+fn ac_cf_data(alloc: u64, bytes: []const u8, n: u64) -> u64 { return @extern("CFDataCreate"); }
+fn ac_cf_release(o: u64) -> void { @extern("CFRelease"); }
+fn ac_class_named(name: u64) -> u64 { return @extern("NSClassFromString"); }
+fn ac_sel_named(name: u64) -> u64 { return @extern("NSSelectorFromString"); }
+fn ac_msg0(o: u64, s: u64) -> u64 { return @extern("objc_msgSend"); }
+fn ac_msg1(o: u64, s: u64, a: u64) -> u64 { return @extern("objc_msgSend"); }
+fn ac_msg2(o: u64, s: u64, a: u64, b: u64) -> u64 { return @extern("objc_msgSend"); }
+fn ac_msg3(o: u64, s: u64, a: u64, b: u64, c: u64) -> u64 { return @extern("objc_msgSend"); }
+fn ac_msg_f(o: u64, s: u64, t: f64) -> u64 { return @extern("objc_msgSend"); }
+fn ac_msg_d(o: u64, s: u64) -> f64 { return @extern("objc_msgSend"); }
+fn ac_errno_at() -> u64 { return @extern("__error"); }
+fn ac_alarm(seconds: u32) -> u32 { return @extern("alarm"); }
+fn ac_pipe(fds: [2]u32) -> i32 { return @extern("pipe"); }
+fn ac_spawn_c(pid: [2]u32, path: []const u8, actions: []u8, attr: []u8, argv: [8]u64, envp: u64) -> i32 { return @extern("posix_spawn"); }
+fn ac_fa_init(fa: []u8) -> i32 { return @extern("posix_spawn_file_actions_init"); }
+fn ac_fa_destroy(fa: []u8) -> i32 { return @extern("posix_spawn_file_actions_destroy"); }
+fn ac_fa_dup2(fa: []u8, fd: i32, to: i32) -> i32 { return @extern("posix_spawn_file_actions_adddup2"); }
+fn ac_fa_close(fa: []u8, fd: i32) -> i32 { return @extern("posix_spawn_file_actions_addclose"); }
+fn ac_fa_open(fa: []u8, fd: i32, path: []const u8, flags: i32, mode: u32) -> i32 { return @extern("posix_spawn_file_actions_addopen"); }
+fn ac_attr_init(at: []u8) -> i32 { return @extern("posix_spawnattr_init"); }
+fn ac_attr_flags(at: []u8, flags: u32) -> i32 { return @extern("posix_spawnattr_setflags"); }
+fn ac_attr_destroy(at: []u8) -> i32 { return @extern("posix_spawnattr_destroy"); }
+
+fn ac_cf(s: []const u8) -> u64 {
+    return ac_cf_str(0, s, s.len, AC_UTF8, false);
+}
+
+fn ac_cls(s: []const u8) -> u64 {
+    const n : u64 = ac_cf(s);
+    const c : u64 = ac_class_named(n);
+    ac_cf_release(n);
+    return c;
+}
+
+fn ac_sel(s: []const u8) -> u64 {
+    const n : u64 = ac_cf(s);
+    const c : u64 = ac_sel_named(n);
+    ac_cf_release(n);
+    return c;
+}
+
+fn ac_wipe(b: []u8) -> void {
+    var i : usize = 0;
+    while (i < b.len) {
+        b[i] = 0;
+        i = i + 1;
+    }
+}
+
+/// The UTF-8 bytes of an NSString into out (cut at out.len); 0 for none.
+fn ac_ns_bytes(s: u64, out: []u8) -> usize {
+    if (s == 0) { return 0; }
+    const p : u64 = ac_msg0(s, ac_sel("UTF8String"));
+    if (p == 0) { return 0; }
+    var n : u64 = sys_strlen(p);
+    if (n > @as(u64, out.len)) { n = @as(u64, out.len); }
+    sys_peek(out, p, n);
+    return @as(usize, n);
+}
+
+fn ac_add_header(req: u64, name: []const u8, value: []const u8) -> void {
+    const n : u64 = ac_cf(name);
+    const v : u64 = ac_cf(value);
+    ac_msg2(req, ac_sel("setValue:forHTTPHeaderField:"), v, n);
+    ac_cf_release(n);
+    ac_cf_release(v);
+}
+
+/// Decimal digits of t into a number; false when t is empty, longer than 18 digits or not all digits.
+fn ac_number(t: []const u8, v: []u64) -> bool {
+    if (t.len == 0 or t.len > 18) { return false; }
+    var x : u64 = 0;
+    var i : usize = 0;
+    while (i < t.len) {
+        if (t[i] < 48 or t[i] > 57) { return false; }
+        x = x * 10 + @as(u64, t[i] - 48);
+        i = i + 1;
+    }
+    v[0] = x;
+    return true;
+}
+
+// ---------------------------------------------------------------- the worker
+
+/// errno of the last failed call (libSystem __error).
+fn ac_errno() -> u32 {
+    var e : [4]u8 = [0, 0, 0, 0];
+    sys_peek(e[0..4], ac_errno_at(), 4);
+    return @as(u32, e[0]) + @as(u32, e[1]) * 256 + @as(u32, e[2]) * 65536 + @as(u32, e[3]) * 16777216;
+}
+
+/// The wait a 429's Retry-After header asks for, in seconds. 0 when there is no header (api_manage then pauses
+/// AM_RATE_PAUSE_S). Delta-seconds as given. An HTTP-date in the IMF-fixdate form ("Wed, 21 Oct 2026 07:28:00
+/// GMT", RFC 9110) is read with NSDateFormatter (locale en_US_POSIX, time zone GMT) and turned into the seconds
+/// left, at least 1, rounded up. AM_RETRY_MANUAL for anything else (the obsolete date forms, garbage) and for a
+/// wait above one day: the provider is then held until the person resumes it, never paused for a guessed
+/// shorter time.
+fn ac_retry_seconds(s: u64) -> u64 {
+    if (s == 0) { return 0; }
+    var t : [96]u8 = undefined;
+    const n : usize = ac_ns_bytes(s, t[0..96]);
+    if (n >= 96) { return AM_RETRY_MANUAL; }
+    var a : usize = 0;
+    var e : usize = n;
+    while (a < e and (t[a] == 32 or t[a] == 9)) { a = a + 1; }
+    while (e > a and (t[e - 1] == 32 or t[e - 1] == 9)) { e = e - 1; }
+    if (a == e) { return 0; }
+    var v : [2]u64 = [0, 0];
+    if (ac_number(t[a..e], v[0..2])) {
+        if (v[0] > 86400) { return AM_RETRY_MANUAL; }
+        return v[0];
+    }
+    const fmt : u64 = ac_msg0(ac_cls("NSDateFormatter"), ac_sel("new"));
+    if (fmt == 0) { return AM_RETRY_MANUAL; }
+    ac_msg1(fmt, ac_sel("setLocale:"), ac_msg1(ac_cls("NSLocale"), ac_sel("localeWithLocaleIdentifier:"), ac_cf("en_US_POSIX")));
+    ac_msg1(fmt, ac_sel("setTimeZone:"), ac_msg1(ac_cls("NSTimeZone"), ac_sel("timeZoneWithName:"), ac_cf("GMT")));
+    ac_msg1(fmt, ac_sel("setDateFormat:"), ac_cf("EEE, dd MMM yyyy HH:mm:ss zzz"));
+    const d : u64 = ac_msg1(fmt, ac_sel("dateFromString:"), ac_cf(t[a..e]));
+    if (d == 0) { return AM_RETRY_MANUAL; }
+    const left : f64 = ac_msg_d(d, ac_sel("timeIntervalSinceNow"));
+    if (left > 86400.0) { return AM_RETRY_MANUAL; }
+    if (left <= 1.0) { return 1; }
+    return @as(u64, @intFromFloat(left)) + 1;
+}
+
+
+/// One check of key `slot` of provider p on model `model`; res[0] state, res[1] HTTP status (0 none), res[2]
+/// Retry-After seconds. Blocks up to AM_CHECK_TIMEOUT_S: only a worker calls it, never the window.
+fn ac_check(p: u32, slot: u32, model: []const u8, res: []u64) -> void {
+    res[0] = @as(u64, AM_S_INVALID);
+    res[1] = 0;
+    res[2] = 0;
+    const m : u32 = am_index(p);
+    if (m == AM_NONE or slot >= AM_SLOTS or am_model_id_check(model) != AM_ID_OK) { return; }
+    var key : [256]u8 = undefined;
+    ac_wipe(key[0..256]);
+    var sst : [2]u32 = [0, 0];
+    const kn : usize = kc_read_n(p, slot, key[0..256], sst[0..2]);
+    if (sst[0] != SEC_OK or kn == 0) {
+        // no item is "no key in slot"; a denied or failed read is "Keychain unreadable", never "no key"
+        ac_wipe(key[0..256]);
+        res[0] = @as(u64, AM_S_KEYCHAIN);
+        if (sst[0] == SEC_NOT_FOUND) { res[0] = @as(u64, AM_S_NO_KEY); }
+        return;
+    }
+    const us : u64 = ac_cf(am_route(m));
+    const url : u64 = ac_msg1(ac_cls("NSURL"), ac_sel("URLWithString:"), us);
+    ac_cf_release(us);
+    const req : u64 = ac_msg1(ac_cls("NSMutableURLRequest"), ac_sel("requestWithURL:"), url);
+    if (url == 0 or req == 0) {
+        ac_wipe(key[0..256]);
+        return;
+    }
+    ac_msg_f(req, ac_sel("setTimeoutInterval:"), @as(f64, @floatFromInt(AM_CHECK_TIMEOUT_S)));
+    var hv : [300]u8 = undefined;
+    ac_wipe(hv[0..300]);
+    var hn : usize = put_bytes(hv[0..300], 0, "Bearer ");
+    hn = put_bytes(hv[0..300], hn, key[0..kn]);
+    ac_add_header(req, "Authorization", hv[0..hn]);
+    ac_wipe(hv[0..300]);
+    ac_wipe(key[0..256]);
+    var bb : [256]u8 = undefined;
+    const bl : usize = am_check_body(model, bb[0..256]);
+    const data : u64 = ac_cf_data(0, bb[0..bl], @as(u64, bl));
+    const post : u64 = ac_cf("POST");
+    ac_msg1(req, ac_sel("setHTTPMethod:"), post);
+    ac_msg1(req, ac_sel("setHTTPBody:"), data);
+    ac_cf_release(post);
+    ac_cf_release(data);
+    ac_add_header(req, "Content-Type", "application/json");
+    ac_add_header(req, "Accept", "application/json");
+    ac_add_header(req, "User-Agent", "t27os");
+    var resp : [8]u8 = [0, 0, 0, 0, 0, 0, 0, 0];
+    var err : [8]u8 = [0, 0, 0, 0, 0, 0, 0, 0];
+    const body : u64 = ac_msg3(ac_cls("NSURLConnection"), ac_sel("sendSynchronousRequest:returningResponse:error:"), req, sys_addr(resp[0..8], resp[0..8], 0), sys_addr(err[0..8], err[0..8], 0));
+    const r : u64 = get_u64(resp[0..8], 0);
+    if (r == 0) {
+        // no answer: network error or timeout, inconclusive
+        res[0] = @as(u64, am_classify(0, AM_J_BAD));
+        return;
+    }
+    const http : u32 = @as(u32, @intCast(ac_msg0(r, ac_sel("statusCode")) % 1000));
+    res[1] = @as(u64, http);
+    var j : u32 = AM_J_BAD;
+    if (body != 0) {
+        const bn : u64 = ac_msg0(body, ac_sel("length"));
+        if (bn > 0 and bn <= @as(u64, AM_BODY_MAX)) {
+            var buf : [65536]u8 = undefined;
+            ac_msg2(body, ac_sel("getBytes:length:"), sys_addr(buf[0..65536], buf[0..65536], 0), bn);
+            j = am_json_classify(buf[0 .. @as(usize, bn)]);
+        }
+    }
+    res[0] = @as(u64, am_classify(http, j));
+    if (res[0] == @as(u64, AM_S_RATE)) {
+        res[2] = ac_retry_seconds(ac_msg1(r, ac_sel("valueForHTTPHeaderField:"), ac_cf("Retry-After")));
+    }
+}
+
+/// The worker mode of the window's executable: when argv[1] is AM_WORKER_FLAG, run the one check argv names
+/// (argv[2] request id, argv[3] provider id, argv[4] key slot, argv[5] model id), print its line on standard
+/// output and return true (the caller exits at once, before any window exists). The flag is recognized first:
+/// a launch whose argv[1] is the flag is a worker whatever else it holds, and a malformed one (another argument
+/// count, a word that is not a number, a provider or slot out of range) exits with no line and no window; the
+/// window reads a missing line as an invalid response. False only when argv[1] is not the flag.
+pub fn ac_worker_main() -> bool {
+    const args : u64 = ac_msg0(ac_msg0(ac_cls("NSProcessInfo"), ac_sel("processInfo")), ac_sel("arguments"));
+    if (args == 0) { return false; }
+    const argc : u64 = ac_msg0(args, ac_sel("count"));
+    if (argc < 2) { return false; }
+    var w : [96]u8 = undefined;
+    const fl : usize = ac_ns_bytes(ac_msg1(args, ac_sel("objectAtIndex:"), 1), w[0..96]);
+    if (same_bytes(w[0..fl], AM_WORKER_FLAG) == false) { return false; }
+    // the worker bounds its own life: SIGALRM with its default action ends it at AM_WORKER_WALL_S whatever it is
+    // waiting for (the Keychain tool, the network), so the window never has to signal a pid
+    sys_signal(AC_SIGALRM, AC_SIG_DFL);
+    ac_alarm(AM_WORKER_WALL_S);
+    if (argc != 6) { return true; }
+    var v : [2]u64 = [0, 0];
+    var rq : u64 = 0;
+    var pv : u64 = 0;
+    var sv : u64 = 0;
+    var ok : bool = true;
+    var n : usize = ac_ns_bytes(ac_msg1(args, ac_sel("objectAtIndex:"), 2), w[0..96]);
+    if (ac_number(w[0..n], v[0..2])) { rq = v[0]; } else { ok = false; }
+    n = ac_ns_bytes(ac_msg1(args, ac_sel("objectAtIndex:"), 3), w[0..96]);
+    if (ac_number(w[0..n], v[0..2]) and v[0] < 256) { pv = v[0]; } else { ok = false; }
+    n = ac_ns_bytes(ac_msg1(args, ac_sel("objectAtIndex:"), 4), w[0..96]);
+    if (ac_number(w[0..n], v[0..2]) and v[0] < @as(u64, AM_SLOTS)) { sv = v[0]; } else { ok = false; }
+    var model : [96]u8 = undefined;
+    const mn : usize = ac_ns_bytes(ac_msg1(args, ac_sel("objectAtIndex:"), 5), model[0..96]);
+    if (ok == false) { return true; }
+    var res : [3]u64 = [0, 0, 0];
+    ac_check(@as(u32, @intCast(pv)), @as(u32, @intCast(sv)), model[0..mn], res[0..3]);
+    var line : [96]u8 = undefined;
+    const ln : usize = am_wline(rq, @as(u32, @intCast(pv)), @as(u32, @intCast(sv)), @as(u32, @intCast(res[0])), @as(u32, @intCast(res[1])), res[2], line[0..96]);
+    if (ln > 0) { sys_write(1, line[0..ln], @as(u64, ln)); }
+    return true;
+}
+
+// ---------------------------------------------------------------- the window side
+
+/// Start one worker: `exe` is the window's executable path (bytes, no NUL). out[0] = the read end of its output
+/// pipe (the window owns it and closes it). The pid, 0 when nothing started (nothing is left open then).
+pub fn ac_spawn(exe: []const u8, req: u64, p: u32, slot: u32, model: []const u8, out: []u64) -> u64 {
+    out[0] = 0;
+    if (exe.len == 0 or exe.len > 400 or model.len == 0 or model.len > 60) { return 0; }
+    // argv words, NUL separated, in one buffer: exe, flag, request, provider, slot, model
+    var words : [640]u8 = undefined;
+    ac_wipe(words[0..640]);
+    var offs : [6]usize = [0, 0, 0, 0, 0, 0];
+    var n : usize = put_bytes(words[0..640], 0, exe);
+    n = n + 1;
+    offs[1] = n;
+    n = put_bytes(words[0..640], n, AM_WORKER_FLAG) + 1;
+    offs[2] = n;
+    n = put_dec(words[0..640], n, req) + 1;
+    offs[3] = n;
+    n = put_dec(words[0..640], n, @as(u64, p)) + 1;
+    offs[4] = n;
+    n = put_dec(words[0..640], n, @as(u64, slot)) + 1;
+    offs[5] = n;
+    n = put_bytes(words[0..640], n, model) + 1;
+    const base : u64 = sys_addr(words[0..640], words[0..640], 0);
+    var argv : [8]u64 = [0, 0, 0, 0, 0, 0, 0, 0];
+    var a : usize = 0;
+    while (a < 6) {
+        argv[a] = base + @as(u64, offs[a]);
+        a = a + 1;
+    }
+    // an empty environment: nothing of the window's environment reaches the worker
+    var ev : [8]u8 = [0, 0, 0, 0, 0, 0, 0, 0];
+    const envp : u64 = sys_addr(ev[0..8], ev[0..8], 0);
+    var po : [2]u32 = [0, 0];
+    if (ac_pipe(po) != 0) { return 0; }
+    var dn : [16]u8 = undefined;
+    ac_wipe(dn[0..16]);
+    put_bytes(dn[0..16], 0, "/dev/null");
+    var fa : [8]u8 = [0, 0, 0, 0, 0, 0, 0, 0];
+    var at : [8]u8 = [0, 0, 0, 0, 0, 0, 0, 0];
+    var bad : bool = false;
+    if (ac_fa_init(fa[0..8]) != 0) {
+        sys_close(@as(i32, @intCast(po[0])));
+        sys_close(@as(i32, @intCast(po[1])));
+        return 0;
+    }
+    if (ac_attr_init(at[0..8]) != 0) {
+        ac_fa_destroy(fa[0..8]);
+        sys_close(@as(i32, @intCast(po[0])));
+        sys_close(@as(i32, @intCast(po[1])));
+        return 0;
+    }
+    if (ac_attr_flags(at[0..8], AC_CLOEXEC_DEFAULT) != 0) { bad = true; }
+    if (ac_fa_open(fa[0..8], 0, dn[0..16], 0, 0) != 0) { bad = true; }
+    if (ac_fa_dup2(fa[0..8], @as(i32, @intCast(po[1])), 1) != 0) { bad = true; }
+    if (ac_fa_open(fa[0..8], 2, dn[0..16], 1, 0) != 0) { bad = true; }
+    if (ac_fa_close(fa[0..8], @as(i32, @intCast(po[0]))) != 0) { bad = true; }
+    if (ac_fa_close(fa[0..8], @as(i32, @intCast(po[1]))) != 0) { bad = true; }
+    var pid : [2]u32 = [0, 0];
+    var rc : i32 = 1;
+    if (bad == false) { rc = ac_spawn_c(pid, words[0..640], fa[0..8], at[0..8], argv, envp); }
+    ac_fa_destroy(fa[0..8]);
+    ac_attr_destroy(at[0..8]);
+    sys_close(@as(i32, @intCast(po[1])));
+    if (rc != 0 or pid[0] == 0) {
+        sys_close(@as(i32, @intCast(po[0])));
+        return 0;
+    }
+    out[0] = @as(u64, po[0]);
+    return @as(u64, pid[0]);
+}
+
+/// Read what the worker printed so far, without waiting: the bytes go to buf[have ..]. Returns how many were
+/// read; 0 at end of output: every holder of the pipe's write end closed it, and with
+/// POSIX_SPAWN_CLOEXEC_DEFAULT the worker is the only holder (its /usr/bin/security child gets its own pipes as
+/// 0, 1 and 2 and keeps none of the worker's), so end of output means the worker has exited or is exiting; -1
+/// when nothing is ready yet (or the read was interrupted: ask again). Nothing ready is NOT proof that the worker
+/// still runs: it may exit right after this call; the window decides nothing from it but whether to listen on.
+/// -2 when buf is full before the end (an oversized output, never a success).
+pub fn ac_drain(fd: u64, buf: []u8, have: usize) -> i64 {
+    if (have >= buf.len) { return -2; }
+    var pf : [8]u8 = [0, 0, 0, 0, 0, 0, 0, 0];
+    put_pollfd(pf[0..8], 0, @as(u32, @intCast(fd)));
+    const r : i32 = sys_poll(pf[0..8], 1, 0);
+    if (r <= 0 or poll_revents(pf[0..8], 0) == 0) { return -1; }
+    const got : i64 = sys_read(@as(i32, @intCast(fd)), buf[have .. buf.len], @as(u64, buf.len - have));
+    if (got < 0 and ac_errno() == AC_EINTR) { return -1; }
+    if (got < 0) { return 0; }
+    return got;
+}
+
+/// Close the read end of a worker's pipe.
+pub fn ac_close(fd: u64) -> void {
+    if (fd > 0) { sys_close(@as(i32, @intCast(fd))); }
+}
+
+/// One wait for worker `pid` without blocking (waitpid WNOHANG on that pid only, never -1, so no other child of
+/// the window is reaped here). AC_GONE when it was reaped now, or when it is no longer this process's child
+/// (ECHILD): editors_host.t27 sets SIGCHLD to ignore, under which the kernel reaps an exited child itself, and a
+/// keychain read (keys_host.t27) sets the default only for its own run, so either can happen. AC_RUNNING while it
+/// runs. AC_UNSURE for an interrupted or failed wait: the caller asks again next frame and never treats it as an
+/// exit.
+pub fn ac_reap(pid: u64) -> u32 {
+    if (pid == 0) { return AC_GONE; }
+    var st : [2]u32 = [0, 0];
+    const r : i32 = sys_waitpid(@as(i32, @intCast(pid)), st, AC_WNOHANG);
+    if (r == @as(i32, @intCast(pid))) { return AC_GONE; }
+    if (r == 0) { return AC_RUNNING; }
+    if (ac_errno() == AC_ECHILD) { return AC_GONE; }
+    return AC_UNSURE;
+}
+
+/// One step of the window's read of provider p's saved keys: key slot k's status and its masked form (keys.t27
+/// mask_key: stars and at most the last four characters), never its value. res[0] = 1 a key is stored, res[1] = 1
+/// the read failed or was denied (neither a key nor "no such item": never "no key"). mask gets [length][masked
+/// text] (16 bytes), length 0 when no key was read. The key is wiped before this returns.
+pub fn ac_scan_slot(p: u32, k: u32, res: []u32, mask: []u8) -> void {
+    var key : [256]u8 = undefined;
+    ac_wipe(key[0..256]);
+    var st : [2]u32 = [0, 0];
+    const n : usize = kc_read_n(p, k, key[0..256], st[0..2]);
+    res[0] = 0;
+    res[1] = 0;
+    ac_wipe(mask);
+    if (st[0] == SEC_OK and n > 0) {
+        res[0] = 1;
+        var mt : [24]u8 = undefined;
+        const ml : usize = mask_key(key[0..n], mt[0..24]);
+        var i : usize = 0;
+        while (i < ml and i + 1 < mask.len) {
+            mask[i + 1] = mt[i];
+            i = i + 1;
+        }
+        mask[0] = @as(u8, @intCast(i));
+    } else if (st[0] != SEC_NOT_FOUND) {
+        res[1] = 1;
+    }
+    ac_wipe(key[0..256]);
+}
+
+/// A persisted text value (NSUserDefaults string) into out; the count, 0 when there is none.
+pub fn ac_defaults_get(name: []const u8, out: []u8) -> usize {
+    const defs : u64 = ac_msg0(ac_cls("NSUserDefaults"), ac_sel("standardUserDefaults"));
+    const k : u64 = ac_cf(name);
+    const s : u64 = ac_msg1(defs, ac_sel("stringForKey:"), k);
+    ac_cf_release(k);
+    return ac_ns_bytes(s, out);
+}
+
+/// Persist a text value (NSUserDefaults string, written through at once). Holds no key: callers pass the
+/// api_manage selection or binding table only.
+pub fn ac_defaults_put(name: []const u8, text: []const u8) -> void {
+    const defs : u64 = ac_msg0(ac_cls("NSUserDefaults"), ac_sel("standardUserDefaults"));
+    const k : u64 = ac_cf(name);
+    const v : u64 = ac_cf(text);
+    ac_msg2(defs, ac_sel("setObject:forKey:"), v, k);
+    ac_msg0(defs, ac_sel("synchronize"));
+    ac_cf_release(k);
+    ac_cf_release(v);
+}
+
+test the_api_check_host_is_declared {
+    var b : [4]u8 = [0, 0, 0, 0];
+    b[0] = 1;
+    assert b[0] == 1 and AC_CLOEXEC_DEFAULT == 16384 and AM_WLINE_MAX >= 32;
+}

@@ -11,6 +11,8 @@ module T27osPtyClient;
 use t27os::pty_proto::OP_PROVIDER_OPEN;
 use t27os::provider_catalog::pc_token;
 use t27os::provider_catalog::PC_COUNT;
+use t27os::api_manage::am_pin_of;
+use t27os::editors::same_bytes;
 
 use t27os::editors::editor_spawn_payload;
 use t27os::pty_proto::OP_LIST;
@@ -139,6 +141,38 @@ pub fn client_provider_open(fd: i32, space: u32, choice: u32, cwd: []const u8, o
     return client_call(fd, OP_PROVIDER_OPEN, 0, p[0 .. 4 + cwd.len + tn], out);
 }
 
+/// The PROVIDER_OPEN payload of an exact pin (a catalog token or an api_manage key binding) in a space and
+/// directory: [3][space][0][cwd] TAB [token]. 0 when the token is no live pin or the cwd does not fit, so a
+/// retired or malformed binding is never sent.
+pub fn provider_open_payload(space: u32, token: []const u8, cwd: []const u8, p: []u8) -> usize {
+    var f : [5]u64 = [0, 0, 0, 0, 0];
+    if (am_pin_of(token, f[0..5]) == false or space > 255) { return 0; }
+    if (cwd.len == 0 or cwd.len > 255 or p.len < 4 + cwd.len + token.len) { return 0; }
+    p[0] = 3;
+    p[1] = @as(u8, @intCast(space));
+    p[2] = 0;
+    var j : usize = 0;
+    while (j < cwd.len) {
+        p[3 + j] = cwd[j];
+        j = j + 1;
+    }
+    p[3 + cwd.len] = 9;
+    j = 0;
+    while (j < token.len) {
+        p[4 + cwd.len + j] = token[j];
+        j = j + 1;
+    }
+    return 4 + cwd.len + token.len;
+}
+
+/// Open or reconnect the chat of an exact pin token (provider_open_payload). Same reply as client_provider_open.
+pub fn client_provider_open_token(fd: i32, space: u32, token: []const u8, cwd: []const u8, out: []u8) -> usize {
+    var p : [340]u8 = undefined;
+    const n : usize = provider_open_payload(space, token, cwd, p[0..340]);
+    if (n == 0) { return 0; }
+    return client_call(fd, OP_PROVIDER_OPEN, 0, p[0..n], out);
+}
+
 /// SPAWN terminal editor `pick` on `path`. Same reply as client_spawn; 0 when the path is not fit.
 pub fn client_spawn_editor(fd: i32, space: u32, slot: u32, pick: u32, path: []const u8, out: []u8) -> usize {
     var p : [300]u8 = undefined;
@@ -247,4 +281,18 @@ test only_an_ok_reply_counts_as_a_set_key {
     assert client_reply_ok(r[0..8], 9) == false;
     r[0] = RE_ERR;
     assert client_reply_ok(r[0..8], 4) == false;
+}
+
+test a_bound_chat_opens_with_its_exact_token_and_a_retired_one_is_never_sent {
+    var p : [340]u8 = undefined;
+    const n : usize = provider_open_payload(2, "n1:64:my-model.v2", "/Users/x", p[0..340]);
+    assert n == 4 + 8 + 17;
+    assert p[0] == 3 and p[1] == 2 and p[2] == 0 and p[3 + 8] == 9;
+    assert same_bytes(p[3..11], "/Users/x");
+    assert same_bytes(p[12..n], "n1:64:my-model.v2");
+    // a catalog token is a pin too; a retired binding, free text and an empty cwd build nothing
+    assert provider_open_payload(0, "za:glm-4.7-flash", "/tmp", p[0..340]) == 4 + 4 + 16;
+    assert provider_open_payload(0, "n0:64:my-model.v2", "/tmp", p[0..340]) == 0;
+    assert provider_open_payload(0, "glm-4.7-flash", "/tmp", p[0..340]) == 0;
+    assert provider_open_payload(0, "n1:64:my-model.v2", "", p[0..340]) == 0;
 }

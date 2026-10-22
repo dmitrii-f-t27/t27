@@ -575,7 +575,7 @@ pub const KEY_BACKSPACE : u32 = 51;
 pub const KEY_ESC : u32 = 53;
 pub const KEY_V : u32 = 9;
 
-pub const KEYS_WORDS : str = "KEYS,add,full,delete,confirm,check,checking,no key,paste or type a key,enter saves  esc cancels,open in";
+pub const KEYS_WORDS : str = "KEYS,add,full,delete,confirm,check,checking,no key,add saves a new key to Keychain,enter saves  esc cancels,open in";
 
 /// Top edge of provider row r in a panel whose top is t.
 pub fn ky_row_top(t: f64, r: u32) -> f64 {

@@ -38,17 +38,19 @@
 //
 // Refs gHashTag/t27#10782.
 module T27osPtyServer;
-use t27os::provider_catalog::pc_find;
-use t27os::provider_catalog::pc_model;
-use t27os::provider_catalog::pc_provider;
-use t27os::provider_catalog::pc_profile;
-use t27os::provider_catalog::PC_COUNT;
 use t27os::pty_proto::OP_PROVIDER_OPEN;
 use t27os::pty_logic::PK_PIN_BIT;
 use t27os::pty_logic::PK_BAD;
 use t27os::pty_logic::key_count;
 use t27os::keys::opencode_config_model;
-use t27os::provider_catalog::pc_reserved;
+use t27os::api_manage::am_pin_of;
+use t27os::api_manage::am_token_reserved;
+use t27os::api_manage::am_same_pin;
+use t27os::api_manage::am_bind_matches;
+use t27os::api_manage::am_bind_retire;
+use t27os::api_manage::AM_SLOTS;
+use t27os::pty_logic::plan_bound_key;
+use t27os::pty_logic::key_present;
 
 use t27os::agents::AGENT_COUNT;
 use t27os::agents::S_STOPPED;
@@ -351,10 +353,15 @@ fn model_of(mem: []const u8, i: usize) -> []const u8 {
     return mem[at + 1 .. at + 1 + @as(usize, mem[at])];
 }
 
-/// Set pane i's model from mem[at .. at + len] when model_ok() passes it; true when it changed.
-fn set_model(mem: []u8, i: usize, at: usize, len: usize) -> bool {
-    // Hooks/transcripts may report a model; they cannot remove an explicit provider pin.
-    if (pc_find(model_of(mem, i)) < PC_COUNT and pc_find(mem[at .. at + len]) >= PC_COUNT) { return false; }
+/// Set pane i's model from mem[at .. at + len] when model_ok() passes it; true when it changed. An explicit pin
+/// (a catalog token or an api_manage key binding, live or retired) is written only with pin_ok: by the window's
+/// SPAWN / PROVIDER_OPEN, by the pane's own record and by the launch that keeps it. A hook or a transcript passes
+/// pin_ok false: it can neither write a pin nor replace or remove one.
+fn set_model(mem: []u8, i: usize, at: usize, len: usize, pin_ok: bool) -> bool {
+    const cur_pin : bool = am_token_reserved(model_of(mem, i));
+    const new_pin : bool = am_token_reserved(mem[at .. at + len]);
+    if (pin_ok == false and (cur_pin or new_pin)) { return false; }
+    if (cur_pin and new_pin == false) { return false; }
     if (len >= MODEL_CAP or !model_ok(mem[at .. at + len])) { return false; }
     const mo : usize = O_MODEL + i * MODEL_CAP;
     var same : bool = @as(usize, mem[mo]) == len;
@@ -404,7 +411,7 @@ fn model_from_transcript(st: []const u64, mem: []u8, i: usize) -> void {
         }
     }
     sys_close(fd);
-    if (ml > 0) { set_model(mem, i, O_TMP2 + 2048, ml); }
+    if (ml > 0) { set_model(mem, i, O_TMP2 + 2048, ml, false); }
 }
 
 fn ring_of(mem: []u8, i: usize) -> []u8 {
@@ -493,9 +500,13 @@ fn inject_profile(st: []const u64, mem: []u8, i: usize, agent: u32) -> void {
             sys_setenv(mem[O_TMP2 .. O_TMP2 + nl + 1], mem[at + 1 .. at + 2 + @as(usize, mem[at])], 1);
         } else {
             var vl : usize = agent_var_text_step(agent, pr, k, pane_mstep_get(st, i), home_slice(st, mem), mem[O_TMP2 + 3072 .. O_TMP2 + 4000]);
-            const choice : u32 = pc_find(model_of(mem, i));
-            if (agent == 3 and k == 1 and choice < PC_COUNT) {
-                vl = opencode_config_model(pr, pc_model(choice), mem[O_TMP2 + 3072 .. O_TMP2 + 4000]);
+            // a pinned OpenCode pane (catalog token or key binding) runs exactly its model id
+            var pf : [5]u64 = [0, 0, 0, 0, 0];
+            const mt : []const u8 = model_of(mem, i);
+            if (agent == 3 and k == 1 and am_pin_of(mt, pf[0..5])) {
+                const ms : usize = @as(usize, @intCast(pf[3]));
+                const me : usize = ms + @as(usize, @intCast(pf[4]));
+                vl = opencode_config_model(pr, mt[ms .. me], mem[O_TMP2 + 3072 .. O_TMP2 + 4000]);
             }
             mem[O_TMP2 + 3072 + vl] = 0;
             sys_setenv(mem[O_TMP2 .. O_TMP2 + nl + 1], mem[O_TMP2 + 3072 .. O_TMP2 + 3072 + vl + 1], 1);
@@ -569,22 +580,37 @@ fn launch(st: []u64, mem: []u8, i: usize, plan: u32, spawned: bool) -> bool {
     }
     // the keys of this start: the profile and the key number of each provider the agent reads, by rotation
     // over the numbered keys (a failover has set what to skip); the unfinished screen row of the old process goes
-    const choice : u32 = pc_find(model_of(mem, i));
-    if (pc_reserved(model_of(mem, i)) and choice >= PC_COUNT) { return false; }
-    if (choice < PC_COUNT) {
+    // A pin (api_manage am_pin_of: a catalog token or a key binding) fixes provider, profile and model and stops
+    // every failover; a key binding also fixes the exact key number. A reserved token that is no live pin (a
+    // retired binding, an unknown catalog token) never starts: its person chooses again.
+    var pf : [5]u64 = [0, 0, 0, 0, 0];
+    const pinned : bool = am_pin_of(model_of(mem, i), pf[0..5]);
+    if (am_token_reserved(model_of(mem, i)) and pinned == false) { return false; }
+    var bound : bool = false;
+    var prov : u32 = 0;
+    if (pinned) {
         if (agent != 3) { return false; }
+        prov = @as(u32, @intCast(pf[0]));
         const pk : usize = G_PANEK + i * PK;
-        st[pk + PK_PROF] = @as(u64, pc_profile(choice));
+        st[pk + PK_PROF] = pf[1];
         st[pk + PK_BAD] = PK_PIN_BIT;
-        if (key_count(st, pc_provider(choice)) == 0) { load_keys(st, mem, 1 << pc_provider(choice)); }
+        bound = pf[2] < @as(u64, AM_SLOTS);
+        var need : bool = key_count(st, prov) == 0;
+        if (bound and key_present(st, prov, @as(u32, @intCast(pf[2]))) == false) { need = true; }
+        if (need) { load_keys(st, mem, 1 << prov); }
     }
-    plan_pane_keys(st, i, agent, now_ms(mem));
-    if (choice < PC_COUNT and pane_key_get(st, i, pc_provider(choice)) == 0) { return false; }
+    if (bound) {
+        // exactly the bound key: an empty slot starts nothing, it never takes another key
+        if (plan_bound_key(st, i, agent, @as(u32, @intCast(pf[1])), prov, @as(u32, @intCast(pf[2])), now_ms(mem)) == false) { return false; }
+    } else {
+        plan_pane_keys(st, i, agent, now_ms(mem));
+    }
+    if (pinned and pane_key_get(st, i, prov) == 0) { return false; }
     write_agent_config(st, mem, i, agent);
     // the model of this start, from the profile just chosen; the pane's slot (and so its record) takes it
     const mn : usize = launch_model(st, i, agent, spawned, model_of(mem, i), mem[O_TMP2 + 2048 .. O_TMP2 + 2112]);
     mem[O_MODEL + i * MODEL_CAP] = 0;
-    if (mn > 0) { set_model(mem, i, O_TMP2 + 2048, mn); }
+    if (mn > 0) { set_model(mem, i, O_TMP2 + 2048, mn, true); }
     mem[O_CARRY + i * CARRY_SLOT] = 0;
     const home : []const u8 = home_slice(st, mem);
     const cn : usize = launch_command(agent, plan, sid_of(st, mem, i), model_of(mem, i), home, cwd_of(st, mem, i), mem[O_TMP1 + 4096 .. O_TMP1 + 8000]);
@@ -769,6 +795,7 @@ fn put_key(st: []u64, mem: []u8, sp: u32, sk: u32, src: usize, plen: usize) -> b
     if (sp >= PROVIDER_COUNT or sk >= MAX_KEYS or plen > KEY_CAP - 2) { return false; }
     if (plen > 0 and !key_fits(mem[src .. src + plen])) { return false; }
     const ka : usize = key_slot(sp, sk);
+    const was : bool = mem[ka] > 0;
     var same : bool = plen > 0 and @as(usize, mem[ka]) == plen;
     var j : usize = 0;
     while (j < plen) {
@@ -784,7 +811,24 @@ fn put_key(st: []u64, mem: []u8, sp: u32, sk: u32, src: usize, plen: usize) -> b
         wp = wp + 1;
     }
     key_put(st, sp, sk, plen > 0, same);
+    // a key that was there and is now different or gone retires every chat bound to this exact slot, so none
+    // of them starts again on whatever the slot holds later; the first fill of an empty slot retires nothing
+    if (was and same == false) { retire_bound(st, mem, sp, sk); }
     return true;
+}
+
+/// Retire the binding of every pane bound to key number sk of provider sp (api_manage: "n1:" -> "n0:") and save
+/// its record, so neither a relaunch nor a restore runs that chat on another key. A running process keeps the
+/// key it started with until it exits; it is never moved to another one.
+fn retire_bound(st: []u64, mem: []u8, sp: u32, sk: u32) -> void {
+    var pi : usize = 0;
+    while (pi < @as(usize, MAX_PANES)) {
+        if (st[pi * PF + PF_USED] != 0 and am_bind_matches(model_of(mem, pi), sp, sk)) {
+            const mo : usize = O_MODEL + pi * MODEL_CAP;
+            if (am_bind_retire(mem[mo + 1 .. mo + 1 + @as(usize, mem[mo])])) { save_pane(st, mem, pi); }
+        }
+        pi = pi + 1;
+    }
 }
 
 /// Read the Keychain's keys of the providers in `mask` (pty_logic load_mask_agent, load_all_mask) into the table,
@@ -846,7 +890,9 @@ fn handle_frame(st: []u64, mem: []u8, fd: i32, off: usize) -> void {
                 // later, which the nibble cannot hold: pty_logic list_key_nibble); bits 0 to 2 as before, bit 3 pinned
                 const kshown : u32 = pane_key_shown(st, @as(usize, i), @as(u32, @intCast(st[b + PF_AGENT])));
                 var pinned_flag : u32 = 0;
-                if (pc_find(model_of(mem, @as(usize, i))) < PC_COUNT) { pinned_flag = 8; }
+                // bit 3: an explicit pin (catalog token or key binding, live or retired); the window maps it by identity, never by
+                // the ordinal of unpinned panes
+                if (am_token_reserved(model_of(mem, @as(usize, i)))) { pinned_flag = 8; }
                 at = put_list_entry(mem[O_OUT .. O_OUT + 128], at - O_OUT, i, @as(u32, @intCast(st[b + PF_AGENT])), list_shown(st, @as(usize, i), @as(u32, @intCast(st[b + PF_AGENT])), shown_state(w), now_ms(mem)), list_flags_key(st[b + PF_LIVE] != 0, w, kshown) + pinned_flag) + O_OUT;
             }
             i = i + 1;
@@ -862,14 +908,19 @@ fn handle_frame(st: []u64, mem: []u8, fd: i32, off: usize) -> void {
         // path as `<editor> '<path>'`: a path that would break the quoting is refused here
         var ml : usize = 0;
         if (3 + cl < plen) { ml = plen - 4 - cl; }
-        const choice : u32 = pc_find(mem[p0 + 4 + cl .. p0 + 4 + cl + ml]);
-        if (pc_reserved(mem[p0 + 4 + cl .. p0 + 4 + cl + ml]) and (choice >= PC_COUNT or mem[p0] != 3)) { reply(fd, mem, RE_ERR, 0, 0); return; }
+        // a pin (catalog token or key binding) is OpenCode's only, and only a live one; a reserved token that is
+        // no live pin (a retired binding, an unknown catalog token) is refused before any pane is touched
+        var spf : [5]u64 = [0, 0, 0, 0, 0];
+        const spin : bool = am_pin_of(mem[p0 + 4 + cl .. p0 + 4 + cl + ml], spf[0..5]);
+        if (am_token_reserved(mem[p0 + 4 + cl .. p0 + 4 + cl + ml]) and (spin == false or mem[p0] != 3)) { reply(fd, mem, RE_ERR, 0, 0); return; }
         if (op == OP_PROVIDER_OPEN) {
-            if (choice >= PC_COUNT or mem[p0] != 3) { reply(fd, mem, RE_ERR, 0, 0); return; }
+            if (spin == false or mem[p0] != 3) { reply(fd, mem, RE_ERR, 0, 0); return; }
+            // reuse only the exact identity: same space, same cwd and byte-for-byte the same pin (provider, key
+            // binding and model); the same model on another key is another chat
             var pi : usize = 0;
             while (pi < @as(usize, MAX_PANES)) {
                 const pb : usize = pi * PF;
-                if (st[pb + PF_USED] != 0 and st[pb + PF_AGENT] == 3 and st[pb + PF_SPACE] == @as(u64, mem[p0 + 1]) and pc_find(model_of(mem, pi)) == choice) {
+                if (st[pb + PF_USED] != 0 and st[pb + PF_AGENT] == 3 and st[pb + PF_SPACE] == @as(u64, mem[p0 + 1]) and am_same_pin(model_of(mem, pi), mem[p0 + 4 + cl .. p0 + 4 + cl + ml])) {
                     const cwd : []const u8 = cwd_of(st, mem, pi);
                     var equal : bool = cwd.len == cl;
                     var cj : usize = 0;
@@ -908,7 +959,7 @@ fn handle_frame(st: []u64, mem: []u8, fd: i32, off: usize) -> void {
         // a model after a TAB in the payload (T27OS_CTL=spawn with T27OS_MODEL) goes on the command line and into
         // the record; without one the pane learns it from its SessionStart hook or, on restore, its transcript
         mem[O_MODEL + @as(usize, slot) * MODEL_CAP] = 0;
-        if (3 + cl < plen) { set_model(mem, @as(usize, slot), p0 + 4 + cl, plen - 4 - cl); }
+        if (3 + cl < plen) { set_model(mem, @as(usize, slot), p0 + 4 + cl, plen - 4 - cl, true); }
         // no key in the table for this agent (the window has not pushed one, or is not there at all): read the
         // Keychain for the providers the agent reads, unless that was done in the last minute (keys_reload_due)
         const spawn_agent : u32 = @as(u32, mem[p0]);
@@ -1007,7 +1058,7 @@ fn handle_frame(st: []u64, mem: []u8, fd: i32, off: usize) -> void {
             }
         }
         if (st[base + PF_AGENT] == 0 and hook_model(mem[p0 .. p0 + plen], f[0..2])) {
-            if (set_model(mem, @as(usize, pane), p0 + @as(usize, @intCast(f[0])), @as(usize, @intCast(f[1])))) { changed = true; }
+            if (set_model(mem, @as(usize, pane), p0 + @as(usize, @intCast(f[0])), @as(usize, @intCast(f[1])), false)) { changed = true; }
         }
         if (changed) { save_pane(st, mem, @as(usize, pane)); }
         reply(fd, mem, RE_OK, @as(u8, @intCast(pane)), 0);
@@ -1139,7 +1190,7 @@ fn restore_all(st: []u64, mem: []u8) -> u32 {
                     pane_keys_reset(st, @as(usize, i));
                     // the record's model (a v1 record has none), then the newer one the transcript names
                     mem[O_MODEL + @as(usize, i) * MODEL_CAP] = 0;
-                    set_model(mem, @as(usize, i), O_TMP2 + 512 + @as(usize, @intCast(f[F_MODEL_AT])), @as(usize, @intCast(f[F_MODEL_LEN])));
+                    set_model(mem, @as(usize, i), O_TMP2 + 512 + @as(usize, @intCast(f[F_MODEL_AT])), @as(usize, @intCast(f[F_MODEL_LEN])), true);
                     model_from_transcript(st, mem, @as(usize, i));
                     const sid : []const u8 = sid_of(st, mem, @as(usize, i));
                     const sidv : []const u8 = sid;
