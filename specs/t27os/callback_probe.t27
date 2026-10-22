@@ -17,6 +17,11 @@
 //      -e _main -lSystem -framework CoreFoundation -framework AudioToolbox -o probe probe.o
 // Step 4 (ABI probe): part A is a 10 ms timer for 10 s with first/last time marks; part B is a 440 Hz tone, 10 ms
 // buffers (960 bytes, 48 kHz mono 16 bit), 4 buffers, 60 s, callbacks counted. Exits 0 only when the direct calls and checks 1 and 2 pass. ASCII only (L3).
+// Part C (capture): an AudioQueue INPUT queue, same format and buffers, cbp_in on this run loop for 10 s; prints
+// the NewInput and Start statuses, callbacks, nonzero samples, mean |sample| and the first 4 bytes. It never
+// decides the exit code of the full run. On macOS a microphone denied by TCC usually does not fail NewInput or
+// Start: the queue runs and delivers zero samples, so the verdict comes from the samples, not the statuses.
+// CBP_ONLY_C=1 skips A and B (no 60 s tone); then the exit code is 0 only when C ran with callbacks.
 
 module T27osCallbackProbe;
 
@@ -26,6 +31,7 @@ use t27os::pty_sys::sys_peek;
 use t27os::pty_sys::sys_addr;
 use t27os::pty_proto::put_u64;
 use t27os::pty_proto::get_u64;
+use t27os::pty_sys::sys_getenv;
 
 const CBP_RTLD_DEFAULT : u64 = 18446744073709551614;
 /// kAudioFormatLinearPCM, 'lpcm'.
@@ -45,6 +51,7 @@ fn cbp_run(mode: u64, seconds: f64, after_one: bool) -> i32 { return @extern("CF
 fn cbp_timer_invalidate(timer: u64) -> void { @extern("CFRunLoopTimerInvalidate"); }
 fn cbp_release(x: u64) -> void { @extern("CFRelease"); }
 fn cbp_aq_new_output(fmt: []const u8, cb: u64, user: u64, rl: u64, mode: u64, flags: u32, out_aq: []u8) -> i32 { return @extern("AudioQueueNewOutput"); }
+fn cbp_aq_new_input(fmt: []const u8, cb: u64, user: u64, rl: u64, mode: u64, flags: u32, out_aq: []u8) -> i32 { return @extern("AudioQueueNewInput"); }
 fn cbp_aq_alloc(aq: u64, size: u32, out_buf: []u8) -> i32 { return @extern("AudioQueueAllocateBuffer"); }
 fn cbp_aq_enqueue(aq: u64, buf: u64, n: u32, descs: u64) -> i32 { return @extern("AudioQueueEnqueueBuffer"); }
 fn cbp_aq_start(aq: u64, at: u64) -> i32 { return @extern("AudioQueueStart"); }
@@ -118,6 +125,50 @@ pub fn cbp_out(user: u64, aq: u64, buf: u64) -> u64 {
     return n;
 }
 
+/// Capture state block (u64 slots): 0 callbacks, 1 first 4 bytes, 2 first-buffer flag, 3 first us, 4 last us,
+/// 5 samples, 6 nonzero samples, 7 sum of |sample|, 8 bytes, 9 failed re-enqueues, 10 max |sample|.
+/// AudioQueue input callback (user, queue, buffer, start time, packet count, packet descs).
+pub fn cbp_in(user: u64, aq: u64, buf: u64, ts: u64, npk: u32, pd: u64) -> u64 {
+    const n : u64 = cbp_get(user) + 1;
+    cbp_put(user, n);
+    const t : u64 = cbp_us();
+    if (n == 1) { cbp_put(user + 24, t); }
+    cbp_put(user + 32, t);
+    var hd : [4]u8 = undefined;
+    sys_peek(hd[0..4], buf + 16, 4);
+    var sz : u64 = @as(u64, @intCast(hd[0])) | (@as(u64, @intCast(hd[1])) << 8) | (@as(u64, @intCast(hd[2])) << 16) | (@as(u64, @intCast(hd[3])) << 24);
+    if (sz > 960) { sz = 960; }
+    var pcm : [960]u8 = undefined;
+    const data : u64 = cbp_get(buf + 8);
+    if (data == 0) { sz = 0; }
+    if (sz > 0) { sys_peek(pcm[0..960], data, sz); }
+    if (n == 1 and sz >= 4) {
+        cbp_put(user + 8, @as(u64, @intCast(pcm[0])) | (@as(u64, @intCast(pcm[1])) << 8) | (@as(u64, @intCast(pcm[2])) << 16) | (@as(u64, @intCast(pcm[3])) << 24));
+        cbp_put(user + 16, 1);
+    }
+    var nz : u64 = 0;
+    var sum : u64 = 0;
+    var mx : u64 = cbp_get(user + 80);
+    var i : u64 = 0;
+    while (i < sz / 2) {
+        var v : i64 = @as(i64, @intCast(pcm[i * 2])) | (@as(i64, @intCast(pcm[i * 2 + 1])) << 8);
+        if (v >= 32768) { v = v - 65536; }
+        if (v < 0) { v = 0 - v; }
+        const a : u64 = @as(u64, @intCast(v));
+        if (a != 0) { nz = nz + 1; }
+        if (a > mx) { mx = a; }
+        sum = sum + a;
+        i = i + 1;
+    }
+    cbp_put(user + 40, cbp_get(user + 40) + sz / 2);
+    cbp_put(user + 48, cbp_get(user + 48) + nz);
+    cbp_put(user + 56, cbp_get(user + 56) + sum);
+    cbp_put(user + 64, cbp_get(user + 64) + sz);
+    cbp_put(user + 80, mx);
+    if (cbp_aq_enqueue(aq, buf, 0, 0) != 0) { cbp_put(user + 72, cbp_get(user + 72) + 1); }
+    return n;
+}
+
 fn say(s: []const u8, ok: bool) -> bool {
     if (ok) { sys_write(1, "ok   ", 5); } else { sys_write(1, "FAIL ", 5); }
     sys_write(1, s, @as(u64, s.len));
@@ -158,7 +209,7 @@ fn cbp_pcm48k(out: []u8) -> void {
     var i : usize = 0;
     while (i < 40) { out[i] = 0; i = i + 1; }
     // mSampleRate 48000.0 as IEEE-754 binary64 = 0x40E7700000000000.
-    put_u64(out, 0, 4680673736892645376);
+    put_u64(out, 0, 4676829883349860352);
     out[8] = @as(u8, @intCast(CBP_LPCM & 255));
     out[9] = @as(u8, @intCast((CBP_LPCM >> 8) & 255));
     out[10] = @as(u8, @intCast((CBP_LPCM >> 16) & 255));
@@ -179,7 +230,8 @@ pub fn main() -> void {
     cbp_put(ps + 16, 1511506142);
     cbp_tick(0, ps);
     // Never true (count is 1): only makes sure cbp_out is emitted and so exported.
-    if (cbp_get(ps) == 99) { cbp_out(ps, 0, 0); }
+    if (cbp_get(ps) == 99) { cbp_out(ps, 0, 0); cbp_in(ps, 0, 0, 0, 0, 0); }
+    const only_c : bool = sys_getenv("CBP_ONLY_C") != 0;
     const direct : bool = say("direct call: tick counts 1", cbp_get(ps) == 1);
     cbp_put(ps, 0);
     cbp_put(ps + 24, 0);
@@ -194,7 +246,7 @@ pub fn main() -> void {
     while (k < 40) { ctx[k] = 0; k = k + 1; }
     put_u64(ctx[0..40], 8, ps);
     var by_timer : bool = false;
-    if (ftick != 0 and mode != 0) {
+    if (!only_c and ftick != 0 and mode != 0) {
         const t0 : u64 = cbp_us();
         const t : u64 = cbp_timer_create(0, cbp_now() + 0.01, 0.01, 0, 0, ftick, ctx[0..40]);
         if (t != 0) {
@@ -225,7 +277,7 @@ pub fn main() -> void {
     cbp_put(ps + 24, 0);
     cbp_put(ps + 40, 0);
     var s1 : i32 = -1;
-    if (a_ok and fout != 0) { s1 = cbp_aq_new_output(fmt[0..40], fout, ps, cbp_rl_current(), mode, 0, aqb[0..8]); }
+    if (!only_c and a_ok and fout != 0) { s1 = cbp_aq_new_output(fmt[0..40], fout, ps, cbp_rl_current(), mode, 0, aqb[0..8]); }
     say_num("AudioQueueNewOutput status: ", @as(i64, s1));
     const aq : u64 = get_u64(aqb[0..8], 0);
     var queued : u32 = 0;
@@ -260,6 +312,88 @@ pub fn main() -> void {
         disposed = cbp_aq_dispose(aq, true) == 0;
     }
     const b_ok : bool = say("B: Start=0, 4 buffers, callbacks >= 5900, disposed", s2 == 0 and queued == 4 and b_calls >= 5900 and disposed);
+
+    // C. Capture: input queue, 4 buffers of 960 bytes, 10 s on this run loop.
+    var cst : [96]u8 = undefined;
+    var q : usize = 0;
+    while (q < 96) { cst[q] = 0; q = q + 1; }
+    const pc : u64 = sys_addr(cst[0..96], cst[0..96], 0);
+    const fin : u64 = cbp_dlsym(CBP_RTLD_DEFAULT, "cbp_in");
+    say("dlsym finds cbp_in", fin != 0);
+    var aqi : [8]u8 = undefined;
+    put_u64(aqi[0..8], 0, 0);
+    var s3 : i32 = -1;
+    if (fin != 0 and mode != 0) { s3 = cbp_aq_new_input(fmt[0..40], fin, pc, cbp_rl_current(), mode, 0, aqi[0..8]); }
+    say_num("AudioQueueNewInput status: ", @as(i64, s3));
+    const qi : u64 = get_u64(aqi[0..8], 0);
+    var c_queued : u32 = 0;
+    var s4 : i32 = -1;
+    var c_calls : u64 = 0;
+    var c_disposed : bool = false;
+    if (s3 == 0 and qi != 0) {
+        var m : u32 = 0;
+        while (m < 4) {
+            var cb : [8]u8 = undefined;
+            put_u64(cb[0..8], 0, 0);
+            if (cbp_aq_alloc(qi, 960, cb[0..8]) == 0) {
+                if (cbp_aq_enqueue(qi, get_u64(cb[0..8], 0), 0, 0) == 0) { c_queued = c_queued + 1; }
+            }
+            m = m + 1;
+        }
+        say_num("C buffers enqueued: ", @as(i64, @intCast(c_queued)));
+        const tc : u64 = cbp_us();
+        s4 = cbp_aq_start(qi, 0);
+        say_num("C AudioQueueStart status: ", @as(i64, s4));
+        if (s4 == 0) {
+            var sec : u32 = 0;
+            while (sec < 10) {
+                cbp_run(mode, 1.0, false);
+                say_num("C callbacks so far: ", @as(i64, @intCast(cbp_get(pc))));
+                sec = sec + 1;
+            }
+        }
+        c_disposed = cbp_aq_dispose(qi, true) == 0;
+        c_calls = cbp_get(pc);
+        say_num("C input callbacks in 10 s: ", @as(i64, @intCast(c_calls)));
+        if (c_calls > 0) {
+            say_num("C first callback +us (from start): ", @as(i64, @intCast(cbp_get(pc + 24) - tc)));
+            say_num("C last us - first us: ", @as(i64, @intCast(cbp_get(pc + 32) - cbp_get(pc + 24))));
+        }
+        say_num("C bytes captured: ", @as(i64, @intCast(cbp_get(pc + 64))));
+        say_num("C samples: ", @as(i64, @intCast(cbp_get(pc + 40))));
+        say_num("C nonzero samples: ", @as(i64, @intCast(cbp_get(pc + 48))));
+        var mean : u64 = 0;
+        if (cbp_get(pc + 40) > 0) { mean = cbp_get(pc + 56) / cbp_get(pc + 40); }
+        say_num("C mean |sample| (sum/samples): ", @as(i64, @intCast(mean)));
+        say_num("C max |sample|: ", @as(i64, @intCast(cbp_get(pc + 80))));
+        say_num("C failed re-enqueues: ", @as(i64, @intCast(cbp_get(pc + 72))));
+        if (cbp_get(pc + 16) == 1) {
+            const w : u64 = cbp_get(pc + 8);
+            say_num("C first buffer byte 0: ", @as(i64, @intCast(w & 255)));
+            say_num("C first buffer byte 1: ", @as(i64, @intCast((w >> 8) & 255)));
+            say_num("C first buffer byte 2: ", @as(i64, @intCast((w >> 16) & 255)));
+            say_num("C first buffer byte 3: ", @as(i64, @intCast((w >> 24) & 255)));
+        }
+        say("C disposed", c_disposed);
+    }
+    const c_ran : bool = s3 == 0 and s4 == 0 and c_queued == 4 and c_calls > 0 and c_disposed;
+    if (s3 != 0 or s4 != 0) {
+        sys_write(1, "CAPTURE REFUSED: a status above is nonzero\n", 43);
+    } else if (c_calls == 0) {
+        sys_write(1, "CAPTURE UNVERIFIED: queue started, no input callback\n", 53);
+    } else if (cbp_get(pc + 48) == 0) {
+        sys_write(1, "CAPTURE SILENT: callbacks arrive, every sample is zero (TCC denial or muted input)\n", 83);
+    } else {
+        sys_write(1, "CAPTURE LIVE: callbacks arrive with nonzero samples\n", 52);
+    }
+    if (only_c) {
+        if (direct and c_ran) {
+            sys_write(1, "abi-probe: C ran (see the CAPTURE line for the samples)\n", 56);
+            sys_exit(0);
+        }
+        sys_write(1, "abi-probe: FAILED\n", 18);
+        sys_exit(1);
+    }
     if (a_ok and b_ok) {
         sys_write(1, "abi-probe: A and B pass (audibility of the tone not checked)\n", 62);
         sys_exit(0);
@@ -271,7 +405,9 @@ pub fn main() -> void {
 test the_pcm_format_is_48_khz_mono_16_bit {
     var f : [40]u8 = undefined;
     cbp_pcm48k(f[0..40]);
-    assert get_u64(f[0..40], 0) == 4680673736892645376;
+    // 0x40E7700000000000: sign 0, exponent 0x40E (2^15), mantissa 0x77 << 44; 1.46484375 * 32768 = 48000.
+    assert get_u64(f[0..40], 0) == 4676829883349860352;
+    assert (get_u64(f[0..40], 0) >> 44) == 265847 and (get_u64(f[0..40], 0) & 17592186044415) == 0;
     assert f[8] == 109 and f[9] == 99 and f[10] == 112 and f[11] == 108;
     assert f[12] == 12 and f[16] == 2 and f[20] == 1 and f[24] == 2 and f[28] == 1 and f[32] == 16;
 }
