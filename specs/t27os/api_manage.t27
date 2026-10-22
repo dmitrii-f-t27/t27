@@ -881,6 +881,56 @@ pub const AM_RETRY_MANUAL : u64 = 86401;
 /// The pause word of a provider held until the person resumes it.
 pub const AM_PAUSE_HOLD : u64 = 4611686018427387904;
 
+/// A dead key is not asked again (live 2026-10-22: a "check all" run walked keys whose last answer was 401, and
+/// a key that answered "token expired or incorrect" answers it again). An authorization refusal (HTTP 401 or 403)
+/// holds the slot for AM_AUTH_HOLD_S: no automatic check (a "check all") reaches it until the day is over, the key
+/// changes (its identity moves, am_slot_changed) or the person checks that one key by hand. A network error, a
+/// timeout or a server error is asked again after a backoff that doubles from AM_NET_BACKOFF_S up to
+/// AM_NET_BACKOFF_CAP_S. Pure decisions: the window keeps the verdict, its HTTP code and its time per slot.
+pub const AM_AUTH_HOLD_S : u64 = 86400;
+pub const AM_NET_BACKOFF_S : u64 = 60;
+pub const AM_NET_BACKOFF_CAP_S : u64 = 3600;
+
+/// Is this HTTP status an authorization refusal (the key itself is refused, not the network or the server)?
+pub fn am_auth_refused(http: u32) -> bool {
+    return http == 401 or http == 403;
+}
+
+/// Seconds after a verdict before an automatic check may ask the same key again: AM_AUTH_HOLD_S after a 401/403;
+/// for a network error, a timeout, a server error or an unreadable answer, AM_NET_BACKOFF_S doubled per failure
+/// in a row (`fails`, at least 1), never above AM_NET_BACKOFF_CAP_S; 0 for anything else (no hold).
+pub fn am_recheck_wait_s(state: u32, http: u32, fails: u32) -> u64 {
+    if (am_auth_refused(http)) { return AM_AUTH_HOLD_S; }
+    if (state == AM_S_NETWORK or state == AM_S_SERVICE or state == AM_S_INVALID) {
+        var s : u64 = AM_NET_BACKOFF_S;
+        var i : u32 = 1;
+        while (i < fails and s < AM_NET_BACKOFF_CAP_S) {
+            s = s * 2;
+            i = i + 1;
+        }
+        if (s > AM_NET_BACKOFF_CAP_S) { return AM_NET_BACKOFF_CAP_S; }
+        return s;
+    }
+    return 0;
+}
+
+/// May an automatic check ask a key whose verdict `state`/`http` was given at checked_ms (0: never checked)? A clock
+/// that went back before the verdict keeps the hold: a dead key is never asked early.
+pub fn am_recheck_due(state: u32, http: u32, fails: u32, checked_ms: u64, now_ms: u64) -> bool {
+    if (checked_ms == 0) { return true; }
+    const wait : u64 = am_recheck_wait_s(state, http, fails);
+    if (wait == 0) { return true; }
+    if (now_ms < checked_ms) { return false; }
+    return now_ms - checked_ms >= wait * 1000;
+}
+
+/// "Key invalid (401): replace it." The words a slot held by a refusal shows instead of being asked again.
+pub fn am_dead_text(http: u32, out: []u8) -> usize {
+    var n : usize = put_bytes(out, 0, "Key invalid (");
+    n = put_dec(out, n, @as(u64, http));
+    return put_bytes(out, n, "): replace it. Not re-checked for 24 h.");
+}
+
 /// The answer budget of one check. The catalog's reasoning models (GLM-4.7-Flash, Nemotron 3.5 Super and others)
 /// count reasoning tokens against max_tokens, so a small budget (64) can end a working key's answer before any
 /// final text and read "accepted, no text". 1024 leaves room for a short reasoning pass and the one-word answer;
@@ -1057,6 +1107,7 @@ pub const AM_MSG_PASTE : u32 = 20;
 pub const AM_MSG_STOPPING : u32 = 21;
 pub const AM_MSG_WAIT : u32 = 22;
 pub const AM_MSG_OTHER : u32 = 23;
+pub const AM_MSG_ALL_DEAD : u32 = 24;
 pub const AM_MSG_ID_BASE : u32 = 32;
 
 pub fn am_msg_text(code: u32) -> str {
@@ -1083,6 +1134,7 @@ pub fn am_msg_text(code: u32) -> str {
     if (code == AM_MSG_STOPPING) { return "Stopping: the running check ends by itself within 70 s; its answer is discarded."; }
     if (code == AM_MSG_WAIT) { return "The other provider's stopped check is still finishing (up to 70 s)."; }
     if (code == AM_MSG_OTHER) { return "The other provider's check is running; stop it there or wait."; }
+    if (code == AM_MSG_ALL_DEAD) { return "Every key was refused (401/403) within 24 h: replace the keys."; }
     if (code > AM_MSG_ID_BASE) { return am_id_error_text(code - AM_MSG_ID_BASE); }
     return "";
 }
@@ -1434,43 +1486,66 @@ pub fn am_block_reason(w: []const u64, m: u32) -> u32 {
     return AM_MSG_NONE;
 }
 
-/// Start "check all" for provider m: one request per stored key, in slot order, one at a time.
-pub fn am_batch_begin(w: []u64, m: u32) -> void {
+/// Is slot k of provider m held by an authorization refusal at now_ms: its current verdict (same model, same key)
+/// came with HTTP 401 or 403 less than AM_AUTH_HOLD_S ago (am_recheck_due)? A changed key or model is never held:
+/// its identity moved, so its verdict is no longer current.
+pub fn am_slot_dead(w: []const u64, m: u32, k: u32, now_ms: u64) -> bool {
+    if (k >= AM_SLOTS) { return false; }
+    const s : u32 = am_slot_state(w, m, k);
+    if (s != AM_S_AUTH and s != AM_S_DENIED) { return false; }
+    const http : u32 = am_slot_http(w, m, k);
+    if (am_auth_refused(http) == false) { return false; }
+    return am_recheck_due(s, http, 1, w[AM_W_TIME + @as(usize, m) * 64 + @as(usize, k)], now_ms) == false;
+}
+
+/// The HTTP status of slot k's last verdict (0: none, or no answer).
+pub fn am_slot_http(w: []const u64, m: u32, k: u32) -> u32 {
+    return @as(u32, @intCast(w[AM_W_HTTP + @as(usize, m) * 64 + @as(usize, k % 64)] % 1000));
+}
+
+/// Start "check all" for provider m at now_ms: one request per stored key, in slot order, one at a time. A key
+/// held by a 401/403 (am_slot_dead) is skipped and keeps its verdict, its code and its time.
+pub fn am_batch_begin(w: []u64, m: u32, now_ms: u64) -> void {
     // this run replaces every earlier result of the keys it covers: a slot reads "not checked" (and has no check
     // time) until this run reaches it, so a Stop or a rate limit can never leave an old green that looks like
     // part of a complete new sweep
     const stored : u64 = w[AM_W_STORED + @as(usize, m)];
+    var total : u64 = 0;
     var k : u32 = 0;
     while (k < AM_SLOTS) {
-        if (slot_taken(stored, k)) {
+        if (slot_taken(stored, k) and am_slot_dead(w, m, k, now_ms) == false) {
             const ix : usize = @as(usize, m) * 64 + @as(usize, k);
             w[AM_W_STATUS + ix] = @as(u64, AM_S_NOT_CHECKED);
             w[AM_W_TIME + ix] = 0;
             w[AM_W_HTTP + ix] = 0;
+            total = total + 1;
         }
         k = k + 1;
     }
     w[AM_W_BATCH] = @as(u64, m);
     w[AM_W_BNEXT] = 0;
     w[AM_W_BDONE] = 0;
-    w[AM_W_BTOTAL] = @as(u64, slot_count(w[AM_W_STORED + @as(usize, m)]));
+    w[AM_W_BTOTAL] = total;
     w[AM_W_BSTOP] = 0;
     w[AM_W_BSTOP_M] = @as(u64, m);
     am_say(w, m, AM_MSG_NONE);
     am_touch(w);
 }
 
-/// The next slot the running batch checks (a stored slot at or after BNEXT); AM_NONE when the batch has none
-/// left, which also ends it with "check finished".
-pub fn am_batch_next(w: []u64) -> u32 {
+/// The next slot the running batch checks (a stored slot at or after BNEXT, not held by a 401/403 at now_ms);
+/// AM_NONE when the batch has none left, which also ends it with "check finished" (or, when every stored key
+/// was held, with AM_MSG_ALL_DEAD: nothing was sent).
+pub fn am_batch_next(w: []u64, now_ms: u64) -> u32 {
     if (w[AM_W_BATCH] >= @as(u64, AM_PROVIDERS)) { return AM_NONE; }
     const m : usize = @as(usize, @intCast(w[AM_W_BATCH]));
     var k : u32 = @as(u32, @intCast(w[AM_W_BNEXT]));
     while (k < AM_SLOTS) {
-        if (slot_taken(w[AM_W_STORED + m], k)) { return k; }
+        if (slot_taken(w[AM_W_STORED + m], k) and am_slot_dead(w, @as(u32, @intCast(m)), k, now_ms) == false) { return k; }
         k = k + 1;
     }
-    am_end_batch(w, @as(u32, @intCast(m)), AM_MSG_DONE);
+    var code : u32 = AM_MSG_DONE;
+    if (w[AM_W_BTOTAL] == 0 and w[AM_W_STORED + m] != 0) { code = AM_MSG_ALL_DEAD; }
+    am_end_batch(w, @as(u32, @intCast(m)), code);
     am_touch(w);
     return AM_NONE;
 }
@@ -2480,45 +2555,45 @@ test cancel_and_a_rate_limit_stop_the_batch_without_a_next_request {
     var b : [2864]u8 = undefined;
     am_t_state(w[0..704], b[0..2864]);
     w[AM_W_STORED] = am_t_low(5);
-    am_batch_begin(w[0..704], AM_NV);
+    am_batch_begin(w[0..704], AM_NV, 0);
     assert w[AM_W_BTOTAL] == 5;
-    var k : u32 = am_batch_next(w[0..704]);
+    var k : u32 = am_batch_next(w[0..704], 0);
     assert k == 0;
     var o : [40]u8 = undefined;
     assert same_bytes(o[0..am_progress_text(w[0..704], o[0..40])], "Checking 1 of 5");
     am_batch_after(w[0..704], k, AM_S_AUTH, 0, 100);
     // an invalid key does not stop independent keys
-    k = am_batch_next(w[0..704]);
+    k = am_batch_next(w[0..704], 0);
     assert k == 1;
     // a rate limit pauses the provider and ends the batch: no next key, the rest stay not checked
     am_batch_after(w[0..704], k, AM_S_RATE, 30, 100);
     assert w[AM_W_BATCH] == AM_NONE;
     assert w[AM_W_BSTOP] == AM_MSG_RATE_STOP;
-    assert am_batch_next(w[0..704]) == AM_NONE;
+    assert am_batch_next(w[0..704], 0) == AM_NONE;
     assert am_can_start(w[0..704], AM_NV, 129) == false;
     assert am_can_start(w[0..704], AM_NV, 130);
     assert am_can_start(w[0..704], AM_ZA, 100);
     assert am_slot_state(w[0..704], AM_NV, 3) == AM_S_NOT_CHECKED;
     // no Retry-After: the default pause
-    am_batch_begin(w[0..704], AM_ZA);
+    am_batch_begin(w[0..704], AM_ZA, 0);
     w[AM_W_STORED + 1] = am_t_low(2);
     w[AM_W_BTOTAL] = 2;
     am_batch_after(w[0..704], 0, AM_S_RATE, 0, 1000);
     assert w[AM_W_PAUSE + 1] == 1000 + AM_RATE_PAUSE_S;
     // Stop: the in-flight slot is cancelled, the batch ends, the worker's pid stays held for its reap (never signalled)
-    am_batch_begin(w[0..704], AM_NV);
+    am_batch_begin(w[0..704], AM_NV, 0);
     w[AM_W_PAUSE] = 0;
-    k = am_batch_next(w[0..704]);
+    k = am_batch_next(w[0..704], 0);
     assert am_request_begin(w[0..704], AM_NV, k, 2000) > 0;
     w[AM_W_PID] = 555;
     assert am_stop(w[0..704], 2100) == 555;
     assert w[AM_W_BATCH] == AM_NONE and am_busy(w[0..704]) == false;
     assert w[AM_W_REAP] == 555;
-    assert am_batch_next(w[0..704]) == AM_NONE;
+    assert am_batch_next(w[0..704], 0) == AM_NONE;
     // a batch that reaches its end finishes
-    am_batch_begin(w[0..704], AM_NV);
+    am_batch_begin(w[0..704], AM_NV, 0);
     w[AM_W_BNEXT] = 5;
-    assert am_batch_next(w[0..704]) == AM_NONE and w[AM_W_BSTOP] == AM_MSG_DONE;
+    assert am_batch_next(w[0..704], 0) == AM_NONE and w[AM_W_BSTOP] == AM_MSG_DONE;
 }
 
 test an_unreadable_retry_after_holds_the_provider_until_the_person_resumes {
@@ -2526,12 +2601,12 @@ test an_unreadable_retry_after_holds_the_provider_until_the_person_resumes {
     var b : [2864]u8 = undefined;
     am_t_state(w[0..704], b[0..2864]);
     w[AM_W_STORED] = am_t_low(3);
-    am_batch_begin(w[0..704], AM_NV);
-    const k : u32 = am_batch_next(w[0..704]);
+    am_batch_begin(w[0..704], AM_NV, 0);
+    const k : u32 = am_batch_next(w[0..704], 0);
     assert am_t_result(w[0..704], AM_NV, k, AM_S_RATE, 1000);
     am_batch_after(w[0..704], k, AM_S_RATE, AM_RETRY_MANUAL, 100);
     // never a guessed shorter pause: held until Resume, even ten days later; no next key
-    assert am_held(w[0..704], AM_NV) and am_batch_next(w[0..704]) == AM_NONE;
+    assert am_held(w[0..704], AM_NV) and am_batch_next(w[0..704], 0) == AM_NONE;
     assert am_can_start(w[0..704], AM_NV, 100 + 10 * 86400) == false;
     assert am_can_start(w[0..704], AM_ZA, 100);
     am_resume(w[0..704], AM_NV);
@@ -2546,6 +2621,106 @@ test an_unreadable_retry_after_holds_the_provider_until_the_person_resumes {
     var f : [6]u64 = [0, 0, 0, 0, 0, 0];
     assert am_wline_parse(o[0..n], f[0..6]) and f[5] == AM_RETRY_MANUAL;
     assert am_wline_parse("T27AC1 7 9 0 6 429 86402\n", f[0..6]) == false;
+}
+
+/// Write result `s` with HTTP `http` for slot k of provider m at now_ms, as a worker line would.
+fn am_t_result_http(w: []u64, m: u32, k: u32, http: u32, now_ms: u64) -> bool {
+    const req : u64 = am_request_begin(w, m, k, now_ms);
+    w[AM_W_PID] = 4242;
+    var f : [6]u64 = [0, 0, 0, 0, 0, 0];
+    f[0] = req;
+    f[1] = @as(u64, am_provider(m));
+    f[2] = @as(u64, k);
+    f[3] = @as(u64, am_classify(http, AM_J_BAD));
+    f[4] = @as(u64, http);
+    return am_result_apply(w, f[0..6], now_ms) == AM_R_APPLIED;
+}
+
+test an_authorization_refusal_is_not_asked_again_for_a_day {
+    // 401 and 403: a day's hold, whatever the failure count; 500, 502 and a timeout: a backoff with a ceiling
+    assert am_auth_refused(401) and am_auth_refused(403);
+    assert am_auth_refused(404) == false and am_auth_refused(429) == false and am_auth_refused(500) == false and am_auth_refused(0) == false;
+    assert am_recheck_wait_s(AM_S_AUTH, 401, 1) == AM_AUTH_HOLD_S and am_recheck_wait_s(AM_S_DENIED, 403, 9) == AM_AUTH_HOLD_S;
+    assert am_recheck_due(AM_S_AUTH, 401, 1, 1000, 1000 + 86399999) == false;
+    assert am_recheck_due(AM_S_DENIED, 403, 1, 1000, 1000 + 60000) == false;
+    assert am_recheck_due(AM_S_AUTH, 401, 1, 1000, 1000 + 86400000);
+    // a clock that went back keeps the hold
+    assert am_recheck_due(AM_S_AUTH, 401, 1, 5000, 4000) == false;
+    // a 404 or 422 "denied" (model unavailable) is not an authorization refusal: no hold
+    assert am_recheck_wait_s(am_classify(404, AM_J_BAD), 404, 1) == 0;
+    // server error and timeout: 60, 120, 240 ... capped at an hour
+    assert am_classify(500, AM_J_BAD) == AM_S_SERVICE and am_classify(0, AM_J_BAD) == AM_S_NETWORK;
+    assert am_recheck_wait_s(AM_S_SERVICE, 500, 1) == 60 and am_recheck_wait_s(AM_S_SERVICE, 500, 2) == 120;
+    assert am_recheck_wait_s(AM_S_NETWORK, 0, 3) == 240 and am_recheck_wait_s(AM_S_NETWORK, 0, 0) == 60;
+    assert am_recheck_wait_s(AM_S_NETWORK, 0, 7) == AM_NET_BACKOFF_CAP_S and am_recheck_wait_s(AM_S_NETWORK, 0, 4000000000) == AM_NET_BACKOFF_CAP_S;
+    assert am_recheck_due(AM_S_SERVICE, 500, 1, 1000, 1000 + 59999) == false and am_recheck_due(AM_S_SERVICE, 500, 1, 1000, 1000 + 60000);
+    assert am_recheck_due(AM_S_NETWORK, 0, 1, 1000, 1000 + 60000);
+    // a working key and a never-checked one are always due
+    assert am_recheck_due(AM_S_WORKING, 200, 1, 1000, 1001) and am_recheck_due(AM_S_NOT_CHECKED, 0, 1, 0, 0);
+    var o : [64]u8 = undefined;
+    assert same_bytes(o[0..am_dead_text(401, o[0..64])], "Key invalid (401): replace it. Not re-checked for 24 h.");
+}
+
+test check_all_skips_a_refused_key_until_the_day_is_over_or_the_key_changes {
+    var w : [704]u64 = undefined;
+    var b : [2864]u8 = undefined;
+    am_t_state(w[0..704], b[0..2864]);
+    w[AM_W_STORED] = am_t_low(4);
+    w[AM_W_LOADED] = 1;
+    const t0 : u64 = 1000000;
+    // slot 0 answered 401, slot 1 403, slot 2 500, slot 3 a timeout (no answer)
+    assert am_t_result_http(w[0..704], AM_NV, 0, 401, t0);
+    assert am_t_result_http(w[0..704], AM_NV, 1, 403, t0);
+    assert am_t_result_http(w[0..704], AM_NV, 2, 500, t0);
+    assert am_t_result_http(w[0..704], AM_NV, 3, 0, t0);
+    assert am_slot_dead(w[0..704], AM_NV, 0, t0 + 120000) and am_slot_dead(w[0..704], AM_NV, 1, t0 + 120000);
+    assert am_slot_dead(w[0..704], AM_NV, 2, t0 + 120000) == false and am_slot_dead(w[0..704], AM_NV, 3, t0 + 120000) == false;
+    // two minutes later "check all": the 401 and 403 keys keep their verdicts, only 500 and the timeout are asked
+    am_batch_begin(w[0..704], AM_NV, t0 + 120000);
+    assert w[AM_W_BTOTAL] == 2;
+    assert am_slot_state(w[0..704], AM_NV, 0) == AM_S_AUTH and am_slot_http(w[0..704], AM_NV, 0) == 401;
+    assert am_slot_state(w[0..704], AM_NV, 1) == AM_S_DENIED;
+    var k : u32 = am_batch_next(w[0..704], t0 + 120000);
+    assert k == 2;
+    am_batch_after(w[0..704], k, AM_S_SERVICE, 0, (t0 + 120000) / 1000);
+    k = am_batch_next(w[0..704], t0 + 120000);
+    assert k == 3;
+    am_batch_after(w[0..704], k, AM_S_NETWORK, 0, (t0 + 120000) / 1000);
+    assert am_batch_next(w[0..704], t0 + 120000) == AM_NONE and w[AM_W_BSTOP] == AM_MSG_DONE;
+    // the key of slot 0 is replaced: its counter resets, the next check all asks it
+    am_slot_changed(w[0..704], AM_NV, 0, true);
+    assert am_slot_dead(w[0..704], AM_NV, 0, t0 + 180000) == false;
+    am_batch_begin(w[0..704], AM_NV, t0 + 180000);
+    assert w[AM_W_BTOTAL] == 3 and am_batch_next(w[0..704], t0 + 180000) == 0;
+    am_end_batch(w[0..704], AM_NV, AM_MSG_STOPPED);
+    // a day after the 403: one more attempt (it is due again), and a new 403 holds it for another day
+    const t1 : u64 = t0 + 86400000;
+    assert am_slot_dead(w[0..704], AM_NV, 1, t1) == false;
+    am_batch_begin(w[0..704], AM_NV, t1);
+    assert am_batch_next(w[0..704], t1) == 0;
+    w[AM_W_BNEXT] = 1;
+    assert am_batch_next(w[0..704], t1) == 1;
+    am_end_batch(w[0..704], AM_NV, AM_MSG_STOPPED);
+    assert am_t_result_http(w[0..704], AM_NV, 1, 403, t1 + 1000);
+    assert am_slot_dead(w[0..704], AM_NV, 1, t1 + 2000);
+}
+
+test check_all_over_only_refused_keys_sends_nothing {
+    var w : [704]u64 = undefined;
+    var b : [2864]u8 = undefined;
+    am_t_state(w[0..704], b[0..2864]);
+    w[AM_W_STORED + 1] = am_t_low(2);
+    w[AM_W_LOADED + 1] = 1;
+    assert am_t_result_http(w[0..704], AM_ZA, 0, 401, 5000);
+    assert am_t_result_http(w[0..704], AM_ZA, 1, 401, 5000);
+    am_batch_begin(w[0..704], AM_ZA, 125000);
+    assert w[AM_W_BTOTAL] == 0;
+    assert am_batch_next(w[0..704], 125000) == AM_NONE;
+    assert w[AM_W_BATCH] == AM_NONE and am_bstop_for(w[0..704], AM_ZA) == AM_MSG_ALL_DEAD;
+    assert same_bytes(am_msg_text(AM_MSG_ALL_DEAD), "Every key was refused (401/403) within 24 h: replace the keys.");
+    // a model change moves every identity: the keys are asked again on the new model
+    assert am_set_model(w[0..704], b[0..2864], AM_ZA, "glm-4.5-flash") == AM_MSG_SAVED;
+    assert am_slot_dead(w[0..704], AM_ZA, 0, 126000) == false;
 }
 
 test the_active_key_is_selected_or_deterministic_and_a_missing_one_blocks {
@@ -2761,16 +2936,16 @@ test a_new_check_all_resets_its_keys_so_stop_or_429_cannot_keep_an_old_green {
     am_counts(w[0..704], AM_NV, c[0..7]);
     assert am_all_green(c[0..7]) and am_last_time(w[0..704], AM_NV) == 1000;
     // a new run: every key it covers reads "not checked" and the old check time is gone
-    am_batch_begin(w[0..704], AM_NV);
+    am_batch_begin(w[0..704], AM_NV, 0);
     am_counts(w[0..704], AM_NV, c[0..7]);
     assert c[1] == 0 and c[2] == 4 and am_all_green(c[0..7]) == false;
     assert am_last_time(w[0..704], AM_NV) == 0;
     // first response, then Stop during the second
-    k = am_batch_next(w[0..704]);
+    k = am_batch_next(w[0..704], 0);
     assert k == 0;
     assert am_t_result(w[0..704], AM_NV, k, AM_S_WORKING, 2000);
     am_batch_after(w[0..704], k, AM_S_WORKING, 0, 2);
-    k = am_batch_next(w[0..704]);
+    k = am_batch_next(w[0..704], 0);
     assert k == 1;
     assert am_request_begin(w[0..704], AM_NV, k, 2100) > 0;
     w[AM_W_PID] = 77;
@@ -2781,11 +2956,11 @@ test a_new_check_all_resets_its_keys_so_stop_or_429_cannot_keep_an_old_green {
     assert same_bytes(o[0..am_summary(c[0..7], o[0..64])], "1/4 working, 3 not checked");
     assert am_last_time(w[0..704], AM_NV) == 2000;
     // the same with a rate limit on the first key: no old green survives, the rest stay not checked
-    am_batch_begin(w[0..704], AM_NV);
-    k = am_batch_next(w[0..704]);
+    am_batch_begin(w[0..704], AM_NV, 0);
+    k = am_batch_next(w[0..704], 0);
     assert am_t_result(w[0..704], AM_NV, k, AM_S_RATE, 3000);
     am_batch_after(w[0..704], k, AM_S_RATE, 0, 3);
-    assert am_batch_next(w[0..704]) == AM_NONE;
+    assert am_batch_next(w[0..704], 0) == AM_NONE;
     am_counts(w[0..704], AM_NV, c[0..7]);
     assert c[1] == 0 and c[3] == 1 and c[2] == 3;
 }
@@ -3186,8 +3361,8 @@ test a_stopped_nvidia_check_never_describes_z_ai {
     w[AM_W_STORED] = am_t_low(3);
     w[AM_W_STORED + 1] = am_t_low(2);
     // NVIDIA check all, stopped during its first key
-    am_batch_begin(w[0..704], AM_NV);
-    const k : u32 = am_batch_next(w[0..704]);
+    am_batch_begin(w[0..704], AM_NV, 0);
+    const k : u32 = am_batch_next(w[0..704], 0);
     assert am_request_begin(w[0..704], AM_NV, k, 1000) > 0;
     w[AM_W_PID] = 9;
     assert am_stop(w[0..704], 1100) == 9;
@@ -3211,7 +3386,7 @@ test a_stopped_nvidia_check_never_describes_z_ai {
     assert am_msg_for(w[0..704], AM_NV) == AM_MSG_NONE and am_bstop_for(w[0..704], AM_NV) == AM_MSG_NONE;
     // a batch end belongs to its provider: a Z.ai rate limit is Z.ai's
     am_request_fail(w[0..704], AM_S_NETWORK, 3100);
-    am_batch_begin(w[0..704], AM_ZA);
+    am_batch_begin(w[0..704], AM_ZA, 0);
     am_batch_after(w[0..704], 0, AM_S_RATE, 30, 4);
     assert am_bstop_for(w[0..704], AM_ZA) == AM_MSG_RATE_STOP and am_bstop_for(w[0..704], AM_NV) == AM_MSG_NONE;
 }

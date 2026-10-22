@@ -925,6 +925,9 @@ use t27os::api_manage::am_bstop_for;
 use t27os::api_manage::am_block_reason;
 use t27os::api_manage::am_end_batch;
 use t27os::api_manage::am_ago_compact;
+use t27os::api_manage::am_slot_dead;
+use t27os::api_manage::am_slot_http;
+use t27os::api_manage::am_dead_text;
 use t27os::api_manage::AM_IK_SELECT_ALL;
 use t27os::api_manage::AM_IK_DESELECT;
 use t27os::api_manage::AM_W_INSEL;
@@ -5776,6 +5779,8 @@ fn api_status(w: []const u64, b: []const u8, m: u32, hover: u32, now_s: u64, out
         n = put_bytes(out, n, ": ");
         if (slot_taken(w[AM_W_UNKNOWN + @as(usize, m)], hover)) { return put_bytes(out, n, "Keychain unreadable"); }
         if (slot_taken(w[AM_W_STORED + @as(usize, m)], hover) == false) { return put_bytes(out, n, "empty slot"); }
+        // a key refused with 401/403 is not asked again for a day: say so, with its code, instead of a bare "Rejected"
+        if (am_slot_dead(w, m, hover, now_ms)) { return n + am_dead_text(am_slot_http(w, m, hover), out[n .. out.len]); }
         n = put_bytes(out, n, am_state_text(am_slot_state(w, m, hover)));
         n = put_bytes(out, n, ", ");
         var ab : [48]u8 = undefined;
@@ -6461,7 +6466,7 @@ fn api_tick(w: []u64, b: []u8, exe: []const u8, now_s: u64, open: bool) -> void 
     }
     if (w[AM_W_PID] == 0 and w[AM_W_REAP] == 0 and w[AM_W_BATCH] < @as(u64, AM_PROVIDERS)) {
         const bm : u32 = @as(u32, @intCast(w[AM_W_BATCH]));
-        const k : u32 = am_batch_next(w);
+        const k : u32 = am_batch_next(w, now_s * 1000);
         if (k != AM_NONE) {
             if (api_start(w, b, exe, bm, k, now_s) == false) { am_end_batch(w, bm, AM_MSG_SPAWN); }
         }
@@ -11841,7 +11846,7 @@ pub fn main() -> void {
                             am_say(amw[0..704], am, AM_MSG_PAUSED);
                         } else {
                             // every saved key of this provider on its model, one at a time; api_tick starts the first
-                            am_batch_begin(amw[0..704], am);
+                            am_batch_begin(amw[0..704], am, now * 1000);
                         }
                     } else if (ak == AM_K_STOP) {
                         api_stop(amw[0..704], amb[0..2864], am, now);
