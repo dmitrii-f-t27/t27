@@ -284,6 +284,16 @@ use t27os::call_session::CS_K_GLEAVE_S;
 use t27os::call_session::CS_K_GAUTO;
 use t27os::call_session::CS_K_TONE_AMP;
 use t27os::call_session::cs_set;
+use t27os::call_session::CS_VLAST;
+use t27os::call_session::CS_K_VIDEO;
+use t27os::call_session::CS_V_SERIAL;
+use t27os::call_session::CS_V_SHOWN;
+use t27os::call_session::CS_V_SKIPPED;
+use t27os::call_session::cs_vstat;
+use t27os::call_session::cs_vlen;
+use t27os::call_session::cs_vlive;
+use t27os::call_vid::vid_decode;
+use t27os::call_vid::vid_release_image;
 use t27os::call_session::CS_EV_NONE;
 use t27os::call_session::CS_EV_CALLING;
 use t27os::call_session::CS_EV_RINGING;
@@ -8989,6 +8999,17 @@ pub const CL_STATS : usize = 120;
 /// Not drawn: 1 when T27OS_CALL_AUTOTEST is set (test aid, not product behavior): an incoming call is answered 2 s after
 /// it rings and the code is confirmed as matching 2 s after it appears. Off by default.
 pub const CL_AUTO : usize = 121;
+/// Video (owner, 2026-10-22), drawn: 1 while a video frame arrived within the last second, the serial of the picture
+/// held (the session's CS_V_SERIAL), the frames shown and skipped so far, and the decoded CGImage of the last
+/// complete frame (two u32, low then high; 0 = none). The window decodes a new picture whenever the serial changes.
+/// Not drawn: 1 when T27OS_CALL_VIDEO is set, the session sends the test video of call_vid.t27 (off by default).
+pub const CL_VLIVE : usize = 124;
+pub const CL_VSEND : usize = 125;
+pub const CL_VSER : usize = 128;
+pub const CL_VSHOWN : usize = 132;
+pub const CL_VSKIP : usize = 136;
+pub const CL_VIMG : usize = 144;
+pub const CL_VIMG_END : usize = 152;
 pub const CLW_AUTO_T : usize = 9;
 /// The window's own call clock (main's [10]u64): when ACTIVE began, when the last poll returned, the longest gap from
 /// the end of one poll to the start of the next while ACTIVE, the state the last snapshot saw, the system activity
@@ -9111,6 +9132,8 @@ pub fn cl_boot(cl: []u8, s: []u8) -> void {
     if (cl_env("T27OS_CALL_STATS", e[0..32]) > 0) { cl[CL_STATS] = 1; }
     // test aid, not product behavior: off unless the variable is set
     if (cl_env("T27OS_CALL_AUTOTEST", e[0..32]) > 0) { cl[CL_AUTO] = 1; }
+    // video: the test generator (call_vid.t27) until the camera is allowed; off unless the variable is set
+    if (cl_env("T27OS_CALL_VIDEO", e[0..32]) > 0) { cl[CL_VSEND] = 1; }
     n = cl_env("T27OS_CALL_AUDIO", e[0..32]);
     if (n == 4 and e[0] == 116 and e[1] == 101 and e[2] == 115 and e[3] == 116) { audio = CS_AUDIO_TEST; }
     // test aid: T27OS_CALL_AUDIO=tone is a quiet triangle wave that names its sender, mixed by a software speaker
@@ -9129,6 +9152,7 @@ pub fn cl_boot(cl: []u8, s: []u8) -> void {
         // confirm by themselves, like AUTOTEST does for the first), T27OS_CALL_TONE_AMP=<100..32767>
         if (cl[CL_STATS] != 0) { cs_set(s, CS_K_GSTATS, 1); }
         if (cl[CL_AUTO] != 0) { cs_set(s, CS_K_GAUTO, 1); }
+        if (cl[CL_VSEND] != 0) { cs_set(s, CS_K_VIDEO, 1); }
         n = cl_env("T27OS_GROUP_LEAVE_AFTER", e[0..32]);
         if (n > 0) { cs_set(s, CS_K_GLEAVE_S, cl_port_of(e[0..32], n)); }
         n = cl_env("T27OS_CALL_TONE_AMP", e[0..32]);
@@ -9179,6 +9203,51 @@ fn cl_stats_line(cl: []u8, s: []u8, secs: u64) -> void {
     cl_stat_num(" p10=", cl_get32(cl, CL_N10));
     cl_stat_num(" ring_cb=", rt_stat(cl[FE_TONE .. FE_TONE + RT_BLOCK], RT_S_CB));
     sys_write(2, "\n", 1);
+}
+
+/// The decoded picture held in the snapshot, 0 when none.
+pub fn cl_vimg(cl: []const u8) -> u64 {
+    return cl_get32(cl, CL_VIMG) | (cl_get32(cl, CL_VIMG + 4) << 32);
+}
+
+fn cl_vimg_set(cl: []u8, img: u64) -> void {
+    cl_put32(cl, CL_VIMG, img & 4294967295);
+    cl_put32(cl, CL_VIMG + 4, img >> 32);
+}
+
+/// The video of the call: while the call is ACTIVE, a new complete frame is decoded (ImageIO) into a CGImage the panel
+/// draws; the old one is released. When the call is over the picture goes. The counters and the "video on" flag are
+/// copied for the panel; a frame redraws the window (the frame key folds these bytes), at most 10 times a second.
+pub fn cl_video(cl: []u8, s: []u8, now: u64) -> void {
+    const st : u32 = cs_state(s);
+    if (st != CK_ACTIVE) {
+        const old : u64 = cl_vimg(cl);
+        if (old != 0) {
+            vid_release_image(old);
+            cl_vimg_set(cl, 0);
+        }
+        cl[CL_VLIVE] = 0;
+        cl_put32(cl, CL_VSER, 0);
+        cl_put32(cl, CL_VSHOWN, 0);
+        cl_put32(cl, CL_VSKIP, 0);
+        return;
+    }
+    const ser : u64 = cs_vstat(s, CS_V_SERIAL);
+    if (ser != cl_get32(cl, CL_VSER)) {
+        const n : usize = cs_vlen(s);
+        if (n > 0) {
+            const img : u64 = vid_decode(s[CS_VLAST .. CS_VLAST + n]);
+            if (img != 0) {
+                const old : u64 = cl_vimg(cl);
+                if (old != 0) { vid_release_image(old); }
+                cl_vimg_set(cl, img);
+            }
+        }
+        cl_put32(cl, CL_VSER, ser);
+        cl_put32(cl, CL_VSHOWN, cs_vstat(s, CS_V_SHOWN));
+        cl_put32(cl, CL_VSKIP, cs_vstat(s, CS_V_SKIPPED));
+    }
+    if (cs_vlive(s, now)) { cl[CL_VLIVE] = 1; } else { cl[CL_VLIVE] = 0; }
 }
 
 /// Copy the session into the region draw() reads. The counters and the clock change at most once a second, so a call
@@ -9272,6 +9341,7 @@ pub fn cl_tick(cl: []u8, s: []u8, w: []u64) -> bool {
     fe_group_tick(cl, s);
     if (cl[CL_AUTO] != 0) { cl_autotest(cl, s, w, ckh_ms()); }
     cl_ring(cl, s);
+    cl_video(cl, s, ckh_ms());
     cl_snapshot(cl, s, w, ckh_ms());
     // the gap is measured from here: the time inside cs_poll (opening the audio queues once) is the poll's own work
     w[CLW_LAST] = ckh_ms();
@@ -9649,6 +9719,50 @@ fn draw_cl_front(c: u64, kit: [48]u64, sh: f64, mx: f64, my: f64, l: f64, t: f64
     }
 }
 
+/// The video of the call under the counters: a line with the indicator ("VIDEO ON" while frames arrive, "NO VIDEO"
+/// otherwise) and the frames shown / skipped, then the last picture at 4:3 in the width of the panel, as high as the
+/// window leaves room for; a dark box with a word while there is no picture yet.
+fn draw_cl_video(c: u64, kit: [48]u64, x: f64, right: f64, y: f64, sh: f64, cl: []const u8) -> void {
+    var line : [64]u8 = undefined;
+    const live : bool = cl[CL_VLIVE] != 0;
+    draw_cl_dot(c, kit, x, y - 8.0, live);
+    var n : usize = 0;
+    if (live) { n = put_bytes(line[0..64], 0, "VIDEO ON"); } else { n = put_bytes(line[0..64], 0, "NO VIDEO"); }
+    n = put_bytes(line[0..64], n, "   frames ");
+    n = put_dec(line[0..64], n, cl_get32(cl, CL_VSHOWN));
+    n = put_bytes(line[0..64], n, "   skipped ");
+    n = put_dec(line[0..64], n, cl_get32(cl, CL_VSKIP));
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+    draw_fit(c, kit, line[0..64], n, x + 14.0, y, 9.5, WEIGHT_SEMIBOLD, true, right);
+    const top : f64 = y + 10.0;
+    var w : f64 = right - x;
+    var h : f64 = w * 0.75;
+    const room : f64 = sh - top - 16.0;
+    if (room < h) {
+        h = room;
+        w = h * 4.0 / 3.0;
+    }
+    if (h < 24.0) { return; }
+    cg_fill_rgba(c, 0.0, 0.0, 0.0, 0.45);
+    cg_fill_rect(c, x, top, w, h);
+    const img : u64 = cl_vimg(cl);
+    if (img != 0) {
+        cg_save(c);
+        cg_translate(c, x, top + h);
+        cg_scale(c, 1.0, -1.0);
+        cg_draw_image(c, 0.0, 0.0, w, h, img);
+        cg_restore(c);
+    } else {
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+        draw_fit(c, kit, "waiting for video", 17, x + 8.0, top + 0.5 * h, 9.5, 0.0, true, right);
+    }
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LINE_WHITE));
+    cg_fill_rect(c, x, top, w, HAIR);
+    cg_fill_rect(c, x, top + h - HAIR, w, HAIR);
+    cg_fill_rect(c, x, top, HAIR, h);
+    cg_fill_rect(c, x + w - HAIR, top, HAIR, h);
+}
+
 fn draw_call_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, cl: []const u8) -> void {
     const l : f64 = qp_left(sw);
     const t : f64 = WS_TOP;
@@ -9781,6 +9895,7 @@ fn draw_call_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, cl:
         n = put_dec(line[0..96], n, cl_get32(cl, CL_OVER) + cl_get32(cl, CL_TXO));
         draw_fit(c, kit, line[0..96], n, x, t + CV_HINT_Y + 72.0, 9.5, 0.0, true, right);
     }
+    if (view == CV_ACTIVE) { draw_cl_video(c, kit, x, right, t + CV_HINT_Y + 90.0, sh, cl); }
 }
 
 fn draw(c: u64, kit: [48]u64, frame: u32, state: u32, hov: u32, ma: f64, shown: u32, task: u32, space: u32, sp: u32, ss: u64, cur: u32, collapsed: bool, mx: f64, my: f64, z: f64, sw: f64, sh: f64, ws: u32, full: bool, qp: bool, ring: [8]u64, n: u32, now: u64, sug: u32, god: bool, glow: f64, dk: [128]u64, dp: bool, darmed: u32, doff: u32, dgo: u32, dlive: bool, dlabel: u64, tst: []const u32, tcells: []const u32, topen: u32, tcur: bool, kyp: bool, kstored: []const u32, kmask: []const u8, kmlen: []const u32, kst: []const u32, kfail: []const u32, kopen: []const u64, kedit: u32, kbuf: []const u8, klen: u32, karm: u32, kbusy: u32, kemask: u32, kewhy: u32, ktpick: u32, hs: u32, cons: bool, dc: []u64, gal: []const u8, gt: []const u32, evd: u32, evpk: u64, pb: []const u8, sst: []const u32, tg: []const u64, tb: []const u8) -> void {
@@ -11216,7 +11331,7 @@ pub fn main() -> void {
     var clp : bool = false;
     // a call that rang during a tick after the event wait opens the panel at the top of the next pass
     var clring : bool = false;
-    var csv : [272256]u8 = undefined;
+    var csv : [496512]u8 = undefined;
     var clw : [10]u64 = undefined;
     var clz : usize = 0;
     while (clz < 74368) {
@@ -14560,6 +14675,9 @@ test the_call_region_ends_the_text_store_and_draw_reads_only_folded_bytes {
     assert CL_PFP + 10 <= CL_PIP;
     assert CL_CODE + 6 <= CL_PFP;
     assert CL_KEY_N <= CL_CAP;
+    // the video slots stand between the call counters and the friends snapshot, and are folded into the frame key
+    assert CL_AUTO < CL_VLIVE and CL_VSEND < CL_VSER and CL_VSER + 4 <= CL_VSHOWN and CL_VSHOWN + 4 <= CL_VSKIP;
+    assert CL_VSKIP + 4 <= CL_VIMG and CL_VIMG + 8 == CL_VIMG_END and CL_VIMG_END <= 256 and CL_VIMG_END <= CL_KEY_N;
 }
 
 test the_call_pill_stands_between_the_header_cluster_and_the_profile_circle {

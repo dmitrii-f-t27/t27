@@ -56,6 +56,10 @@
 // VERIFY) is a plain 52-byte BYE (seq 0) of the call's session, sent three times; it is accepted only before
 // ACTIVE, so in a running call only a sealed BYE ends it. A plain BYE can be forged by whoever sees the session id:
 // that ends a call that is not yet carrying media, as dropping its packets would; it opens nothing.
+// Video (owner, 2026-10-22): the same sealed channel also carries CK_T_VIDEO frames, the parts of a 320x240 JPEG
+// (call_core: vc_part / vr_take). cs_set(CS_K_VIDEO, 1) makes an ACTIVE one to one call send 10 frames a second: the
+// camera's JPEG while cs_video_feed keeps it fresh, the test generator of call_vid.t27 otherwise. The receiver always
+// assembles; cs_vstat(CS_V_*) counts, cs_vlen / s[CS_VLAST ..] give the last complete JPEG, cs_vlive says "video on".
 // Test identities only (fixed fingerprints in the probe); binding to keysync device keys is the next slice.
 // Behaviour checks, not a security audit.
 module T27osCallSession;
@@ -104,6 +108,30 @@ use t27os::call_core::CK_T_REVEAL;
 use t27os::call_core::CK_T_CONFIRM;
 use t27os::call_core::CK_T_BYE;
 use t27os::call_core::CK_T_MEDIA;
+use t27os::call_core::CK_T_VIDEO;
+use t27os::call_core::VC_JPEG_MAX;
+use t27os::call_core::VC_SRC_CAM;
+use t27os::call_core::VC_PT_MAX;
+use t27os::call_core::vc_parts_for;
+use t27os::call_core::vc_part;
+use t27os::call_core::vc_hash;
+use t27os::call_core::vc_due;
+use t27os::call_core::vc_source;
+use t27os::call_core::vc_live;
+use t27os::call_core::VR_LEN;
+use t27os::call_core::VR_COMPLETE;
+use t27os::call_core::VR_DONE;
+use t27os::call_core::VR_SKIP;
+use t27os::call_core::VR_PARTS;
+use t27os::call_core::VR_REFUSED;
+use t27os::call_core::VR_STALE;
+use t27os::call_core::VR_HASH;
+use t27os::call_core::VR_SIZE;
+use t27os::call_core::VR_AT;
+use t27os::call_core::VR_LAST;
+use t27os::call_core::vr_take;
+use t27os::call_core::vr_get;
+use t27os::call_vid::vid_make;
 use t27os::call_core::GR_PEERS;
 use t27os::call_core::GR_NONE;
 use t27os::call_core::GR_WAITING;
@@ -216,7 +244,17 @@ pub const CS_AUD : usize = 2048;
 pub const CS_GRP : usize = 89728;
 pub const CS_GRP_LEN : usize = 1024;
 pub const CS_GBODY : usize = 768;
-pub const CS_LEN : usize = 90752;
+/// After the group region: the video of a one to one call (owner, 2026-10-22). 1024 bytes of slots (the first VR_LEN
+/// are the receiver's assembly state of call_core, then u64 slots VT_*), then three buffers of CS_VBUF bytes: the JPEG
+/// in assembly, the last complete JPEG (what the window decodes) and the latest camera JPEG handed in by
+/// cs_video_feed. Only link 0 uses them.
+pub const CS_VID : usize = 90752;
+pub const CS_VSLOTS : usize = 1024;
+pub const CS_VBUF : usize = 24576;
+pub const CS_VASM : usize = 91776;
+pub const CS_VLAST : usize = 116352;
+pub const CS_VCAM : usize = 140928;
+pub const CS_LEN : usize = 165504;
 
 /// Slots (u64 LE at CS_SLOTS + 8 k). The first ones are also the window's counters through cs_stat.
 pub const CS_ST_SENT : u32 = 0;
@@ -272,6 +310,12 @@ pub const CS_K_GSTATS : u32 = 46;
 pub const CS_K_GLEAVE_S : u32 = 47;
 pub const CS_K_GAUTO : u32 = 48;
 pub const CS_K_TONE_AMP : u32 = 49;
+/// 1 = send video while a one to one call is ACTIVE (the receiver always accepts it). Off by default.
+pub const CS_K_VIDEO : u32 = 50;
+/// Test aid: the video frame number whose part 1 is sealed but not sent (a lost datagram); 0 = none.
+pub const CS_K_VDROP : u32 = 51;
+/// Test aid: stop after this many video frames in a call (0 = no limit).
+pub const CS_K_VLIMIT : u32 = 52;
 
 pub const CS_AUDIO_DEV : u32 = 1;
 pub const CS_AUDIO_TEST : u32 = 2;
@@ -650,8 +694,10 @@ pub fn cs_set(s: []u8, k: u32, v: u64) -> bool {
         if (v != 0 and v < cs_g(s, CS_K_JB_MAX)) { ok = true; }
     } else if (k == CS_K_JB_MAX) {
         if (v > cs_g(s, CS_K_JB_TARGET) and v + CBP_F_TX < CBP_F_JB) { ok = true; }
-    } else if (k == CS_K_GSTATS or k == CS_K_GAUTO) {
+    } else if (k == CS_K_GSTATS or k == CS_K_GAUTO or k == CS_K_VIDEO) {
         if (v <= 1) { ok = true; }
+    } else if (k == CS_K_VDROP or k == CS_K_VLIMIT) {
+        if (v <= 4294967295) { ok = true; }
     } else if (k == CS_K_GLEAVE_S) {
         if (v <= 3600) { ok = true; }
     } else if (k == CS_K_TONE_AMP) {
@@ -675,6 +721,7 @@ fn cs_fresh(s: []u8) -> void {
     ck_wipe(s[CS_AUD..CS_GRP]);
     ck_wipe(s[CS_GRP..CS_GRP + 16 * 8]);
     ck_wipe(s[CS_GRP + CS_GBODY..CS_GRP + CS_GRP_LEN]);
+    ck_wipe(s[CS_VID..CS_VID + CS_VSLOTS]);
     cs_p(s, CS_CODE_SAID, 0);
     cs_p(s, CS_REASON, 0);
     cs_p(s, CS_N1, 0);
@@ -1158,7 +1205,7 @@ fn cs_on_packet(s: []u8, m: []const u8, from: []const u8) -> void {
         ckh_go(ep, ev);
         return;
     }
-    if (typ == CK_T_MEDIA or typ == CK_T_BYE) {
+    if (typ == CK_T_MEDIA or typ == CK_T_BYE or typ == CK_T_VIDEO) {
         var pt : [1928]u8 = undefined;
         const o : i64 = ckh_open(ep, m, pt[0..1928]);
         if (o == -2) { cs_add(s, CS_ST_REJ_STATE, 1); return; }
@@ -1168,6 +1215,10 @@ fn cs_on_packet(s: []u8, m: []const u8, from: []const u8) -> void {
         if (typ == CK_T_BYE) {
             cs_p(s, CS_REASON, @as(u64, CS_R_PEER_BYE));
             ckh_go(ep, CK_EV_BYE);
+            return;
+        }
+        if (typ == CK_T_VIDEO) {
+            cs_take_video(s, pt[0..@as(usize, @intCast(o))]);
             return;
         }
         cs_take_media(s, pt[0..@as(usize, @intCast(o))]);
@@ -1776,6 +1827,174 @@ fn csg_pump(s: []u8, now: u64) -> void {
     if (nl > 1) { csg_tick(s, now); }
 }
 
+// ---------------------------------------------------------------- video (owner, 2026-10-22)
+
+// A one to one call also carries video: 10 JPEG frames of 320x240 a second, each cut into parts of 1000 bytes, each part
+// sealed as its own CK_T_VIDEO frame (call_core: the part format, vr_take, the assembly). The sender takes the camera's
+// JPEG while cs_video_feed keeps it fresh and the test generator (call_vid) otherwise, so a camera that is not allowed
+// or goes away changes the source and nothing else. The receiver keeps the last complete JPEG for the window.
+// Slots (u64 LE at CS_VID + VR_LEN + 8 k):
+const VT_FRAMES : usize = 0;
+const VT_PARTS : usize = 1;
+const VT_DROPPED : usize = 2;
+const VT_HASH : usize = 3;
+const VT_LAST_MS : usize = 4;
+const VT_GEN : usize = 5;
+const VT_CAM : usize = 6;
+const VT_ERR : usize = 7;
+const VT_SENDERR : usize = 8;
+const VT_CAM_AT : usize = 9;
+const VT_CAM_LEN : usize = 10;
+const VT_LASTLEN : usize = 11;
+const VT_SERIAL : usize = 12;
+const VT_MAKE_MAX : usize = 13;
+const VT_DROPHASH : usize = 14;
+const VT_END : usize = 15;
+
+fn cvg(s: []const u8, k: usize) -> u64 { return get_u64(s, CS_VID + VR_LEN + k * 8); }
+fn cvp(s: []u8, k: usize, v: u64) -> void { put_u64(s, CS_VID + VR_LEN + k * 8, v); }
+
+/// Counters of the video, for the window and the probes (cs_vstat).
+pub const CS_V_SHOWN : u32 = 0;
+pub const CS_V_SKIPPED : u32 = 1;
+pub const CS_V_RXPARTS : u32 = 2;
+pub const CS_V_REFUSED : u32 = 3;
+pub const CS_V_STALE : u32 = 4;
+pub const CS_V_RXHASH : u32 = 5;
+pub const CS_V_LASTAT : u32 = 6;
+pub const CS_V_LASTSIZE : u32 = 7;
+pub const CS_V_LASTFRAME : u32 = 8;
+pub const CS_V_TXFRAMES : u32 = 9;
+pub const CS_V_TXPARTS : u32 = 10;
+pub const CS_V_TXDROPPED : u32 = 11;
+pub const CS_V_TXHASH : u32 = 12;
+pub const CS_V_GEN : u32 = 13;
+pub const CS_V_CAM : u32 = 14;
+pub const CS_V_ERR : u32 = 15;
+pub const CS_V_SENDERR : u32 = 16;
+pub const CS_V_MAKE_MAX : u32 = 17;
+/// Frames shown so far, as the window sees it: it decodes a new picture whenever this number changed.
+pub const CS_V_SERIAL : u32 = 18;
+/// The hash of the frame whose part was left out on purpose (CS_K_VDROP).
+pub const CS_V_DROPHASH : u32 = 19;
+
+pub fn cs_vstat(s: []const u8, k: u32) -> u64 {
+    if (s.len < CS_LEN) { return 0; }
+    const vr : []const u8 = s[CS_VID..CS_VID + VR_LEN];
+    if (k == CS_V_SHOWN) { return vr_get(vr, VR_DONE); }
+    if (k == CS_V_SKIPPED) { return vr_get(vr, VR_SKIP); }
+    if (k == CS_V_RXPARTS) { return vr_get(vr, VR_PARTS); }
+    if (k == CS_V_REFUSED) { return vr_get(vr, VR_REFUSED); }
+    if (k == CS_V_STALE) { return vr_get(vr, VR_STALE); }
+    if (k == CS_V_RXHASH) { return vr_get(vr, VR_HASH); }
+    if (k == CS_V_LASTAT) { return vr_get(vr, VR_AT); }
+    if (k == CS_V_LASTSIZE) { return vr_get(vr, VR_SIZE); }
+    if (k == CS_V_LASTFRAME) { return vr_get(vr, VR_LAST); }
+    if (k == CS_V_TXFRAMES) { return cvg(s, VT_FRAMES); }
+    if (k == CS_V_TXPARTS) { return cvg(s, VT_PARTS); }
+    if (k == CS_V_TXDROPPED) { return cvg(s, VT_DROPPED); }
+    if (k == CS_V_TXHASH) { return cvg(s, VT_HASH); }
+    if (k == CS_V_GEN) { return cvg(s, VT_GEN); }
+    if (k == CS_V_CAM) { return cvg(s, VT_CAM); }
+    if (k == CS_V_ERR) { return cvg(s, VT_ERR); }
+    if (k == CS_V_SENDERR) { return cvg(s, VT_SENDERR); }
+    if (k == CS_V_MAKE_MAX) { return cvg(s, VT_MAKE_MAX); }
+    if (k == CS_V_SERIAL) { return cvg(s, VT_SERIAL); }
+    if (k == CS_V_DROPHASH) { return cvg(s, VT_DROPHASH); }
+    return 0;
+}
+
+/// The length of the last complete JPEG: it stands at s[CS_VLAST .. CS_VLAST + n]. 0 before the first one.
+pub fn cs_vlen(s: []const u8) -> usize {
+    if (s.len < CS_LEN) { return 0; }
+    return @as(usize, @intCast(cvg(s, VT_LASTLEN)));
+}
+
+/// A frame completed within the last second.
+pub fn cs_vlive(s: []const u8, now: u64) -> bool {
+    if (s.len < CS_LEN) { return false; }
+    return vc_live(now, vr_get(s[CS_VID..CS_VID + VR_LEN], VR_AT));
+}
+
+/// Hand in the camera's latest JPEG (320x240, from SOI). From now on, for half a second, the sender sends it instead
+/// of the test picture; call it again with each new camera frame, from the thread that polls. False for anything that
+/// is not a JPEG of 1..VC_JPEG_MAX bytes.
+pub fn cs_video_feed(s: []u8, jpeg: []const u8) -> bool {
+    if (!cs_live(s) or jpeg.len < 4 or jpeg.len > VC_JPEG_MAX or jpeg[0] != 255 or jpeg[1] != 216) { return false; }
+    ck_put(s[CS_VCAM..CS_VCAM + jpeg.len], 0, jpeg);
+    cvp(s, VT_CAM_LEN, @as(u64, jpeg.len));
+    cvp(s, VT_CAM_AT, ckh_ms());
+    return true;
+}
+
+/// One opened video part: assemble; a complete frame is copied to the "last" buffer for the window.
+fn cs_take_video(s: []u8, pt: []const u8) -> void {
+    const r : u32 = vr_take(s[CS_VID..CS_VID + VR_LEN], s[CS_VASM..CS_VASM + CS_VBUF], pt, ckh_ms());
+    if (r != VR_COMPLETE) { return; }
+    const n : usize = @as(usize, @intCast(vr_get(s[CS_VID..CS_VID + VR_LEN], VR_SIZE)));
+    var i : usize = 0;
+    while (i < n) {
+        s[CS_VLAST + i] = s[CS_VASM + i];
+        i = i + 1;
+    }
+    cvp(s, VT_LASTLEN, @as(u64, n));
+    cvp(s, VT_SERIAL, cvg(s, VT_SERIAL) + 1);
+}
+
+/// Every 100 ms of an ACTIVE one to one call with video on: make or take a frame, cut it, seal every part, send it.
+fn cs_vtick(s: []u8, now: u64) -> void {
+    if (cs_g(s, CS_K_VIDEO) == 0 or ckh_state(s[0..EP_LEN]) != CK_ACTIVE or cs_n_active(s) != 1) { return; }
+    if (!vc_due(now, cvg(s, VT_LAST_MS))) { return; }
+    cvp(s, VT_LAST_MS, now);
+    const f : u64 = cvg(s, VT_FRAMES) + 1;
+    const lim : u64 = cs_g(s, CS_K_VLIMIT);
+    if (lim != 0 and f > lim) { return; }
+    var jpeg : [24000]u8 = undefined;
+    var n : usize = 0;
+    if (vc_source(now, cvg(s, VT_CAM_AT)) == VC_SRC_CAM) {
+        n = @as(usize, @intCast(cvg(s, VT_CAM_LEN)));
+        if (n > VC_JPEG_MAX) { n = 0; }
+        var i : usize = 0;
+        while (i < n) {
+            jpeg[i] = s[CS_VCAM + i];
+            i = i + 1;
+        }
+        if (n > 0) { cvp(s, VT_CAM, cvg(s, VT_CAM) + 1); }
+    } else {
+        n = vid_make(f, jpeg[0..24000]);
+        if (n > 0) { cvp(s, VT_GEN, cvg(s, VT_GEN) + 1); }
+    }
+    const np : usize = vc_parts_for(n);
+    if (np == 0) {
+        cvp(s, VT_ERR, cvg(s, VT_ERR) + 1);
+        return;
+    }
+    cvp(s, VT_FRAMES, f);
+    const hv : u64 = vc_hash(jpeg[0..n]);
+    cvp(s, VT_HASH, cvg(s, VT_HASH) +% hv);
+    const drop : u64 = cs_g(s, CS_K_VDROP);
+    if (drop != 0 and f == drop) { cvp(s, VT_DROPHASH, hv); }
+    var k : usize = 0;
+    while (k < np) {
+        var pt : [1012]u8 = undefined;
+        var fr : [1080]u8 = undefined;
+        const pn : usize = vc_part(pt[0..1012], f, jpeg[0..n], k);
+        const m : usize = ckh_seal(s[0..EP_LEN], CK_T_VIDEO, pt[0..pn], fr[0..1080]);
+        if (pn == 0 or m == 0) {
+            cvp(s, VT_ERR, cvg(s, VT_ERR) + 1);
+        } else if (drop != 0 and f == drop and k == 1) {
+            cvp(s, VT_DROPPED, cvg(s, VT_DROPPED) + 1);
+        } else if (cs_send(s, fr[0..m])) {
+            cvp(s, VT_PARTS, cvg(s, VT_PARTS) + 1);
+        } else {
+            cvp(s, VT_SENDERR, cvg(s, VT_SENDERR) + 1);
+        }
+        k = k + 1;
+    }
+    const took : u64 = ckh_ms() - now;
+    if (took > cvg(s, VT_MAKE_MAX)) { cvp(s, VT_MAKE_MAX, took); }
+}
+
 // ---------------------------------------------------------------- the poll
 
 /// Which link of a window slice a datagram belongs to. A one to one session, and any window with no group open, has
@@ -1852,6 +2071,7 @@ pub fn cs_poll(s: []u8) -> u32 {
         j = j + 1;
     }
     csg_pump(s, now);
+    cs_vtick(s, now);
     j = 1;
     while (j < nl) {
         cs_sync(s[j * CS_LEN..(j + 1) * CS_LEN]);
@@ -1871,7 +2091,12 @@ test the_block_holds_its_parts_without_overlap {
     assert CS_PADDR + 16 <= CS_EVQ;
     assert CS_EVQ + 16 <= CS_AUD;
     assert CS_AUD + CBP_F_BYTES == CS_GRP;
-    assert CS_GRP + CS_GRP_LEN == CS_LEN;
+    assert CS_GRP + CS_GRP_LEN == CS_VID;
+    assert CS_VID + CS_VSLOTS == CS_VASM;
+    assert CS_VASM + CS_VBUF == CS_VLAST and CS_VLAST + CS_VBUF == CS_VCAM and CS_VCAM + CS_VBUF == CS_LEN;
+    assert CS_VBUF >= VC_JPEG_MAX;
+    assert VR_LEN + VT_END * 8 <= CS_VSLOTS;
+    assert CS_K_VDROP < 64;
     assert CS_GRP + CS_GBODY + GR_LIST_MAX <= CS_GRP + CS_GRP_LEN;
     assert G_MEM + 3 * 3 <= 96;
     assert 96 * 8 <= CS_GBODY;
@@ -1888,6 +2113,16 @@ test a_sealed_media_frame_is_header_packet_tag_and_fits_a_datagram {
     assert cs_pkt_index(pkt[0..1928]) == 70000;
     assert cs_pkt_head(pkt[0..1928], 0, false) == 968;
     assert pkt[6] == 0 and cs_pkt_index(pkt[0..1928]) == 0;
+}
+
+test a_sealed_video_part_fits_a_datagram_and_the_video_tunables_are_in_the_table {
+    assert CK_HDR + VC_PT_MAX + CK_TAG == 1080;
+    assert 1080 < CS_SEALED;
+    assert vc_parts_for(VC_JPEG_MAX) * 1000 >= VC_JPEG_MAX;
+    assert CS_K_VIDEO > CS_K_TONE_AMP and CS_K_VLIMIT < 64;
+    assert VT_DROPHASH < VT_END;
+    // the window's receive buffer (2048) holds a sealed audio frame (1996) and so a video part (1080)
+    assert CS_SEALED <= 2048;
 }
 
 test every_state_a_window_must_draw_has_one_event {
@@ -2014,10 +2249,10 @@ test two_members_of_three_never_add_up_past_the_ceiling {
 test a_window_slice_holds_one_to_three_links_and_a_member_survives_the_table {
     var a : [10]u8 = undefined;
     ck_fill_session(a[0..10], 3);
-    var blk : [90752]u8 = undefined;
+    var blk : [165504]u8 = undefined;
     ck_wipe(blk[0..CS_LEN]);
     assert cs_links(blk[0..CS_LEN]) == 1;
-    assert cs_links(blk[0..90752]) == 1;
+    assert cs_links(blk[0..165504]) == 1;
     // the member table keeps fingerprint, address and port in two words
     gm_put(blk[0..CS_LEN], 0, a[0..10], 3232239368, 47743);
     cgp(blk[0..CS_LEN], gm_slot(0) + 2, 4);

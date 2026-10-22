@@ -107,6 +107,7 @@ use t27os::call_core::CK_T_REVEAL;
 use t27os::call_core::CK_T_CONFIRM;
 use t27os::call_core::CK_T_BYE;
 use t27os::call_core::CK_T_MEDIA;
+use t27os::call_core::CK_T_VIDEO;
 use t27os::call_core::CK_INVITE_LEN;
 use t27os::call_core::CK_ANSWER_LEN;
 use t27os::call_core::CK_REVEAL_LEN;
@@ -435,7 +436,7 @@ fn ckh_seal(ep: []u8, typ: u32, pt: []const u8, out: []u8) -> usize {
     const s : u32 = ckh_state(ep);
     if (typ == CK_T_CONFIRM) {
         if (s != CK_VERIFY or ep[EP_HAVE_CODE] == 0) { return 0; }
-    } else if (typ == CK_T_MEDIA or typ == CK_T_BYE) {
+    } else if (typ == CK_T_MEDIA or typ == CK_T_BYE or typ == CK_T_VIDEO) {
         if (!ck_media_ok(s)) { return 0; }
     } else {
         return 0;
@@ -465,7 +466,7 @@ fn ckh_open(ep: []u8, m: []const u8, out: []u8) -> i64 {
     const s : u32 = ckh_state(ep);
     if (typ == CK_T_CONFIRM) {
         if (s != CK_VERIFY or ep[EP_HAVE_CODE] == 0) { return -2; }
-    } else if (typ == CK_T_MEDIA or typ == CK_T_BYE) {
+    } else if (typ == CK_T_MEDIA or typ == CK_T_BYE or typ == CK_T_VIDEO) {
         if (!ck_media_ok(s)) { return -2; }
     } else {
         return -1;

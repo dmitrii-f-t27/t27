@@ -583,6 +583,206 @@ pub fn gr_list_port(b: []const u8, n: usize) -> u64 {
     return (@as(u64, b[at + 14]) << 8) | @as(u64, b[at + 15]);
 }
 
+// ---------------------------------------------------------------- video (owner, 2026-10-22)
+
+// A video frame is one JPEG of 320x240 (7-8 KB) cut into parts of at most VC_PART (1000) bytes. Every part is its own
+// sealed frame of type CK_T_VIDEO (33) on the call's UDP socket, with the same header, the same AES-128-GCM key per
+// direction and the same replay window as audio. The plaintext of a part is VC_HDR (12) bytes then the cut:
+//   frame u32 LE (the video sequence, 1, 2, 3 ..), part u16 LE (0 ..), parts u16 LE (how many in this frame),
+//   total u32 LE (the JPEG length), then the cut: bytes part*1000 .. min(total, part*1000 + 1000) of the JPEG.
+// A sealed part is 52 + 12 + 1000 + 16 = 1080 bytes at most. The receiver keeps ONE frame in assembly: a part of a
+// newer frame drops the half-built older one at once, a part of an older frame is stale, and a frame is shown only
+// when every part is there and the length adds up. A lost part therefore skips the whole frame (the picture is never
+// torn) and the stream goes on with the next one. There is no retransmission: 10 frames a second, the next one is
+// 100 ms away.
+
+pub const CK_T_VIDEO : u32 = 33;
+pub const VC_PART : usize = 1000;
+pub const VC_HDR : usize = 12;
+pub const VC_PT_MAX : usize = 1012;
+pub const VC_JPEG_MAX : usize = 24000;
+pub const VC_PARTS_MAX : usize = 24;
+pub const VC_W : u32 = 320;
+pub const VC_H : u32 = 240;
+/// 10 frames a second.
+pub const VC_PERIOD_MS : u64 = 100;
+/// A camera frame older than this is not current: the test generator takes over.
+pub const VC_CAM_FRESH_MS : u64 = 500;
+/// The window shows "video on" while a frame arrived within this time.
+pub const VC_LIVE_MS : u64 = 1000;
+
+pub const VC_SRC_GEN : u32 = 1;
+pub const VC_SRC_CAM : u32 = 2;
+
+/// The parts a JPEG of `total` bytes needs: 0 when it is empty or longer than VC_JPEG_MAX.
+pub fn vc_parts_for(total: usize) -> usize {
+    if (total == 0 or total > VC_JPEG_MAX) { return 0; }
+    return (total + VC_PART - 1) / VC_PART;
+}
+
+/// The length of part `k` of a JPEG of `total` bytes (0 when k is out of range).
+pub fn vc_cut_len(total: usize, k: usize) -> usize {
+    const n : usize = vc_parts_for(total);
+    if (n == 0 or k >= n) { return 0; }
+    if (k + 1 < n) { return VC_PART; }
+    return total - k * VC_PART;
+}
+
+fn vc_put32(b: []u8, at: usize, v: u64) -> void {
+    b[at] = @as(u8, @intCast(v & 255));
+    b[at + 1] = @as(u8, @intCast((v >> 8) & 255));
+    b[at + 2] = @as(u8, @intCast((v >> 16) & 255));
+    b[at + 3] = @as(u8, @intCast((v >> 24) & 255));
+}
+
+fn vc_get32(b: []const u8, at: usize) -> u64 {
+    return @as(u64, b[at]) | (@as(u64, b[at + 1]) << 8) | (@as(u64, b[at + 2]) << 16) | (@as(u64, b[at + 3]) << 24);
+}
+
+fn vc_get16(b: []const u8, at: usize) -> usize {
+    return @as(usize, b[at]) | (@as(usize, b[at + 1]) << 8);
+}
+
+/// The plaintext of part `k` of `jpeg` as frame number `frame` into out: its length, 0 on a bad part or a short out.
+pub fn vc_part(out: []u8, frame: u64, jpeg: []const u8, k: usize) -> usize {
+    const total : usize = jpeg.len;
+    const n : usize = vc_parts_for(total);
+    const len : usize = vc_cut_len(total, k);
+    if (n == 0 or len == 0 or out.len < VC_HDR + len or frame == 0 or frame > 4294967295) { return 0; }
+    vc_put32(out, 0, frame);
+    out[4] = @as(u8, @intCast(k & 255));
+    out[5] = @as(u8, @intCast((k >> 8) & 255));
+    out[6] = @as(u8, @intCast(n & 255));
+    out[7] = @as(u8, @intCast((n >> 8) & 255));
+    vc_put32(out, 8, @as(u64, total));
+    var i : usize = 0;
+    while (i < len) {
+        out[VC_HDR + i] = jpeg[k * VC_PART + i];
+        i = i + 1;
+    }
+    return VC_HDR + len;
+}
+
+/// A part plaintext that is well formed: header, counts and length agree.
+pub fn vc_ok(pt: []const u8) -> bool {
+    if (pt.len < VC_HDR + 1 or pt.len > VC_PT_MAX) { return false; }
+    const total : usize = @as(usize, @intCast(vc_get32(pt, 8)));
+    const n : usize = vc_get16(pt, 6);
+    const k : usize = vc_get16(pt, 4);
+    if (vc_get32(pt, 0) == 0 or n == 0 or n != vc_parts_for(total) or k >= n) { return false; }
+    return pt.len == VC_HDR + vc_cut_len(total, k);
+}
+
+pub fn vc_frame(pt: []const u8) -> u64 { return vc_get32(pt, 0); }
+pub fn vc_index(pt: []const u8) -> usize { return vc_get16(pt, 4); }
+pub fn vc_count(pt: []const u8) -> usize { return vc_get16(pt, 6); }
+pub fn vc_total(pt: []const u8) -> usize { return @as(usize, @intCast(vc_get32(pt, 8))); }
+
+/// A 64-bit hash of a JPEG (shift, add, xor: a check that both sides saw the same bytes, not a MAC).
+pub fn vc_hash(b: []const u8) -> u64 {
+    var h : u64 = 5381;
+    var i : usize = 0;
+    while (i < b.len) {
+        h = ((h << 5) +% h) ^ @as(u64, b[i]);
+        i = i + 1;
+    }
+    return h;
+}
+
+/// The next frame is due when none was made yet or VC_PERIOD_MS passed. One frame per call: a late poll does not burst.
+pub fn vc_due(now: u64, last: u64) -> bool {
+    if (last == 0) { return true; }
+    return now >= last + VC_PERIOD_MS;
+}
+
+/// Where the next frame comes from: the camera when its last frame (at time cam_at, 0 = none) is fresh, else the
+/// test generator. Switches back and forth by availability and never fails.
+pub fn vc_source(now: u64, cam_at: u64) -> u32 {
+    if (cam_at != 0 and now >= cam_at and now - cam_at <= VC_CAM_FRESH_MS) { return VC_SRC_CAM; }
+    return VC_SRC_GEN;
+}
+
+/// "Video on": a frame was completed within VC_LIVE_MS of now.
+pub fn vc_live(now: u64, last_at: u64) -> bool {
+    return last_at != 0 and now >= last_at and now - last_at <= VC_LIVE_MS;
+}
+
+// The assembly state (VR_LEN bytes, u64 LE slots) and the bytes of the frame in assembly are the receiver's.
+pub const VR_LEN : usize = 128;
+pub const VR_CUR : usize = 0;
+pub const VR_MASK : usize = 1;
+pub const VR_TOTAL : usize = 2;
+pub const VR_LAST : usize = 3;
+pub const VR_DONE : usize = 4;
+pub const VR_SKIP : usize = 5;
+pub const VR_PARTS : usize = 6;
+pub const VR_REFUSED : usize = 7;
+pub const VR_STALE : usize = 8;
+pub const VR_HASH : usize = 9;
+pub const VR_SIZE : usize = 10;
+pub const VR_AT : usize = 11;
+
+pub const VR_NO : u32 = 0;
+pub const VR_STORED : u32 = 1;
+pub const VR_COMPLETE : u32 = 2;
+pub const VR_OLD : u32 = 3;
+
+fn vr_g(st: []const u8, k: usize) -> u64 { return get_u64(st, k * 8); }
+fn vr_p(st: []u8, k: usize, v: u64) -> void { put_u64(st, k * 8, v); }
+pub fn vr_get(st: []const u8, k: usize) -> u64 {
+    if (st.len < VR_LEN or k * 8 + 8 > VR_LEN) { return 0; }
+    return vr_g(st, k);
+}
+
+/// Take one opened part. VR_NO a malformed part; VR_STORED kept; VR_OLD a duplicate or a part of a frame that is
+/// already shown or dropped; VR_COMPLETE every part of the frame is in `buf` (buf[0..VR_SIZE]) and it is newer than
+/// the last shown one. The frames between two shown ones are counted as skipped.
+pub fn vr_take(st: []u8, buf: []u8, pt: []const u8, now: u64) -> u32 {
+    if (st.len < VR_LEN or buf.len < VC_JPEG_MAX or !vc_ok(pt)) {
+        if (st.len >= VR_LEN) { vr_p(st, VR_REFUSED, vr_g(st, VR_REFUSED) + 1); }
+        return VR_NO;
+    }
+    const f : u64 = vc_frame(pt);
+    const total : usize = vc_total(pt);
+    const k : usize = vc_index(pt);
+    const n : usize = vc_count(pt);
+    if (f <= vr_g(st, VR_LAST) or (f < vr_g(st, VR_CUR))) {
+        vr_p(st, VR_STALE, vr_g(st, VR_STALE) + 1);
+        return VR_OLD;
+    }
+    if (f > vr_g(st, VR_CUR)) {
+        // a newer frame: whatever was half built is dropped, never shown
+        vr_p(st, VR_CUR, f);
+        vr_p(st, VR_MASK, 0);
+        vr_p(st, VR_TOTAL, @as(u64, total));
+    } else if (vr_g(st, VR_TOTAL) != @as(u64, total)) {
+        vr_p(st, VR_REFUSED, vr_g(st, VR_REFUSED) + 1);
+        return VR_NO;
+    }
+    const bit : u64 = @as(u64, 1) << @as(u64, @intCast(k));
+    if ((vr_g(st, VR_MASK) & bit) != 0) {
+        vr_p(st, VR_STALE, vr_g(st, VR_STALE) + 1);
+        return VR_OLD;
+    }
+    var i : usize = 0;
+    while (i < pt.len - VC_HDR) {
+        buf[k * VC_PART + i] = pt[VC_HDR + i];
+        i = i + 1;
+    }
+    vr_p(st, VR_MASK, vr_g(st, VR_MASK) | bit);
+    vr_p(st, VR_PARTS, vr_g(st, VR_PARTS) + 1);
+    const all : u64 = (@as(u64, 1) << @as(u64, @intCast(n))) - 1;
+    if (vr_g(st, VR_MASK) != all) { return VR_STORED; }
+    vr_p(st, VR_SKIP, vr_g(st, VR_SKIP) + (f - vr_g(st, VR_LAST) - 1));
+    vr_p(st, VR_LAST, f);
+    vr_p(st, VR_DONE, vr_g(st, VR_DONE) + 1);
+    vr_p(st, VR_SIZE, @as(u64, total));
+    vr_p(st, VR_AT, now);
+    vr_p(st, VR_HASH, vr_g(st, VR_HASH) +% vc_hash(buf[0..total]));
+    vr_p(st, VR_MASK, 0);
+    return VR_COMPLETE;
+}
+
 // ---------------------------------------------------------------- tests
 
 fn ck_fill(b: []u8, base: u8) -> void {
@@ -1034,4 +1234,216 @@ test the_member_list_round_trips_and_refuses_a_short_or_marked_wrong_body {
     l[4] = 193;
     l[6] = 0;
     assert gr_list_ok(l[0..72]) == false;
+}
+
+fn vc_fake(j: []u8, n: usize, seed: u8) -> void {
+    var i : usize = 0;
+    while (i < n) {
+        j[i] = seed +% @as(u8, @intCast((i * 13 + i / 7) & 255));
+        i = i + 1;
+    }
+}
+
+test a_jpeg_is_cut_in_parts_of_1000_and_the_last_is_what_is_left {
+    assert vc_parts_for(0) == 0;
+    assert vc_parts_for(1) == 1;
+    assert vc_parts_for(1000) == 1;
+    assert vc_parts_for(1001) == 2;
+    assert vc_parts_for(7900) == 8;
+    assert vc_parts_for(VC_JPEG_MAX) == VC_PARTS_MAX;
+    assert vc_parts_for(VC_JPEG_MAX + 1) == 0;
+    assert vc_cut_len(7900, 0) == 1000;
+    assert vc_cut_len(7900, 6) == 1000;
+    assert vc_cut_len(7900, 7) == 900;
+    assert vc_cut_len(7900, 8) == 0;
+    assert vc_cut_len(2000, 1) == 1000;
+    // a sealed part fits a datagram with room to spare
+    assert CK_HDR + VC_PT_MAX + CK_TAG == 1080;
+    assert VC_HDR + VC_PART == VC_PT_MAX;
+}
+
+test a_part_names_its_frame_index_count_and_total_and_reads_back {
+    var j : [7900]u8 = undefined;
+    vc_fake(j[0..7900], 7900, 3);
+    var pt : [1012]u8 = undefined;
+    assert vc_part(pt[0..1012], 77, j[0..7900], 7) == VC_HDR + 900;
+    assert vc_ok(pt[0..VC_HDR + 900]);
+    assert vc_frame(pt[0..VC_HDR + 900]) == 77;
+    assert vc_index(pt[0..VC_HDR + 900]) == 7;
+    assert vc_count(pt[0..VC_HDR + 900]) == 8;
+    assert vc_total(pt[0..VC_HDR + 900]) == 7900;
+    assert pt[VC_HDR] == j[7000];
+    assert pt[VC_HDR + 899] == j[7899];
+    // refusals: part out of range, frame 0, an out too short for the part
+    assert vc_part(pt[0..1012], 77, j[0..7900], 8) == 0;
+    assert vc_part(pt[0..1012], 0, j[0..7900], 0) == 0;
+    assert vc_part(pt[0..100], 77, j[0..7900], 0) == 0;
+}
+
+test a_malformed_part_is_refused {
+    var j : [2500]u8 = undefined;
+    vc_fake(j[0..2500], 2500, 9);
+    var pt : [1012]u8 = undefined;
+    const n : usize = vc_part(pt[0..1012], 5, j[0..2500], 1);
+    assert vc_ok(pt[0..n]);
+    assert vc_ok(pt[0..n - 1]) == false;
+    assert vc_ok(pt[0..VC_HDR]) == false;
+    pt[6] = 4;
+    assert vc_ok(pt[0..n]) == false;
+    pt[6] = 3;
+    pt[4] = 3;
+    assert vc_ok(pt[0..n]) == false;
+    pt[4] = 1;
+    vc_put32(pt[0..1012], 0, 0);
+    assert vc_ok(pt[0..n]) == false;
+    vc_put32(pt[0..1012], 0, 5);
+    vc_put32(pt[0..1012], 8, 30000);
+    assert vc_ok(pt[0..n]) == false;
+}
+
+test every_part_in_any_order_builds_the_same_jpeg_once {
+    var j : [7900]u8 = undefined;
+    vc_fake(j[0..7900], 7900, 11);
+    var st : [128]u8 = undefined;
+    kfill(st[0..128], 0);
+    var buf : [24576]u8 = undefined;
+    var pt : [1012]u8 = undefined;
+    var order : [8]usize = undefined;
+    order[0] = 3;
+    order[1] = 0;
+    order[2] = 7;
+    order[3] = 5;
+    order[4] = 1;
+    order[5] = 6;
+    order[6] = 2;
+    order[7] = 4;
+    var i : usize = 0;
+    var got : u32 = 0;
+    while (i < 8) {
+        const n : usize = vc_part(pt[0..1012], 1, j[0..7900], order[i]);
+        got = vr_take(st[0..128], buf[0..24576], pt[0..n], 1000);
+        if (i < 7) { assert got == VR_STORED; }
+        i = i + 1;
+    }
+    assert got == VR_COMPLETE;
+    assert vr_get(st[0..128], VR_DONE) == 1;
+    assert vr_get(st[0..128], VR_LAST) == 1;
+    assert vr_get(st[0..128], VR_SIZE) == 7900;
+    assert vr_get(st[0..128], VR_SKIP) == 0;
+    assert vr_get(st[0..128], VR_HASH) == vc_hash(j[0..7900]);
+    var same : bool = true;
+    i = 0;
+    while (i < 7900) {
+        if (buf[i] != j[i]) { same = false; }
+        i = i + 1;
+    }
+    assert same;
+    // the same part again is a duplicate of a shown frame
+    const n2 : usize = vc_part(pt[0..1012], 1, j[0..7900], 2);
+    assert vr_take(st[0..128], buf[0..24576], pt[0..n2], 1000) == VR_OLD;
+    assert vr_get(st[0..128], VR_DONE) == 1;
+}
+
+test a_frame_missing_one_part_is_never_shown_and_the_next_one_is {
+    var j1 : [3500]u8 = undefined;
+    var j2 : [3600]u8 = undefined;
+    var j3 : [3700]u8 = undefined;
+    vc_fake(j1[0..3500], 3500, 1);
+    vc_fake(j2[0..3600], 3600, 2);
+    vc_fake(j3[0..3700], 3700, 3);
+    var st : [128]u8 = undefined;
+    kfill(st[0..128], 0);
+    var buf : [24576]u8 = undefined;
+    var pt : [1012]u8 = undefined;
+    var k : usize = 0;
+    var r : u32 = 0;
+    while (k < 4) {
+        const n : usize = vc_part(pt[0..1012], 1, j1[0..3500], k);
+        r = vr_take(st[0..128], buf[0..24576], pt[0..n], 100);
+        k = k + 1;
+    }
+    assert r == VR_COMPLETE;
+    // frame 2 loses part 1
+    k = 0;
+    while (k < 4) {
+        if (k != 1) {
+            const n : usize = vc_part(pt[0..1012], 2, j2[0..3600], k);
+            r = vr_take(st[0..128], buf[0..24576], pt[0..n], 200);
+            assert r == VR_STORED;
+        }
+        k = k + 1;
+    }
+    assert vr_get(st[0..128], VR_DONE) == 1;
+    // frame 3 arrives whole: it replaces the half-built frame 2 and is shown; frame 2 counts as skipped
+    k = 0;
+    while (k < 4) {
+        const n : usize = vc_part(pt[0..1012], 3, j3[0..3700], k);
+        r = vr_take(st[0..128], buf[0..24576], pt[0..n], 300);
+        k = k + 1;
+    }
+    assert r == VR_COMPLETE;
+    assert vr_get(st[0..128], VR_DONE) == 2;
+    assert vr_get(st[0..128], VR_SKIP) == 1;
+    assert vr_get(st[0..128], VR_LAST) == 3;
+    assert vr_get(st[0..128], VR_AT) == 300;
+    assert buf[0] == j3[0] and buf[3699] == j3[3699];
+    // the lost part of frame 2 turns up late: stale, nothing changes
+    const nl : usize = vc_part(pt[0..1012], 2, j2[0..3600], 1);
+    assert vr_take(st[0..128], buf[0..24576], pt[0..nl], 400) == VR_OLD;
+    assert vr_get(st[0..128], VR_DONE) == 2;
+}
+
+test a_frame_that_never_came_is_counted_as_skipped_when_the_next_is_shown {
+    var j : [1500]u8 = undefined;
+    vc_fake(j[0..1500], 1500, 5);
+    var st : [128]u8 = undefined;
+    kfill(st[0..128], 0);
+    var buf : [24576]u8 = undefined;
+    var pt : [1012]u8 = undefined;
+    var f : u64 = 1;
+    while (f <= 10) {
+        if (f != 4 and f != 5) {
+            var k : usize = 0;
+            while (k < 2) {
+                const n : usize = vc_part(pt[0..1012], f, j[0..1500], k);
+                vr_take(st[0..128], buf[0..24576], pt[0..n], f * 100);
+                k = k + 1;
+            }
+        }
+        f = f + 1;
+    }
+    assert vr_get(st[0..128], VR_DONE) == 8;
+    assert vr_get(st[0..128], VR_SKIP) == 2;
+    assert vr_get(st[0..128], VR_LAST) == 10;
+}
+
+test a_part_that_disagrees_about_the_frame_length_is_refused {
+    var j : [2500]u8 = undefined;
+    var j2 : [2600]u8 = undefined;
+    vc_fake(j[0..2500], 2500, 1);
+    vc_fake(j2[0..2600], 2600, 1);
+    var st : [128]u8 = undefined;
+    kfill(st[0..128], 0);
+    var buf : [24576]u8 = undefined;
+    var pt : [1012]u8 = undefined;
+    var n : usize = vc_part(pt[0..1012], 9, j[0..2500], 0);
+    assert vr_take(st[0..128], buf[0..24576], pt[0..n], 1) == VR_STORED;
+    n = vc_part(pt[0..1012], 9, j2[0..2600], 1);
+    assert vr_take(st[0..128], buf[0..24576], pt[0..n], 1) == VR_NO;
+    assert vr_get(st[0..128], VR_REFUSED) == 1;
+    assert vr_take(st[0..100], buf[0..24576], pt[0..n], 1) == VR_NO;
+}
+
+test the_source_is_the_camera_only_while_its_frame_is_fresh {
+    assert vc_source(10000, 0) == VC_SRC_GEN;
+    assert vc_source(10000, 9800) == VC_SRC_CAM;
+    assert vc_source(10000, 9500) == VC_SRC_CAM;
+    assert vc_source(10000, 9499) == VC_SRC_GEN;
+    assert vc_source(10000, 10001) == VC_SRC_GEN;
+    assert vc_due(1000, 0);
+    assert vc_due(1099, 1000) == false;
+    assert vc_due(1100, 1000);
+    assert vc_live(5000, 4500);
+    assert vc_live(5000, 3999) == false;
+    assert vc_live(5000, 0) == false;
 }
