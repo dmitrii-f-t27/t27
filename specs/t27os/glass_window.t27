@@ -710,6 +710,9 @@ use t27os::provider_catalog::PC_COUNT;
 use t27os::provider_catalog::PC_NONE;
 use t27os::provider_catalog::pc_model;
 use t27os::provider_catalog::pc_label;
+use t27os::provider_catalog::pc_note_short;
+use t27os::api_manage::am_model_note;
+use t27os::api_manage::am_model_note_short;
 use t27os::provider_catalog::pc_provider;
 use t27os::provider_catalog::pc_row;
 use t27os::provider_catalog::pc_page_count;
@@ -5646,6 +5649,7 @@ fn draw_provider_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64,
     }
     cg_fill_rgba(c, 1.0, 1.0, 1.0, 0.75);
     var status : str = "Catalog checked 2026-10-21";
+    if (cell == 1) { status = "Catalog updated 2026-10-22"; }
     if (err == 1) { status = "Add a key using KEYS +, then choose a model."; }
     if (err == 2) { status = "OpenCode is not installed. Open KEYS to set up."; }
     if (err == 3) { status = "Close a chat before opening another model."; }
@@ -5786,6 +5790,8 @@ fn api_status(w: []const u64, b: []const u8, m: u32, hover: u32, now_s: u64, out
         n = put_dec(out, n, w[AM_W_PAUSE + @as(usize, m)] - now_s);
         return put_bytes(out, n, " s before checking.");
     }
+    // a model with a dated warning (ordinary GLM-5.3 on NVIDIA) says it whole here while it is selected
+    if (am_model_note(m, am_model(b, m)).len > 0) { return put_bytes(out, 0, am_model_note(m, am_model(b, m))); }
     if (am_catalog_of(m, am_model(b, m)) == PC_NONE) { return put_bytes(out, 0, "Custom ID: availability unverified until checked."); }
     return put_bytes(out, 0, "Check all tests every saved key on this model.");
 }
@@ -5818,6 +5824,13 @@ fn api_draw_overview(c: u64, kit: [48]u64, sw: f64, sh: f64, w: []const u64, b: 
         draw_dot(c, api_dot(cnt[0..7]), x + 10.0 + nw + 10.0, cy + 14.0, 1.0);
         var n : usize = put_bytes(tb[0..128], 0, "Model: ");
         n = n + api_model_name(b, cm, tb[n .. 128]);
+        // a dated warning (ordinary GLM-5.3) rides along with the model it belongs to
+        const ovnote : str = am_model_note_short(cm, am_model(b, cm));
+        if (ovnote.len > 0) {
+            n = put_bytes(tb[0..128], n, " (");
+            n = put_bytes(tb[0..128], n, ovnote);
+            n = put_bytes(tb[0..128], n, ")");
+        }
         cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
         api_text(c, kit, tb[0..n], x + 10.0, cy + 34.0, 9.5, 0.0, false, inner - 20.0);
         n = api_summary(w, cm, tb[0..128]);
@@ -5860,8 +5873,25 @@ fn api_draw_detail(c: u64, kit: [48]u64, sw: f64, sh: f64, w: []const u64, b: []
     api_text(c, kit, tb[0..n], x + 40.0, t + AM_D_MODEL_Y + 15.0, 10.5, WEIGHT_SEMIBOLD, false, bx - x - 48.0);
     api_btn(c, kit, bx, t + AM_D_MODEL_Y, 72.0, AM_BTN_H, "Change", false, true, hk == AM_K_MODEL);
     const id : []const u8 = am_model(b, m);
+    // a dated warning (ordinary GLM-5.3) follows the id on its line: the whole note when it fits beside the id at
+    // its smallest size, else the part that must stay visible; the id itself is never cut (it only shrinks)
+    var dnote : str = am_model_note(m, id);
+    var dnotew : f64 = 0.0;
+    if (dnote.len > 0) {
+        dnotew = bytes_w(kit, dnote, dnote.len, 8.5, WEIGHT_SEMIBOLD, false);
+        if (bytes_w(kit, id, id.len, 7.5, 0.0, true) + 8.0 + dnotew > inner) {
+            dnote = am_model_note_short(m, id);
+            dnotew = bytes_w(kit, dnote, dnote.len, 8.5, WEIGHT_SEMIBOLD, false);
+        }
+    }
+    var didmax : f64 = inner;
+    if (dnote.len > 0) { didmax = inner - dnotew - 8.0; }
     cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
-    draw_bytes(c, kit, id, id.len, x, t + AM_D_ID_Y, api_mono_size(kit, id, inner), 0.0, true);
+    const didw : f64 = draw_bytes(c, kit, id, id.len, x, t + AM_D_ID_Y, api_mono_size(kit, id, didmax), 0.0, true);
+    if (dnote.len > 0) {
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+        api_text(c, kit, dnote, x + didw + 8.0, t + AM_D_ID_Y, 8.5, WEIGHT_SEMIBOLD, false, inner - didw - 8.0);
+    }
     // the active key: the selected one, the first saved one (said so), or why there is none
     cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
     draw_str(c, kit, "Key", x, t + AM_D_KEY_Y + 15.0, 9.0, 0.0);
@@ -6014,7 +6044,8 @@ fn api_draw_models(c: u64, kit: [48]u64, sw: f64, sh: f64, w: []const u64, b: []
     cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
     draw_str(c, kit, "Model", x + 64.0, t + 25.0, 11.5, WEIGHT_SEMIBOLD);
     cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
-    var note : str = "Catalog of 2026-10-21: free endpoints, limits apply";
+    // NVIDIA's list gained ordinary GLM-5.3 on 2026-10-22 (provider_catalog.t27); Z.ai's is unchanged since 2026-10-21
+    var note : str = "Updated 2026-10-22: free endpoints, limits apply";
     if (m == AM_ZA) { note = "Catalog of 2026-10-21: free models, Coding Plan route"; }
     api_text(c, kit, note, x, t + 44.0, 9.0, 0.0, false, inner);
     const per : u32 = am_mrows_fit(t, sh);
@@ -6043,7 +6074,12 @@ fn api_draw_models(c: u64, kit: [48]u64, sw: f64, sh: f64, w: []const u64, b: []
             cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
             api_text(c, kit, pc_label(row), x, ry + 13.0, 10.5, WEIGHT_MEDIUM, false, inner - 84.0);
             cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
-            api_text(c, kit, pc_model(row), x, ry + 25.0, 8.0, 0.0, true, inner - 84.0);
+            const mrw : f64 = api_text(c, kit, pc_model(row), x, ry + 25.0, 8.0, 0.0, true, inner - 84.0);
+            // a dated warning (ordinary GLM-5.3) shows before the model is chosen, after its exact id
+            if (pc_note_short(row).len > 0) {
+                cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+                api_text(c, kit, pc_note_short(row), x + mrw + 6.0, ry + 25.0, 8.0, WEIGHT_SEMIBOLD, false, inner - 84.0 - mrw - 6.0);
+            }
             if (chosen) {
                 cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
                 draw_dot(c, DOT_FILLED, l + QP_W - QP_PAD - 66.0, ry + 11.0, 1.0);
@@ -14000,7 +14036,8 @@ test the_comb_holds_the_agents_with_the_queen_in_the_middle {
         pi = pi + 1;
     }
     assert pc_hit(qp_left(W_PT) + 25.0, WS_TOP + 85.0, W_PT, 1, 0) == 0;
-    assert pc_hit(qp_left(W_PT) + 25.0, WS_TOP + 150.0, W_PT, 2, 0) == 9;
+    // the Z.ai cell's third row is GLM-4.6V-Flash, row 10 since ordinary GLM-5.3 joined NVIDIA's rows
+    assert pc_hit(qp_left(W_PT) + 25.0, WS_TOP + 150.0, W_PT, 2, 0) == 10;
     // A. the Queen is the middle cell of the middle row
     assert AGENT_QUEEN / 3 == 1;
     assert AGENT_QUEEN % 3 == 1;

@@ -40,6 +40,9 @@ use t27os::provider_catalog::PC_COUNT;
 use t27os::provider_catalog::PC_NONE;
 use t27os::provider_catalog::PC_NVIDIA_COUNT;
 use t27os::provider_catalog::pc_model;
+use t27os::provider_catalog::pc_note;
+use t27os::provider_catalog::pc_note_short;
+use t27os::provider_catalog::PC_GLM53;
 use t27os::provider_catalog::pc_drop;
 use t27os::provider_catalog::pc_drop_space;
 use t27os::provider_catalog::pc_set;
@@ -124,6 +127,22 @@ pub fn am_catalog_of(m: u32, id: []const u8) -> u32 {
         i = i + 1;
     }
     return PC_NONE;
+}
+
+/// The dated warning of the model id `id` of provider m (provider_catalog pc_note: ordinary GLM-5.3 on NVIDIA is
+/// deprecated 2026-10-27 and unsupported after 2026-10-28); "" for a model without one. The same exact id typed as
+/// a custom id carries it too: the warning belongs to the model, not to how it was chosen.
+pub fn am_model_note(m: u32, id: []const u8) -> str {
+    const row : u32 = am_catalog_of(m, id);
+    if (row == PC_NONE) { return ""; }
+    return pc_note(row);
+}
+
+/// The part of that warning that must stay visible in a narrow place (pc_note_short).
+pub fn am_model_note_short(m: u32, id: []const u8) -> str {
+    const row : u32 = am_catalog_of(m, id);
+    if (row == PC_NONE) { return ""; }
+    return pc_note_short(row);
 }
 
 // ---------------------------------------------------------------- 2. exact custom model IDs
@@ -1694,7 +1713,7 @@ pub fn am_sb_parse(t: []const u8, b: []u8) -> u32 {
     return got;
 }
 
-/// Is chat i a bound chat: its pin byte is provider_catalog PC_BOUND (above every catalog row, so pc_get reads it
+/// Is chat i a bound chat: its pin byte is provider_catalog PC_BOUND (a byte no catalog row uses, so pc_get reads it
 /// as PC_NONE and no catalog path takes it; pc_drop / pc_drop_space keep it in place) and the table holds its
 /// live binding?
 pub fn am_session_bound(pins: u64, b: []const u8, i: u32) -> bool {
@@ -2177,7 +2196,7 @@ test managed_providers_routes_and_catalog_rows {
     assert same_bytes(am_route(AM_NV), "https://integrate.api.nvidia.com/v1/chat/completions");
     assert same_bytes(am_route(AM_ZA), "https://api.z.ai/api/coding/paas/v4/chat/completions");
     assert am_catalog_count(AM_NV) + am_catalog_count(AM_ZA) == PC_COUNT;
-    assert am_catalog_of(AM_ZA, "glm-4.7-flash") == 7;
+    assert am_catalog_of(AM_ZA, "glm-4.7-flash") == PC_NVIDIA_COUNT;
     assert am_catalog_of(AM_NV, "glm-4.7-flash") == PC_NONE;
     assert am_catalog_of(AM_NV, "meta/muse-glimmer-30b") == 5;
     assert am_catalog_of(AM_NV, "meta/muse-glimmer-30") == PC_NONE;
@@ -3208,6 +3227,59 @@ test the_check_age_is_its_own_short_field_and_the_counts_stay_whole {
     var c : [7]u32 = [11, 0, 10, 1, 0, 0, 0];
     var s : [80]u8 = undefined;
     assert same_bytes(s[0..am_summary(c[0..7], s[0..80])], "0/11 working, 10 not checked, 1 failed");
+}
+
+test ordinary_glm_5_3_routes_binds_and_checks_as_its_own_nvidia_model {
+    var w : [704]u64 = undefined;
+    var b : [2864]u8 = undefined;
+    am_t_state(w[0..704], b[0..2864]);
+    // an NVIDIA catalog row of its own, distinct from Flash, never a Z.ai one; the ranges stay contiguous
+    assert am_catalog_of(AM_NV, "z-ai/glm-5.3") == PC_GLM53;
+    assert am_catalog_of(AM_NV, "z-ai/glm-5.3-flash") == 3;
+    assert am_catalog_of(AM_ZA, "z-ai/glm-5.3") == PC_NONE;
+    assert am_catalog_first(AM_ZA) == PC_NVIDIA_COUNT and am_catalog_count(AM_NV) == PC_NVIDIA_COUNT;
+    // the defaults are untouched: nothing is selected for the person
+    assert same_bytes(am_model(b[0..2864], AM_NV), "nvidia/nemotron-3.5-super-vl-120b-a12b");
+    assert same_bytes(am_model(b[0..2864], AM_ZA), "glm-4.7-flash");
+    // the dated warning belongs to GLM-5.3 only, chosen from the list or typed as the same exact id
+    assert am_model_note(AM_NV, "z-ai/glm-5.3").len > 0 and am_model_note_short(AM_NV, "z-ai/glm-5.3").len > 0;
+    assert am_model_note(AM_NV, "z-ai/glm-5.3-flash").len == 0 and am_model_note_short(AM_NV, "z-ai/glm-5.3-flash").len == 0;
+    assert am_model_note(AM_ZA, "glm-4.7-flash").len == 0 and am_model_note(AM_NV, "vendor/other").len == 0;
+    // Flash -> GLM-5.3: the Flash results stop being current, so no stale green shows under GLM-5.3
+    w[AM_W_STORED] = am_t_low(2);
+    assert am_set_model(w[0..704], b[0..2864], AM_NV, "z-ai/glm-5.3-flash") == AM_MSG_SAVED;
+    assert am_t_result(w[0..704], AM_NV, 0, AM_S_WORKING, 1000);
+    assert am_set_model(w[0..704], b[0..2864], AM_NV, pc_model(PC_GLM53)) == AM_MSG_SAVED;
+    assert am_slot_state(w[0..704], AM_NV, 0) == AM_S_NOT_CHECKED;
+    // the selection persists by its exact id, never by a row index
+    var o : [256]u8 = undefined;
+    const on : usize = am_cfg_emit(w[0..704], b[0..2864], o[0..256]);
+    var w2 : [704]u64 = undefined;
+    var b2 : [2864]u8 = undefined;
+    am_t_state(w2[0..704], b2[0..2864]);
+    assert am_cfg_parse(o[0..on], w2[0..704], b2[0..2864]);
+    assert same_bytes(am_model(b2[0..2864], AM_NV), "z-ai/glm-5.3");
+    // a check sends the exact id to NVIDIA's route
+    var cb : [256]u8 = undefined;
+    assert am_check_body("z-ai/glm-5.3", cb[0..256]) > 24;
+    assert same_bytes(cb[0..24], "{\"model\":\"z-ai/glm-5.3\",");
+    assert same_bytes(am_route(AM_NV), "https://integrate.api.nvidia.com/v1/chat/completions");
+    // a chat bound to it, and an older catalog pin, both run exactly z-ai/glm-5.3 on NVIDIA
+    var t : [64]u8 = undefined;
+    const tn : usize = am_bind_token(AM_NV, 33, "z-ai/glm-5.3", t[0..64]);
+    assert same_bytes(t[0..tn], "n1:34:z-ai/glm-5.3");
+    var f : [5]u64 = [0, 0, 0, 0, 0];
+    assert am_pin_of(t[0..tn], f[0..5]);
+    assert f[0] == P_NVIDIA and f[1] == PR_NVIDIA and f[2] == 33;
+    assert same_bytes(t[@as(usize, @intCast(f[3])) .. @as(usize, @intCast(f[3] + f[4]))], "z-ai/glm-5.3");
+    const ct : str = "nv:z-ai/glm-5.3";
+    assert am_pin_of(ct, f[0..5]);
+    assert f[0] == P_NVIDIA and f[2] == AM_NONE;
+    assert same_bytes(ct[@as(usize, @intCast(f[3])) .. @as(usize, @intCast(f[3] + f[4]))], "z-ai/glm-5.3");
+    // reuse is exact: GLM-5.3 and Flash on the same key are two chats
+    var u : [64]u8 = undefined;
+    const un : usize = am_bind_token(AM_NV, 33, "z-ai/glm-5.3-flash", u[0..64]);
+    assert am_same_pin(t[0..tn], u[0..un]) == false and am_same_pin(t[0..tn], t[0..tn]);
 }
 
 invariant the_state_layout_does_not_overlap {
