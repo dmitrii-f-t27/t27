@@ -41,6 +41,8 @@ pub const FV_NICKLEN : usize = 261;
 pub const FV_NET : usize = 262;
 pub const FV_OPEN : usize = 263;
 pub const FV_INV : usize = 264;
+/// The first friend in view (the table index of snapshot row 0); the ACCOUNT panel scrolls a long list with it.
+pub const FV_SCROLL : usize = 290;
 pub const FV_MYNICK : usize = 296;
 pub const FV_TYPED : usize = 320;
 pub const FV_ROWS : usize = 352;
@@ -140,6 +142,11 @@ pub const FN_IDENT : u32 = 23;
 pub const FN_COPIED : u32 = 24;
 pub const FN_KEYNEED : u32 = 25;
 pub const FN_NOSAVE : u32 = 26;
+pub const FN_REMOVED : u32 = 27;
+pub const FN_FCOPIED : u32 = 28;
+pub const FN_BAD_LEN : u32 = 29;
+pub const FN_BAD_CHECK : u32 = 30;
+pub const FN_RM_NOSAVE : u32 = 31;
 pub const FN_OFF : u32 = 32;
 
 pub fn fv_note_text(code: u32) -> str {
@@ -151,9 +158,14 @@ pub fn fv_note_text(code: u32) -> str {
     if (code == FN_DAMAGED) { return "The friends file is damaged and was left as it was. Nothing was added."; }
     if (code == FN_EMPTY) { return "Paste or type the friend's invite first (T27-...)."; }
     if (code == FN_IDENT) { return "Calls are off: the identity file could not be opened or is damaged (left as found)."; }
-    if (code == FN_COPIED) { return "Your invite is on the clipboard."; }
+    if (code == FN_COPIED) { return "Your key is on the clipboard. Send it to your friend."; }
     if (code == FN_KEYNEED) { return "A debug call needs the friend's invite in the add field above, and a valid address."; }
     if (code == FN_NOSAVE) { return "Added in memory, but the friends file could not be written."; }
+    if (code == FN_REMOVED) { return "Friend removed."; }
+    if (code == FN_FCOPIED) { return "Your friend's key is on the clipboard."; }
+    if (code == FN_BAD_LEN) { return "A key is 25 characters: T27-XXXX-XXXX-XXXX-XXXX-C. This one is shorter or longer."; }
+    if (code == FN_BAD_CHECK) { return "The last symbol does not match: a character was mistyped or the key was cut."; }
+    if (code == FN_RM_NOSAVE) { return "Removed in memory, but the friends file could not be written."; }
     return "";
 }
 
@@ -268,7 +280,7 @@ pub const FV_H_DFIELD : u32 = 5;
 pub const FV_H_DCALL : u32 = 6;
 pub const FV_H_ROW : u32 = 16;
 
-fn fv_in(x: f64, y: f64, bx: f64, by: f64, bw: f64, bh: f64) -> bool {
+pub fn fv_in(x: f64, y: f64, bx: f64, by: f64, bw: f64, bh: f64) -> bool {
     return x >= bx and x < bx + bw and y >= by and y < by + bh;
 }
 
@@ -301,7 +313,7 @@ pub fn fv_hit(x: f64, y: f64, l: f64, w: f64, t: f64, shown: u32, debug: bool) -
 
 // ---------------------------------------------------------------- tests
 
-fn fv_eq(a: []const u8, n: usize, s: []const u8) -> bool {
+pub fn fv_eq(a: []const u8, n: usize, s: []const u8) -> bool {
     if (n != s.len) { return false; }
     var i : usize = 0;
     while (i < n) {
@@ -311,7 +323,7 @@ fn fv_eq(a: []const u8, n: usize, s: []const u8) -> bool {
     return true;
 }
 
-fn fv_blank(cl: []u8) -> void {
+pub fn fv_blank(cl: []u8) -> void {
     var i : usize = 0;
     while (i < cl.len) {
         cl[i] = 0;
@@ -322,6 +334,7 @@ fn fv_blank(cl: []u8) -> void {
 test fv_the_snapshot_fits_between_the_core_and_the_engine {
     assert FV_BASE >= 256;
     assert FV_COUNT == FV_BASE;
+    assert FV_INV + 25 <= FV_SCROLL and FV_SCROLL < FV_MYNICK;
     assert FV_INV + 25 <= FV_MYNICK;
     assert FV_MYNICK + 24 <= FV_TYPED;
     assert FV_TYPED + 25 <= FV_ROWS;
@@ -405,7 +418,7 @@ test fv_a_row_line_says_online_or_offline_and_why {
 
 test fv_every_note_has_its_line_and_a_click_on_a_friend_who_is_off_says_why {
     var c : u32 = FN_ADDED;
-    while (c <= FN_NOSAVE) {
+    while (c <= FN_RM_NOSAVE) {
         assert fv_note_text(c).len > 0;
         assert fv_note_is_mine(c);
         c = c + 1;
@@ -413,6 +426,8 @@ test fv_every_note_has_its_line_and_a_click_on_a_friend_who_is_off_says_why {
     assert fv_note_text(0).len == 0;
     assert fv_note_is_mine(6) == false;
     assert fv_offline_note(FV_R_GONE) == FN_OFF + 2;
+    // the person-facing codes stay below the offline notes (32 + reason)
+    assert FN_RM_NOSAVE < FN_OFF;
 }
 
 test fv_the_invite_field_takes_letters_digits_and_the_dash_only {
