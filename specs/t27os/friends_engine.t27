@@ -18,7 +18,8 @@
 //
 // Test aids (opt-in, off by default): T27OS_NICK (the nickname announced; default t27os), T27OS_FRIEND_ADD (an invite
 // added at launch), T27OS_FRIEND_DIAL (a friend's nickname, as the list shows it; the friend is called as a click would call
-// it, as soon as it is online), T27OS_FRIENDS_LOG (one line a second to stderr).
+// it, as soon as it is online), T27OS_FRIENDS_LOG (one line a second to stderr), T27OS_CALL_AUTODIAL (a friend's invite
+// T27-...: added if absent, then called once, as a click would, as soon as it is online). Test aids, not product behavior.
 // Flat namespace (the window build splices imported modules): every name here starts with fe_ / FE_.
 module T27osFriendsEngine;
 
@@ -258,8 +259,24 @@ pub fn fe_identity(cl: []u8, fp: []u8) -> bool {
     }
     var dn : [32]u8 = undefined;
     if (fe_env("T27OS_FRIEND_DIAL", dn[0..32]) > 0) { fe_ss(cl, FE_S_DIAL, 1); }
+    // T27OS_CALL_AUTODIAL (test aid, off by default, not product behavior): the invite is added, then called once
+    var afp : [10]u8 = undefined;
+    if (fe_autodial_fp(afp[0..10]) and fe_env("T27OS_CALL_AUTODIAL", inv[0..32]) == INVITE_LEN) {
+        if (fe_ss_file(cl)) {
+            ft_add(cl[FE_FT..FE_FT + FT_LEN], inv[0..INVITE_LEN], cl[FE_FP..FE_FP + FP_BYTES]);
+            ih_friends_save(cl[FE_FT..FE_FT + FT_LEN]);
+        }
+        fe_ss(cl, FE_S_DIAL, 1);
+    }
     fe_snapshot(cl, ckh_ms());
     return true;
+}
+
+/// T27OS_CALL_AUTODIAL (a test aid): the 10-byte key of the invite it holds; false when unset or not a valid invite.
+fn fe_autodial_fp(fp: []u8) -> bool {
+    var b : [32]u8 = undefined;
+    if (fe_env("T27OS_CALL_AUTODIAL", b[0..32]) != INVITE_LEN) { return false; }
+    return invite_parse(b[0..INVITE_LEN], fp) == INV_OK;
 }
 
 fn fe_ss_file(cl: []const u8) -> bool { return fe_sl(cl, FE_S_FILE) != 0; }
@@ -618,6 +635,22 @@ fn fe_log(cl: []const u8, now: u64) -> void {
 
 /// The friend a test aid names (by the nickname the list shows): its row, FV_ROWS_SNAP when none matches.
 fn fe_dial_target(cl: []const u8) -> usize {
+    var afp : [10]u8 = undefined;
+    if (fe_autodial_fp(afp[0..10])) {
+        var j : usize = 0;
+        while (j < @as(usize, cl[FV_SHOWN])) {
+            const rj : usize = fv_row_at(j);
+            var same2 : bool = true;
+            var m : usize = 0;
+            while (m < 10) {
+                if (cl[rj + FR_FP + m] != afp[m]) { same2 = false; }
+                m = m + 1;
+            }
+            if (same2) { return j; }
+            j = j + 1;
+        }
+        return FV_ROWS_SNAP;
+    }
     var want : [32]u8 = undefined;
     const wn : usize = fe_env("T27OS_FRIEND_DIAL", want[0..32]);
     if (wn == 0) { return FV_ROWS_SNAP; }

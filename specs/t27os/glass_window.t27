@@ -8977,6 +8977,10 @@ pub const CL_TXO : usize = 112;
 pub const CL_KEY_N : usize = 736;
 /// Not drawn: 1 when T27OS_CALL_STATS is set, the call counters go to stderr once a second (a test aid, off by default).
 pub const CL_STATS : usize = 120;
+/// Not drawn: 1 when T27OS_CALL_AUTOTEST is set (test aid, not product behavior): an incoming call is answered 2 s after
+/// it rings and the code is confirmed as matching 2 s after it appears. Off by default.
+pub const CL_AUTO : usize = 121;
+pub const CLW_AUTO_T : usize = 9;
 /// The window's own call clock (main's [10]u64): when ACTIVE began, when the last poll returned, the longest gap from
 /// the end of one poll to the start of the next while ACTIVE, the state the last snapshot saw, the system activity
 /// token held while a call is up, the gaps over 10 ms and the polls counted while ACTIVE.
@@ -9096,6 +9100,8 @@ pub fn cl_boot(cl: []u8, s: []u8) -> void {
     }
     var audio : u32 = CS_AUDIO_DEV;
     if (cl_env("T27OS_CALL_STATS", e[0..32]) > 0) { cl[CL_STATS] = 1; }
+    // test aid, not product behavior: off unless the variable is set
+    if (cl_env("T27OS_CALL_AUTOTEST", e[0..32]) > 0) { cl[CL_AUTO] = 1; }
     n = cl_env("T27OS_CALL_AUDIO", e[0..32]);
     if (n == 4 and e[0] == 116 and e[1] == 101 and e[2] == 115 and e[3] == 116) { audio = CS_AUDIO_TEST; }
     // the fingerprint of this device's identity is the one the call frames name (a call is addressed to a key); a
@@ -9234,11 +9240,28 @@ pub fn cl_tick(cl: []u8, s: []u8, w: []u64) -> bool {
             fe_dial_done(cl);
         }
     }
+    if (cl[CL_AUTO] != 0) { cl_autotest(cl, s, w, ckh_ms()); }
     cl_ring(cl, s);
     cl_snapshot(cl, s, w, ckh_ms());
     // the gap is measured from here: the time inside cs_poll (opening the audio queues once) is the poll's own work
     w[CLW_LAST] = ckh_ms();
     return rang;
+}
+
+/// T27OS_CALL_AUTOTEST (a test aid, off by default, not product behavior): ANSWER 2 s after an incoming call rings,
+/// CODES MATCH 2 s after the code appears, both sides. w[CLW_AUTO_T] is when the state last changed.
+pub fn cl_autotest(cl: []u8, s: []u8, w: []u64, now: u64) -> void {
+    const st : u32 = cs_state(s);
+    if (@as(u64, st) != w[CLW_PREV] or w[CLW_AUTO_T] == 0) { w[CLW_AUTO_T] = now; }
+    if (now < w[CLW_AUTO_T] + 2000) { return; }
+    if (st == CK_RINGING) {
+        cs_answer(s);
+        w[CLW_AUTO_T] = now;
+    } else if (st == CK_VERIFY and cl[CL_SAID] == 0) {
+        var code : [6]u8 = undefined;
+        if (cs_code(s, code[0..6]) and cs_confirm(s, true)) { cl[CL_SAID] = 1; }
+        w[CLW_AUTO_T] = now;
+    }
 }
 
 /// The call signal follows the call state (ringtone.t27); with T27OS_CALL_STATS a line goes to stderr when its queue
