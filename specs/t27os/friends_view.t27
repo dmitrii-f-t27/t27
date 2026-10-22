@@ -311,6 +311,16 @@ pub fn fv_hit(x: f64, y: f64, l: f64, w: f64, t: f64, shown: u32, debug: bool) -
     return FV_H_NONE;
 }
 
+// ---------------------------------------------------------------- 5. the hint of an empty field
+
+/// The grey hint of a text field: "e.g. " and the example, drawn only while the field is empty (with or without the
+/// caret), so it never reads as an address or a key already typed; nothing once a character stands. 0 when out is short.
+pub fn fv_field_hint(tn: usize, example: []const u8, out: []u8) -> usize {
+    if (tn > 0 or out.len < example.len + 5) { return 0; }
+    const n : usize = put_bytes(out, 0, "e.g. ");
+    return put_bytes(out, n, example);
+}
+
 // ---------------------------------------------------------------- tests
 
 pub fn fv_eq(a: []const u8, n: usize, s: []const u8) -> bool {
@@ -467,4 +477,17 @@ test fv_the_boxes_hit_their_own_target_and_nothing_overlaps {
     assert t + FV_NOTE_Y + 28.0 < t + FV_DBG_LABEL_Y;
     assert t + FV_DFIELD_Y + CV_FIELD_H < t + FV_DCALL_Y;
     assert fv_rows_drawn(0) == 0 and fv_rows_drawn(3) == 3 and fv_rows_drawn(8) == FV_ROWS_MAX;
+}
+
+test fv_an_empty_field_shows_a_hint_marked_as_a_hint_and_a_typed_one_shows_none {
+    var o : [40]u8 = undefined;
+    // empty, focused or not (the window draws the caret before it): the hint, led by "e.g. "
+    assert fv_eq(o[0..40], fv_field_hint(0, "192.168.1.10:47727", o[0..40]), "e.g. 192.168.1.10:47727");
+    assert fv_eq(o[0..40], fv_field_hint(0, "T27-XXXX-XXXX-XXXX-XXXX-C", o[0..40]), "e.g. T27-XXXX-XXXX-XXXX-XXXX-C");
+    assert o[0] == 101 and o[1] == 46 and o[2] == 103 and o[3] == 46 and o[4] == 32;
+    // one character typed: no hint at all
+    assert fv_field_hint(1, "192.168.1.10:47727", o[0..40]) == 0;
+    assert fv_field_hint(18, "192.168.1.10:47727", o[0..40]) == 0;
+    // a buffer too short for the prefix and the example is never overrun
+    assert fv_field_hint(0, "192.168.1.10:47727", o[0..20]) == 0;
 }

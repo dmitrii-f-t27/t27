@@ -504,6 +504,16 @@ use t27os::account_view::AC_H_NO;
 use t27os::account_view::ac_boot;
 use t27os::account_view::ac_tick;
 use t27os::account_view::ac_note_copy;
+use t27os::account_view::ac_flash_set;
+use t27os::account_view::ac_flash_kind;
+use t27os::account_view::ac_flash_tick;
+use t27os::account_view::ac_flash_text;
+use t27os::account_view::ac_empty_text;
+use t27os::account_view::AC_FLASH;
+use t27os::account_view::AC_FLASH_MINE_DX;
+use t27os::account_view::AC_FLASH_FRIEND_DX;
+use t27os::account_view::AC_L_NONE;
+use t27os::friends_view::fv_field_hint;
 use t27os::account_view::ac_copies;
 use t27os::account_view::ac_my_key;
 use t27os::account_view::ac_friend_key;
@@ -9957,7 +9967,8 @@ fn draw_cl_dot(c: u64, kit: [48]u64, dx: f64, dy: f64, on: bool) -> void {
     }
 }
 
-/// One text field of the panel: the box, the text (a caret while it is typed in) or the grey example.
+/// One text field of the panel: the box, the text (a caret while it is typed in), or while it is empty the caret (when
+/// typed in) and the grey hint "e.g. ..." (friends_view.fv_field_hint), so the example never reads as typed text.
 fn draw_cl_field(c: u64, kit: [48]u64, fx: f64, fy: f64, fw: f64, typing: bool, over: bool, txt: []const u8, tn: usize, example: []const u8) -> void {
     round_rect(c, fx, fy, fw, CV_FIELD_H, 5.0);
     cg_line_width(c, 1.0);
@@ -9977,12 +9988,20 @@ fn draw_cl_field(c: u64, kit: [48]u64, fx: f64, fy: f64, fw: f64, typing: bool, 
         shown[an] = 95;
         an = an + 1;
     }
-    if (an > 0) {
+    if (tn > 0) {
         cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
         draw_fit(c, kit, shown[0..32], an, fx + 8.0, fy + 17.5, 10.5, 0.0, true, fx + fw - 8.0);
     } else {
+        var hx : f64 = fx + 8.0;
+        if (typing) {
+            cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+            draw_bytes(c, kit, "_", 1, hx, fy + 17.5, 10.5, 0.0, true);
+            hx = hx + bytes_w(kit, "_", 1, 10.5, 0.0, true) + 2.0;
+        }
+        var hb : [40]u8 = undefined;
+        const hn : usize = fv_field_hint(0, example, hb[0..40]);
         cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
-        draw_fit(c, kit, example, example.len, fx + 8.0, fy + 17.5, 10.5, 0.0, true, fx + fw - 8.0);
+        draw_fit(c, kit, hb[0..40], hn, hx, fy + 17.5, 10.5, 0.0, true, fx + fw - 8.0);
     }
 }
 
@@ -10314,8 +10333,9 @@ pub fn ac_hit_now(x: f64, y: f64, sw: f64, sh: f64, cl: []const u8) -> u32 {
     return ac_hit(x, y, qp_left(sw), QP_W, WS_TOP, h, ac_rows_drawn(@as(usize, cl[FV_SHOWN]), vis), @as(usize, cl[FV_COUNT]), vis, ac_conf_row(cl), ac_upd_shown(cl));
 }
 
-/// This device's key to the clipboard. Without an identity there is nothing to copy and the note says why.
-pub fn ac_copy_mine(cl: []u8) -> void {
+/// This device's key to the clipboard; "copied" stands above the key for 2 s. Without an identity there is nothing to
+/// copy and the note says why.
+pub fn ac_copy_mine(cl: []u8, now: u64) -> void {
     var k : [32]u8 = undefined;
     const n : usize = ac_my_key(cl, k[0..32]);
     if (n == 0) {
@@ -10324,6 +10344,7 @@ pub fn ac_copy_mine(cl: []u8) -> void {
     }
     pb_copy(k[0..32], n);
     ac_note_copy(cl, AC_L_MINE);
+    ac_flash_set(cl, AC_L_MINE, now);
     cl[CL_NOTE] = @as(u8, @intCast(FN_COPIED));
 }
 
@@ -10393,6 +10414,7 @@ pub fn ac_do(cl: []u8, s: []u8, w: []u64, pf: []u8, hit: u32, vis: usize) -> u32
         if (kn > 0) {
             pb_copy(kb[0..32], kn);
             ac_note_copy(cl, AC_L_FRIEND);
+            ac_flash_set(cl, AC_L_FRIEND, now);
             cl[CL_NOTE] = @as(u8, @intCast(FN_FCOPIED));
         }
         return 0;
@@ -10402,7 +10424,7 @@ pub fn ac_do(cl: []u8, s: []u8, w: []u64, pf: []u8, hit: u32, vis: usize) -> u32
         return 0;
     }
     if (hit == AC_H_KEY or hit == AC_H_COPYKEY) {
-        ac_copy_mine(cl);
+        ac_copy_mine(cl, now);
     } else if (hit == AC_H_NICK) {
         pf_to_edit(pf);
     } else if (hit == AC_H_SAVE) {
@@ -10550,7 +10572,16 @@ fn draw_account_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, 
     // MY KEY: the whole T27-... string, a click copies it; the short fingerprint and COPY KEY under it
     cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
     draw_bytes(c, kit, "MY KEY", 6, x, t + AC_KEY_LABEL_Y, 9.5, 0.0, false);
-    if (hit == AC_H_KEY) { draw_bytes(c, kit, "click to copy", 13, x + 60.0, t + AC_KEY_LABEL_Y, 9.5, 0.0, false); }
+    // a copy just made: "copied" for 2 s on the label line (above the key, not on it); else the hover hint
+    const flash : u32 = @as(u32, cl[AC_FLASH]);
+    if (flash == AC_L_MINE) {
+        const fw0 : []const u8 = ac_flash_text(flash);
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+        draw_bytes(c, kit, fw0, fw0.len, x + AC_FLASH_MINE_DX, t + AC_KEY_LABEL_Y, 9.5, WEIGHT_SEMIBOLD, false);
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+    } else if (hit == AC_H_KEY) {
+        draw_bytes(c, kit, "click to copy", 13, x + AC_FLASH_MINE_DX, t + AC_KEY_LABEL_Y, 9.5, 0.0, false);
+    }
     round_rect(c, x, t + AC_KEY_Y, right - x, AC_KEY_H, 5.0);
     cg_line_width(c, 1.0);
     cg_stroke_rgba(c, 1.0, 1.0, 1.0, STRICT_HOVER_EDGE);
@@ -10600,16 +10631,21 @@ fn draw_account_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, 
     }
     cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
     draw_fit(c, kit, line[0..96], n, x, t + AC_FR_LABEL_Y, 9.5, 0.0, false, ac_up_x(l, QP_W) - 8.0);
+    if (flash == AC_L_FRIEND) {
+        const fw1 : []const u8 = ac_flash_text(flash);
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+        draw_fit(c, kit, fw1, fw1.len, x + AC_FLASH_FRIEND_DX, t + AC_FR_LABEL_Y, 9.5, WEIGHT_SEMIBOLD, false, ac_up_x(l, QP_W) - 8.0);
+    }
     if (count > vis) {
         n = ac_range_text(scroll, drawn, count, line[0..96]);
         cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
-        draw_fit(c, kit, line[0..96], n, x + 80.0, t + AC_FR_LABEL_Y, 9.0, 0.0, true, ac_up_x(l, QP_W) - 8.0);
+        if (flash != AC_L_FRIEND) { draw_fit(c, kit, line[0..96], n, x + AC_FLASH_FRIEND_DX, t + AC_FR_LABEL_Y, 9.0, 0.0, true, ac_up_x(l, QP_W) - 8.0); }
         draw_ac_arrow(c, kit, ac_up_x(l, QP_W), ac_arrow_y(t), true, scroll > 0, hit == AC_H_UP);
         draw_ac_arrow(c, kit, ac_down_x(l, QP_W), ac_arrow_y(t), false, scroll < ac_max_scroll(count, vis), hit == AC_H_DOWN);
     }
     if (count == 0) {
         cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
-        draw_cl_wrap(c, kit, "No friends yet. Paste a friend's key below, or send them yours.", x, right, t + AC_FR_LABEL_Y + 18.0, 9.5, 2, sh);
+        draw_cl_wrap(c, kit, ac_empty_text(count), x, right, t + AC_FR_LABEL_Y + 18.0, 9.5, 2, sh);
     }
     i = 0;
     while (i < drawn) {
@@ -12176,7 +12212,7 @@ pub fn main() -> void {
     if (acen > 0) {
         clp = true;
         ac_open(tbv[TBO_CL .. TBO_CL + CL_CAP]);
-        if (acen == 4 and ace[0] == 99 and ace[1] == 111 and ace[2] == 112 and ace[3] == 121) { ac_copy_mine(tbv[TBO_CL .. TBO_CL + CL_CAP]); }
+        if (acen == 4 and ace[0] == 99 and ace[1] == 111 and ace[2] == 112 and ace[3] == 121) { ac_copy_mine(tbv[TBO_CL .. TBO_CL + CL_CAP], ckh_ms()); }
         ac_log(tbv[TBO_CL .. TBO_CL + CL_CAP]);
     }
     tgv[TPG_U_BLEN] = @as(u64, bundle_len(ubp[0..ubn], ubn));
@@ -14132,6 +14168,7 @@ pub fn main() -> void {
         if (clp) { tbv[TBO_CL + CL_OPEN] = 1; } else { tbv[TBO_CL + CL_OPEN] = 0; }
         tbv[TBO_CL + FV_OPEN] = tbv[TBO_CL + CL_OPEN];
         if (clp and tbv[TBO_CL + AC_ON] != 0) { ac_tick(tbv[TBO_CL .. TBO_CL + CL_CAP], now); }
+        if (clp and tbv[TBO_CL + AC_ON] != 0) { ac_flash_tick(tbv[TBO_CL .. TBO_CL + CL_CAP], cnow); }
         if (cl_tick(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN * 3], clw[0..10])) { clring = true; }
         // U. the frame gate: fold what this frame shows into a key; an unchanged key with nothing
         // animating keeps the image already on the layer (frame_gate.t27)
@@ -15822,6 +15859,8 @@ test the_account_state_stands_in_free_bytes_of_the_call_region_and_is_folded {
     assert AC_ON != CL_OPEN and AC_ON != CL_VIEW and AC_ON != CL_FOCUS and AC_ON != CL_NOTE;
     assert FV_SCROLL >= FV_INV + INVITE_LEN and FV_SCROLL < FV_MYNICK and FV_SCROLL < CL_KEY_N;
     assert AC_SECS + 4 <= AC_END and AC_CONF < AC_SECS;
+    // the copy confirmation (kind and time) is among the folded bytes, so its end redraws the frame
+    assert AC_FLASH < AC_END and AC_END <= FV_BASE and AC_FLASH != CL_NOTE;
     // the three notes the cabinet adds stay below the offline notes and fit a byte
     assert FN_REMOVED < FN_OFF and FN_FCOPIED < FN_OFF and FN_FCOPIED < 256;
 }
@@ -15871,6 +15910,44 @@ test a_point_in_the_cabinet_means_the_same_to_the_click_the_cursor_and_the_drawi
     assert ac_hit_now(ac_del_x(l, QP_W) + 4.0, ac_row_y(WS_TOP, 1) + 4.0, sw, sh, cl[0..8192]) == AC_H_NO + 1;
     // outside the panel nothing answers
     assert ac_hit_now(l - 20.0, ac_row_y(WS_TOP, 1) + 4.0, sw, sh, cl[0..8192]) == AC_H_NONE;
+}
+
+test a_copy_confirmation_changes_no_click_and_ends_after_two_seconds_of_frames {
+    var cl : [8192]u8 = undefined;
+    var i : usize = 0;
+    while (i < 8192) {
+        cl[i] = 0;
+        i = i + 1;
+    }
+    cl[AC_ON] = 1;
+    cl[FV_COUNT] = 2;
+    cl[FV_SHOWN] = 2;
+    const sw : f64 = 960.0;
+    const sh : f64 = 540.0;
+    const l : f64 = qp_left(sw);
+    const kx : f64 = l + 40.0;
+    const ky : f64 = WS_TOP + AC_KEY_Y + 6.0;
+    const wx : f64 = l + QP_PAD + AC_FLASH_MINE_DX + 10.0;
+    const wy : f64 = WS_TOP + AC_KEY_LABEL_Y - 4.0;
+    const before_key : u32 = ac_hit_now(kx, ky, sw, sh, cl[0..8192]);
+    const before_copy : u32 = ac_hit_now(ac_copy_x(l, QP_W) + 4.0, WS_TOP + AC_COPY_Y + 4.0, sw, sh, cl[0..8192]);
+    const before_word : u32 = ac_hit_now(wx, wy, sw, sh, cl[0..8192]);
+    const before_row : u32 = ac_hit_now(ac_fcopy_x(l, QP_W) + 4.0, ac_row_y(WS_TOP, 1) + 4.0, sw, sh, cl[0..8192]);
+    ac_flash_set(cl[0..8192], AC_L_MINE, 50000);
+    assert ac_hit_now(kx, ky, sw, sh, cl[0..8192]) == before_key and before_key == AC_H_KEY;
+    assert ac_hit_now(ac_copy_x(l, QP_W) + 4.0, WS_TOP + AC_COPY_Y + 4.0, sw, sh, cl[0..8192]) == before_copy;
+    assert ac_hit_now(wx, wy, sw, sh, cl[0..8192]) == before_word and before_word == AC_H_NONE;
+    ac_flash_set(cl[0..8192], AC_L_FRIEND, 50000);
+    assert ac_hit_now(ac_fcopy_x(l, QP_W) + 4.0, ac_row_y(WS_TOP, 1) + 4.0, sw, sh, cl[0..8192]) == before_row and before_row == AC_H_FCOPY + 1;
+    // passes at 16 ms: the word stands through 1984 ms and is cleared at the first pass at or after 2000 ms
+    var t : u64 = 50000;
+    while (t < 52000) {
+        ac_flash_tick(cl[0..8192], t);
+        assert cl[AC_FLASH] == @as(u8, @intCast(AC_L_FRIEND));
+        t = t + 16;
+    }
+    ac_flash_tick(cl[0..8192], t);
+    assert cl[AC_FLASH] == 0 and ac_flash_kind(cl[0..8192], t) == AC_L_NONE;
 }
 
 test the_cabinet_boxes_stay_inside_the_slot_at_the_widths_the_window_has {

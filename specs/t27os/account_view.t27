@@ -69,7 +69,11 @@ pub const AC_VER : usize = 197;
 pub const AC_VER_MAX : usize = 16;
 pub const AC_COPIES : usize = 216;
 pub const AC_LAST : usize = 220;
-pub const AC_END : usize = 224;
+/// The copy just made, shown for AC_FLASH_FOR_MS next to what was copied (AC_L_*, 0 = nothing shown), and the
+/// millisecond it was made (the low 32 bits of the clock).
+pub const AC_FLASH : usize = 221;
+pub const AC_FLASH_MS : usize = 224;
+pub const AC_END : usize = 228;
 
 /// What the last copy put on the clipboard (AC_LAST): nothing yet, this device's key, a friend's key.
 pub const AC_L_NONE : u32 = 0;
@@ -106,6 +110,45 @@ pub fn ac_note_copy(cl: []u8, kind: u32) -> void {
     fv_put32(cl, AC_COPIES, fv_get32(cl, AC_COPIES) + 1);
     cl[AC_LAST] = @as(u8, @intCast(kind));
 }
+
+/// How long the word "copied" stands after a copy.
+pub const AC_FLASH_FOR_MS : u64 = 2000;
+
+fn ac_ms32(now_ms: u64) -> u64 { return now_ms % 4294967296; }
+
+/// A copy was made at now_ms: its confirmation shows from this frame on (a second copy starts the time again).
+pub fn ac_flash_set(cl: []u8, kind: u32, now_ms: u64) -> void {
+    fv_put32(cl, AC_FLASH_MS, ac_ms32(now_ms));
+    cl[AC_FLASH] = @as(u8, @intCast(kind));
+}
+
+/// The confirmation to draw in a frame at now_ms: the kind of the copy while it is younger than AC_FLASH_FOR_MS, else
+/// AC_L_NONE (the clock is read modulo 2^32, so a wrap of the low bits does not keep it on).
+pub fn ac_flash_kind(cl: []const u8, now_ms: u64) -> u32 {
+    const k : u32 = @as(u32, cl[AC_FLASH]);
+    if (k == AC_L_NONE) { return AC_L_NONE; }
+    const age : u64 = (ac_ms32(now_ms) + 4294967296 - fv_get32(cl, AC_FLASH_MS)) % 4294967296;
+    if (age >= AC_FLASH_FOR_MS) { return AC_L_NONE; }
+    return k;
+}
+
+/// Every pass while the panel is open: an expired confirmation is cleared, so the folded byte changes and the frame
+/// that removes the word is drawn.
+pub fn ac_flash_tick(cl: []u8, now_ms: u64) -> void {
+    if (cl[AC_FLASH] != 0 and ac_flash_kind(cl, now_ms) == AC_L_NONE) { cl[AC_FLASH] = 0; }
+}
+
+/// The word of the confirmation: "copied" right of MY KEY, "friend's key copied" right of FRIENDS.
+pub fn ac_flash_text(kind: u32) -> str {
+    if (kind == AC_L_MINE) { return "copied"; }
+    if (kind == AC_L_FRIEND) { return "friend's key copied"; }
+    return "";
+}
+
+/// Where the confirmation stands, from the panel's left text edge: on the label line above the key box (never on the
+/// key), and on the FRIENDS label line in place of the range.
+pub const AC_FLASH_MINE_DX : f64 = 60.0;
+pub const AC_FLASH_FRIEND_DX : f64 = 80.0;
 
 // ---------------------------------------------------------------- 2. the key and the friends' keys (copy, pure part)
 
@@ -228,6 +271,12 @@ pub fn ac_paste_find(src: []const u8, n: usize) -> usize {
         i = i + 1;
     }
     return 0;
+}
+
+/// The line under FRIENDS when the list is empty (a plain invitation, not a fault); nothing when there are friends.
+pub fn ac_empty_text(count: usize) -> str {
+    if (count == 0) { return "No friends yet. Send your key to someone, or add theirs below."; }
+    return "";
 }
 
 /// "1-5 of 12" for the friends window: the first and last friend in view among all.
@@ -439,7 +488,7 @@ test ac_the_state_stands_below_the_friends_snapshot_and_in_the_folded_bytes {
     assert AC_ON < AC_CONF and AC_CONF + 1 <= AC_CONF_FP and AC_CONF_FP + 10 <= AC_SECS;
     assert AC_SECS + 4 <= AC_BOOT and AC_BOOT + 4 <= AC_BUILD and AC_BUILD + 4 <= AC_VERLEN;
     assert AC_VER == AC_VERLEN + 1 and AC_VER + AC_VER_MAX <= AC_COPIES;
-    assert AC_COPIES + 4 <= AC_LAST and AC_LAST < AC_END;
+    assert AC_COPIES + 4 <= AC_LAST and AC_LAST < AC_FLASH and AC_FLASH < AC_FLASH_MS and AC_FLASH_MS + 4 <= AC_END;
     assert FV_SCROLL > FV_INV + INVITE_LEN - 1 and FV_SCROLL < 296;
 }
 
@@ -765,4 +814,53 @@ test ac_the_update_button_answers_only_when_it_is_shown {
     assert AC_UPD_Y < AC_UPD_BTN_Y and AC_UPD_BTN_Y + AC_UPD_BTN_H < AC_FR_LABEL_Y - 14.0;
     // the friends' first row is no longer where the button is
     assert ac_hit(l + 40.0, ac_row_y(t, 0) + 4.0, l, w, t, h, 3, 3, 5, none, true) == AC_H_ROW;
+}
+
+test ac_a_copy_shows_its_word_for_two_seconds_then_the_panel_is_as_before {
+    var cl : [256]u8 = undefined;
+    fv_blank(cl[0..256]);
+    assert ac_flash_kind(cl[0..256], 5000) == AC_L_NONE;
+    ac_flash_set(cl[0..256], AC_L_MINE, 10000);
+    assert ac_flash_kind(cl[0..256], 10000) == AC_L_MINE;
+    assert ac_flash_kind(cl[0..256], 11999) == AC_L_MINE;
+    assert ac_flash_kind(cl[0..256], 12000) == AC_L_NONE;
+    // the tick keeps a young confirmation and clears an old one (the byte the frame key folds)
+    ac_flash_tick(cl[0..256], 11000);
+    assert cl[AC_FLASH] == 1;
+    ac_flash_tick(cl[0..256], 12001);
+    assert cl[AC_FLASH] == 0 and ac_flash_kind(cl[0..256], 10500) == AC_L_NONE;
+    // a friend's copy names the friend's key; a second copy starts the time again
+    ac_flash_set(cl[0..256], AC_L_FRIEND, 20000);
+    ac_flash_set(cl[0..256], AC_L_FRIEND, 21500);
+    assert ac_flash_kind(cl[0..256], 23000) == AC_L_FRIEND;
+    assert ac_flash_kind(cl[0..256], 23500) == AC_L_NONE;
+    // the low 32 bits of the clock wrap between the copy and the frame: still 2 seconds
+    ac_flash_set(cl[0..256], AC_L_MINE, 4294967296 - 500);
+    assert ac_flash_kind(cl[0..256], 4294967296 + 1000) == AC_L_MINE;
+    assert ac_flash_kind(cl[0..256], 4294967296 + 1500) == AC_L_NONE;
+    var o : [64]u8 = undefined;
+    assert fv_eq(o[0..64], put_bytes(o[0..64], 0, ac_flash_text(AC_L_MINE)), "copied");
+    assert fv_eq(o[0..64], put_bytes(o[0..64], 0, ac_flash_text(AC_L_FRIEND)), "friend's key copied");
+    assert ac_flash_text(AC_L_NONE).len == 0;
+}
+
+test ac_the_copy_word_stands_above_the_key_and_takes_no_click {
+    const l : f64 = 660.0;
+    const w : f64 = 300.0;
+    const t : f64 = 35.0;
+    const h : f64 = 600.0;
+    const none : usize = FV_ROWS_SNAP;
+    // the word's line (9.5 pt on the label baseline) ends above the key box and right of the MY KEY label
+    assert AC_KEY_LABEL_Y + 3.0 <= AC_KEY_Y;
+    assert AC_FLASH_MINE_DX >= 50.0 and AC_FLASH_FRIEND_DX >= 70.0;
+    assert l + QP_PAD + AC_FLASH_FRIEND_DX + 90.0 < ac_up_x(l, w);
+    // the label line is not a button: a point on the word answers what it answered before (nothing)
+    assert ac_hit(l + QP_PAD + AC_FLASH_MINE_DX + 10.0, t + AC_KEY_LABEL_Y - 4.0, l, w, t, h, 3, 3, 5, none, false) == AC_H_NONE;
+    assert ac_hit(l + QP_PAD + AC_FLASH_FRIEND_DX + 10.0, t + AC_FR_LABEL_Y - 4.0, l, w, t, h, 3, 3, 5, none, false) == AC_H_NONE;
+}
+
+test ac_an_empty_list_reads_as_an_invitation {
+    var o : [96]u8 = undefined;
+    assert fv_eq(o[0..96], put_bytes(o[0..96], 0, ac_empty_text(0)), "No friends yet. Send your key to someone, or add theirs below.");
+    assert ac_empty_text(1).len == 0 and ac_empty_text(32).len == 0;
 }
