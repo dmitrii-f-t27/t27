@@ -1199,3 +1199,92 @@ test fe_the_announcement_carries_ver_build_and_the_update_port {
     var back : [10]u8 = undefined;
     assert txt_fp(cl[FE_TXT..FE_TXT + 96], k2, back[0..10]) == INV_OK and back[9] == 10;
 }
+
+test fe_the_typed_key_is_read_only_from_a_whole_invite {
+    var cl : [8000]u8 = undefined;
+    fe_t_blank(cl[0..8000]);
+    const fp : [10]u8 = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
+    var inv : [25]u8 = undefined;
+    assert invite_make(fp[0..10], inv[0..25]) == 25;
+    var i : usize = 0;
+    while (i < 25) {
+        cl[FV_TYPED + i] = inv[i];
+        i = i + 1;
+    }
+    var out : [10]u8 = undefined;
+    // nothing typed yet
+    assert fe_typed_key(cl[0..8000], out[0..10]) == false;
+    cl[FV_INVLEN] = 25;
+    assert fe_typed_key(cl[0..8000], out[0..10]);
+    assert out[0] == 10 and out[4] == 50 and out[9] == 100;
+    // one character short is not a key
+    cl[FV_INVLEN] = 24;
+    assert fe_typed_key(cl[0..8000], out[0..10]) == false;
+    // a wrong prefix is not a key
+    cl[FV_INVLEN] = 25;
+    cl[FV_TYPED] = 88;
+    assert fe_typed_key(cl[0..8000], out[0..10]) == false;
+    // parsing does not add: the table and the typed text stay as they were
+    assert cl[FV_COUNT] == 0 and cl[FV_INVLEN] == 25;
+}
+
+test fe_the_dial_aid_is_spent_once_and_a_group_needs_it_armed {
+    var cl : [8000]u8 = undefined;
+    fe_t_blank(cl[0..8000]);
+    var s : [16]u8 = undefined;
+    // not armed: no group is picked (the environment is never read)
+    assert fe_group_tick(cl[0..8000], s[0..16]) == false;
+    fe_ss(cl[0..8000], FE_S_DIAL, 1);
+    fe_dial_done(cl[0..8000]);
+    assert fe_sl(cl[0..8000], FE_S_DIAL) == 2;
+    // spent: still no group
+    assert fe_group_tick(cl[0..8000], s[0..16]) == false;
+    // the other slots are not touched
+    assert fe_sl(cl[0..8000], FE_S_TICK) == 0 and fe_sl(cl[0..8000], FE_S_LOG) == 0;
+}
+
+test fe_a_pass_does_nothing_off_the_net_too_soon_or_on_a_short_region {
+    var cl : [8000]u8 = undefined;
+    fe_t_blank(cl[0..8000]);
+    // a region shorter than the engine's blocks, even on the net
+    cl[FV_NET] = @as(u8, @intCast(FV_NET_UP));
+    assert fe_tick(cl[0..7000], 1000) == FV_ROWS_SNAP;
+    // announcing is off: the pass keeps no time
+    cl[FV_NET] = @as(u8, @intCast(FV_NET_FAIL));
+    assert fe_tick(cl[0..8000], 1000) == FV_ROWS_SNAP;
+    assert fe_sl(cl[0..8000], FE_S_TICK) == 0;
+    // on the net, but the last pass was less than FE_TICK_MS ago: nothing moves
+    cl[FV_NET] = @as(u8, @intCast(FV_NET_UP));
+    fe_ss(cl[0..8000], FE_S_TICK, 1000);
+    assert fe_tick(cl[0..8000], 1000 + FE_TICK_MS - 1) == FV_ROWS_SNAP;
+    assert fe_sl(cl[0..8000], FE_S_TICK) == 1000;
+}
+
+test fe_no_announcement_without_an_identity_and_no_identity_in_a_short_region {
+    var cl : [8000]u8 = undefined;
+    fe_t_blank(cl[0..8000]);
+    // the identity was neither created nor loaded: no announcement, the port and address are not kept
+    cl[FV_IDSTATE] = 0;
+    assert fe_net(cl[0..8000], 3232235786, 47727) == false;
+    assert fe_sl(cl[0..8000], FE_S_PORT) == 0 and fe_sl(cl[0..8000], FE_S_IP) == 0;
+    cl[FV_IDSTATE] = 3;
+    assert fe_net(cl[0..8000], 3232235786, 47727) == false;
+    assert fe_sl(cl[0..8000], FE_S_PORT) == 0;
+    // the fingerprint out is short, or the region is: no identity is opened
+    var fp : [10]u8 = undefined;
+    assert fe_identity(cl[0..8000], fp[0..9]) == false;
+    assert fe_identity(cl[0..7000], fp[0..10]) == false;
+}
+
+test fe_stop_takes_the_engine_off_the_net_and_holds_no_ref {
+    var cl : [8000]u8 = undefined;
+    fe_t_blank(cl[0..8000]);
+    cl[FV_NET] = @as(u8, @intCast(FV_NET_UP));
+    fe_stop(cl[0..8000]);
+    assert cl[FV_NET] == @as(u8, @intCast(FV_NET_OFF));
+    assert get_u64(cl[0..8000], FE_BREF) == 0 and get_u64(cl[0..8000], FE_RREF) == 0;
+    assert get_u64(cl[0..8000], FE_REFS) == 0 and get_u64(cl[0..8000], FE_REFS + (BR_COUNT - 1) * 16 + 8) == 0;
+    // a pass after the stop does nothing
+    assert fe_tick(cl[0..8000], 5000) == FV_ROWS_SNAP;
+    assert fe_sl(cl[0..8000], FE_S_TICK) == 0;
+}

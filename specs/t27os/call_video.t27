@@ -846,3 +846,8 @@ test the_live_take_refuses_an_empty_block {
     assert(cvl_take(0, b[0..64]) == 0);
     assert(cvl_stat(0, 1) == 0);
 }
+
+test the_live_start_of_no_block_says_no_camera {
+    // no block: "no camera or setup failed" (3), never "running" (0) or an authorization answer (1, 2)
+    assert(cvl_start(0) == 3);
+}

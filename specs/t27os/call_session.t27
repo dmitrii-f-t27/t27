@@ -2273,3 +2273,238 @@ fn ck_fill_session(b: []u8, base: u8) -> void {
         i = i + 1;
     }
 }
+
+/// A live block as cs_open leaves it, without the socket: the magic, IDLE, the default tunables (test aid).
+fn cs_t_live(s: []u8) -> void {
+    ck_wipe(s[0..CS_LEN]);
+    s[1] = @as(u8, @intCast(CK_IDLE));
+    cs_p(s, CS_MAGIC, CS_MAGIC_V);
+    cs_p(s, CS_K_CALLING_MS, 60000);
+    cs_p(s, CS_K_RINGING_MS, 60000);
+    cs_p(s, CS_K_VERIFY_MS, 60000);
+    cs_p(s, CS_K_SILENT_MS, 5000);
+    cs_p(s, CS_K_JB_TARGET, CBP_F_PRE);
+    cs_p(s, CS_K_JB_MAX, CBP_F_PREMAX);
+    cs_p(s, CS_K_TONE_AMP, 6000);
+}
+
+test a_block_that_is_not_open_refuses_every_action {
+    var s : [165504]u8 = undefined;
+    ck_wipe(s[0..CS_LEN]);
+    var fp : [10]u8 = undefined;
+    ck_fill_session(fp[0..10], 9);
+    const jpeg : [4]u8 = [255, 216, 255, 217];
+    assert cs_mute(s[0..CS_LEN], true) == false and cs_muted(s[0..CS_LEN]) == false;
+    assert cs_set(s[0..CS_LEN], CS_K_CALLING_MS, 5000) == false;
+    assert cs_call(s[0..CS_LEN], 3232235786, 47727, fp[0..10]) == false;
+    assert cs_answer(s[0..CS_LEN]) == false;
+    assert cs_decline(s[0..CS_LEN]) == false;
+    assert cs_confirm(s[0..CS_LEN], true) == false;
+    assert cs_hangup(s[0..CS_LEN]) == false;
+    assert cs_dismiss(s[0..CS_LEN]) == false;
+    assert cs_video_feed(s[0..CS_LEN], jpeg[0..4]) == false;
+    assert csg_add(s[0..CS_LEN], fp[0..10], 3232235786, 47727) == false;
+    assert csg_leave(s[0..CS_LEN]) == false;
+    assert cs_poll(s[0..CS_LEN]) == CS_EV_NONE;
+    // closing a block that is not open touches nothing (no socket is closed)
+    cs_close(s[0..CS_LEN]);
+    assert cs_g(s[0..CS_LEN], CS_MAGIC) == 0 and cs_g(s[0..CS_LEN], CS_FD) == 0;
+    // nothing was written
+    assert cs_g(s[0..CS_LEN], CS_K_CALLING_MS) == 0 and cs_g(s[0..CS_LEN], CS_MUTED) == 0;
+    // a short block, a short fingerprint, an address or port out of range, an unknown audio mode: no socket is made
+    assert cs_open(s[0..CS_LEN - 1], fp[0..10], 0, 47727, CS_AUDIO_TEST) == false;
+    assert cs_open(s[0..CS_LEN], fp[0..9], 0, 47727, CS_AUDIO_TEST) == false;
+    assert cs_open(s[0..CS_LEN], fp[0..10], 4294967296, 47727, CS_AUDIO_TEST) == false;
+    assert cs_open(s[0..CS_LEN], fp[0..10], 0, 65536, CS_AUDIO_TEST) == false;
+    assert cs_open(s[0..CS_LEN], fp[0..10], 0, 47727, 9) == false;
+    assert cs_g(s[0..CS_LEN], CS_MAGIC) == 0 and s[EP_ME] == 0;
+}
+
+test the_window_reads_state_peer_code_reason_mute_and_counters {
+    var s : [165504]u8 = undefined;
+    cs_t_live(s[0..CS_LEN]);
+    var fp : [10]u8 = undefined;
+    var out : [10]u8 = undefined;
+    assert cs_state(s[0..CS_LEN]) == CK_IDLE and cs_incoming(s[0..CS_LEN]) == false;
+    // no call: no peer
+    assert cs_peer(s[0..CS_LEN], out[0..10]) == 0;
+    ck_fill_session(fp[0..10], 40);
+    ck_put(s[0..CS_LEN], EP_PEER, fp[0..10]);
+    cs_p(s[0..CS_LEN], CS_PEER_IP, 3232235786);
+    s[1] = @as(u8, @intCast(CK_RINGING));
+    assert cs_state(s[0..CS_LEN]) == CK_RINGING and cs_incoming(s[0..CS_LEN]);
+    assert cs_peer(s[0..CS_LEN], out[0..10]) == 3232235786;
+    assert ck_same(out[0..10], fp[0..10]);
+    assert cs_peer(s[0..CS_LEN], out[0..9]) == 0;
+    // the code: only once known, only in VERIFY or ACTIVE, only into 6 bytes or more
+    var code : [6]u8 = undefined;
+    s[EP_CODE] = 52;
+    s[EP_CODE + 5] = 55;
+    assert cs_code(s[0..CS_LEN], code[0..6]) == false;
+    s[EP_HAVE_CODE] = 1;
+    assert cs_code(s[0..CS_LEN], code[0..6]) == false;
+    s[1] = @as(u8, @intCast(CK_VERIFY));
+    assert cs_code(s[0..CS_LEN], code[0..6]);
+    assert code[0] == 52 and code[5] == 55;
+    assert cs_code(s[0..CS_LEN], code[0..5]) == false;
+    s[1] = @as(u8, @intCast(CK_ACTIVE));
+    assert cs_code(s[0..CS_LEN], code[0..6]);
+    s[1] = @as(u8, @intCast(CK_ENDED));
+    assert cs_code(s[0..CS_LEN], code[0..6]) == false;
+    // the reason, the mute flag
+    cs_p(s[0..CS_LEN], CS_REASON, @as(u64, CS_R_PEER_SAID_DIFFER));
+    assert cs_reason(s[0..CS_LEN]) == CS_R_PEER_SAID_DIFFER;
+    assert cs_mute(s[0..CS_LEN], true) and cs_muted(s[0..CS_LEN]);
+    assert cs_mute(s[0..CS_LEN], false) and cs_muted(s[0..CS_LEN]) == false;
+    // counters: a slot below 64 reads back, anything between 64 and 999 is 0
+    cs_p(s[0..CS_LEN], CS_ST_SENT, 7);
+    cs_p(s[0..CS_LEN], CS_ST_ABS_PEAK, 31000);
+    assert cs_stat(s[0..CS_LEN], CS_ST_SENT) == 7 and cs_stat(s[0..CS_LEN], CS_ST_ABS_PEAK) == 31000;
+    assert cs_stat(s[0..CS_LEN], CS_K_CALLING_MS) == 60000;
+    // slot 64 would be the first bytes of the kept handshake message: never read as a counter
+    s[CS_L1] = 9;
+    assert cs_stat(s[0..CS_LEN], 64) == 0 and cs_stat(s[0..CS_LEN], 999) == 0;
+}
+
+test the_tunables_take_only_their_ranges_and_never_during_media {
+    var s : [165504]u8 = undefined;
+    cs_t_live(s[0..CS_LEN]);
+    const z : []u8 = s[0..CS_LEN];
+    assert cs_set(z, CS_K_CALLING_MS, 999) == false;
+    assert cs_set(z, CS_K_CALLING_MS, 1000) and cs_g(z, CS_K_CALLING_MS) == 1000;
+    assert cs_set(z, CS_K_SILENT_MS, 600000) and cs_g(z, CS_K_SILENT_MS) == 600000;
+    assert cs_set(z, CS_K_VERIFY_MS, 600001) == false and cs_g(z, CS_K_VERIFY_MS) == 60000;
+    // the jitter target stays under the max, the max stays over the target and inside the buffer
+    assert cs_set(z, CS_K_JB_TARGET, 0) == false;
+    assert cs_set(z, CS_K_JB_TARGET, CBP_F_PREMAX) == false;
+    assert cs_set(z, CS_K_JB_TARGET, CBP_F_PREMAX - 1) and cs_g(z, CS_K_JB_TARGET) == CBP_F_PREMAX - 1;
+    assert cs_set(z, CS_K_JB_MAX, CBP_F_PREMAX - 1) == false;
+    assert cs_set(z, CS_K_JB_MAX, CBP_F_JB - CBP_F_TX) == false;
+    assert cs_set(z, CS_K_JB_MAX, CBP_F_JB - CBP_F_TX - 1) and cs_g(z, CS_K_JB_MAX) == CBP_F_JB - CBP_F_TX - 1;
+    // switches are 0 or 1, the leave time at most an hour, the tone amplitude a 16-bit level
+    assert cs_set(z, CS_K_VIDEO, 2) == false and cs_set(z, CS_K_VIDEO, 1) and cs_g(z, CS_K_VIDEO) == 1;
+    assert cs_set(z, CS_K_GSTATS, 1) and cs_set(z, CS_K_GAUTO, 0);
+    assert cs_set(z, CS_K_GLEAVE_S, 3601) == false and cs_set(z, CS_K_GLEAVE_S, 3600);
+    assert cs_set(z, CS_K_TONE_AMP, 99) == false and cs_set(z, CS_K_TONE_AMP, 32768) == false;
+    assert cs_set(z, CS_K_TONE_AMP, 100) and cs_set(z, CS_K_TONE_AMP, 32767) and cs_g(z, CS_K_TONE_AMP) == 32767;
+    assert cs_set(z, CS_K_VDROP, 4294967296) == false and cs_set(z, CS_K_VLIMIT, 4294967295);
+    // a slot that is not a tunable is never written through cs_set
+    assert cs_set(z, CS_ST_SENT, 5) == false and cs_set(z, CS_MAGIC, 0) == false and cs_set(z, 60, 1) == false;
+    assert cs_g(z, CS_MAGIC) == CS_MAGIC_V;
+    // while media flows nothing changes
+    z[1] = @as(u8, @intCast(CK_ACTIVE));
+    assert cs_set(z, CS_K_CALLING_MS, 2000) == false and cs_g(z, CS_K_CALLING_MS) == 1000;
+}
+
+test an_action_out_of_its_state_is_refused_and_moves_nothing {
+    var s : [165504]u8 = undefined;
+    cs_t_live(s[0..CS_LEN]);
+    const z : []u8 = s[0..CS_LEN];
+    var fp : [10]u8 = undefined;
+    ck_fill_session(fp[0..10], 77);
+    // answer and decline need a ringing call; dismiss needs an ended one; hang-up needs one up
+    assert cs_answer(z) == false and cs_decline(z) == false and cs_dismiss(z) == false;
+    z[1] = @as(u8, @intCast(CK_RINGING));
+    assert cs_hangup(z) == false and cs_state(z) == CK_RINGING;
+    z[1] = @as(u8, @intCast(CK_ACTIVE));
+    assert cs_dismiss(z) == false and cs_state(z) == CK_ACTIVE;
+    // confirm needs VERIFY with the code known and no confirm sent yet
+    assert cs_confirm(z, true) == false;
+    z[1] = @as(u8, @intCast(CK_VERIFY));
+    assert cs_confirm(z, true) == false;
+    z[EP_HAVE_CODE] = 1;
+    cs_p(z, CS_N2, 60);
+    assert cs_confirm(z, false) == false and cs_reason(z) == CS_R_NONE;
+    // a dial needs a free line, an address, a port and a 10-byte key
+    assert cs_call(z, 3232235786, 47727, fp[0..10]) == false;
+    z[1] = @as(u8, @intCast(CK_ACTIVE));
+    assert cs_call(z, 3232235786, 47727, fp[0..10]) == false;
+    z[1] = @as(u8, @intCast(CK_RINGING));
+    assert cs_call(z, 3232235786, 47727, fp[0..10]) == false;
+    z[1] = @as(u8, @intCast(CK_IDLE));
+    assert cs_call(z, 0, 47727, fp[0..10]) == false;
+    assert cs_call(z, 4294967296, 47727, fp[0..10]) == false;
+    assert cs_call(z, 3232235786, 0, fp[0..10]) == false;
+    assert cs_call(z, 3232235786, 65536, fp[0..10]) == false;
+    assert cs_call(z, 3232235786, 47727, fp[0..9]) == false;
+    assert cs_state(z) == CK_IDLE and z[EP_ROLE] == 0;
+    // the camera hands in only a JPEG (SOI 255 216) of 4 .. VC_JPEG_MAX bytes
+    const bad : [4]u8 = [255, 217, 0, 0];
+    assert cs_video_feed(z, bad[0..4]) == false;
+    const short : [3]u8 = [255, 216, 255];
+    assert cs_video_feed(z, short[0..3]) == false;
+    assert cvg(z, VT_CAM_LEN) == 0;
+    // a one block session has no group: no pick, no leave, no link but its own
+    assert csg_add(z, fp[0..10], 3232235786, 47727) == false;
+    assert csg_leave(z) == false;
+    assert csg_link(z, 1, 2) == 0 and csg_link(z, 3, 6) == 0;
+}
+
+test the_group_and_video_counters_read_their_own_slots {
+    var s : [165504]u8 = undefined;
+    cs_t_live(s[0..CS_LEN]);
+    const z : []u8 = s[0..CS_LEN];
+    assert csg_state(z) == GR_NONE;
+    cgp(z, G_STATE, @as(u64, GR_PARTIAL));
+    assert csg_state(z) == GR_NONE;
+    cgp(z, G_STARTED, 1);
+    assert csg_state(z) == GR_PARTIAL;
+    cgp(z, G_UP, 101);
+    cgp(z, G_UPMAX, 102);
+    cgp(z, G_MIXED, 103);
+    cgp(z, G_CLIP, 104);
+    cgp(z, G_MIX_PEAK, 105);
+    cgp(z, G_PEND, 107);
+    cgp(z, G_GONE, 108);
+    cgp(z, G_FULL_MS, 109);
+    cgp(z, G_FULL_TICKS, 110);
+    assert csg_stat(z, 0) == 101 and csg_stat(z, 1) == 102 and csg_stat(z, 2) == 103 and csg_stat(z, 3) == 104;
+    assert csg_stat(z, 4) == 105 and csg_stat(z, 6) == 107 and csg_stat(z, 7) == 108;
+    assert csg_stat(z, 8) == 109 and csg_stat(z, 9) == 110 and csg_stat(z, 10) == 0;
+    // the receiver's assembly counters (call_core) and the sender's (VT_*), each from its own slot
+    put_u64(z, CS_VID + VR_DONE * 8, 201);
+    put_u64(z, CS_VID + VR_SKIP * 8, 202);
+    put_u64(z, CS_VID + VR_PARTS * 8, 203);
+    put_u64(z, CS_VID + VR_REFUSED * 8, 204);
+    put_u64(z, CS_VID + VR_STALE * 8, 205);
+    put_u64(z, CS_VID + VR_HASH * 8, 206);
+    put_u64(z, CS_VID + VR_AT * 8, 207);
+    put_u64(z, CS_VID + VR_SIZE * 8, 208);
+    put_u64(z, CS_VID + VR_LAST * 8, 209);
+    var k : usize = 0;
+    while (k < VT_END) {
+        cvp(z, k, 300 + @as(u64, k));
+        k = k + 1;
+    }
+    assert cs_vstat(z, CS_V_SHOWN) == 201 and cs_vstat(z, CS_V_SKIPPED) == 202 and cs_vstat(z, CS_V_RXPARTS) == 203;
+    assert cs_vstat(z, CS_V_REFUSED) == 204 and cs_vstat(z, CS_V_STALE) == 205 and cs_vstat(z, CS_V_RXHASH) == 206;
+    assert cs_vstat(z, CS_V_LASTAT) == 207 and cs_vstat(z, CS_V_LASTSIZE) == 208 and cs_vstat(z, CS_V_LASTFRAME) == 209;
+    assert cs_vstat(z, CS_V_TXFRAMES) == 300 + VT_FRAMES and cs_vstat(z, CS_V_TXPARTS) == 300 + VT_PARTS;
+    assert cs_vstat(z, CS_V_TXDROPPED) == 300 + VT_DROPPED and cs_vstat(z, CS_V_TXHASH) == 300 + VT_HASH;
+    assert cs_vstat(z, CS_V_GEN) == 300 + VT_GEN and cs_vstat(z, CS_V_CAM) == 300 + VT_CAM;
+    assert cs_vstat(z, CS_V_ERR) == 300 + VT_ERR and cs_vstat(z, CS_V_SENDERR) == 300 + VT_SENDERR;
+    assert cs_vstat(z, CS_V_MAKE_MAX) == 300 + VT_MAKE_MAX and cs_vstat(z, CS_V_SERIAL) == 300 + VT_SERIAL;
+    assert cs_vstat(z, CS_V_DROPHASH) == 300 + VT_DROPHASH and cs_vstat(z, 20) == 0;
+    assert cs_vlen(z) == 300 + VT_LASTLEN;
+    // a short slice reads nothing
+    assert cs_vstat(s[0..CS_LEN - 1], CS_V_SHOWN) == 0 and cs_vlen(s[0..CS_LEN - 1]) == 0;
+    // "video on": a frame completed within the last second
+    put_u64(z, CS_VID + VR_AT * 8, 5000);
+    assert cs_vlive(z, 5000) and cs_vlive(z, 6000);
+    assert cs_vlive(z, 6001) == false and cs_vlive(z, 4999) == false;
+    assert cs_vlive(s[0..CS_LEN - 1], 5000) == false;
+    put_u64(z, CS_VID + VR_AT * 8, 0);
+    assert cs_vlive(z, 500) == false;
+}
+
+test every_sender_tag_has_a_period_that_divides_a_frame {
+    assert cs_sine_period(0) == 48 and cs_sine_period(1) == 60 and cs_sine_period(2) == 80;
+    assert cs_sine_period(3) == 96 and cs_sine_period(4) == 120 and cs_sine_period(5) == 160;
+    assert cs_sine_period(6) == 240 and cs_sine_period(7) == 48 and cs_sine_period(255) == 96;
+    var t : u32 = 0;
+    while (t < 256) {
+        const p : usize = cs_sine_period(@as(u8, @intCast(t)));
+        assert 480 % p == 0 and p % 2 == 0;
+        t = t + 1;
+    }
+}
