@@ -237,6 +237,23 @@ pub fn upv_line1(cl: []const u8, out: []u8) -> usize {
     return put_bytes(out, 0, "update: no newer build nearby");
 }
 
+/// The footer's update item for this state (the window's footer upper-cases it): "update available" while a friend's
+/// offer stands (again after a failure or a cancel), "updating 42%" while it downloads or installs ("updating" before the
+/// size is known), "restart to update" once installed; 0 bytes when the part has nothing to say, and the footer keeps its
+/// own text (statusbar.upd_text, "up to date").
+pub fn upv_bar_text(st: u32, offer: bool, have: u64, total: u64, out: []u8) -> usize {
+    if (st == UPV_S_DONE) { return put_bytes(out, 0, "restart to update"); }
+    if (st == UPV_S_FETCH or st == UPV_S_INSTALL) {
+        var n : usize = put_bytes(out, 0, "updating");
+        if (total == 0) { return n; }
+        n = put_bytes(out, n, " ");
+        n = put_dec(out, n, @as(u64, uw_percent(have, total)));
+        return put_bytes(out, n, "%");
+    }
+    if (offer and upv_takes_offer(st)) { return put_bytes(out, 0, "update available"); }
+    return 0;
+}
+
 /// The second line: the progress while downloading, the reason after a failure, else what this device serves.
 pub fn upv_line2(cl: []const u8, out: []u8) -> usize {
     const st : u32 = @as(u32, cl[UPV_ST]);
@@ -398,6 +415,22 @@ test upv_the_serving_line_says_port_and_whether_it_is_announced {
     assert upv_eq(o[0..128], upv_line2(cl[0..8192], o[0..128]), "serving 7067 on port 52144 (not announced), sent 2");
     cl[UPV_SRV] = @as(u8, @intCast(UPV_SRV_FAIL));
     assert upv_eq(o[0..128], upv_line2(cl[0..8192], o[0..128]), "not serving: the server stopped");
+}
+
+test upv_the_footer_says_available_updating_restart_or_leaves_its_own_text {
+    var o : [64]u8 = undefined;
+    // nothing nearby: 0 bytes, the footer keeps "up to date"
+    assert upv_bar_text(UPV_S_NONE, false, 0, 0, o[0..64]) == 0;
+    assert upv_bar_text(UPV_S_FAILED, false, 0, 0, o[0..64]) == 0;
+    assert upv_eq(o[0..64], upv_bar_text(UPV_S_NONE, true, 0, 0, o[0..64]), "update available");
+    assert upv_eq(o[0..64], upv_bar_text(UPV_S_OFFER, true, 0, 0, o[0..64]), "update available");
+    assert upv_eq(o[0..64], upv_bar_text(UPV_S_FAILED, true, 0, 0, o[0..64]), "update available");
+    assert upv_eq(o[0..64], upv_bar_text(UPV_S_CANCELLED, true, 0, 0, o[0..64]), "update available");
+    assert upv_eq(o[0..64], upv_bar_text(UPV_S_FETCH, true, 0, 0, o[0..64]), "updating");
+    assert upv_eq(o[0..64], upv_bar_text(UPV_S_FETCH, true, 655360, 1397067, o[0..64]), "updating 46%");
+    assert upv_eq(o[0..64], upv_bar_text(UPV_S_INSTALL, true, 1397067, 1397067, o[0..64]), "updating 100%");
+    assert upv_eq(o[0..64], upv_bar_text(UPV_S_DONE, false, 0, 0, o[0..64]), "restart to update");
+    assert upv_eq(o[0..64], upv_bar_text(UPV_S_DONE, true, 1, 1, o[0..64]), "restart to update");
 }
 
 test upv_the_helper_phases_map_to_the_panel_and_an_offer_waits_while_busy {

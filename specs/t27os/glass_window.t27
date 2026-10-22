@@ -458,6 +458,15 @@ use t27os::update_view::upv_button_word;
 use t27os::update_view::upv_has_offer;
 use t27os::update_view::upv_line1;
 use t27os::update_view::upv_line2;
+use t27os::update_view::upv_bar_text;
+use t27os::update_view::upv_get64;
+use t27os::update_view::UPV_HAVE;
+use t27os::update_view::UPV_TOTAL;
+use t27os::update_view::UPV_OBUILD;
+use t27os::update_view::UPV_OPORT;
+use t27os::update_view::UPV_S_FETCH;
+use t27os::update_view::upv_put32;
+use t27os::update_view::upv_put64;
 use t27os::account_view::AC_UPD_Y;
 use t27os::account_view::AC_UPD2_Y;
 use t27os::account_view::AC_UPD_BTN_Y;
@@ -8511,7 +8520,16 @@ fn sb_put(kit: [48]u64, slots: []u8, lens: []u32, widths: []f64, id: u32, n: usi
 
 /// Writes every present item's text into slots (SB_SLOT bytes each, upper case), its length and width; the present mask.
 /// An item whose feed does not exist yet is not present.
-fn sb_build(kit: [48]u64, tg: []const u64, sst: []const u32, slots: []u8, lens: []u32, widths: []f64) -> u32 {
+/// The footer's update item: the friend's update when the ACCOUNT panel's UPDATE part has one (update_view.upv_bar_text:
+/// available / updating N% / restart to update), else the self-updater's text when it runs (statusbar.upd_text), else none.
+pub fn sb_upd_text(tg: []const u64, cl: []const u8, out: []u8) -> usize {
+    const n : usize = upv_bar_text(@as(u32, cl[UPV_ST]), upv_has_offer(cl), upv_get64(cl, UPV_HAVE), upv_get64(cl, UPV_TOTAL), out);
+    if (n > 0) { return n; }
+    if (tg[TPG_U_ON] == 0) { return 0; }
+    return upd_text(out, tg[TPG_U_ST] as u8, tg[TPG_U_WHY] as u8, PCT_UNKNOWN);
+}
+
+fn sb_build(kit: [48]u64, tg: []const u64, sst: []const u32, cl: []const u8, slots: []u8, lens: []u32, widths: []f64) -> u32 {
     var present : u32 = 0;
     const hn : usize = tg[TPG_SB_HOSTN] as usize;
     if (hn > 0 and hn <= 24) {
@@ -8527,10 +8545,8 @@ fn sb_build(kit: [48]u64, tg: []const u64, sst: []const u32, slots: []u8, lens: 
     if (cn <= 8) { vn = cn; }
     const nv : usize = ver_text(slots[(IT_VER as usize) * SB_SLOT .. (IT_VER as usize) * SB_SLOT + SB_SLOT], tg[TPG_U_CUR] as u32, cb[0..8], vn);
     present = present + sb_put(kit, slots, lens, widths, IT_VER, nv, 0.0);
-    if (tg[TPG_U_ON] != 0) {
-        const nu : usize = upd_text(slots[(IT_UPD as usize) * SB_SLOT .. (IT_UPD as usize) * SB_SLOT + SB_SLOT], tg[TPG_U_ST] as u8, tg[TPG_U_WHY] as u8, PCT_UNKNOWN);
-        present = present + sb_put(kit, slots, lens, widths, IT_UPD, nu, 0.0);
-    }
+    const nu : usize = sb_upd_text(tg, cl, slots[(IT_UPD as usize) * SB_SLOT .. (IT_UPD as usize) * SB_SLOT + SB_SLOT]);
+    if (nu > 0) { present = present + sb_put(kit, slots, lens, widths, IT_UPD, nu, 0.0); }
     const ng : usize = god_text(slots[(IT_GOD as usize) * SB_SLOT .. (IT_GOD as usize) * SB_SLOT + SB_SLOT], tg[TPG_Q_GOD] != 0, sst[SST_QRUN], EV_MAX_AGENTS);
     present = present + sb_put(kit, slots, lens, widths, IT_GOD, ng, 0.0);
     const ns : usize = srv_text(slots[(IT_SRV as usize) * SB_SLOT .. (IT_SRV as usize) * SB_SLOT + SB_SLOT], sst[SST_SRV], sb_panes(sst));
@@ -8559,7 +8575,7 @@ fn sb_build(kit: [48]u64, tg: []const u64, sst: []const u32, slots: []u8, lens: 
 }
 
 /// The footer item under (x, y): its id, IT_FOLD for the "...", SB_NONE for none.
-fn sb_hit(kit: [48]u64, tg: []const u64, sst: []const u32, x: f64, y: f64, sw: f64, sh: f64) -> u32 {
+fn sb_hit(kit: [48]u64, tg: []const u64, sst: []const u32, cl: []const u8, x: f64, y: f64, sw: f64, sh: f64) -> u32 {
     if (in_bar(y, sh) == false) { return SB_NONE; }
     var slots : [704]u8 = undefined;
     var lens : [11]u32 = undefined;
@@ -8570,14 +8586,14 @@ fn sb_hit(kit: [48]u64, tg: []const u64, sst: []const u32, x: f64, y: f64, sw: f
         widths[k] = 0.0;
         k = k + 1;
     }
-    const present : u32 = sb_build(kit, tg, sst, slots[0..704], lens[0..11], widths[0..11]);
+    const present : u32 = sb_build(kit, tg, sst, cl, slots[0..704], lens[0..11], widths[0..11]);
     const vis : u32 = visible_mask(present, widths[0..11], avail_w(sw));
     return sb_item_at(x, y, sh, vis, present, widths[0..11]);
 }
 
 /// The footer: matte glass across the window bottom, small caps, each item from its one source; OPEN SOURCE T27,
 /// KEYS and DOCTOR at the right end. The items that do not fit fold into "..." with a tooltip list.
-fn draw_footer(c: u64, kit: [48]u64, tg: []const u64, sst: []const u32, mx: f64, my: f64, sw: f64, sh: f64, full: bool, a: f64, kyp: bool, dlabel: u64, dp: bool) -> void {
+fn draw_footer(c: u64, kit: [48]u64, tg: []const u64, sst: []const u32, cl: []const u8, mx: f64, my: f64, sw: f64, sh: f64, full: bool, a: f64, kyp: bool, dlabel: u64, dp: bool) -> void {
     draw_ground(c, 0.0, sh - SB_H, sw, SB_H, SURF_SIDEBAR, full, a);
     cg_fill_rgba(c, 1.0, 1.0, 1.0, LINE_WHITE * a);
     cg_fill_rect(c, 0.0, sh - SB_H, sw, HAIR);
@@ -8590,7 +8606,7 @@ fn draw_footer(c: u64, kit: [48]u64, tg: []const u64, sst: []const u32, mx: f64,
         widths[k] = 0.0;
         k = k + 1;
     }
-    const present : u32 = sb_build(kit, tg, sst, slots[0..704], lens[0..11], widths[0..11]);
+    const present : u32 = sb_build(kit, tg, sst, cl, slots[0..704], lens[0..11], widths[0..11]);
     const vis : u32 = visible_mask(present, widths[0..11], avail_w(sw));
     const hot : u32 = sb_item_at(mx, my, sh, vis, present, widths[0..11]);
     const base : f64 = sh - 8.0;
@@ -8602,6 +8618,7 @@ fn draw_footer(c: u64, kit: [48]u64, tg: []const u64, sst: []const u32, mx: f64,
             var al : f64 = LABEL_WHITE;
             if (hot == id) { al = TEXT_WHITE; }
             if (id == IT_UPD and tg[TPG_U_ST] == (U_STAGED as u64)) { al = TEXT_WHITE; }
+            if (id == IT_UPD and ac_upd_shown(cl)) { al = TEXT_WHITE; }
             if (id == IT_GOD and tg[TPG_Q_GOD] != 0) { al = TEXT_WHITE; }
             if (id == IT_LOAD and sst[SST_DISK] > 0 and load_red(NOT_READ, sst[SST_DISK] - 1)) { al = TEXT_WHITE; }
             if (id == IT_LIGHT) {
@@ -10575,7 +10592,7 @@ fn draw(c: u64, kit: [48]u64, frame: u32, state: u32, hov: u32, ma: f64, shown: 
     }
     if (ma > 0.0) {
         draw_god_strip(c, kit, tg, sst, sw, sh, full, ma, god);
-        draw_footer(c, kit, tg, sst, mx, my, sw, sh, full, ma, kyp, dlabel, dp);
+        draw_footer(c, kit, tg, sst, tb[TBO_CL .. TBO_CL + CL_CAP], mx, my, sw, sh, full, ma, kyp, dlabel, dp);
     }
     draw_titlebar(c, kit, sw, full, ma, tg, god, mx, my, tb[TBO_PF .. TBO_PF + PF_CAP], tb[TBO_CL .. TBO_CL + CL_CAP]);
     draw_edge_glow(c, sw, sh, glow, frame);
@@ -12276,7 +12293,7 @@ pub fn main() -> void {
                 vx = @as(i64, @intFromFloat(virt(mx, 0, z, sw, sh)));
                 vy = @as(i64, @intFromFloat(virt(my, 1, z, sw, sh)));
                 const lgh : u32 = lv_log_hit(mx, my, content_x(ws, collapsed), WS_TOP + HEADER_H, sw - content_x(ws, collapsed), sh - WS_TOP - HEADER_H);
-                const sbit : u32 = sb_hit(kit, tgv[0..256], sst[0..560], mx, my, sw, sh);
+                const sbit : u32 = sb_hit(kit, tgv[0..256], sst[0..560], tbv[TBO_CL .. TBO_CL + CL_CAP], mx, my, sw, sh);
                 const sbp : u32 = item_page(sbit);
                 const hdr_ready : bool = tgv[TPG_U_ON] != 0 and tgv[TPG_U_ST] == (U_STAGED as u64);
                 if (on_god_switch(mx, my, hdr_right(sw), TITLE_H)) {
@@ -13910,7 +13927,7 @@ pub fn main() -> void {
         var on_control : bool = on_home_button(mx, my, sw) or on_full_button(mx, my, sw) or on_dock_button(mx, my, sw) or on_god_switch(mx, my, hdr_right(sw), TITLE_H);
         if (on_hdr_btn(mx, my, hdr_right(sw), TITLE_H, tgv[TPG_U_ON] != 0 and tgv[TPG_U_ST] == (U_STAGED as u64))) { on_control = true; }
         if (qd_open(sst[0..560], screen, ws) and on_qd_area(mx, my, sw, sh, ws, collapsed, qp or dp or kyp or pfp or clp) and qd_hit(mx, my, qd_area_x(ws, collapsed), WS_TOP, qd_area_w(sw, ws, collapsed, qp or dp or kyp or pfp or clp), qd_area_h(sh), qd_lane_rows_shown(qd_table_rows(WS_TOP, qd_area_w(sw, ws, collapsed, qp or dp or kyp or pfp or clp), qd_area_h(sh))), qd_queue_rows_shown(qd_table_rows(WS_TOP, qd_area_w(sw, ws, collapsed, qp or dp or kyp or pfp or clp), qd_area_h(sh)))) != QD_QH_NONE) { on_control = true; }
-        if ((screen or hscreen) and sb_hit(kit, tgv[0..256], sst[0..560], mx, my, sw, sh) != SB_NONE) { on_control = true; }
+        if ((screen or hscreen) and sb_hit(kit, tgv[0..256], sst[0..560], tbv[TBO_CL .. TBO_CL + CL_CAP], mx, my, sw, sh) != SB_NONE) { on_control = true; }
         if (hscreen and on_nav_back(mx, my, full)) { on_control = true; }
         if (screen and (on_nav_back(mx, my, full) or on_side_toggle(mx, my, ws, collapsed))) { on_control = true; }
         if (screen and (on_open_dash(mx, my, sw, ws) or on_close_dash(mx, my, ws, collapsed))) { on_control = true; }
@@ -15636,4 +15653,43 @@ test the_update_state_sits_after_the_friends_engine_inside_the_call_region {
     assert ac_upd_shown(cl[0..8192]) == false;
     cl[UPV_ST] = @as(u8, @intCast(UPV_S_DONE));
     assert ac_upd_shown(cl[0..8192]);
+}
+
+test the_footer_update_item_follows_the_friends_offer_before_the_self_updater {
+    var cl : [8192]u8 = undefined;
+    var tg : [256]u64 = undefined;
+    var i : usize = 0;
+    while (i < 8192) {
+        cl[i] = 0;
+        i = i + 1;
+    }
+    i = 0;
+    while (i < 256) {
+        tg[i] = 0;
+        i = i + 1;
+    }
+    var o : [64]u8 = undefined;
+    // no offer, self-updater off: no item; self-updater on and idle: "up to date" as before
+    assert sb_upd_text(tg[0..256], cl[0..8192], o[0..64]) == 0;
+    tg[TPG_U_ON] = 1;
+    var n : usize = sb_upd_text(tg[0..256], cl[0..8192], o[0..64]);
+    assert n == 10 and o[0] == 117 and o[3] == 116;
+    // a friend's offer (build and port): "update available", even while the self-updater says up to date
+    upv_put32(cl[0..8192], UPV_OBUILD, 7069);
+    upv_put32(cl[0..8192], UPV_OPORT, 52144);
+    n = sb_upd_text(tg[0..256], cl[0..8192], o[0..64]);
+    assert n == 16 and o[0] == 117 and o[6] == 32 and o[7] == 97;
+    // downloading 1 of 4: "updating 25%"
+    cl[UPV_ST] = @as(u8, @intCast(UPV_S_FETCH));
+    upv_put64(cl[0..8192], UPV_TOTAL, 4);
+    upv_put64(cl[0..8192], UPV_HAVE, 1);
+    n = sb_upd_text(tg[0..256], cl[0..8192], o[0..64]);
+    assert n == 12 and o[9] == 50 and o[10] == 53 and o[11] == 37;
+    // installed: "restart to update"
+    cl[UPV_ST] = @as(u8, @intCast(UPV_S_DONE));
+    n = sb_upd_text(tg[0..256], cl[0..8192], o[0..64]);
+    assert n == 17 and o[0] == 114;
+    // the self-updater off and the friend's part done still shows
+    tg[TPG_U_ON] = 0;
+    assert sb_upd_text(tg[0..256], cl[0..8192], o[0..64]) == 17;
 }
