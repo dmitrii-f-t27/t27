@@ -9202,6 +9202,9 @@ fn cl_stats_line(cl: []u8, s: []u8, secs: u64) -> void {
     cl_stat_num(" pgap=", cl_get32(cl, CL_GAP));
     cl_stat_num(" p10=", cl_get32(cl, CL_N10));
     cl_stat_num(" ring_cb=", rt_stat(cl[FE_TONE .. FE_TONE + RT_BLOCK], RT_S_CB));
+    cl_stat_num(" vlive=", @as(u64, cl[CL_VLIVE]));
+    cl_stat_num(" vshown=", cl_get32(cl, CL_VSHOWN));
+    cl_stat_num(" vskip=", cl_get32(cl, CL_VSKIP));
     sys_write(2, "\n", 1);
 }
 
