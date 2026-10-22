@@ -1,0 +1,1044 @@
+// SPDX-License-Identifier: Apache-2.0
+// specs/t27os/call_session.t27 -- one T27 OS call as a session a window can drive: dial, ring, answer or decline,
+// show the 6-digit code, confirm it, mute, hang up, and a non-blocking poll that says what happened. Host code
+// (@extern): build it with t27b, not t27c. Nothing here decides a call state, a code, a key or a replay: those are
+// call_core.t27 (ck_next, ck_verdict, the code, the window, the nonces) through the endpoint of
+// call_crypto_probe.t27 (ECDH SecKey, HKDF on CCHmac, AES-128-GCM via libffi), and the audio path is the part F/G
+// machinery of callback_probe.t27 (capture ring cbp_fin, jitter buffer with the redundant copy and concealment
+// cbp_fstore / cbp_fpull / cbp_fout, AudioQueue on the caller's run loop). This file only joins them: one UDP
+// socket, the handshake messages and their resends, sealed media frames, events and timeouts.
+// Owner, 2026-10-21: calls run inside the OS, explicit consent, never auto-answer. Refs gHashTag/t27#11560.
+//
+// API for the window. `s` is one block of CS_LEN bytes owned by the window; it must not move while the session is
+// open, because the audio callbacks hold the address of its audio part. All calls return at once.
+//   cs_open(s, me_fp, bind_ip, port, audio) -> bool   bind one non-blocking UDP socket (ip as a<<24|b<<16|c<<8|d);
+//                                                      me_fp is this device's 10-byte fingerprint; audio is
+//                                                      CS_AUDIO_DEV (microphone and speakers) or CS_AUDIO_TEST
+//                                                      (a numbered test pattern, no devices). State IDLE.
+//   cs_call(s, ip, port, peer_fp) -> bool             dial: IDLE / ENDED / FAILED -> CALLING, sends INVITE.
+//   cs_poll(s) -> u32                                 read the socket until it is empty, resend unanswered
+//                                                      handshake messages every 200 ms, run timeouts, seal and send
+//                                                      captured audio, open received audio; returns the oldest
+//                                                      unread event (CS_EV_*), CS_EV_NONE when there is none. Call
+//                                                      it from the window's main loop at least every 10 ms while a
+//                                                      call is ACTIVE (the capture ring holds 70 ms), and on the
+//                                                      thread whose run loop runs: the audio callbacks are put on
+//                                                      that run loop when the call becomes ACTIVE.
+//   cs_state(s) -> u32                                 CK_IDLE .. CK_FAILED of call_core.
+//   cs_incoming(s) -> bool                             an incoming call rings (RINGING): show Answer / Decline.
+//   cs_peer(s, fp_out) -> u64                          the other party: its 10-byte fingerprint into fp_out and its
+//                                                      IPv4 as the result (0 when there is no call).
+//   cs_code(s, out) -> bool                            the 6 ASCII digits both screens must show, once known.
+//   cs_answer(s) -> bool                               the person pressed Answer: RINGING -> VERIFY, sends ANSWER.
+//   cs_decline(s) -> bool                              the person pressed Decline: RINGING -> ENDED.
+//   cs_confirm(s, same) -> bool                        the person compared the codes: same = "they match". The call
+//                                                      becomes ACTIVE only when both people said match and the
+//                                                      peer's sealed CONFIRM names the same transcript; "differ"
+//                                                      fails the call at once.
+//   cs_mute(s, on) -> bool, cs_muted(s) -> bool        microphone off / on: while muted the frames still go out
+//                                                      (the peer's jitter buffer stays fed) but carry silence.
+//   cs_hangup(s) -> bool                               cancel a CALLING call, or end VERIFY / ACTIVE: -> ENDED.
+//   cs_dismiss(s) -> bool                              the end line was shown: ENDED / FAILED -> IDLE.
+//   cs_reason(s) -> u32                                why the last call ended (CS_R_*).
+//   cs_stat(s, k) -> u64                               counter k (CS_ST_*), or audio counter i as 1000 + i (the
+//                                                      part F header slots of callback_probe.t27).
+//   cs_set(s, k, v) -> bool                            a timeout or jitter size (CS_K_*), before or between calls.
+//   cs_close(s)                                        stop the audio, close the socket.
+// Events: CS_EV_CALLING, CS_EV_RINGING, CS_EV_CODE (the code is ready: show it with Match / Differ), CS_EV_ACTIVE
+// (media flows), CS_EV_ENDED, CS_EV_FAILED (read cs_reason), CS_EV_IDLE. A window needs nothing else to draw the
+// call: the state, the code, the peer, the reason and the mute flag.
+//
+// Wire: every message is a call_core frame (52-byte header). INVITE, ANSWER, REVEAL are plain (call_core's
+// commitment and transcript bind them); CONFIRM, media and the in-call BYE are sealed (AES-128-GCM, the header is
+// the associated data). A media frame's plaintext is part F's packet: audio index u32 LE, length 960 u16, flags
+// u16 (1 = the previous frame follows as a redundant copy), 960 bytes PCM, then the previous 960 bytes; sealed it
+// is 52 + 1928 + 16 = 1996 bytes. Ending before keys exist (cancel while CALLING, decline while RINGING, hang-up in
+// VERIFY) is a plain 52-byte BYE (seq 0) of the call's session, sent three times; it is accepted only before
+// ACTIVE, so in a running call only a sealed BYE ends it. A plain BYE can be forged by whoever sees the session id:
+// that ends a call that is not yet carrying media, as dropping its packets would; it opens nothing.
+// Test identities only (fixed fingerprints in the probe); binding to keysync device keys is the next slice.
+// Behaviour checks, not a security audit.
+module T27osCallSession;
+
+use t27os::pty_sys::sys_socket;
+use t27os::pty_sys::sys_bind;
+use t27os::pty_sys::sys_close;
+use t27os::pty_sys::sys_addr;
+use t27os::pty_sys::sys_peek;
+use t27os::pty_proto::put_u64;
+use t27os::pty_proto::get_u64;
+use t27os::call_core::ck_next;
+use t27os::call_core::ck_hdr_type;
+use t27os::call_core::ck_hdr_seq;
+use t27os::call_core::ck_hdr_admit;
+use t27os::call_core::ck_put_header;
+use t27os::call_core::ck_same;
+use t27os::call_core::ck_put;
+use t27os::call_core::ck_wipe;
+use t27os::call_core::CK_IDLE;
+use t27os::call_core::CK_CALLING;
+use t27os::call_core::CK_RINGING;
+use t27os::call_core::CK_VERIFY;
+use t27os::call_core::CK_ACTIVE;
+use t27os::call_core::CK_ENDED;
+use t27os::call_core::CK_FAILED;
+use t27os::call_core::CK_EV_DECLINE;
+use t27os::call_core::CK_EV_DECLINED;
+use t27os::call_core::CK_EV_CANCEL;
+use t27os::call_core::CK_EV_CANCELLED;
+use t27os::call_core::CK_EV_HANGUP;
+use t27os::call_core::CK_EV_BYE;
+use t27os::call_core::CK_EV_TIMEOUT;
+use t27os::call_core::CK_EV_ERROR;
+use t27os::call_core::CK_EV_DISMISS;
+use t27os::call_core::CK_SAY_MATCH;
+use t27os::call_core::CK_SAY_DIFFER;
+use t27os::call_core::CK_HDR;
+use t27os::call_core::CK_TAG;
+use t27os::call_core::CK_T_INVITE;
+use t27os::call_core::CK_T_ANSWER;
+use t27os::call_core::CK_T_REVEAL;
+use t27os::call_core::CK_T_CONFIRM;
+use t27os::call_core::CK_T_BYE;
+use t27os::call_core::CK_T_MEDIA;
+use t27os::call_core::CK_INVITE_LEN;
+use t27os::call_core::CK_ANSWER_LEN;
+use t27os::call_core::CK_REVEAL_LEN;
+use t27os::call_core::CK_TRANSCRIPT_LEN;
+use t27os::call_crypto_probe::ckh_state;
+use t27os::call_crypto_probe::ckh_caller;
+use t27os::call_crypto_probe::ckh_go;
+use t27os::call_crypto_probe::ckh_invite;
+use t27os::call_crypto_probe::ckh_on_invite;
+use t27os::call_crypto_probe::ckh_answer;
+use t27os::call_crypto_probe::ckh_on_answer;
+use t27os::call_crypto_probe::ckh_on_reveal;
+use t27os::call_crypto_probe::ckh_seal;
+use t27os::call_crypto_probe::ckh_open;
+use t27os::call_crypto_probe::ckh_confirm;
+use t27os::call_crypto_probe::ckh_on_confirm;
+use t27os::call_crypto_probe::ckh_ms;
+use t27os::call_crypto_probe::ckh_at;
+use t27os::call_crypto_probe::ckh_addr4;
+use t27os::call_crypto_probe::ckh_sendto;
+use t27os::call_crypto_probe::ckh_recvfrom;
+use t27os::call_crypto_probe::ckh_fcntl;
+use t27os::call_crypto_probe::EP_LEN;
+use t27os::call_crypto_probe::EP_ROLE;
+use t27os::call_crypto_probe::EP_ME;
+use t27os::call_crypto_probe::EP_PEER;
+use t27os::call_crypto_probe::EP_SID;
+use t27os::call_crypto_probe::EP_HAVE_CODE;
+use t27os::call_crypto_probe::EP_CODE;
+use t27os::call_crypto_probe::EP_TR;
+use t27os::callback_probe::cbp_get;
+use t27os::callback_probe::cbp_put;
+use t27os::callback_probe::cbp_inc;
+use t27os::callback_probe::cbp_poke;
+use t27os::callback_probe::cbp_zero;
+use t27os::callback_probe::cbp_dlsym;
+use t27os::callback_probe::cbp_konst;
+use t27os::callback_probe::cbp_pcm48k;
+use t27os::callback_probe::cbp_rl_current;
+use t27os::callback_probe::cbp_aq_new_input;
+use t27os::callback_probe::cbp_aq_new_output;
+use t27os::callback_probe::cbp_aq_alloc;
+use t27os::callback_probe::cbp_aq_enqueue;
+use t27os::callback_probe::cbp_aq_start;
+use t27os::callback_probe::cbp_aq_dispose;
+use t27os::callback_probe::cbp_aq_set_param;
+use t27os::callback_probe::cbp_fin;
+use t27os::callback_probe::cbp_fout;
+use t27os::callback_probe::cbp_fpull;
+use t27os::callback_probe::cbp_fstore;
+use t27os::callback_probe::cbp_nz;
+use t27os::callback_probe::CBP_RTLD_DEFAULT;
+use t27os::callback_probe::CBP_D_MAGIC;
+use t27os::callback_probe::CBP_VOLUME;
+use t27os::callback_probe::CBP_E_OUTBUFS;
+use t27os::callback_probe::CBP_F_TX;
+use t27os::callback_probe::CBP_F_TXD;
+use t27os::callback_probe::CBP_F_EXT;
+use t27os::callback_probe::CBP_F_BYTES;
+use t27os::callback_probe::CBP_F_TARGET;
+use t27os::callback_probe::CBP_F_MAX;
+use t27os::callback_probe::CBP_F_JB;
+
+// ---------------------------------------------------------------- the block
+
+/// Endpoint of call_crypto_probe (EP_LEN = 960 bytes) at 0; then 64 u64 slots; then the last handshake message
+/// (INVITE, ANSWER or REVEAL) and the last CONFIRM, kept for resends; the peer's sockaddr; the event ring; and at
+/// CS_AUD the part F audio block of callback_probe (72256 bytes), whose address the audio callbacks receive.
+pub const CS_SLOTS : usize = 960;
+pub const CS_L1 : usize = 1472;
+pub const CS_L2 : usize = 1728;
+pub const CS_PADDR : usize = 1856;
+pub const CS_EVQ : usize = 1872;
+pub const CS_EVQ_N : u64 = 16;
+pub const CS_AUD : usize = 2048;
+pub const CS_LEN : usize = 74304;
+
+/// Slots (u64 LE at CS_SLOTS + 8 k). The first ones are also the window's counters through cs_stat.
+pub const CS_ST_SENT : u32 = 0;
+pub const CS_ST_ACCEPTED : u32 = 1;
+pub const CS_ST_REJ_AEAD : u32 = 2;
+pub const CS_ST_REJ_REPLAY : u32 = 3;
+pub const CS_ST_REJ_STATE : u32 = 4;
+pub const CS_ST_REJ_OTHER : u32 = 5;
+pub const CS_ST_RESENDS : u32 = 6;
+pub const CS_ST_ZERO_FRAMES : u32 = 7;
+pub const CS_ST_BAD_CONTENT : u32 = 8;
+pub const CS_ST_HI_INDEX : u32 = 9;
+pub const CS_ST_MS_TO_ACTIVE : u32 = 10;
+pub const CS_ST_SEND_ERR : u32 = 11;
+pub const CS_ST_AUDIO_ON : u32 = 12;
+pub const CS_ST_AUDIO_ERR : u32 = 13;
+pub const CS_ST_MUTED_SENT : u32 = 14;
+pub const CS_ST_NONZERO_RX : u32 = 15;
+const CS_FD : u32 = 20;
+const CS_MODE : u32 = 21;
+const CS_MUTED : u32 = 22;
+const CS_SEEN : u32 = 23;
+const CS_CODE_SAID : u32 = 24;
+const CS_T_STATE : u32 = 25;
+const CS_T_RESEND : u32 = 26;
+const CS_T_RX : u32 = 27;
+const CS_REASON : u32 = 28;
+const CS_N1 : u32 = 29;
+const CS_N2 : u32 = 30;
+const CS_EVH : u32 = 31;
+const CS_EVT : u32 = 32;
+const CS_QIN : u32 = 33;
+const CS_QOUT : u32 = 34;
+const CS_TAGME : u32 = 35;
+const CS_NEXT_TONE : u32 = 36;
+const CS_PEER_IP : u32 = 37;
+const CS_T_DIAL : u32 = 38;
+const CS_MAGIC : u32 = 39;
+/// Tunables (cs_set): 40.. hold the values.
+pub const CS_K_CALLING_MS : u32 = 40;
+pub const CS_K_RINGING_MS : u32 = 41;
+pub const CS_K_VERIFY_MS : u32 = 42;
+pub const CS_K_SILENT_MS : u32 = 43;
+pub const CS_K_JB_TARGET : u32 = 44;
+pub const CS_K_JB_MAX : u32 = 45;
+
+pub const CS_AUDIO_DEV : u32 = 1;
+pub const CS_AUDIO_TEST : u32 = 2;
+
+pub const CS_EV_NONE : u32 = 0;
+pub const CS_EV_CALLING : u32 = 1;
+pub const CS_EV_RINGING : u32 = 2;
+pub const CS_EV_CODE : u32 = 3;
+pub const CS_EV_ACTIVE : u32 = 4;
+pub const CS_EV_ENDED : u32 = 5;
+pub const CS_EV_FAILED : u32 = 6;
+pub const CS_EV_IDLE : u32 = 7;
+
+pub const CS_R_NONE : u32 = 0;
+pub const CS_R_HANGUP : u32 = 1;
+pub const CS_R_PEER_BYE : u32 = 2;
+pub const CS_R_DECLINED : u32 = 3;
+pub const CS_R_I_DECLINED : u32 = 4;
+pub const CS_R_CANCELLED : u32 = 5;
+pub const CS_R_NO_ANSWER : u32 = 6;
+pub const CS_R_I_SAID_DIFFER : u32 = 7;
+pub const CS_R_PEER_SAID_DIFFER : u32 = 8;
+pub const CS_R_NOT_CONFIRMED : u32 = 9;
+pub const CS_R_PEER_SILENT : u32 = 10;
+pub const CS_R_ERROR : u32 = 11;
+pub const CS_R_COMMITMENT : u32 = 12;
+pub const CS_R_AUDIO : u32 = 13;
+
+/// Set by cs_open, cleared by cs_close: the block is a live session.
+const CS_MAGIC_V : u64 = 3472328519473427298;
+/// Media plaintext: part F's packet; sealed size.
+pub const CS_PKT : usize = 1928;
+pub const CS_SEALED : usize = 1996;
+const CS_EAGAIN : u64 = 35;
+
+fn cs_g(s: []const u8, k: u32) -> u64 { return get_u64(s, CS_SLOTS + @as(usize, k) * 8); }
+fn cs_p(s: []u8, k: u32, v: u64) -> void { put_u64(s, CS_SLOTS + @as(usize, k) * 8, v); }
+fn cs_add(s: []u8, k: u32, by: u64) -> void { cs_p(s, k, cs_g(s, k) + by); }
+
+/// The audio block's address: what the callbacks get as `user`.
+fn cs_aud(s: []u8) -> u64 { return sys_addr(s[CS_AUD..CS_LEN], s[CS_AUD..CS_LEN], 0); }
+
+// ---------------------------------------------------------------- pure rules (tested below)
+
+/// The event a window sees when the call enters `st`; VERIFY has none of its own (the code event follows when the
+/// code is known).
+pub fn cs_event_for(st: u32) -> u32 {
+    if (st == CK_CALLING) { return CS_EV_CALLING; }
+    if (st == CK_RINGING) { return CS_EV_RINGING; }
+    if (st == CK_ACTIVE) { return CS_EV_ACTIVE; }
+    if (st == CK_ENDED) { return CS_EV_ENDED; }
+    if (st == CK_FAILED) { return CS_EV_FAILED; }
+    if (st == CK_IDLE) { return CS_EV_IDLE; }
+    return CS_EV_NONE;
+}
+
+/// What a plain (unsealed, 52-byte) BYE of this call does in state st: the call_core event, or 0 when it is
+/// ignored. In ACTIVE only a sealed BYE counts.
+pub fn cs_plain_bye_event(st: u32) -> u32 {
+    if (st == CK_CALLING) { return CK_EV_DECLINED; }
+    if (st == CK_RINGING) { return CK_EV_CANCELLED; }
+    if (st == CK_VERIFY) { return CK_EV_BYE; }
+    return 0;
+}
+
+/// The local end action in state st: the call_core event (0 = nothing to end) and whether it goes out sealed.
+pub fn cs_end_event(st: u32) -> u32 {
+    if (st == CK_CALLING) { return CK_EV_CANCEL; }
+    if (st == CK_VERIFY or st == CK_ACTIVE) { return CK_EV_HANGUP; }
+    return 0;
+}
+
+/// How long a state may last before it times out (0 = no limit), given the tunables.
+pub fn cs_limit(st: u32, calling: u64, ringing: u64, verify: u64) -> u64 {
+    if (st == CK_CALLING) { return calling; }
+    if (st == CK_RINGING) { return ringing; }
+    if (st == CK_VERIFY) { return verify; }
+    return 0;
+}
+
+/// Why a timeout ended the call in state st.
+pub fn cs_timeout_reason(st: u32) -> u32 {
+    if (st == CK_VERIFY) { return CS_R_NOT_CONFIRMED; }
+    if (st == CK_ACTIVE) { return CS_R_PEER_SILENT; }
+    return CS_R_NO_ANSWER;
+}
+
+/// The test pattern of audio frame q from the side tagged `tag`: 960 bytes, the index (u32 LE) in the first 4,
+/// the tag in byte 5, never an all-zero frame (every other byte has its low bit set).
+pub fn cs_tone(pcm: []u8, q: u64, tag: u8) -> void {
+    cs_pkt_head(pcm, q, false);
+    pcm[4] = tag;
+    var i : usize = 5;
+    while (i < 960) {
+        pcm[i] = @as(u8, @intCast((q * 7 + @as(u64, i) + @as(u64, tag) * 101) & 255)) | 1;
+        i = i + 1;
+    }
+}
+
+/// Is pcm exactly the test frame q of `tag`.
+pub fn cs_tone_ok(pcm: []const u8, q: u64, tag: u8) -> bool {
+    if (pcm.len < 960 or cs_pkt_index(pcm) != (q & 4294967295) or pcm[4] != tag) { return false; }
+    var i : usize = 5;
+    while (i < 960) {
+        if (pcm[i] != (@as(u8, @intCast((q * 7 + @as(u64, i) + @as(u64, tag) * 101) & 255)) | 1)) { return false; }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// All 960 bytes zero (a muted frame).
+pub fn cs_silent(pcm: []const u8) -> bool {
+    var d : u8 = 0;
+    var i : usize = 0;
+    while (i < 960) {
+        d = d | pcm[i];
+        i = i + 1;
+    }
+    return d == 0;
+}
+
+/// Write the media plaintext header for audio frame q: length 960, flags 1 when the redundant copy follows.
+pub fn cs_pkt_head(pkt: []u8, q: u64, red: bool) -> usize {
+    pkt[0] = @as(u8, @intCast(q & 255));
+    pkt[1] = @as(u8, @intCast((q >> 8) & 255));
+    pkt[2] = @as(u8, @intCast((q >> 16) & 255));
+    pkt[3] = @as(u8, @intCast((q >> 24) & 255));
+    pkt[4] = 192;
+    pkt[5] = 3;
+    pkt[6] = 0;
+    pkt[7] = 0;
+    if (red) {
+        pkt[6] = 1;
+        return CS_PKT;
+    }
+    return 968;
+}
+
+pub fn cs_pkt_index(pkt: []const u8) -> u64 {
+    return @as(u64, pkt[0]) | (@as(u64, pkt[1]) << 8) | (@as(u64, pkt[2]) << 16) | (@as(u64, pkt[3]) << 24);
+}
+
+// ---------------------------------------------------------------- events
+
+fn cs_push(s: []u8, ev: u32) -> void {
+    const h : u64 = cs_g(s, CS_EVH);
+    const t : u64 = cs_g(s, CS_EVT);
+    if (t - h >= CS_EVQ_N) { cs_p(s, CS_EVH, h + 1); }
+    s[CS_EVQ + @as(usize, @intCast(t % CS_EVQ_N))] = @as(u8, @intCast(ev));
+    cs_p(s, CS_EVT, t + 1);
+}
+
+fn cs_pop(s: []u8) -> u32 {
+    const h : u64 = cs_g(s, CS_EVH);
+    if (h == cs_g(s, CS_EVT)) { return CS_EV_NONE; }
+    cs_p(s, CS_EVH, h + 1);
+    return @as(u32, s[CS_EVQ + @as(usize, @intCast(h % CS_EVQ_N))]);
+}
+
+/// After anything that may have moved the call: one event per new state, the code event once, audio on entering
+/// ACTIVE and off on leaving it.
+fn cs_sync(s: []u8) -> void {
+    const st : u32 = ckh_state(s[0..EP_LEN]);
+    const was : u32 = @as(u32, @intCast(cs_g(s, CS_SEEN)));
+    if (st != was) {
+        const now : u64 = ckh_ms();
+        cs_p(s, CS_SEEN, @as(u64, st));
+        cs_p(s, CS_T_STATE, now);
+        if (was == CK_ACTIVE) { cs_audio_stop(s); }
+        if (st == CK_ACTIVE) {
+            cs_p(s, CS_ST_MS_TO_ACTIVE, now - cs_g(s, CS_T_DIAL));
+            cs_p(s, CS_T_RX, now);
+            if (!cs_audio_start(s)) {
+                cs_p(s, CS_REASON, @as(u64, CS_R_AUDIO));
+                ckh_go(s[0..EP_LEN], CK_EV_ERROR);
+                cs_push(s, CS_EV_ACTIVE);
+                cs_sync(s);
+                return;
+            }
+        }
+        const ev : u32 = cs_event_for(st);
+        if (ev != CS_EV_NONE) { cs_push(s, ev); }
+    }
+    if (s[EP_HAVE_CODE] != 0 and cs_g(s, CS_CODE_SAID) == 0 and (st == CK_VERIFY or st == CK_ACTIVE)) {
+        cs_p(s, CS_CODE_SAID, 1);
+        cs_push(s, CS_EV_CODE);
+    }
+}
+
+// ---------------------------------------------------------------- the socket
+
+fn cs_fd(s: []const u8) -> i32 { return @as(i32, @intCast(cs_g(s, CS_FD))) - 1; }
+
+fn cs_send(s: []u8, b: []const u8) -> bool {
+    const r : i64 = ckh_sendto(cs_fd(s), b, @as(u64, b.len), 0, s[CS_PADDR..CS_PADDR + 16], 16);
+    if (r != @as(i64, @intCast(b.len))) {
+        cs_add(s, CS_ST_SEND_ERR, 1);
+        return false;
+    }
+    return true;
+}
+
+/// A plain BYE of the current session, three times (a lost one would leave the peer waiting for its timeout).
+fn cs_send_plain_bye(s: []u8) -> void {
+    var h : [52]u8 = undefined;
+    ck_put_header(h[0..52], CK_T_BYE, s[EP_ME..EP_ME + 10], s[EP_PEER..EP_PEER + 10], s[EP_SID..EP_SID + 16], 0);
+    var k : u32 = 0;
+    while (k < 3) {
+        cs_send(s, h[0..52]);
+        k = k + 1;
+    }
+}
+
+fn cs_send_sealed_bye(s: []u8) -> void {
+    var by : [1]u8 = undefined;
+    by[0] = 0;
+    var f : [128]u8 = undefined;
+    const n : usize = ckh_seal(s[0..EP_LEN], CK_T_BYE, by[0..1], f[0..128]);
+    var k : u32 = 0;
+    while (k < 3 and n > 0) {
+        cs_send(s, f[0..n]);
+        k = k + 1;
+    }
+}
+
+// ---------------------------------------------------------------- open, dial, answer
+
+/// Open the session: one UDP socket bound to bind_ip:port, non-blocking. False when the block is short, the
+/// fingerprint is not 10 bytes, the mode is unknown or the OS refuses.
+pub fn cs_open(s: []u8, me_fp: []const u8, bind_ip: u64, port: u64, audio: u32) -> bool {
+    if (s.len < CS_LEN or me_fp.len != 10 or bind_ip > 4294967295 or port > 65535) { return false; }
+    if (audio != CS_AUDIO_DEV and audio != CS_AUDIO_TEST) { return false; }
+    ck_wipe(s[0..CS_LEN]);
+    ck_put(s, EP_ME, me_fp);
+    s[1] = @as(u8, @intCast(CK_IDLE));
+    var a : [16]u8 = undefined;
+    ckh_addr4(a[0..16], bind_ip, port);
+    const fd : i32 = sys_socket(2, 2, 0);
+    if (fd < 0) { return false; }
+    if (sys_bind(fd, a[0..16], 16) != 0) {
+        sys_close(fd);
+        return false;
+    }
+    const fl : i32 = ckh_fcntl(fd, 3, 0);
+    if (fl < 0 or ckh_fcntl(fd, 4, @as(u64, @intCast(fl | 4))) != 0) {
+        sys_close(fd);
+        return false;
+    }
+    cs_p(s, CS_FD, @as(u64, @intCast(fd)) + 1);
+    cs_p(s, CS_MODE, @as(u64, audio));
+    cs_p(s, CS_SEEN, @as(u64, CK_IDLE));
+    cs_p(s, CS_MAGIC, CS_MAGIC_V);
+    cs_p(s, CS_K_CALLING_MS, 30000);
+    cs_p(s, CS_K_RINGING_MS, 30000);
+    cs_p(s, CS_K_VERIFY_MS, 60000);
+    cs_p(s, CS_K_SILENT_MS, 5000);
+    cs_p(s, CS_K_JB_TARGET, CBP_F_TARGET);
+    cs_p(s, CS_K_JB_MAX, CBP_F_MAX);
+    return true;
+}
+
+fn cs_live(s: []const u8) -> bool { return s.len >= CS_LEN and cs_g(s, CS_MAGIC) == CS_MAGIC_V; }
+
+/// A tunable: CS_K_CALLING_MS, CS_K_RINGING_MS, CS_K_VERIFY_MS, CS_K_SILENT_MS (each 1000 .. 600000) or the jitter
+/// target / max in frames (target >= 1, target < max, max + 8 < 64). Not while a call is ACTIVE.
+pub fn cs_set(s: []u8, k: u32, v: u64) -> bool {
+    if (!cs_live(s) or ckh_state(s[0..EP_LEN]) == CK_ACTIVE) { return false; }
+    if (k >= CS_K_CALLING_MS and k <= CS_K_SILENT_MS) {
+        if (v < 1000 or v > 600000) { return false; }
+        cs_p(s, k, v);
+        return true;
+    }
+    if (k == CS_K_JB_TARGET) {
+        if (v == 0 or v >= cs_g(s, CS_K_JB_MAX)) { return false; }
+        cs_p(s, k, v);
+        return true;
+    }
+    if (k == CS_K_JB_MAX) {
+        if (v <= cs_g(s, CS_K_JB_TARGET) or v + CBP_F_TX >= CBP_F_JB) { return false; }
+        cs_p(s, k, v);
+        return true;
+    }
+    return false;
+}
+
+/// Counters of a new call (the audio block too: its queues were disposed when the last call left ACTIVE); the
+/// slots from CS_FD on (socket, mode, tunables) stay.
+fn cs_fresh(s: []u8) -> void {
+    ck_wipe(s[CS_SLOTS..CS_SLOTS + 20 * 8]);
+    ck_wipe(s[CS_AUD..CS_LEN]);
+    cs_p(s, CS_CODE_SAID, 0);
+    cs_p(s, CS_REASON, 0);
+    cs_p(s, CS_N1, 0);
+    cs_p(s, CS_N2, 0);
+    cs_p(s, CS_MUTED, 0);
+    cs_p(s, CS_T_DIAL, ckh_ms());
+}
+
+/// Dial ip:port, the peer known by its fingerprint.
+pub fn cs_call(s: []u8, ip: u64, port: u64, peer_fp: []const u8) -> bool {
+    if (!cs_live(s) or peer_fp.len != 10 or ip == 0 or ip > 4294967295 or port == 0 or port > 65535) { return false; }
+    const st : u32 = ckh_state(s[0..EP_LEN]);
+    if (st != CK_IDLE and st != CK_ENDED and st != CK_FAILED) { return false; }
+    cs_fresh(s);
+    s[EP_ROLE] = 1;
+    ck_put(s, EP_PEER, peer_fp);
+    ckh_addr4(s[CS_PADDR..CS_PADDR + 16], ip, port);
+    cs_p(s, CS_PEER_IP, ip);
+    const n : usize = ckh_invite(s[0..EP_LEN], s[CS_L1..CS_L1 + 256]);
+    if (n == 0) { return false; }
+    cs_p(s, CS_N1, @as(u64, n));
+    cs_p(s, CS_T_RESEND, ckh_ms());
+    cs_send(s, s[CS_L1..CS_L1 + n]);
+    cs_sync(s);
+    return true;
+}
+
+pub fn cs_state(s: []const u8) -> u32 { return ckh_state(s[0..EP_LEN]); }
+
+pub fn cs_incoming(s: []const u8) -> bool { return ckh_state(s[0..EP_LEN]) == CK_RINGING; }
+
+pub fn cs_peer(s: []const u8, fp_out: []u8) -> u64 {
+    const st : u32 = ckh_state(s[0..EP_LEN]);
+    if (st == CK_IDLE or fp_out.len < 10) { return 0; }
+    ck_put(fp_out, 0, s[EP_PEER..EP_PEER + 10]);
+    return cs_g(s, CS_PEER_IP);
+}
+
+pub fn cs_code(s: []const u8, out: []u8) -> bool {
+    if (s[EP_HAVE_CODE] == 0 or out.len < 6) { return false; }
+    const st : u32 = ckh_state(s[0..EP_LEN]);
+    if (st != CK_VERIFY and st != CK_ACTIVE) { return false; }
+    ck_put(out, 0, s[EP_CODE..EP_CODE + 6]);
+    return true;
+}
+
+pub fn cs_reason(s: []const u8) -> u32 { return @as(u32, @intCast(cs_g(s, CS_REASON))); }
+
+pub fn cs_muted(s: []const u8) -> bool { return cs_g(s, CS_MUTED) != 0; }
+
+pub fn cs_mute(s: []u8, on: bool) -> bool {
+    if (!cs_live(s)) { return false; }
+    if (on) { cs_p(s, CS_MUTED, 1); } else { cs_p(s, CS_MUTED, 0); }
+    return true;
+}
+
+pub fn cs_stat(s: []u8, k: u32) -> u64 {
+    if (k >= 1000 and k < 1000 + 64) { return cbp_get(cs_aud(s) + @as(u64, k - 1000) * 8); }
+    if (k < 64) { return cs_g(s, k); }
+    return 0;
+}
+
+pub fn cs_answer(s: []u8) -> bool {
+    if (!cs_live(s) or ckh_state(s[0..EP_LEN]) != CK_RINGING) { return false; }
+    const n : usize = ckh_answer(s[0..EP_LEN], s[CS_L1..CS_L1 + 256]);
+    if (n == 0) {
+        cs_p(s, CS_REASON, @as(u64, CS_R_ERROR));
+        cs_sync(s);
+        return false;
+    }
+    cs_p(s, CS_N1, @as(u64, n));
+    cs_send(s, s[CS_L1..CS_L1 + n]);
+    cs_sync(s);
+    return true;
+}
+
+pub fn cs_decline(s: []u8) -> bool {
+    if (!cs_live(s) or ckh_state(s[0..EP_LEN]) != CK_RINGING) { return false; }
+    cs_send_plain_bye(s);
+    cs_p(s, CS_REASON, @as(u64, CS_R_I_DECLINED));
+    ckh_go(s[0..EP_LEN], CK_EV_DECLINE);
+    cs_sync(s);
+    return true;
+}
+
+pub fn cs_confirm(s: []u8, same: bool) -> bool {
+    if (!cs_live(s) or ckh_state(s[0..EP_LEN]) != CK_VERIFY or s[EP_HAVE_CODE] == 0 or cs_g(s, CS_N2) != 0) { return false; }
+    var say : u32 = CK_SAY_DIFFER;
+    if (same) { say = CK_SAY_MATCH; }
+    const n : usize = ckh_confirm(s[0..EP_LEN], say, s[CS_L2..CS_L2 + 128]);
+    if (n > 0) {
+        cs_p(s, CS_N2, @as(u64, n));
+        cs_send(s, s[CS_L2..CS_L2 + n]);
+    }
+    if (!same) { cs_p(s, CS_REASON, @as(u64, CS_R_I_SAID_DIFFER)); }
+    cs_sync(s);
+    return n > 0;
+}
+
+pub fn cs_hangup(s: []u8) -> bool {
+    if (!cs_live(s)) { return false; }
+    const st : u32 = ckh_state(s[0..EP_LEN]);
+    const ev : u32 = cs_end_event(st);
+    if (ev == 0) { return false; }
+    if (st == CK_ACTIVE) { cs_send_sealed_bye(s); } else { cs_send_plain_bye(s); }
+    cs_p(s, CS_REASON, @as(u64, CS_R_HANGUP));
+    ckh_go(s[0..EP_LEN], ev);
+    cs_sync(s);
+    return true;
+}
+
+pub fn cs_dismiss(s: []u8) -> bool {
+    if (!cs_live(s)) { return false; }
+    const st : u32 = ckh_state(s[0..EP_LEN]);
+    if (st != CK_ENDED and st != CK_FAILED) { return false; }
+    ckh_go(s[0..EP_LEN], CK_EV_DISMISS);
+    cs_sync(s);
+    return true;
+}
+
+pub fn cs_close(s: []u8) -> void {
+    if (!cs_live(s)) { return; }
+    cs_audio_stop(s);
+    sys_close(cs_fd(s));
+    cs_p(s, CS_MAGIC, 0);
+}
+
+// ---------------------------------------------------------------- audio
+
+/// The part F block for a new call: magic, warm-up, mins, redundancy on, two-host accounting (no storm, no
+/// capture-age from the other clock), the jitter sizes.
+fn cs_audio_reset(s: []u8) -> void {
+    ck_wipe(s[CS_AUD..CS_LEN]);
+    const p : u64 = cs_aud(s);
+    cbp_put(p + 72, CBP_D_MAGIC);
+    cbp_put(p + 112, 1);
+    cbp_put(p + 336, 18446744073709551615);
+    cbp_put(p + 400, 18446744073709551615);
+    cbp_put(p + 440, 1);
+    cbp_put(p + CBP_F_EXT, 1);
+    cbp_put(p + CBP_F_EXT + 96, cs_g(s, CS_K_JB_TARGET));
+    cbp_put(p + CBP_F_EXT + 104, cs_g(s, CS_K_JB_MAX));
+    cs_p(s, CS_NEXT_TONE, ckh_ms());
+    if (ckh_caller(s[0..EP_LEN])) { cs_p(s, CS_TAGME, 65); } else { cs_p(s, CS_TAGME, 66); }
+}
+
+/// Microphone and speakers on this thread's run loop (output volume 0.05, against feedback while there is no echo
+/// canceller), output first, as part F. TEST mode only resets the block.
+fn cs_audio_start(s: []u8) -> bool {
+    cs_audio_reset(s);
+    if (cs_g(s, CS_MODE) != @as(u64, CS_AUDIO_DEV)) {
+        cs_p(s, CS_ST_AUDIO_ON, 1);
+        return true;
+    }
+    const p : u64 = cs_aud(s);
+    const fin : u64 = cbp_dlsym(CBP_RTLD_DEFAULT, "cbp_fin");
+    const fout : u64 = cbp_dlsym(CBP_RTLD_DEFAULT, "cbp_fout");
+    const mode : u64 = cbp_konst("kCFRunLoopDefaultMode");
+    if (fin == 0 or fout == 0 or mode == 0) { return false; }
+    var fmt : [40]u8 = undefined;
+    cbp_pcm48k(fmt[0..40]);
+    var aqi : [8]u8 = undefined;
+    var aqo : [8]u8 = undefined;
+    put_u64(aqi[0..8], 0, 0);
+    put_u64(aqo[0..8], 0, 0);
+    const si : i32 = cbp_aq_new_input(fmt[0..40], fin, p, cbp_rl_current(), mode, 0, aqi[0..8]);
+    const so : i32 = cbp_aq_new_output(fmt[0..40], fout, p, cbp_rl_current(), mode, 0, aqo[0..8]);
+    cs_p(s, CS_QIN, get_u64(aqi[0..8], 0));
+    cs_p(s, CS_QOUT, get_u64(aqo[0..8], 0));
+    if (si != 0 or so != 0 or cs_g(s, CS_QIN) == 0 or cs_g(s, CS_QOUT) == 0) {
+        cs_p(s, CS_ST_AUDIO_ERR, 1);
+        return false;
+    }
+    const qi : u64 = cs_g(s, CS_QIN);
+    const qo : u64 = cs_g(s, CS_QOUT);
+    if (cbp_aq_set_param(qo, CBP_VOLUME, 0.05) != 0) {
+        cs_p(s, CS_ST_AUDIO_ERR, 2);
+        return false;
+    }
+    var k : u32 = 0;
+    var ok : u32 = 0;
+    while (k < 4) {
+        var b : [8]u8 = undefined;
+        put_u64(b[0..8], 0, 0);
+        if (cbp_aq_alloc(qi, 960, b[0..8]) == 0) {
+            if (cbp_aq_enqueue(qi, get_u64(b[0..8], 0), 0, 0) == 0) { ok = ok + 1; }
+        }
+        k = k + 1;
+    }
+    k = 0;
+    while (k < CBP_E_OUTBUFS) {
+        var b : [8]u8 = undefined;
+        put_u64(b[0..8], 0, 0);
+        if (cbp_aq_alloc(qo, 960, b[0..8]) == 0) {
+            if (cbp_fpull(p, qo, get_u64(b[0..8], 0)) == 0) { ok = ok + 1; }
+        }
+        k = k + 1;
+    }
+    if (ok != 4 + CBP_E_OUTBUFS) {
+        cs_p(s, CS_ST_AUDIO_ERR, 3);
+        return false;
+    }
+    if (cbp_aq_start(qo, 0) != 0 or cbp_aq_start(qi, 0) != 0) {
+        cs_p(s, CS_ST_AUDIO_ERR, 4);
+        return false;
+    }
+    cs_p(s, CS_ST_AUDIO_ON, 1);
+    return true;
+}
+
+/// Stop the callbacks (they return at once once the stop flag is set), dispose both queues.
+fn cs_audio_stop(s: []u8) -> void {
+    const p : u64 = cs_aud(s);
+    cbp_put(p + 64, 1);
+    if (cs_g(s, CS_QOUT) != 0) { cbp_aq_dispose(cs_g(s, CS_QOUT), true); }
+    if (cs_g(s, CS_QIN) != 0) { cbp_aq_dispose(cs_g(s, CS_QIN), true); }
+    cs_p(s, CS_QIN, 0);
+    cs_p(s, CS_QOUT, 0);
+}
+
+/// TEST mode: put a test frame into the capture ring every 10 ms, as cbp_fin puts a captured one.
+fn cs_tone_tick(s: []u8) -> void {
+    const p : u64 = cs_aud(s);
+    const now : u64 = ckh_ms();
+    var guard : u32 = 0;
+    while (cs_g(s, CS_NEXT_TONE) <= now and guard < 8) {
+        const w : u64 = cbp_get(p + 16);
+        if (w - cbp_get(p + 24) >= CBP_F_TX - 1) {
+            cbp_inc(p + 56, 1);
+        } else {
+            var pcm : [960]u8 = undefined;
+            cs_tone(pcm[0..960], w, @as(u8, @intCast(cs_g(s, CS_TAGME))));
+            cbp_poke(p + CBP_F_TXD + (w % CBP_F_TX) * 960, pcm[0..960], 960);
+            cbp_put(p + 16, w + 1);
+            cbp_inc(p, 1);
+        }
+        cs_p(s, CS_NEXT_TONE, cs_g(s, CS_NEXT_TONE) + 10);
+        guard = guard + 1;
+    }
+}
+
+/// Seal and send every captured frame not sent yet, each with the previous one as its redundant copy.
+fn cs_send_media(s: []u8) -> void {
+    const p : u64 = cs_aud(s);
+    var k : u64 = cbp_get(p + 24);
+    const w : u64 = cbp_get(p + 16);
+    while (k < w) {
+        const slot : u64 = p + CBP_F_TXD + (k % CBP_F_TX) * 960;
+        if (cs_g(s, CS_MUTED) != 0) {
+            cbp_zero(slot, 960);
+            cs_add(s, CS_ST_MUTED_SENT, 1);
+        }
+        var pkt : [1928]u8 = undefined;
+        const n : usize = cs_pkt_head(pkt[0..1928], k, k >= 1);
+        sys_peek(pkt[8..968], slot, 960);
+        if (k >= 1) { sys_peek(pkt[968..1928], p + CBP_F_TXD + ((k - 1) % CBP_F_TX) * 960, 960); }
+        var f : [1996]u8 = undefined;
+        const m : usize = ckh_seal(s[0..EP_LEN], CK_T_MEDIA, pkt[0..n], f[0..1996]);
+        if (m > 0) {
+            if (cs_send(s, f[0..m])) {
+                cs_add(s, CS_ST_SENT, 1);
+                cbp_inc(p + 128, 1);
+            }
+        } else {
+            cs_add(s, CS_ST_SEND_ERR, 1);
+        }
+        k = k + 1;
+    }
+    cbp_put(p + 24, k);
+}
+
+/// An opened media plaintext: count it, check it in TEST mode, feed the jitter buffer in DEV mode (primary, then
+/// the redundant copy of the frame before), with part F's counters.
+fn cs_take_media(s: []u8, pt: []const u8) -> void {
+    if (pt.len < 968 or pt[4] != 192 or pt[5] != 3) {
+        cs_add(s, CS_ST_REJ_OTHER, 1);
+        return;
+    }
+    cs_add(s, CS_ST_ACCEPTED, 1);
+    const q : u64 = cs_pkt_index(pt);
+    if (q + 1 > cs_g(s, CS_ST_HI_INDEX)) { cs_p(s, CS_ST_HI_INDEX, q + 1); }
+    if (cs_silent(pt[8..968])) {
+        cs_add(s, CS_ST_ZERO_FRAMES, 1);
+    } else {
+        const nz : u64 = cbp_nz(ckh_at(pt[8..968], pt[8..968], 0), 960);
+        cs_add(s, CS_ST_NONZERO_RX, nz);
+    }
+    const p : u64 = cs_aud(s);
+    cbp_inc(p + 168, 1);
+    if (cs_g(s, CS_MODE) == @as(u64, CS_AUDIO_TEST)) {
+        var peer_tag : u8 = 65;
+        if (cs_g(s, CS_TAGME) == 65) { peer_tag = 66; }
+        if (!cs_silent(pt[8..968]) and !cs_tone_ok(pt[8..968], q, peer_tag)) { cs_add(s, CS_ST_BAD_CONTENT, 1); }
+        return;
+    }
+    const hi : u64 = cbp_get(p + 104);
+    if (q + 1 < hi) { cbp_inc(p + 200, 1); }
+    if (q + 1 > hi) { cbp_put(p + 104, q + 1); }
+    const st : u64 = cbp_fstore(p, q, pt[8..968], 1);
+    if (st == 2) { cbp_inc(p + 184, 1); } else if (st == 0) { cbp_inc(p + 192, 1); } else { cbp_inc(p + 176, 1); }
+    if ((pt[6] & 1) != 0 and pt.len >= CS_PKT and q >= 1) {
+        if (cbp_fstore(p, q - 1, pt[968..1928], 2) == 1) { cbp_inc(p + 208, 1); }
+    }
+}
+
+// ---------------------------------------------------------------- one received datagram
+
+fn cs_on_packet(s: []u8, m: []const u8, from: []const u8) -> void {
+    const ep : []u8 = s[0..EP_LEN];
+    const typ : u32 = ck_hdr_type(m);
+    const st : u32 = ckh_state(ep);
+    const caller : bool = ckh_caller(ep);
+    if (typ == 0) {
+        cs_add(s, CS_ST_REJ_OTHER, 1);
+        return;
+    }
+    if (typ == CK_T_INVITE) {
+        if ((st == CK_IDLE or st == CK_ENDED or st == CK_FAILED) and m.len == CK_INVITE_LEN) {
+            // a new call for me: the caller is whoever this INVITE names as sender, answered where it came from
+            if (!ck_hdr_admit(m, s[EP_ME..EP_ME + 10], m[0..0], m[0..0])) { cs_add(s, CS_ST_REJ_OTHER, 1); return; }
+            cs_fresh(s);
+            s[EP_ROLE] = 0;
+            ck_put(s, EP_PEER, m[8..18]);
+            ck_put(s, CS_PADDR, from[0..16]);
+            cs_p(s, CS_PEER_IP, (@as(u64, from[4]) << 24) | (@as(u64, from[5]) << 16) | (@as(u64, from[6]) << 8) | @as(u64, from[7]));
+            if (!ckh_on_invite(ep, m)) { cs_add(s, CS_ST_REJ_OTHER, 1); }
+            return;
+        }
+        // the same INVITE again after I answered: my ANSWER was lost
+        if (!caller and st == CK_VERIFY and cs_g(s, CS_N1) > 0 and m.len == CK_INVITE_LEN and ck_same(m, s[EP_TR..EP_TR + CK_INVITE_LEN])) {
+            cs_send(s, s[CS_L1..CS_L1 + @as(usize, @intCast(cs_g(s, CS_N1)))]);
+            cs_add(s, CS_ST_RESENDS, 1);
+        }
+        return;
+    }
+    if (!ck_hdr_admit(m, s[EP_ME..EP_ME + 10], s[EP_PEER..EP_PEER + 10], s[EP_SID..EP_SID + 16])) {
+        cs_add(s, CS_ST_REJ_OTHER, 1);
+        return;
+    }
+    cs_p(s, CS_T_RX, ckh_ms());
+    if (typ == CK_T_ANSWER and caller) {
+        if (st == CK_CALLING) {
+            const n : usize = ckh_on_answer(ep, m, s[CS_L1..CS_L1 + 256]);
+            if (n > 0) {
+                cs_p(s, CS_N1, @as(u64, n));
+                cs_send(s, s[CS_L1..CS_L1 + n]);
+            }
+        } else if (cs_g(s, CS_N1) > 0) {
+            cs_send(s, s[CS_L1..CS_L1 + @as(usize, @intCast(cs_g(s, CS_N1)))]);
+            cs_add(s, CS_ST_RESENDS, 1);
+        }
+        return;
+    }
+    if (typ == CK_T_REVEAL and !caller) {
+        if (st == CK_VERIFY and s[EP_HAVE_CODE] == 0) {
+            if (!ckh_on_reveal(ep, m) and ckh_state(ep) == CK_FAILED) { cs_p(s, CS_REASON, @as(u64, CS_R_COMMITMENT)); }
+        } else if (cs_g(s, CS_N2) > 0 and m.len == CK_REVEAL_LEN and ck_same(m, s[EP_TR + CK_INVITE_LEN + CK_ANSWER_LEN..EP_TR + CK_TRANSCRIPT_LEN])) {
+            // the caller has not seen my CONFIRM yet
+            cs_send(s, s[CS_L2..CS_L2 + @as(usize, @intCast(cs_g(s, CS_N2)))]);
+            cs_add(s, CS_ST_RESENDS, 1);
+        }
+        return;
+    }
+    if (typ == CK_T_CONFIRM) {
+        const r : i64 = ckh_on_confirm(ep, m);
+        if (r == -3) { cs_add(s, CS_ST_REJ_AEAD, 1); }
+        if (r == -4) { cs_add(s, CS_ST_REJ_REPLAY, 1); }
+        if (r == -2) { cs_add(s, CS_ST_REJ_STATE, 1); }
+        if (ckh_state(ep) == CK_FAILED and cs_g(s, CS_REASON) == 0) { cs_p(s, CS_REASON, @as(u64, CS_R_PEER_SAID_DIFFER)); }
+        return;
+    }
+    if (typ == CK_T_BYE and m.len == CK_HDR) {
+        if (ck_hdr_seq(m) != 0) { return; }
+        const ev : u32 = cs_plain_bye_event(st);
+        if (ev == 0) {
+            cs_add(s, CS_ST_REJ_STATE, 1);
+            return;
+        }
+        if (ev == CK_EV_DECLINED) { cs_p(s, CS_REASON, @as(u64, CS_R_DECLINED)); }
+        if (ev == CK_EV_CANCELLED) { cs_p(s, CS_REASON, @as(u64, CS_R_CANCELLED)); }
+        if (ev == CK_EV_BYE) { cs_p(s, CS_REASON, @as(u64, CS_R_PEER_BYE)); }
+        ckh_go(ep, ev);
+        return;
+    }
+    if (typ == CK_T_MEDIA or typ == CK_T_BYE) {
+        var pt : [1928]u8 = undefined;
+        const o : i64 = ckh_open(ep, m, pt[0..1928]);
+        if (o == -2) { cs_add(s, CS_ST_REJ_STATE, 1); return; }
+        if (o == -3) { cs_add(s, CS_ST_REJ_AEAD, 1); return; }
+        if (o == -4) { cs_add(s, CS_ST_REJ_REPLAY, 1); return; }
+        if (o < 0) { cs_add(s, CS_ST_REJ_OTHER, 1); return; }
+        if (typ == CK_T_BYE) {
+            cs_p(s, CS_REASON, @as(u64, CS_R_PEER_BYE));
+            ckh_go(ep, CK_EV_BYE);
+            return;
+        }
+        cs_take_media(s, pt[0..@as(usize, @intCast(o))]);
+        return;
+    }
+    cs_add(s, CS_ST_REJ_OTHER, 1);
+}
+
+// ---------------------------------------------------------------- the poll
+
+pub fn cs_poll(s: []u8) -> u32 {
+    if (!cs_live(s)) { return CS_EV_NONE; }
+    var rx : [2048]u8 = undefined;
+    var from : [16]u8 = undefined;
+    var fl : [4]u8 = undefined;
+    var got : u32 = 0;
+    while (got < 256) {
+        ck_wipe(from[0..16]);
+        fl[0] = 16; fl[1] = 0; fl[2] = 0; fl[3] = 0;
+        const r : i64 = ckh_recvfrom(cs_fd(s), rx[0..2048], 2048, 0, sys_addr(from[0..16], from[0..16], 0), sys_addr(fl[0..4], fl[0..4], 0));
+        if (r <= 0) { break; }
+        cs_on_packet(s, rx[0..@as(usize, @intCast(r))], from[0..16]);
+        cs_sync(s);
+        got = got + 1;
+    }
+    const now : u64 = ckh_ms();
+    const st : u32 = ckh_state(s[0..EP_LEN]);
+    // the caller repeats its unanswered handshake message (INVITE, or REVEAL and its CONFIRM) every 200 ms
+    if (ckh_caller(s[0..EP_LEN]) and (st == CK_CALLING or st == CK_VERIFY) and now - cs_g(s, CS_T_RESEND) >= 200) {
+        cs_p(s, CS_T_RESEND, now);
+        if (cs_g(s, CS_N1) > 0) {
+            cs_send(s, s[CS_L1..CS_L1 + @as(usize, @intCast(cs_g(s, CS_N1)))]);
+            cs_add(s, CS_ST_RESENDS, 1);
+        }
+        if (st == CK_VERIFY and cs_g(s, CS_N2) > 0) { cs_send(s, s[CS_L2..CS_L2 + @as(usize, @intCast(cs_g(s, CS_N2)))]); }
+    }
+    const lim : u64 = cs_limit(st, cs_g(s, CS_K_CALLING_MS), cs_g(s, CS_K_RINGING_MS), cs_g(s, CS_K_VERIFY_MS));
+    var timed_out : bool = lim > 0 and now - cs_g(s, CS_T_STATE) > lim;
+    if (st == CK_ACTIVE and now - cs_g(s, CS_T_RX) > cs_g(s, CS_K_SILENT_MS)) { timed_out = true; }
+    if (timed_out) {
+        if (st == CK_CALLING or st == CK_VERIFY) { cs_send_plain_bye(s); }
+        cs_p(s, CS_REASON, @as(u64, cs_timeout_reason(st)));
+        ckh_go(s[0..EP_LEN], CK_EV_TIMEOUT);
+    }
+    if (ckh_state(s[0..EP_LEN]) == CK_ACTIVE) {
+        if (cs_g(s, CS_MODE) == @as(u64, CS_AUDIO_TEST)) { cs_tone_tick(s); }
+        cs_send_media(s);
+    }
+    cs_sync(s);
+    return cs_pop(s);
+}
+
+// ---------------------------------------------------------------- tests
+
+test the_block_holds_its_parts_without_overlap {
+    assert EP_LEN <= CS_SLOTS;
+    assert CS_SLOTS + 64 * 8 <= CS_L1;
+    assert CS_L1 + 256 <= CS_L2;
+    assert CS_L2 + 128 <= CS_PADDR;
+    assert CS_PADDR + 16 <= CS_EVQ;
+    assert CS_EVQ + 16 <= CS_AUD;
+    assert CS_AUD + CBP_F_BYTES == CS_LEN;
+    assert CS_K_JB_MAX < 64;
+}
+
+test a_sealed_media_frame_is_header_packet_tag_and_fits_a_datagram {
+    assert CS_SEALED == CK_HDR + CS_PKT + CK_TAG;
+    assert CS_PKT == 8 + 960 + 960;
+    assert CS_SEALED < 9216;
+    var pkt : [1928]u8 = undefined;
+    assert cs_pkt_head(pkt[0..1928], 70000, true) == CS_PKT;
+    assert pkt[6] == 1 and pkt[4] == 192 and pkt[5] == 3;
+    assert cs_pkt_index(pkt[0..1928]) == 70000;
+    assert cs_pkt_head(pkt[0..1928], 0, false) == 968;
+    assert pkt[6] == 0 and cs_pkt_index(pkt[0..1928]) == 0;
+}
+
+test every_state_a_window_must_draw_has_one_event {
+    assert cs_event_for(CK_CALLING) == CS_EV_CALLING;
+    assert cs_event_for(CK_RINGING) == CS_EV_RINGING;
+    assert cs_event_for(CK_ACTIVE) == CS_EV_ACTIVE;
+    assert cs_event_for(CK_ENDED) == CS_EV_ENDED;
+    assert cs_event_for(CK_FAILED) == CS_EV_FAILED;
+    assert cs_event_for(CK_IDLE) == CS_EV_IDLE;
+    // VERIFY waits for the code event instead
+    assert cs_event_for(CK_VERIFY) == CS_EV_NONE;
+}
+
+test a_plain_bye_never_ends_a_call_that_carries_media {
+    assert cs_plain_bye_event(CK_ACTIVE) == 0;
+    assert cs_plain_bye_event(CK_IDLE) == 0;
+    assert cs_plain_bye_event(CK_ENDED) == 0;
+    assert cs_plain_bye_event(CK_CALLING) == CK_EV_DECLINED;
+    assert cs_plain_bye_event(CK_RINGING) == CK_EV_CANCELLED;
+    assert cs_plain_bye_event(CK_VERIFY) == CK_EV_BYE;
+    // and each of those events ends the call in call_core, none opens it
+    assert ck_next(CK_CALLING, CK_EV_DECLINED) == CK_ENDED;
+    assert ck_next(CK_RINGING, CK_EV_CANCELLED) == CK_ENDED;
+    assert ck_next(CK_VERIFY, CK_EV_BYE) == CK_ENDED;
+}
+
+test the_local_end_action_exists_only_while_a_call_is_up {
+    assert cs_end_event(CK_CALLING) == CK_EV_CANCEL;
+    assert cs_end_event(CK_VERIFY) == CK_EV_HANGUP;
+    assert cs_end_event(CK_ACTIVE) == CK_EV_HANGUP;
+    assert cs_end_event(CK_RINGING) == 0;
+    assert cs_end_event(CK_IDLE) == 0;
+    assert ck_next(CK_CALLING, cs_end_event(CK_CALLING)) == CK_ENDED;
+    assert ck_next(CK_ACTIVE, cs_end_event(CK_ACTIVE)) == CK_ENDED;
+}
+
+test timeouts_have_a_limit_and_a_reason_per_state {
+    assert cs_limit(CK_CALLING, 1, 2, 3) == 1;
+    assert cs_limit(CK_RINGING, 1, 2, 3) == 2;
+    assert cs_limit(CK_VERIFY, 1, 2, 3) == 3;
+    assert cs_limit(CK_ACTIVE, 1, 2, 3) == 0;
+    assert cs_limit(CK_IDLE, 1, 2, 3) == 0;
+    assert cs_timeout_reason(CK_VERIFY) == CS_R_NOT_CONFIRMED;
+    assert cs_timeout_reason(CK_ACTIVE) == CS_R_PEER_SILENT;
+    assert cs_timeout_reason(CK_CALLING) == CS_R_NO_ANSWER;
+    // a timeout in VERIFY fails the call, so it can never reach ACTIVE afterwards
+    assert ck_next(CK_VERIFY, CK_EV_TIMEOUT) == CK_FAILED;
+}
+
+test the_test_pattern_reads_back_and_is_never_silent {
+    var a : [960]u8 = undefined;
+    cs_tone(a[0..960], 12345, 65);
+    assert cs_tone_ok(a[0..960], 12345, 65);
+    assert cs_tone_ok(a[0..960], 12346, 65) == false;
+    assert cs_tone_ok(a[0..960], 12345, 66) == false;
+    assert cs_silent(a[0..960]) == false;
+    a[700] = a[700] ^ 2;
+    assert cs_tone_ok(a[0..960], 12345, 65) == false;
+    ck_wipe(a[0..960]);
+    assert cs_silent(a[0..960]);
+}
