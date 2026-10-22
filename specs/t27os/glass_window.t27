@@ -297,6 +297,11 @@ use t27os::call_session::cs_vlen;
 use t27os::call_session::cs_vlive;
 use t27os::call_vid::vid_decode;
 use t27os::call_vid::vid_release_image;
+use t27os::call_vid::vgq_new;
+use t27os::call_vid::vgq_stat;
+use t27os::call_session::cs_video_encoder;
+use t27os::call_session::CS_V_ENCSKIP;
+use t27os::call_session::CS_V_MAKE_MAX;
 use t27os::call_session::CS_EV_NONE;
 use t27os::call_session::CS_EV_CALLING;
 use t27os::call_session::CS_EV_RINGING;
@@ -9212,7 +9217,8 @@ pub const CL_AUTO : usize = 121;
 /// Video (owner, 2026-10-22), drawn: 1 while a video frame arrived within the last second, the serial of the picture
 /// held (the session's CS_V_SERIAL), the frames shown and skipped so far, and the decoded CGImage of the last
 /// complete frame (two u32, low then high; 0 = none). The window decodes a new picture whenever the serial changes.
-/// Not drawn: 1 when T27OS_CALL_VIDEO is set, the session sends the test video of call_vid.t27 (off by default).
+/// Not drawn: 1 = a one to one call sends video (the camera, the test picture of call_vid.t27 until it is allowed);
+/// on by default, T27OS_CALL_VIDEO=0 turns it off (cl_video_on).
 pub const CL_VLIVE : usize = 124;
 pub const CL_VSEND : usize = 125;
 /// Not drawn: 1 when T27OS_CALL_CAMERA=0 (the camera stays off, the test generator is the source), the status of the
@@ -9231,6 +9237,8 @@ pub const CL_VIMG_END : usize = 152;
 /// CL_CAMTRY is 1 once this call's start was tried (cleared when the call is over).
 pub const CL_CAMP : usize = 152;
 pub const CL_CAMTRY : usize = 160;
+/// Not drawn: the address of the test picture's encoder block (call_vid.t27 vgq_new), two u32, low then high; 0 = none.
+pub const CL_VENC : usize = 161;
 pub const CLW_AUTO_T : usize = 9;
 /// The window's own call clock (main's [10]u64): when ACTIVE began, when the last poll returned, the longest gap from
 /// the end of one poll to the start of the next while ACTIVE, the state the last snapshot saw, the system activity
@@ -9317,6 +9325,11 @@ fn cl_env(name: []const u8, out: []u8) -> usize {
     return @as(usize, @intCast(n));
 }
 
+/// Video in a call is on unless the variable reads exactly "0" (unset, "1" or anything else: on).
+pub fn cl_video_on(e: []const u8, n: usize) -> bool {
+    return !(n == 1 and e.len >= 1 and e[0] == 48);
+}
+
 /// Decimal digits only, 1..65535; 0 otherwise.
 pub fn cl_port_of(t: []const u8, n: usize) -> u64 {
     if (n == 0 or n > 5) { return 0; }
@@ -9361,8 +9374,9 @@ pub fn cl_boot(cl: []u8, s: []u8) -> void {
     if (cl_env("T27OS_CALL_STATS", e[0..32]) > 0) { cl[CL_STATS] = 1; }
     // test aid, not product behavior: off unless the variable is set
     if (cl_env("T27OS_CALL_AUTOTEST", e[0..32]) > 0) { cl[CL_AUTO] = 1; }
-    // video: the test generator (call_vid.t27) until the camera is allowed; off unless the variable is set
-    if (cl_env("T27OS_CALL_VIDEO", e[0..32]) > 0) { cl[CL_VSEND] = 1; }
+    // video: on unless T27OS_CALL_VIDEO=0 (the camera, the test generator of call_vid.t27 until it is allowed)
+    n = cl_env("T27OS_CALL_VIDEO", e[0..32]);
+    if (cl_video_on(e[0..32], n)) { cl[CL_VSEND] = 1; }
     // the camera is the source of a call's video unless T27OS_CALL_CAMERA=0
     n = cl_env("T27OS_CALL_CAMERA", e[0..32]);
     if (n == 1 and e[0] == 48) { cl[CL_CAMOFF] = 1; }
@@ -9384,7 +9398,14 @@ pub fn cl_boot(cl: []u8, s: []u8) -> void {
         // confirm by themselves, like AUTOTEST does for the first), T27OS_CALL_TONE_AMP=<100..32767>
         if (cl[CL_STATS] != 0) { cs_set(s, CS_K_GSTATS, 1); }
         if (cl[CL_AUTO] != 0) { cs_set(s, CS_K_GAUTO, 1); }
-        if (cl[CL_VSEND] != 0) { cs_set(s, CS_K_VIDEO, 1); }
+        if (cl[CL_VSEND] != 0) {
+            cs_set(s, CS_K_VIDEO, 1);
+            // the test picture is encoded on its own queue, never in this loop's poll (no block: in the poll, as before)
+            const vq : u64 = vgq_new();
+            if (vq != 0) { cs_video_encoder(s, vq); }
+            cl_put32(cl, CL_VENC, vq & 4294967295);
+            cl_put32(cl, CL_VENC + 4, vq >> 32);
+        }
         n = cl_env("T27OS_GROUP_LEAVE_AFTER", e[0..32]);
         if (n > 0) { cs_set(s, CS_K_GLEAVE_S, cl_port_of(e[0..32], n)); }
         n = cl_env("T27OS_CALL_TONE_AMP", e[0..32]);
@@ -9469,6 +9490,11 @@ fn cl_stats_line(cl: []u8, s: []u8, secs: u64) -> void {
     cl_stat_num(" txcam=", cs_vstat(s, CS_V_CAM));
     cl_stat_num(" txgen=", cs_vstat(s, CS_V_GEN));
     cl_stat_num(" txframes=", cs_vstat(s, CS_V_TXFRAMES));
+    cl_stat_num(" txencskip=", cs_vstat(s, CS_V_ENCSKIP));
+    cl_stat_num(" txpollmax_ms=", cs_vstat(s, CS_V_MAKE_MAX));
+    const vq : u64 = cl_get32(cl, CL_VENC) | (cl_get32(cl, CL_VENC + 4) << 32);
+    cl_stat_num(" encjobs=", vgq_stat(vq, 1));
+    cl_stat_num(" encmax_us=", vgq_stat(vq, 4));
     cl_stat_num(" camst=", @as(u64, cl[CL_CAMST]));
     const cp : u64 = cl_camp(cl);
     cl_stat_num(" camauth=", cvl_stat(cp, 4));
@@ -15633,6 +15659,18 @@ test the_call_region_ends_the_text_store_and_draw_reads_only_folded_bytes {
     assert CL_VSEND < CL_CAMOFF and CL_CAMST < CL_VSER and CL_CAMP == CL_VIMG_END and CL_CAMP + 8 <= CL_CAMTRY and CL_CAMTRY < FV_COUNT;
     // the capture state is folded into the frame key too, so "camera unavailable" redraws the panel
     assert CL_VSKIP + 4 <= CL_CAMSTATE and CL_CAMSTATE < CL_VIMG;
+    // the encoder's address stands after the camera's try flag and before the account panel
+    assert CL_CAMTRY < CL_VENC and CL_VENC + 8 <= AC_ON;
+}
+
+test video_in_a_call_is_on_unless_the_variable_says_0 {
+    const z : [4]u8 = [48, 49, 48, 32];
+    // unset: on
+    assert cl_video_on(z[0..4], 0);
+    // "0": off; "1", "00", "0 " and "10": on
+    assert cl_video_on(z[0..1], 1) == false;
+    assert cl_video_on(z[1..2], 1);
+    assert cl_video_on(z[0..4], 2) and cl_video_on(z[2..4], 2) and cl_video_on(z[1..3], 2);
 }
 
 test camera_unavailable_shows_only_for_a_failed_camera_with_video_on {

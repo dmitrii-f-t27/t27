@@ -9,11 +9,13 @@
 // vid_decode(jpeg) -> CGImage        the picture of a JPEG (ImageIO), 0 when it does not decode; release it with
 //                                     vid_release. The window draws it in the CALL panel.
 // vid_size(img) -> w << 16 | h       the size of a decoded picture.
+// vgq_new / vgq_plan_of / vgq_kick / vgq_take   vid_make on its own serial queue, off the polling thread (below).
 // Host code (@extern): test with t27b, not t27c. Refs gHashTag/t27#11560.
 module T27osCallVid;
 
 use t27os::pty_sys::sys_peek;
 use t27os::pty_proto::put_u64;
+use t27os::pty_proto::get_u64;
 
 const VID_W : u64 = 320;
 const VID_H : u64 = 240;
@@ -251,6 +253,164 @@ pub fn vid_size(img: u64) -> u64 {
     return (vid_cg_w(img) << 16) | vid_cg_h(img);
 }
 
+// ---------------------------------------------------------------- the encoder off the polling thread (owner, 2026-10-22)
+
+// A live call measured the sender's frame at 5-10 ms inside cs_poll, against an audio budget of 10 ms a pass, and all
+// of it was vid_make (240 rows of pixels and the ImageIO JPEG). So the test picture is made on the block's own serial
+// queue: a due tick of the poll asks for a frame (vgq_kick: a few stores and dispatch_async_f), the job makes it and
+// publishes it under a sequence number (odd = being written), and a later tick copies the finished JPEG (vgq_take) and
+// only cuts it into parts. At most one job is in flight: while one runs no new one is queued and the tick counts a frame
+// skipped by the encoder. The polling thread is the only one that queues; the job is the only one that publishes.
+// Slots of the block (u64 at st + 8 k); the JPEG stands at st + VGQ_BUF.
+const VGQ_MAGIC : u64 = 6074266361726096167;
+const VGQ_REQ : u64 = 1;
+const VGQ_DONE : u64 = 2;
+const VGQ_SEQ : u64 = 3;
+const VGQ_LEN : u64 = 4;
+const VGQ_FRAME : u64 = 5;
+const VGQ_FED : u64 = 6;
+const VGQ_Q : u64 = 7;
+const VGQ_FN : u64 = 8;
+const VGQ_ENC : u64 = 9;
+const VGQ_FAIL : u64 = 10;
+const VGQ_MAX_US : u64 = 11;
+const VGQ_REFUSED : u64 = 12;
+const VGQ_BUF : u64 = 128;
+const VGQ_BUF_MAX : u64 = 24000;
+
+/// What a due tick does with the encoder (bits): take the JPEG the job published and the tick has not taken (seq even,
+/// non-zero, not the one taken last), queue the next frame when no job is in flight (req == done), or, with a job still
+/// running and nothing new to take, skip this frame (counted).
+pub const VGQ_TAKE : u32 = 1;
+pub const VGQ_KICK : u32 = 2;
+pub const VGQ_BUSY : u32 = 4;
+
+pub fn vgq_plan(req: u64, done: u64, seq: u64, fed: u64) -> u32 {
+    var a : u32 = 0;
+    if (seq != 0 and seq % 2 == 0 and seq != fed) { a = a | VGQ_TAKE; }
+    if (req == done) {
+        a = a | VGQ_KICK;
+    } else if ((a & VGQ_TAKE) == 0) {
+        a = a | VGQ_BUSY;
+    }
+    return a;
+}
+
+fn vgq_put(at: u64, v: u64) -> void {
+    var c : [8]u8 = undefined;
+    put_u64(c[0..8], 0, v);
+    vid_poke(at, c[0..8], 8);
+}
+
+fn vgq_get(at: u64) -> u64 {
+    var c : [8]u8 = undefined;
+    sys_peek(c[0..8], at, 8);
+    return get_u64(c[0..8], 0);
+}
+
+fn vgq_ok(st: u64) -> bool { return st != 0 and vgq_get(st) == VGQ_MAGIC; }
+
+fn vgq_queue(label: []const u8, attr: u64) -> u64 { return @extern("dispatch_queue_create"); }
+fn vgq_async(q: u64, ctx: u64, f: u64) -> void { @extern("dispatch_async_f"); }
+fn vgq_fence() -> void { @extern("OSMemoryBarrier"); }
+fn vgq_now() -> f64 { return @extern("CFAbsoluteTimeGetCurrent"); }
+fn vgq_copy(dst: u64, src: []const u8, n: u64) -> u64 { return @extern("memmove"); }
+
+/// A new encoder block with its serial queue; 0 when memory or the queue is missing (the caller then makes frames in
+/// its own pass, as before).
+pub fn vgq_new() -> u64 {
+    const st : u64 = vid_calloc(1, VGQ_BUF + VGQ_BUF_MAX + 64);
+    if (st == 0) { return 0; }
+    // Never true: makes sure vgq_job is emitted and exported for dlsym.
+    if (vgq_get(st + VGQ_BUF) == 99) { vgq_job(0); }
+    const q : u64 = vgq_queue("t27.callvid.encode", 0);
+    const f : u64 = vid_dlsym(VID_RTLD_DEFAULT, "vgq_job");
+    if (q == 0 or f == 0) {
+        vid_free(st);
+        return 0;
+    }
+    vgq_put(st + VGQ_Q * 8, q);
+    vgq_put(st + VGQ_FN * 8, f);
+    vgq_put(st, VGQ_MAGIC);
+    return st;
+}
+
+/// The plan of this tick for the block (polling thread, a few reads); 0 for no block.
+pub fn vgq_plan_of(st: u64) -> u32 {
+    if (!vgq_ok(st)) { return 0; }
+    const done : u64 = vgq_get(st + VGQ_DONE * 8);
+    vgq_fence();
+    return vgq_plan(vgq_get(st + VGQ_REQ * 8), done, vgq_get(st + VGQ_SEQ * 8), vgq_get(st + VGQ_FED * 8));
+}
+
+/// Queue the making of frame `frame` (polling thread, returns at once). False, and counted, while a job is in flight.
+pub fn vgq_kick(st: u64, frame: u64) -> bool {
+    if (!vgq_ok(st)) { return false; }
+    const req : u64 = vgq_get(st + VGQ_REQ * 8);
+    if (req != vgq_get(st + VGQ_DONE * 8)) {
+        vgq_put(st + VGQ_REFUSED * 8, vgq_get(st + VGQ_REFUSED * 8) + 1);
+        return false;
+    }
+    vgq_put(st + VGQ_FRAME * 8, frame);
+    vgq_put(st + VGQ_REQ * 8, req + 1);
+    vgq_fence();
+    vgq_async(vgq_get(st + VGQ_Q * 8), st, vgq_get(st + VGQ_FN * 8));
+    return true;
+}
+
+/// The job, on the block's serial queue (never the polling thread): make the frame, publish it, count it done.
+pub fn vgq_job(st: u64) -> u64 {
+    if (!vgq_ok(st)) { return 0; }
+    const t0 : f64 = vgq_now();
+    var jpeg : [24000]u8 = undefined;
+    const n : usize = vid_make(vgq_get(st + VGQ_FRAME * 8), jpeg[0..24000]);
+    if (n >= 4 and @as(u64, n) <= VGQ_BUF_MAX) {
+        // odd sequence = being written; the reader refuses an odd or a changed one
+        vgq_put(st + VGQ_SEQ * 8, vgq_get(st + VGQ_SEQ * 8) + 1);
+        vgq_fence();
+        vgq_copy(st + VGQ_BUF, jpeg[0..n], @as(u64, n));
+        vgq_put(st + VGQ_LEN * 8, @as(u64, n));
+        vgq_fence();
+        vgq_put(st + VGQ_SEQ * 8, vgq_get(st + VGQ_SEQ * 8) + 1);
+        vgq_put(st + VGQ_ENC * 8, vgq_get(st + VGQ_ENC * 8) + 1);
+    } else {
+        vgq_put(st + VGQ_FAIL * 8, vgq_get(st + VGQ_FAIL * 8) + 1);
+    }
+    const us : u64 = @as(u64, @intFromFloat((vgq_now() - t0) * 1000000.0));
+    if (us > vgq_get(st + VGQ_MAX_US * 8)) { vgq_put(st + VGQ_MAX_US * 8, us); }
+    vgq_fence();
+    vgq_put(st + VGQ_DONE * 8, vgq_get(st + VGQ_DONE * 8) + 1);
+    return 0;
+}
+
+/// Copy the finished JPEG not yet taken into out; its length, 0 when there is none (or the job was writing it).
+pub fn vgq_take(st: u64, out: []u8) -> usize {
+    if (!vgq_ok(st)) { return 0; }
+    const seq : u64 = vgq_get(st + VGQ_SEQ * 8);
+    if (seq == 0 or seq % 2 == 1 or seq == vgq_get(st + VGQ_FED * 8)) { return 0; }
+    vgq_fence();
+    const n : u64 = vgq_get(st + VGQ_LEN * 8);
+    if (n < 4 or n > VGQ_BUF_MAX or n > @as(u64, out.len)) { return 0; }
+    sys_peek(out[0..@as(usize, @intCast(n))], st + VGQ_BUF, n);
+    vgq_fence();
+    if (vgq_get(st + VGQ_SEQ * 8) != seq) { return 0; }
+    vgq_put(st + VGQ_FED * 8, seq);
+    return @as(usize, @intCast(n));
+}
+
+/// Counters of the block: 0 jobs queued, 1 jobs done, 2 JPEG made, 3 failures, 4 longest job in microseconds,
+/// 5 kicks refused while a job was in flight.
+pub fn vgq_stat(st: u64, k: u32) -> u64 {
+    if (!vgq_ok(st)) { return 0; }
+    if (k == 0) { return vgq_get(st + VGQ_REQ * 8); }
+    if (k == 1) { return vgq_get(st + VGQ_DONE * 8); }
+    if (k == 2) { return vgq_get(st + VGQ_ENC * 8); }
+    if (k == 3) { return vgq_get(st + VGQ_FAIL * 8); }
+    if (k == 4) { return vgq_get(st + VGQ_MAX_US * 8); }
+    if (k == 5) { return vgq_get(st + VGQ_REFUSED * 8); }
+    return 0;
+}
+
 test the_digits_are_5_by_7_and_the_number_reads_back_from_its_slots {
     assert vid_lit(8, 0, 1) and vid_lit(8, 0, 0) == false;
     assert vid_lit(1, 6, 1) and vid_lit(1, 6, 3) and vid_lit(1, 6, 0) == false and vid_lit(1, 0, 0) == false;
@@ -299,4 +459,71 @@ test the_fast_row_gives_the_same_pixels_as_the_pixel_function {
         f = f + 211;
     }
     assert bad == 0;
+}
+
+test the_encoder_plan_takes_a_new_frame_kicks_when_idle_and_skips_when_busy {
+    // nothing queued yet: kick, nothing to take, no skip
+    assert vgq_plan(0, 0, 0, 0) == VGQ_KICK;
+    // a job in flight, nothing published: the frame is skipped by the encoder, no second job
+    assert vgq_plan(1, 0, 0, 0) == VGQ_BUSY;
+    // the job is done and published (seq 2): take it and queue the next
+    assert vgq_plan(1, 1, 2, 0) == VGQ_TAKE | VGQ_KICK;
+    // taken already, the next job in flight: skip, never kick
+    assert vgq_plan(2, 1, 2, 2) == VGQ_BUSY;
+    // being written (odd seq) is never taken
+    assert vgq_plan(2, 1, 3, 2) == VGQ_BUSY;
+    // a job that failed (done, nothing new): kick again, nothing to take, not a skip
+    assert vgq_plan(2, 2, 2, 2) == VGQ_KICK;
+    // no plan ever kicks while a job is in flight
+    var r : u64 = 0;
+    while (r < 6) {
+        var d : u64 = 0;
+        while (d < 6) {
+            if (r != d) { assert (vgq_plan(r, d, 2 * d, 0) & VGQ_KICK) == 0; }
+            d = d + 1;
+        }
+        r = r + 1;
+    }
+}
+
+test a_simulated_call_keeps_at_most_one_frame_in_flight_and_counts_sent_and_skipped {
+    // each due tick follows vgq_plan; a job finishes `cost` ticks after it was queued (cost 1 = before the next tick)
+    var cost : u64 = 1;
+    while (cost <= 3) {
+        var req : u64 = 0;
+        var done : u64 = 0;
+        var seq : u64 = 0;
+        var fed : u64 = 0;
+        var due_at : u64 = 0;
+        var sent : u64 = 0;
+        var skipped : u64 = 0;
+        var maxfly : u64 = 0;
+        var t : u64 = 0;
+        while (t < 60) {
+            // the job finishes and publishes
+            if (req > done and t >= due_at) {
+                seq = seq + 2;
+                done = done + 1;
+            }
+            const a : u32 = vgq_plan(req, done, seq, fed);
+            if ((a & VGQ_TAKE) != 0) { fed = seq; sent = sent + 1; }
+            if ((a & VGQ_BUSY) != 0) { skipped = skipped + 1; }
+            if ((a & VGQ_KICK) != 0) { req = req + 1; due_at = t + cost; }
+            if (req - done > maxfly) { maxfly = req - done; }
+            t = t + 1;
+        }
+        assert maxfly == 1;
+        // every tick either sent a frame, skipped one, or was the first (nothing made yet)
+        assert sent + skipped + 1 == 60;
+        // a job that takes cost ticks leaves cost - 1 skips per frame sent
+        assert skipped == (cost - 1) * (sent + 1) or skipped == (cost - 1) * sent;
+        if (cost == 1) { assert sent == 59 and skipped == 0; }
+        cost = cost + 1;
+    }
+}
+
+test the_encoder_block_refuses_no_block {
+    var b : [64]u8 = undefined;
+    assert vgq_plan_of(0) == 0 and vgq_kick(0, 1) == false and vgq_take(0, b[0..64]) == 0 and vgq_stat(0, 0) == 0;
+    assert VGQ_BUF >= 8 * (VGQ_REFUSED + 1) and VGQ_BUF_MAX == 24000;
 }

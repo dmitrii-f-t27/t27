@@ -60,6 +60,8 @@
 // (call_core: vc_part / vr_take). cs_set(CS_K_VIDEO, 1) makes an ACTIVE one to one call send 10 frames a second: the
 // camera's JPEG while cs_video_feed keeps it fresh, the test generator of call_vid.t27 otherwise. The receiver always
 // assembles; cs_vstat(CS_V_*) counts, cs_vlen / s[CS_VLAST ..] give the last complete JPEG, cs_vlive says "video on".
+// cs_video_encoder hands in an encoder block (call_vid.t27 vgq_new): the generator's JPEG is then made on its own
+// queue and the poll only takes it and cuts it into parts.
 // Test identities only (fixed fingerprints in the probe); binding to keysync device keys is the next slice.
 // Behaviour checks, not a security audit.
 module T27osCallSession;
@@ -132,6 +134,12 @@ use t27os::call_core::VR_LAST;
 use t27os::call_core::vr_take;
 use t27os::call_core::vr_get;
 use t27os::call_vid::vid_make;
+use t27os::call_vid::vgq_plan_of;
+use t27os::call_vid::vgq_kick;
+use t27os::call_vid::vgq_take;
+use t27os::call_vid::VGQ_TAKE;
+use t27os::call_vid::VGQ_KICK;
+use t27os::call_vid::VGQ_BUSY;
 use t27os::call_core::GR_PEERS;
 use t27os::call_core::GR_NONE;
 use t27os::call_core::GR_WAITING;
@@ -310,12 +318,16 @@ pub const CS_K_GSTATS : u32 = 46;
 pub const CS_K_GLEAVE_S : u32 = 47;
 pub const CS_K_GAUTO : u32 = 48;
 pub const CS_K_TONE_AMP : u32 = 49;
-/// 1 = send video while a one to one call is ACTIVE (the receiver always accepts it). Off by default.
+/// 1 = send video while a one to one call is ACTIVE (the receiver always accepts it). 0 in a new session; the window
+/// sets it unless T27OS_CALL_VIDEO=0.
 pub const CS_K_VIDEO : u32 = 50;
 /// Test aid: the video frame number whose part 1 is sealed but not sent (a lost datagram); 0 = none.
 pub const CS_K_VDROP : u32 = 51;
 /// Test aid: stop after this many video frames in a call (0 = no limit).
 pub const CS_K_VLIMIT : u32 = 52;
+/// The address of the test picture's encoder block (call_vid.t27 vgq_new), set by cs_video_encoder, kept across calls;
+/// 0 = none, the generator's frame is then made inside the poll as before (probes and tests).
+const CS_K_VENC : u32 = 53;
 
 pub const CS_AUDIO_DEV : u32 = 1;
 pub const CS_AUDIO_TEST : u32 = 2;
@@ -1849,7 +1861,8 @@ const VT_LASTLEN : usize = 11;
 const VT_SERIAL : usize = 12;
 const VT_MAKE_MAX : usize = 13;
 const VT_DROPHASH : usize = 14;
-const VT_END : usize = 15;
+const VT_ENCSKIP : usize = 15;
+const VT_END : usize = 16;
 
 fn cvg(s: []const u8, k: usize) -> u64 { return get_u64(s, CS_VID + VR_LEN + k * 8); }
 fn cvp(s: []u8, k: usize, v: u64) -> void { put_u64(s, CS_VID + VR_LEN + k * 8, v); }
@@ -1877,6 +1890,8 @@ pub const CS_V_MAKE_MAX : u32 = 17;
 pub const CS_V_SERIAL : u32 = 18;
 /// The hash of the frame whose part was left out on purpose (CS_K_VDROP).
 pub const CS_V_DROPHASH : u32 = 19;
+/// Due frames of the generator skipped because its encoder (the off-poll queue) had not finished the last one.
+pub const CS_V_ENCSKIP : u32 = 20;
 
 pub fn cs_vstat(s: []const u8, k: u32) -> u64 {
     if (s.len < CS_LEN) { return 0; }
@@ -1901,6 +1916,7 @@ pub fn cs_vstat(s: []const u8, k: u32) -> u64 {
     if (k == CS_V_MAKE_MAX) { return cvg(s, VT_MAKE_MAX); }
     if (k == CS_V_SERIAL) { return cvg(s, VT_SERIAL); }
     if (k == CS_V_DROPHASH) { return cvg(s, VT_DROPHASH); }
+    if (k == CS_V_ENCSKIP) { return cvg(s, VT_ENCSKIP); }
     return 0;
 }
 
@@ -1927,6 +1943,14 @@ pub fn cs_video_feed(s: []u8, jpeg: []const u8) -> bool {
     return true;
 }
 
+/// Make the test picture on the encoder block `enc` (call_vid.t27 vgq_new) instead of in the poll; 0 detaches it.
+/// Kept across calls (cs_fresh leaves it). False for a slice that is not a live session.
+pub fn cs_video_encoder(s: []u8, enc: u64) -> bool {
+    if (!cs_live(s)) { return false; }
+    cs_p(s, CS_K_VENC, enc);
+    return true;
+}
+
 /// One opened video part: assemble; a complete frame is copied to the "last" buffer for the window.
 fn cs_take_video(s: []u8, pt: []const u8) -> void {
     const r : u32 = vr_take(s[CS_VID..CS_VID + VR_LEN], s[CS_VASM..CS_VASM + CS_VBUF], pt, ckh_ms());
@@ -1941,7 +1965,9 @@ fn cs_take_video(s: []u8, pt: []const u8) -> void {
     cvp(s, VT_SERIAL, cvg(s, VT_SERIAL) + 1);
 }
 
-/// Every 100 ms of an ACTIVE one to one call with video on: make or take a frame, cut it, seal every part, send it.
+/// Every 100 ms of an ACTIVE one to one call with video on: take a frame, cut it, seal every part, send it. With an
+/// encoder block the generator's JPEG is made off the poll (vgq_*): this tick takes the one finished since the last tick
+/// and queues the next; while that job still runs the frame is skipped (CS_V_ENCSKIP), never waited for.
 fn cs_vtick(s: []u8, now: u64) -> void {
     if (cs_g(s, CS_K_VIDEO) == 0 or ckh_state(s[0..EP_LEN]) != CK_ACTIVE or cs_n_active(s) != 1) { return; }
     if (!vc_due(now, cvg(s, VT_LAST_MS))) { return; }
@@ -1961,7 +1987,17 @@ fn cs_vtick(s: []u8, now: u64) -> void {
         }
         if (n > 0) { cvp(s, VT_CAM, cvg(s, VT_CAM) + 1); }
     } else {
-        n = vid_make(f, jpeg[0..24000]);
+        const enc : u64 = cs_g(s, CS_K_VENC);
+        if (enc == 0) {
+            n = vid_make(f, jpeg[0..24000]);
+        } else {
+            const a : u32 = vgq_plan_of(enc);
+            if ((a & VGQ_TAKE) != 0) { n = vgq_take(enc, jpeg[0..24000]); }
+            if ((a & VGQ_KICK) != 0) { vgq_kick(enc, f + 1); }
+            if ((a & VGQ_BUSY) != 0) { cvp(s, VT_ENCSKIP, cvg(s, VT_ENCSKIP) + 1); }
+            // nothing finished yet (the first tick, a skip): no frame this tick, not an error
+            if (n == 0) { return; }
+        }
         if (n > 0) { cvp(s, VT_GEN, cvg(s, VT_GEN) + 1); }
     }
     const np : usize = vc_parts_for(n);
@@ -2119,7 +2155,7 @@ test a_sealed_video_part_fits_a_datagram_and_the_video_tunables_are_in_the_table
     assert CK_HDR + VC_PT_MAX + CK_TAG == 1080;
     assert 1080 < CS_SEALED;
     assert vc_parts_for(VC_JPEG_MAX) * 1000 >= VC_JPEG_MAX;
-    assert CS_K_VIDEO > CS_K_TONE_AMP and CS_K_VLIMIT < 64;
+    assert CS_K_VIDEO > CS_K_TONE_AMP and CS_K_VLIMIT < 64 and CS_K_VENC == CS_K_VLIMIT + 1 and CS_K_VENC < 64;
     assert VT_DROPHASH < VT_END;
     // the window's receive buffer (2048) holds a sealed audio frame (1996) and so a video part (1080)
     assert CS_SEALED <= 2048;
@@ -2484,7 +2520,8 @@ test the_group_and_video_counters_read_their_own_slots {
     assert cs_vstat(z, CS_V_GEN) == 300 + VT_GEN and cs_vstat(z, CS_V_CAM) == 300 + VT_CAM;
     assert cs_vstat(z, CS_V_ERR) == 300 + VT_ERR and cs_vstat(z, CS_V_SENDERR) == 300 + VT_SENDERR;
     assert cs_vstat(z, CS_V_MAKE_MAX) == 300 + VT_MAKE_MAX and cs_vstat(z, CS_V_SERIAL) == 300 + VT_SERIAL;
-    assert cs_vstat(z, CS_V_DROPHASH) == 300 + VT_DROPHASH and cs_vstat(z, 20) == 0;
+    assert cs_vstat(z, CS_V_DROPHASH) == 300 + VT_DROPHASH and cs_vstat(z, CS_V_ENCSKIP) == 300 + VT_ENCSKIP;
+    assert cs_vstat(z, 21) == 0;
     assert cs_vlen(z) == 300 + VT_LASTLEN;
     // a short slice reads nothing
     assert cs_vstat(s[0..CS_LEN - 1], CS_V_SHOWN) == 0 and cs_vlen(s[0..CS_LEN - 1]) == 0;
@@ -2507,4 +2544,50 @@ test every_sender_tag_has_a_period_that_divides_a_frame {
         assert 480 % p == 0 and p % 2 == 0;
         t = t + 1;
     }
+}
+
+test the_parts_of_a_frame_are_cut_as_before_whoever_made_its_jpeg {
+    // a 4500-byte JPEG of frame 7: five parts of 1000, 1000, 1000, 1000 and 500 bytes, each behind its 12-byte header
+    var jpeg : [4500]u8 = undefined;
+    ck_fill_session(jpeg[0..4500], 3);
+    jpeg[0] = 255;
+    jpeg[1] = 216;
+    assert vc_parts_for(4500) == 5;
+    var k : usize = 0;
+    while (k < 5) {
+        var pt : [1012]u8 = undefined;
+        const pn : usize = vc_part(pt[0..1012], 7, jpeg[0..4500], k);
+        if (k < 4) { assert pn == 1012; } else { assert pn == 512; }
+        // frame 7, part k of 5, total 4500 (LE)
+        assert pt[0] == 7 and pt[1] == 0 and pt[2] == 0 and pt[3] == 0;
+        assert pt[4] == @as(u8, @intCast(k)) and pt[5] == 0 and pt[6] == 5 and pt[7] == 0;
+        assert pt[8] == 148 and pt[9] == 17 and pt[10] == 0 and pt[11] == 0;
+        var i : usize = 0;
+        var same : bool = true;
+        while (i + 12 < pn) {
+            if (pt[12 + i] != jpeg[k * 1000 + i]) { same = false; }
+            i = i + 1;
+        }
+        assert same;
+        k = k + 1;
+    }
+    var pt : [1012]u8 = undefined;
+    assert vc_part(pt[0..1012], 7, jpeg[0..4500], 5) == 0;
+}
+
+test the_encoder_block_is_kept_across_calls_and_refused_without_a_session {
+    var s : [165504]u8 = undefined;
+    ck_wipe(s[0..CS_LEN]);
+    assert cs_video_encoder(s[0..CS_LEN], 4096) == false and cs_g(s[0..CS_LEN], CS_K_VENC) == 0;
+    cs_t_live(s[0..CS_LEN]);
+    assert cs_video_encoder(s[0..CS_LEN], 4096) and cs_g(s[0..CS_LEN], CS_K_VENC) == 4096;
+    // a new call wipes the counters, not the encoder: the wipes of cs_fresh (its clock is host code)
+    cvp(s[0..CS_LEN], VT_ENCSKIP, 9);
+    assert @as(usize, CS_K_VENC) * 8 >= 20 * 8 and @as(usize, CS_K_VENC) * 8 + 8 <= CS_SLOTS;
+    ck_wipe(s[CS_SLOTS..CS_SLOTS + 20 * 8]);
+    ck_wipe(s[CS_VID..CS_VID + CS_VSLOTS]);
+    assert cs_g(s[0..CS_LEN], CS_K_VENC) == 4096 and cs_vstat(s[0..CS_LEN], CS_V_ENCSKIP) == 0;
+    // cs_set cannot reach it: it is not a tunable
+    assert cs_set(s[0..CS_LEN], CS_K_VENC, 1) == false and cs_g(s[0..CS_LEN], CS_K_VENC) == 4096;
+    assert cs_video_encoder(s[0..CS_LEN], 0) and cs_g(s[0..CS_LEN], CS_K_VENC) == 0;
 }
