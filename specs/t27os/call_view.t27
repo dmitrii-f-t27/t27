@@ -1,0 +1,537 @@
+// SPDX-License-Identifier: Apache-2.0
+// specs/t27os/call_view.t27 -- what the CALL panel of the T27 OS window shows and what a click in it means. Pure
+// decisions only: no @extern, no socket, no clock. call_session.t27 carries the call (cs_*), call_core.t27 decides
+// its states and its code; the window (glass_window.t27) keeps a snapshot of the session, draws it with the boxes
+// below and turns a hit into one cs_* call through cv_action. Owner, 2026-10-21: calls run inside the OS, explicit
+// consent, never auto-answer. Refs gHashTag/t27#11560.
+//
+// Views (cv_view): IDLE (an address field and CALL), CALLING (CANCEL), RINGING (who calls, ANSWER / DECLINE: the
+// code does not exist before the answer, call_core commits first and reveals after), KEYS (the code is being
+// derived, HANG UP), COMPARE (the 6 digits large, CODES MATCH / CODES DIFFER), WAIT (this person said match, the
+// other has not yet, HANG UP), ACTIVE (the duration, MUTE / UNMUTE and END CALL), ENDED and FAILED (the reason and
+// CLOSE). The panel sits in the slot of the Queen, DOCTOR, KEYS and PROFILE panels (queen::QP_W wide).
+//
+// Identity in this slice: a test fingerprint MADE FROM THE ADDRESS (cv_fp_of: the 4 bytes "t27c", the IPv4, the
+// port). call_core frames name the receiver's fingerprint, so a caller must know it; deriving it from the address
+// lets a person dial by address alone. It proves nothing about who answers -- the 6-digit comparison is what
+// detects a man in the middle -- and the binding to keysync device keys is the next slice. The nickname is not
+// carried by the handshake (call_core INVITE has no field for it), so the RINGING view names the address and the
+// fingerprint only.
+//
+// Addresses: 127.x.x.x or 192.168.15.x only (cv_lan_ok), the port 47727 when none is typed (CV_PORT).
+// Flat namespace (the window build splices imported modules): every name here starts with cv_ / CV_.
+module T27osCallView;
+
+use t27os::call_core::CK_IDLE;
+use t27os::call_core::CK_CALLING;
+use t27os::call_core::CK_RINGING;
+use t27os::call_core::CK_VERIFY;
+use t27os::call_core::CK_ACTIVE;
+use t27os::call_core::CK_ENDED;
+use t27os::call_core::CK_FAILED;
+use t27os::call_core::CK_FP;
+use t27os::queen::QP_PAD;
+use t27os::session_store::put_dec;
+
+// ---------------------------------------------------------------- 1. views and actions
+
+pub const CV_IDLE : u32 = 0;
+pub const CV_CALLING : u32 = 1;
+pub const CV_RINGING : u32 = 2;
+pub const CV_KEYS : u32 = 3;
+pub const CV_COMPARE : u32 = 4;
+pub const CV_WAIT : u32 = 5;
+pub const CV_ACTIVE : u32 = 6;
+pub const CV_ENDED : u32 = 7;
+pub const CV_FAILED : u32 = 8;
+
+pub const CV_A_NONE : u32 = 0;
+pub const CV_A_FOCUS : u32 = 1;
+pub const CV_A_DIAL : u32 = 2;
+pub const CV_A_HANGUP : u32 = 3;
+pub const CV_A_ANSWER : u32 = 4;
+pub const CV_A_DECLINE : u32 = 5;
+pub const CV_A_MATCH : u32 = 6;
+pub const CV_A_DIFFER : u32 = 7;
+pub const CV_A_MUTE : u32 = 8;
+pub const CV_A_CLOSE : u32 = 9;
+
+pub const CV_H_NONE : u32 = 0;
+pub const CV_H_FIELD : u32 = 1;
+pub const CV_H_B0 : u32 = 2;
+pub const CV_H_B1 : u32 = 3;
+
+/// The view of a call state. have_code: cs_code answered; said: this person already pressed CODES MATCH.
+pub fn cv_view(state: u32, have_code: bool, said: bool) -> u32 {
+    if (state == CK_CALLING) { return CV_CALLING; }
+    if (state == CK_RINGING) { return CV_RINGING; }
+    if (state == CK_VERIFY) {
+        if (!have_code) { return CV_KEYS; }
+        if (said) { return CV_WAIT; }
+        return CV_COMPARE;
+    }
+    if (state == CK_ACTIVE) { return CV_ACTIVE; }
+    if (state == CK_ENDED) { return CV_ENDED; }
+    if (state == CK_FAILED) { return CV_FAILED; }
+    return CV_IDLE;
+}
+
+/// A call is up (dialled, ringing, comparing or talking): the window polls at least every 10 ms then.
+pub fn cv_live(view: u32) -> bool {
+    return view >= CV_CALLING and view <= CV_ACTIVE;
+}
+
+pub fn cv_btn_count(view: u32) -> u32 {
+    if (view == CV_RINGING or view == CV_COMPARE or view == CV_ACTIVE) { return 2; }
+    if (view > CV_FAILED) { return 0; }
+    return 1;
+}
+
+/// The word on button b of a view; "" where there is no button.
+pub fn cv_btn_word(view: u32, b: u32, muted: bool) -> str {
+    if (b >= cv_btn_count(view)) { return ""; }
+    if (view == CV_IDLE) { return "CALL"; }
+    if (view == CV_CALLING) { return "CANCEL"; }
+    if (view == CV_RINGING) {
+        if (b == 0) { return "ANSWER"; }
+        return "DECLINE";
+    }
+    if (view == CV_COMPARE) {
+        if (b == 0) { return "CODES MATCH"; }
+        return "CODES DIFFER";
+    }
+    if (view == CV_ACTIVE) {
+        if (b == 0) {
+            if (muted) { return "UNMUTE"; }
+            return "MUTE";
+        }
+        return "END CALL";
+    }
+    if (view == CV_ENDED or view == CV_FAILED) { return "CLOSE"; }
+    return "HANG UP";
+}
+
+/// What a hit in a view asks for. Nothing answers a button the view does not draw.
+pub fn cv_action(view: u32, hit: u32) -> u32 {
+    if (hit == CV_H_FIELD) {
+        if (view == CV_IDLE) { return CV_A_FOCUS; }
+        return CV_A_NONE;
+    }
+    if (hit != CV_H_B0 and hit != CV_H_B1) { return CV_A_NONE; }
+    const b : u32 = hit - CV_H_B0;
+    if (b >= cv_btn_count(view)) { return CV_A_NONE; }
+    if (view == CV_IDLE) { return CV_A_DIAL; }
+    if (view == CV_RINGING) {
+        if (b == 0) { return CV_A_ANSWER; }
+        return CV_A_DECLINE;
+    }
+    if (view == CV_COMPARE) {
+        if (b == 0) { return CV_A_MATCH; }
+        return CV_A_DIFFER;
+    }
+    if (view == CV_ACTIVE) {
+        if (b == 0) { return CV_A_MUTE; }
+        return CV_A_HANGUP;
+    }
+    if (view == CV_ENDED or view == CV_FAILED) { return CV_A_CLOSE; }
+    return CV_A_HANGUP;
+}
+
+pub fn cv_title(view: u32) -> str {
+    if (view == CV_CALLING) { return "CALLING"; }
+    if (view == CV_RINGING) { return "INCOMING CALL"; }
+    if (view == CV_KEYS) { return "SECURING THE CALL"; }
+    if (view == CV_COMPARE) { return "COMPARE THE CODE"; }
+    if (view == CV_WAIT) { return "WAITING FOR THE OTHER SIDE"; }
+    if (view == CV_ACTIVE) { return "IN CALL"; }
+    if (view == CV_ENDED) { return "CALL ENDED"; }
+    if (view == CV_FAILED) { return "CALL FAILED"; }
+    return "NEW CALL";
+}
+
+pub fn cv_hint(view: u32) -> str {
+    if (view == CV_CALLING) { return "Waiting for the other side to answer."; }
+    if (view == CV_RINGING) { return "Answer to see the code you both compare. Nothing is sent before you answer."; }
+    if (view == CV_KEYS) { return "Exchanging keys."; }
+    if (view == CV_COMPARE) { return "Read the code aloud. Press CODES MATCH only if both screens show the same digits."; }
+    if (view == CV_WAIT) { return "You said the codes match. The call opens when the other side says so too."; }
+    if (view == CV_ACTIVE) { return "Sealed audio, AES-128-GCM. Microphone and speakers at low volume."; }
+    return "";
+}
+
+// ---------------------------------------------------------------- 2. notes of the window (not call reasons)
+
+pub const CV_N_NONE : u32 = 0;
+pub const CV_N_ADDR : u32 = 1;
+pub const CV_N_LAN : u32 = 2;
+pub const CV_N_SOCKET : u32 = 3;
+pub const CV_N_BIND : u32 = 4;
+pub const CV_N_REFUSED : u32 = 5;
+pub const CV_N_SELF : u32 = 6;
+
+pub fn cv_note_text(note: u32) -> str {
+    if (note == CV_N_ADDR) { return "Type an address like 192.168.15.4:47727."; }
+    if (note == CV_N_LAN) { return "Calls go only to 127.x.x.x or 192.168.15.x in this version."; }
+    if (note == CV_N_SOCKET) { return "Calls are off: the call port could not be opened (is it taken?)."; }
+    if (note == CV_N_BIND) { return "Calls are off: T27OS_CALL_BIND must be 127.x.x.x or 192.168.15.x."; }
+    if (note == CV_N_REFUSED) { return "The call could not be started."; }
+    if (note == CV_N_SELF) { return "That is this device's own address."; }
+    return "";
+}
+
+// ---------------------------------------------------------------- 3. addresses and the test fingerprint
+
+pub const CV_PORT : u64 = 47727;
+/// "255.255.255.255:65535"
+pub const CV_ADDR_MAX : usize = 21;
+pub const CV_CODE_TEXT : usize = 7;
+
+/// A character the address field takes: a digit, a dot or a colon.
+pub fn cv_addr_char(cp: u32) -> bool {
+    return (cp >= 48 and cp <= 57) or cp == 46 or cp == 58;
+}
+
+/// "a.b.c.d" or "a.b.c.d:port" as ip * 65536 + port (port CV_PORT when none is typed); 0 when it is not that shape.
+pub fn cv_parse_addr(t: []const u8, n: usize) -> u64 {
+    if (n == 0 or n > CV_ADDR_MAX or n > t.len) { return 0; }
+    var ip : u64 = 0;
+    var part : u64 = 0;
+    var digits : u32 = 0;
+    var dots : u32 = 0;
+    var i : usize = 0;
+    while (i < n and t[i] != 58) {
+        const c : u8 = t[i];
+        if (c == 46) {
+            if (digits == 0 or dots == 3) { return 0; }
+            ip = ip * 256 + part;
+            part = 0;
+            digits = 0;
+            dots = dots + 1;
+        } else if (c >= 48 and c <= 57) {
+            part = part * 10 + @as(u64, c - 48);
+            digits = digits + 1;
+            if (digits > 3 or part > 255) { return 0; }
+        } else {
+            return 0;
+        }
+        i = i + 1;
+    }
+    if (dots != 3 or digits == 0) { return 0; }
+    ip = ip * 256 + part;
+    var port : u64 = CV_PORT;
+    if (i < n) {
+        i = i + 1;
+        if (i == n) { return 0; }
+        port = 0;
+        var pd : u32 = 0;
+        while (i < n) {
+            const c : u8 = t[i];
+            if (c < 48 or c > 57) { return 0; }
+            port = port * 10 + @as(u64, c - 48);
+            pd = pd + 1;
+            if (pd > 5 or port > 65535) { return 0; }
+            i = i + 1;
+        }
+        if (port == 0) { return 0; }
+    }
+    return ip * 65536 + port;
+}
+
+pub fn cv_addr_ip(a: u64) -> u64 { return a / 65536; }
+pub fn cv_addr_port(a: u64) -> u64 { return a % 65536; }
+
+/// Only this machine (127.x.x.x) and the bench network 192.168.15.x.
+pub fn cv_lan_ok(ip: u64) -> bool {
+    return (ip >> 24) == 127 or (ip >> 8) == 12625935;
+}
+
+fn cv_put1(out: []u8, at: usize, b: u8) -> usize {
+    if (at < out.len) { out[at] = b; }
+    return at + 1;
+}
+
+/// "a.b.c.d:port"; the length.
+pub fn cv_addr_text(ip: u64, port: u64, out: []u8) -> usize {
+    var o : usize = put_dec(out, 0, (ip >> 24) & 255);
+    o = cv_put1(out, o, 46);
+    o = put_dec(out, o, (ip >> 16) & 255);
+    o = cv_put1(out, o, 46);
+    o = put_dec(out, o, (ip >> 8) & 255);
+    o = cv_put1(out, o, 46);
+    o = put_dec(out, o, ip & 255);
+    o = cv_put1(out, o, 58);
+    o = put_dec(out, o, port);
+    return o;
+}
+
+/// The test fingerprint of an address: "t27c", the IPv4 big-endian, the port big-endian (10 bytes).
+pub fn cv_fp_of(ip: u64, port: u64, out: []u8) -> usize {
+    if (out.len < CK_FP) { return 0; }
+    out[0] = 116;
+    out[1] = 50;
+    out[2] = 55;
+    out[3] = 99;
+    out[4] = @as(u8, @intCast((ip >> 24) & 255));
+    out[5] = @as(u8, @intCast((ip >> 16) & 255));
+    out[6] = @as(u8, @intCast((ip >> 8) & 255));
+    out[7] = @as(u8, @intCast(ip & 255));
+    out[8] = @as(u8, @intCast((port >> 8) & 255));
+    out[9] = @as(u8, @intCast(port & 255));
+    return CK_FP;
+}
+
+/// The address a test fingerprint names, as ip * 65536 + port; 0 when it is not one (no "t27c" prefix).
+pub fn cv_fp_addr(fp: []const u8) -> u64 {
+    if (fp.len < CK_FP or fp[0] != 116 or fp[1] != 50 or fp[2] != 55 or fp[3] != 99) { return 0; }
+    const ip : u64 = (@as(u64, fp[4]) << 24) | (@as(u64, fp[5]) << 16) | (@as(u64, fp[6]) << 8) | @as(u64, fp[7]);
+    const port : u64 = (@as(u64, fp[8]) << 8) | @as(u64, fp[9]);
+    return ip * 65536 + port;
+}
+
+// ---------------------------------------------------------------- 4. the code and the clock
+
+/// "123 456": the six digits in two groups of three, as both people read them aloud.
+pub fn cv_code_text(code: []const u8, out: []u8) -> usize {
+    if (code.len < 6 or out.len < CV_CODE_TEXT) { return 0; }
+    var i : usize = 0;
+    var o : usize = 0;
+    while (i < 6) {
+        if (i == 3) {
+            out[o] = 32;
+            o = o + 1;
+        }
+        out[o] = code[i];
+        o = o + 1;
+        i = i + 1;
+    }
+    return o;
+}
+
+fn cv_put2(out: []u8, at: usize, v: u64) -> usize {
+    const o : usize = cv_put1(out, at, @as(u8, @intCast(48 + (v / 10) % 10)));
+    return cv_put1(out, o, @as(u8, @intCast(48 + v % 10)));
+}
+
+/// The call's duration: "MM:SS", from an hour on "H:MM:SS".
+pub fn cv_clock(secs: u64, out: []u8) -> usize {
+    var o : usize = 0;
+    if (secs >= 3600) {
+        o = put_dec(out, 0, secs / 3600);
+        o = cv_put1(out, o, 58);
+    }
+    o = cv_put2(out, o, (secs / 60) % 60);
+    o = cv_put1(out, o, 58);
+    return cv_put2(out, o, secs % 60);
+}
+
+// ---------------------------------------------------------------- 5. the panel boxes (t = panel top, l = its left)
+
+pub const CV_ME_Y : f64 = 52.0;
+pub const CV_FPME_Y : f64 = 66.0;
+pub const CV_LABEL_Y : f64 = 100.0;
+pub const CV_FIELD_Y : f64 = 108.0;
+pub const CV_FIELD_H : f64 = 26.0;
+pub const CV_DIAL_Y : f64 = 146.0;
+pub const CV_NOTE_Y : f64 = 192.0;
+pub const CV_TITLE_Y : f64 = 108.0;
+pub const CV_PEER_Y : f64 = 132.0;
+pub const CV_PFP_Y : f64 = 148.0;
+pub const CV_BIG_Y : f64 = 200.0;
+pub const CV_ROW_Y : f64 = 224.0;
+pub const CV_HINT_Y : f64 = 270.0;
+pub const CV_BTN_H : f64 = 26.0;
+pub const CV_BTN_GAP : f64 = 8.0;
+/// The title bar's CALL control: a pill left of the profile circle.
+pub const CV_HEAD_W : f64 = 40.0;
+pub const CV_HEAD_H : f64 = 18.0;
+pub const CV_HEAD_GAP : f64 = 8.0;
+pub const CV_RESERVE : f64 = 48.0;
+
+fn cv_in(x: f64, y: f64, bx: f64, by: f64, bw: f64, bh: f64) -> bool {
+    return x >= bx and x < bx + bw and y >= by and y < by + bh;
+}
+
+pub fn cv_field_x(l: f64) -> f64 { return l + QP_PAD; }
+pub fn cv_field_y(t: f64) -> f64 { return t + CV_FIELD_Y; }
+pub fn cv_field_w(w: f64) -> f64 { return w - 2.0 * QP_PAD; }
+
+pub fn cv_btn_w(w: f64) -> f64 { return 0.5 * (w - 2.0 * QP_PAD - CV_BTN_GAP); }
+pub fn cv_btn_x(l: f64, w: f64, b: u32) -> f64 { return l + QP_PAD + @as(f64, @floatFromInt(b)) * (cv_btn_w(w) + CV_BTN_GAP); }
+
+/// The top of the button row: under the field while IDLE, under the big digits otherwise.
+pub fn cv_row_y(t: f64, view: u32) -> f64 {
+    if (view == CV_IDLE) { return t + CV_DIAL_Y; }
+    return t + CV_ROW_Y;
+}
+
+pub fn cv_hit(x: f64, y: f64, l: f64, w: f64, t: f64, view: u32) -> u32 {
+    if (view == CV_IDLE and cv_in(x, y, cv_field_x(l), cv_field_y(t), cv_field_w(w), CV_FIELD_H)) { return CV_H_FIELD; }
+    var b : u32 = 0;
+    while (b < cv_btn_count(view)) {
+        if (cv_in(x, y, cv_btn_x(l, w, b), cv_row_y(t, view), cv_btn_w(w), CV_BTN_H)) { return CV_H_B0 + b; }
+        b = b + 1;
+    }
+    return CV_H_NONE;
+}
+
+/// The CALL pill of the title bar ends at `right` (left of the profile circle), centred in the bar's height.
+pub fn cv_head_x(right: f64) -> f64 { return right - CV_HEAD_W; }
+pub fn cv_head_y(title_h: f64) -> f64 { return 0.5 * (title_h - CV_HEAD_H); }
+pub fn cv_head_hit(x: f64, y: f64, right: f64, title_h: f64) -> bool {
+    return cv_in(x, y, cv_head_x(right), cv_head_y(title_h), CV_HEAD_W, CV_HEAD_H);
+}
+
+// ---------------------------------------------------------------- tests
+
+fn cv_eq(a: []const u8, n: usize, s: []const u8) -> bool {
+    if (n != s.len) { return false; }
+    var i : usize = 0;
+    while (i < n) {
+        if (a[i] != s[i]) { return false; }
+        i = i + 1;
+    }
+    return true;
+}
+
+test cv_every_call_state_has_one_view {
+    assert cv_view(CK_IDLE, false, false) == CV_IDLE;
+    assert cv_view(CK_CALLING, false, false) == CV_CALLING;
+    assert cv_view(CK_RINGING, false, false) == CV_RINGING;
+    assert cv_view(CK_VERIFY, false, false) == CV_KEYS;
+    assert cv_view(CK_VERIFY, true, false) == CV_COMPARE;
+    assert cv_view(CK_VERIFY, true, true) == CV_WAIT;
+    assert cv_view(CK_ACTIVE, true, true) == CV_ACTIVE;
+    assert cv_view(CK_ENDED, false, false) == CV_ENDED;
+    assert cv_view(CK_FAILED, true, false) == CV_FAILED;
+    assert cv_view(99, false, false) == CV_IDLE;
+    assert cv_live(CV_IDLE) == false;
+    assert cv_live(CV_CALLING) and cv_live(CV_RINGING) and cv_live(CV_COMPARE) and cv_live(CV_ACTIVE);
+    assert cv_live(CV_ENDED) == false and cv_live(CV_FAILED) == false;
+}
+
+test cv_ringing_never_answers_by_itself_and_shows_no_code_button {
+    // the only ways out of RINGING are the two buttons the person presses
+    assert cv_action(CV_RINGING, CV_H_NONE) == CV_A_NONE;
+    assert cv_action(CV_RINGING, CV_H_FIELD) == CV_A_NONE;
+    assert cv_action(CV_RINGING, CV_H_B0) == CV_A_ANSWER;
+    assert cv_action(CV_RINGING, CV_H_B1) == CV_A_DECLINE;
+    // MATCH exists only once the code is shown
+    var v : u32 = 0;
+    while (v <= CV_FAILED) {
+        if (v != CV_COMPARE) {
+            assert cv_action(v, CV_H_B0) != CV_A_MATCH;
+            assert cv_action(v, CV_H_B1) != CV_A_DIFFER;
+        }
+        v = v + 1;
+    }
+}
+
+test cv_each_view_has_its_buttons_and_nothing_answers_a_missing_one {
+    assert cv_action(CV_IDLE, CV_H_FIELD) == CV_A_FOCUS;
+    assert cv_action(CV_IDLE, CV_H_B0) == CV_A_DIAL;
+    assert cv_action(CV_IDLE, CV_H_B1) == CV_A_NONE;
+    assert cv_action(CV_CALLING, CV_H_B0) == CV_A_HANGUP;
+    assert cv_action(CV_CALLING, CV_H_B1) == CV_A_NONE;
+    assert cv_action(CV_KEYS, CV_H_B0) == CV_A_HANGUP;
+    assert cv_action(CV_COMPARE, CV_H_B0) == CV_A_MATCH;
+    assert cv_action(CV_COMPARE, CV_H_B1) == CV_A_DIFFER;
+    assert cv_action(CV_WAIT, CV_H_B0) == CV_A_HANGUP;
+    assert cv_action(CV_WAIT, CV_H_B1) == CV_A_NONE;
+    assert cv_action(CV_ACTIVE, CV_H_B0) == CV_A_MUTE;
+    assert cv_action(CV_ACTIVE, CV_H_B1) == CV_A_HANGUP;
+    assert cv_action(CV_ENDED, CV_H_B0) == CV_A_CLOSE;
+    assert cv_action(CV_FAILED, CV_H_B0) == CV_A_CLOSE;
+    assert cv_action(CV_FAILED, CV_H_B1) == CV_A_NONE;
+    assert cv_btn_word(CV_ACTIVE, 0, false) == "MUTE";
+    assert cv_btn_word(CV_ACTIVE, 0, true) == "UNMUTE";
+    assert cv_btn_word(CV_ACTIVE, 1, false) == "END CALL";
+    assert cv_btn_word(CV_COMPARE, 0, false) == "CODES MATCH";
+    assert cv_btn_word(CV_IDLE, 1, false) == "";
+    assert cv_btn_word(CV_WAIT, 0, false) == "HANG UP";
+}
+
+test cv_addresses_parse_with_and_without_a_port {
+    const a : u64 = cv_parse_addr("192.168.15.4:47728", 18);
+    assert cv_addr_ip(a) == 3232239364;
+    assert cv_addr_port(a) == 47728;
+    const b : u64 = cv_parse_addr("127.0.0.1", 9);
+    assert cv_addr_ip(b) == 2130706433;
+    assert cv_addr_port(b) == CV_PORT;
+    assert cv_parse_addr("", 0) == 0;
+    assert cv_parse_addr("127.0.0", 7) == 0;
+    assert cv_parse_addr("127.0.0.1.5", 11) == 0;
+    assert cv_parse_addr("256.0.0.1", 9) == 0;
+    assert cv_parse_addr("1..2.3", 6) == 0;
+    assert cv_parse_addr("127.0.0.1:", 10) == 0;
+    assert cv_parse_addr("127.0.0.1:0", 11) == 0;
+    assert cv_parse_addr("127.0.0.1:65536", 15) == 0;
+    assert cv_parse_addr("127.0.0.1:4x", 12) == 0;
+    assert cv_parse_addr("1270.0.0.1", 10) == 0;
+    assert cv_addr_char(48) and cv_addr_char(57) and cv_addr_char(46) and cv_addr_char(58);
+    assert cv_addr_char(32) == false and cv_addr_char(97) == false and cv_addr_char(1103) == false;
+}
+
+test cv_only_this_machine_and_the_bench_network_are_dialled {
+    assert cv_lan_ok(2130706433);
+    assert cv_lan_ok(3232239364);
+    assert cv_lan_ok(3232239361);
+    assert cv_lan_ok(3232235777) == false;
+    assert cv_lan_ok(134744072) == false;
+    assert cv_lan_ok(0) == false;
+}
+
+test cv_the_test_fingerprint_names_its_address_and_reads_back {
+    var fp : [10]u8 = undefined;
+    assert cv_fp_of(3232239364, 47727, fp[0..10]) == 10;
+    assert fp[0] == 116 and fp[3] == 99 and fp[4] == 192 and fp[7] == 4 and fp[8] == 186 and fp[9] == 111;
+    const a : u64 = cv_fp_addr(fp[0..10]);
+    assert cv_addr_ip(a) == 3232239364 and cv_addr_port(a) == 47727;
+    var other : [10]u8 = undefined;
+    assert cv_fp_of(3232239364, 47728, other[0..10]) == 10;
+    assert other[9] != fp[9];
+    fp[0] = 0;
+    assert cv_fp_addr(fp[0..10]) == 0;
+    var t : [24]u8 = undefined;
+    const n : usize = cv_addr_text(3232239364, 47727, t[0..24]);
+    assert cv_eq(t[0..24], n, "192.168.15.4:47727");
+    const m : usize = cv_addr_text(2130706433, 1, t[0..24]);
+    assert cv_eq(t[0..24], m, "127.0.0.1:1");
+    assert cv_parse_addr(t[0..24], m) == 2130706433 * 65536 + 1;
+}
+
+test cv_the_code_reads_in_two_groups_and_the_clock_counts_minutes {
+    var o : [8]u8 = undefined;
+    const n : usize = cv_code_text("269684", o[0..8]);
+    assert cv_eq(o[0..8], n, "269 684");
+    assert cv_code_text("12345", o[0..8]) == 0;
+    var c : [12]u8 = undefined;
+    assert cv_eq(c[0..12], cv_clock(0, c[0..12]), "00:00");
+    assert cv_eq(c[0..12], cv_clock(10, c[0..12]), "00:10");
+    assert cv_eq(c[0..12], cv_clock(754, c[0..12]), "12:34");
+    assert cv_eq(c[0..12], cv_clock(3661, c[0..12]), "1:01:01");
+}
+
+test cv_the_panel_boxes_hit_their_own_button_inside_the_slot {
+    const l : f64 = 600.0;
+    const w : f64 = 300.0;
+    const t : f64 = 52.0;
+    assert cv_hit(cv_field_x(l) + 5.0, cv_field_y(t) + 5.0, l, w, t, CV_IDLE) == CV_H_FIELD;
+    assert cv_hit(cv_field_x(l) + 5.0, cv_field_y(t) + 5.0, l, w, t, CV_ACTIVE) == CV_H_NONE;
+    assert cv_hit(cv_btn_x(l, w, 0) + 5.0, cv_row_y(t, CV_IDLE) + 5.0, l, w, t, CV_IDLE) == CV_H_B0;
+    assert cv_hit(cv_btn_x(l, w, 1) + 5.0, cv_row_y(t, CV_IDLE) + 5.0, l, w, t, CV_IDLE) == CV_H_NONE;
+    assert cv_hit(cv_btn_x(l, w, 1) + 5.0, cv_row_y(t, CV_RINGING) + 5.0, l, w, t, CV_RINGING) == CV_H_B1;
+    assert cv_hit(cv_btn_x(l, w, 0) + 5.0, cv_row_y(t, CV_COMPARE) + 5.0, l, w, t, CV_COMPARE) == CV_H_B0;
+    // the gap between the two buttons is nobody's
+    assert cv_hit(cv_btn_x(l, w, 0) + cv_btn_w(w) + 0.5 * CV_BTN_GAP, cv_row_y(t, CV_ACTIVE) + 5.0, l, w, t, CV_ACTIVE) == CV_H_NONE;
+    // both buttons and the field end inside the slot's padding
+    assert cv_btn_x(l, w, 1) + cv_btn_w(w) <= l + w - QP_PAD + 0.001;
+    assert cv_field_x(l) + cv_field_w(w) <= l + w - QP_PAD + 0.001;
+    // the field row, the dial row and the note do not overlap; the big digits sit above the button row
+    assert cv_field_y(t) + CV_FIELD_H < cv_row_y(t, CV_IDLE);
+    assert cv_row_y(t, CV_IDLE) + CV_BTN_H < t + CV_NOTE_Y - 10.0;
+    assert t + CV_BIG_Y < cv_row_y(t, CV_ACTIVE);
+    assert cv_row_y(t, CV_ACTIVE) + CV_BTN_H < t + CV_HINT_Y - 10.0;
+    assert CV_RESERVE == CV_HEAD_W + CV_HEAD_GAP;
+    assert cv_head_hit(cv_head_x(500.0) + 2.0, cv_head_y(38.0) + 2.0, 500.0, 38.0);
+    assert cv_head_hit(500.0 + 1.0, cv_head_y(38.0) + 2.0, 500.0, 38.0) == false;
+}

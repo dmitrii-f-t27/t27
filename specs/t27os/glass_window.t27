@@ -204,6 +204,122 @@ use t27os::profile_host::prfh_avatar_path;
 use t27os::profile_host::prfh_save_nick;
 use t27os::profile_host::prfh_remove;
 use t27os::profile_host::prfh_pick;
+use t27os::call_view::CV_IDLE;
+use t27os::call_view::CV_RINGING;
+use t27os::call_view::CV_COMPARE;
+use t27os::call_view::CV_WAIT;
+use t27os::call_view::CV_ACTIVE;
+use t27os::call_view::CV_ENDED;
+use t27os::call_view::CV_FAILED;
+use t27os::call_view::CV_A_FOCUS;
+use t27os::call_view::CV_A_DIAL;
+use t27os::call_view::CV_A_HANGUP;
+use t27os::call_view::CV_A_ANSWER;
+use t27os::call_view::CV_A_DECLINE;
+use t27os::call_view::CV_A_MATCH;
+use t27os::call_view::CV_A_DIFFER;
+use t27os::call_view::CV_A_MUTE;
+use t27os::call_view::CV_A_CLOSE;
+use t27os::call_view::CV_H_NONE;
+use t27os::call_view::CV_H_FIELD;
+use t27os::call_view::CV_H_B0;
+use t27os::call_view::CV_N_ADDR;
+use t27os::call_view::CV_N_LAN;
+use t27os::call_view::CV_N_SOCKET;
+use t27os::call_view::CV_N_BIND;
+use t27os::call_view::CV_N_REFUSED;
+use t27os::call_view::CV_N_SELF;
+use t27os::call_view::CV_PORT;
+use t27os::call_view::CV_ADDR_MAX;
+use t27os::call_view::CV_CODE_TEXT;
+use t27os::call_view::CV_ME_Y;
+use t27os::call_view::CV_FPME_Y;
+use t27os::call_view::CV_LABEL_Y;
+use t27os::call_view::CV_FIELD_H;
+use t27os::call_view::CV_NOTE_Y;
+use t27os::call_view::CV_TITLE_Y;
+use t27os::call_view::CV_PEER_Y;
+use t27os::call_view::CV_PFP_Y;
+use t27os::call_view::CV_BIG_Y;
+use t27os::call_view::CV_HINT_Y;
+use t27os::call_view::CV_BTN_H;
+use t27os::call_view::CV_HEAD_W;
+use t27os::call_view::CV_HEAD_H;
+use t27os::call_view::CV_HEAD_GAP;
+use t27os::call_view::CV_RESERVE;
+use t27os::call_view::cv_view;
+use t27os::call_view::cv_live;
+use t27os::call_view::cv_btn_count;
+use t27os::call_view::cv_btn_word;
+use t27os::call_view::cv_action;
+use t27os::call_view::cv_title;
+use t27os::call_view::cv_hint;
+use t27os::call_view::cv_note_text;
+use t27os::call_view::cv_addr_char;
+use t27os::call_view::cv_parse_addr;
+use t27os::call_view::cv_addr_ip;
+use t27os::call_view::cv_addr_port;
+use t27os::call_view::cv_lan_ok;
+use t27os::call_view::cv_addr_text;
+use t27os::call_view::cv_fp_of;
+use t27os::call_view::cv_fp_addr;
+use t27os::call_view::cv_code_text;
+use t27os::call_view::cv_clock;
+use t27os::call_view::cv_field_x;
+use t27os::call_view::cv_field_y;
+use t27os::call_view::cv_field_w;
+use t27os::call_view::cv_btn_w;
+use t27os::call_view::cv_btn_x;
+use t27os::call_view::cv_row_y;
+use t27os::call_view::cv_hit;
+use t27os::call_view::cv_head_x;
+use t27os::call_view::cv_head_y;
+use t27os::call_view::cv_head_hit;
+use t27os::call_session::CS_LEN;
+use t27os::call_session::CS_AUDIO_DEV;
+use t27os::call_session::CS_AUDIO_TEST;
+use t27os::call_session::CS_EV_NONE;
+use t27os::call_session::CS_EV_CALLING;
+use t27os::call_session::CS_EV_RINGING;
+use t27os::call_session::CS_EV_ACTIVE;
+use t27os::call_session::CS_R_HANGUP;
+use t27os::call_session::CS_R_PEER_BYE;
+use t27os::call_session::CS_R_DECLINED;
+use t27os::call_session::CS_R_I_DECLINED;
+use t27os::call_session::CS_R_CANCELLED;
+use t27os::call_session::CS_R_NO_ANSWER;
+use t27os::call_session::CS_R_I_SAID_DIFFER;
+use t27os::call_session::CS_R_PEER_SAID_DIFFER;
+use t27os::call_session::CS_R_NOT_CONFIRMED;
+use t27os::call_session::CS_R_PEER_SILENT;
+use t27os::call_session::CS_R_ERROR;
+use t27os::call_session::CS_R_COMMITMENT;
+use t27os::call_session::CS_R_AUDIO;
+use t27os::call_session::CS_ST_SENT;
+use t27os::call_session::CS_ST_ACCEPTED;
+use t27os::call_session::CS_ST_REJ_AEAD;
+use t27os::call_session::cs_open;
+use t27os::call_session::cs_call;
+use t27os::call_session::cs_poll;
+use t27os::call_session::cs_state;
+use t27os::call_session::cs_peer;
+use t27os::call_session::cs_code;
+use t27os::call_session::cs_answer;
+use t27os::call_session::cs_decline;
+use t27os::call_session::cs_confirm;
+use t27os::call_session::cs_mute;
+use t27os::call_session::cs_muted;
+use t27os::call_session::cs_hangup;
+use t27os::call_session::cs_dismiss;
+use t27os::call_session::cs_reason;
+use t27os::call_session::cs_stat;
+use t27os::call_core::CK_IDLE;
+use t27os::call_core::CK_ACTIVE;
+use t27os::call_core::CK_VERIFY;
+use t27os::call_crypto_probe::ckh_ms;
+use t27os::pty_sys::sys_getenv;
+use t27os::keysync::fp_text;
+use t27os::keysync::FP_TEXT_LEN;
 use t27os::pty_client::client_set_key;
 use t27os::editors::EDITOR_COUNT;
 use t27os::editors::ED_NONE;
@@ -2778,7 +2894,7 @@ fn draw_template_logo(c: u64, cx: f64, cy: f64, k: f64) -> void {
 /// T. The one title bar: (screen up) the back chevron, the template logo + TRINITY (home), (screen up)
 /// the refresh arc, the dock-panel and fullscreen controls, the divider. The world name is not repeated
 /// here: the content header already says it.
-fn draw_titlebar(c: u64, kit: [48]u64, sw: f64, full: bool, ma: f64, tg: []const u64, god: bool, mx: f64, my: f64, pf: []const u8) -> void {
+fn draw_titlebar(c: u64, kit: [48]u64, sw: f64, full: bool, ma: f64, tg: []const u64, god: bool, mx: f64, my: f64, pf: []const u8, cl: []const u8) -> void {
     const mid : f64 = 0.5 * TITLE_H;
     if (ma > 0.0) {
         const bx : f64 = home_x(full);
@@ -2810,6 +2926,8 @@ fn draw_titlebar(c: u64, kit: [48]u64, sw: f64, full: bool, ma: f64, tg: []const
     draw_header_cluster(c, kit, tg, sw, god, row_next(hx, lw, ROW_GAP) + tw);
     // P. the profile circle, left of the refresh arc: the picture, else the initial, else an outline; a click opens the panel
     draw_pf_avatar(c, kit, tg[TPG_PF_IMG], pf[PF_SAVED .. PF_SAVED + PRF_NICK_MAX_BYTES], @as(usize, pf[PF_SLEN]), pf_head_cx(sw), pf_head_cy(), PRF_HEAD_R, pf[PF_OPEN] != 0 or on_pf_head(mx, my, sw), 1.0);
+    // CL. the CALL pill, left of the profile circle: a click opens the CALL panel
+    draw_cl_head(c, kit, sw, mx, my, cl);
     // arrow.up.left.and.arrow.down.right, grokMuted
     const x : f64 = full_x(sw) + 4.0;
     const y : f64 = 0.5 * (TITLE_H - FULL_PT) + 4.0;
@@ -5565,7 +5683,7 @@ pub const TBO_HIVE : usize = 65536;
 pub const TBO_HIVE_N : usize = 6144;
 pub const TBO_HLANES : usize = 71680;
 pub const TBO_HLANES_N : usize = 256;
-pub const TB_SIZE : usize = 77312;
+pub const TB_SIZE : usize = 77568;
 pub const TG_KEY_RETURN : u64 = 36;
 pub const TG_KEY_BACKSPACE : u64 = 51;
 pub const TG_EV_CHAR : u32 = 99;
@@ -8125,8 +8243,9 @@ pub const GOLD_R : f64 = 1.0;
 pub const GOLD_G : f64 = 0.78;
 pub const GOLD_B : f64 = 0.2;
 
-/// The right edge of the header's cluster: left of the title bar's refresh control and of the profile circle (PF_RESERVE).
-pub fn hdr_right(sw: f64) -> f64 { return dock_x(sw) - DOCK_STEP - 6.0 - PF_RESERVE; }
+/// The right edge of the header's cluster: left of the title bar's refresh control, of the profile circle (PF_RESERVE)
+/// and of the CALL pill (CV_RESERVE).
+pub fn hdr_right(sw: f64) -> f64 { return dock_x(sw) - DOCK_STEP - 6.0 - PF_RESERVE - CV_RESERVE; }
 
 /// Panes the server lists as running.
 fn sb_panes(sst: []const u32) -> u32 {
@@ -8723,6 +8842,547 @@ fn draw_profile_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, 
     }
 }
 
+// ======================================================================================================
+// CL. CALL (owner, 2026-10-21; Refs gHashTag/t27#11560). call_session.t27 carries the call (the cs_* API over
+// call_core and the part F audio path), call_view.t27 decides the view, the buttons, the address rules and the
+// boxes. This block only opens the session once at launch, polls it from the main loop, keeps a snapshot of it in a
+// 256 byte region of the text store (TBO_CL) that draw() reads, and turns a click or a key into one cs_* call.
+//   - the title bar pill CALL, left of the profile circle, opens or closes the panel; an incoming call opens it;
+//   - the CALL panel (the slot of the Queen, DOCTOR, KEYS and PROFILE panels): this device's address and test
+//     fingerprint, then the view of call_view (address field and CALL; CANCEL; ANSWER / DECLINE; the 6 digits large
+//     with CODES MATCH / CODES DIFFER; the duration with MUTE / END CALL; the reason with CLOSE).
+//   - where it listens: T27OS_CALL_BIND (default 127.0.0.1, only 127.x or 192.168.15.x), T27OS_CALL_PORT (47727);
+//     T27OS_CALL_AUDIO=test sends call_session's numbered test pattern instead of the microphone; T27OS_CALL_PEER
+//     fills the address field at launch.
+// The session block (CS_LEN bytes) is a local of main(): it never moves, as the audio callbacks need.
+// ======================================================================================================
+pub const TBO_CL : usize = 77312;
+pub const CL_CAP : usize = 256;
+pub const CL_OPEN : usize = 0;
+pub const CL_VIEW : usize = 1;
+pub const CL_FOCUS : usize = 2;
+pub const CL_ALEN : usize = 3;
+pub const CL_MUTED : usize = 4;
+pub const CL_SAID : usize = 5;
+pub const CL_REASON : usize = 6;
+pub const CL_NOTE : usize = 7;
+pub const CL_UP : usize = 8;
+pub const CL_TALKED : usize = 9;
+pub const CL_CODE : usize = 10;
+pub const CL_PFP : usize = 16;
+pub const CL_PIP : usize = 26;
+pub const CL_SECS : usize = 32;
+pub const CL_SENT : usize = 36;
+pub const CL_RECV : usize = 40;
+pub const CL_GAP : usize = 44;
+pub const CL_REJ : usize = 48;
+pub const CL_ME_IP : usize = 52;
+pub const CL_ME_PORT : usize = 56;
+pub const CL_N10 : usize = 60;
+pub const CL_ADDR : usize = 64;
+pub const CL_NPOLL : usize = 96;
+/// The audio counters of the part F block (callback_probe.t27, cs_stat 1000 + i): frames captured (2), underruns (4),
+/// overruns (5), tx ring overruns (7).
+pub const CL_CAPT : usize = 100;
+pub const CL_UNDER : usize = 104;
+pub const CL_OVER : usize = 108;
+pub const CL_TXO : usize = 112;
+/// The bytes the frame key folds in: everything draw() reads.
+pub const CL_KEY_N : usize = 116;
+/// The window's own call clock (main's [10]u64): when ACTIVE began, when the last poll returned, the longest gap from
+/// the end of one poll to the start of the next while ACTIVE, the state the last snapshot saw, the system activity
+/// token held while a call is up, the gaps over 10 ms and the polls counted while ACTIVE.
+pub const CLW_T_ACTIVE : usize = 0;
+pub const CLW_LAST : usize = 1;
+pub const CLW_GAP : usize = 2;
+pub const CLW_PREV : usize = 3;
+pub const CLW_ACT : usize = 4;
+pub const CLW_N10 : usize = 5;
+pub const CLW_NPOLL : usize = 6;
+pub const CLW_CURSOR : usize = 7;
+pub const CLW_CURSOR_MS : usize = 8;
+
+/// Setting the cursor is a round trip to the window server (a 5 s sample of a call: 634 of 1505 main-thread samples
+/// in -[NSCursor set]). While a call is up the loop runs every few ms, so the cursor is set when it changes and at
+/// most every CL_CURSOR_MS otherwise; with no call it is set every pass, as before.
+pub const CL_CURSOR_MS : u64 = 200;
+pub fn cl_cursor_due(live: bool, want: u64, last: u64, now: u64, at: u64) -> bool {
+    if (!live or want != last or now < at) { return true; }
+    return now - at >= CL_CURSOR_MS;
+}
+
+pub fn cl_get32(cl: []const u8, at: usize) -> u64 {
+    return @as(u64, cl[at]) | (@as(u64, cl[at + 1]) << 8) | (@as(u64, cl[at + 2]) << 16) | (@as(u64, cl[at + 3]) << 24);
+}
+
+pub fn cl_put32(cl: []u8, at: usize, v: u64) -> void {
+    var x : u64 = v;
+    if (x > 4294967295) { x = 4294967295; }
+    cl[at] = @as(u8, @intCast(x & 255));
+    cl[at + 1] = @as(u8, @intCast((x >> 8) & 255));
+    cl[at + 2] = @as(u8, @intCast((x >> 16) & 255));
+    cl[at + 3] = @as(u8, @intCast((x >> 24) & 255));
+}
+
+/// The IPv4 kept big-endian at `at`.
+pub fn cl_ip(cl: []const u8, at: usize) -> u64 {
+    return (@as(u64, cl[at]) << 24) | (@as(u64, cl[at + 1]) << 16) | (@as(u64, cl[at + 2]) << 8) | @as(u64, cl[at + 3]);
+}
+
+pub fn cl_put_ip(cl: []u8, at: usize, ip: u64) -> void {
+    cl[at] = @as(u8, @intCast((ip >> 24) & 255));
+    cl[at + 1] = @as(u8, @intCast((ip >> 16) & 255));
+    cl[at + 2] = @as(u8, @intCast((ip >> 8) & 255));
+    cl[at + 3] = @as(u8, @intCast(ip & 255));
+}
+
+pub fn cl_me_port(cl: []const u8) -> u64 { return (@as(u64, cl[CL_ME_PORT]) << 8) | @as(u64, cl[CL_ME_PORT + 1]); }
+
+/// Why the last call ended, one fixed line per call_session reason.
+pub fn cl_reason_text(r: u32) -> str {
+    if (r == CS_R_HANGUP) { return "You ended the call."; }
+    if (r == CS_R_PEER_BYE) { return "The other side ended the call."; }
+    if (r == CS_R_DECLINED) { return "The other side declined."; }
+    if (r == CS_R_I_DECLINED) { return "You declined."; }
+    if (r == CS_R_CANCELLED) { return "The caller cancelled."; }
+    if (r == CS_R_NO_ANSWER) { return "No answer."; }
+    if (r == CS_R_I_SAID_DIFFER) { return "You said the codes differ. Nothing was sent."; }
+    if (r == CS_R_PEER_SAID_DIFFER) { return "The other side said the codes differ. Nothing was sent."; }
+    if (r == CS_R_NOT_CONFIRMED) { return "The codes were not confirmed in time."; }
+    if (r == CS_R_PEER_SILENT) { return "The other side went silent."; }
+    if (r == CS_R_ERROR) { return "The call failed."; }
+    if (r == CS_R_COMMITMENT) { return "The other side's key did not match its commitment."; }
+    if (r == CS_R_AUDIO) { return "The microphone or the speakers could not start."; }
+    return "";
+}
+
+/// An environment variable (at most 31 bytes) into out; its length, 0 when unset.
+fn cl_env(name: []const u8, out: []u8) -> usize {
+    const a : u64 = sys_getenv(name);
+    if (a == 0) { return 0; }
+    var n : u64 = sys_strlen(a);
+    if (n > 31) { n = 31; }
+    sys_peek(out[0..32], a, n);
+    return @as(usize, @intCast(n));
+}
+
+/// Decimal digits only, 1..65535; 0 otherwise.
+pub fn cl_port_of(t: []const u8, n: usize) -> u64 {
+    if (n == 0 or n > 5) { return 0; }
+    var v : u64 = 0;
+    var i : usize = 0;
+    while (i < n) {
+        if (t[i] < 48 or t[i] > 57) { return 0; }
+        v = v * 10 + @as(u64, t[i] - 48);
+        i = i + 1;
+    }
+    if (v > 65535) { return 0; }
+    return v;
+}
+
+/// Launch: where this window listens, the audio mode, the session opened once. A refused address or a taken port
+/// leaves calls off with a note; nothing else depends on it.
+pub fn cl_boot(cl: []u8, s: []u8) -> void {
+    var e : [32]u8 = undefined;
+    var bind : u64 = 2130706433;
+    var n : usize = cl_env("T27OS_CALL_BIND", e[0..32]);
+    if (n > 0) { bind = cv_addr_ip(cv_parse_addr(e[0..32], n)); }
+    var port : u64 = CV_PORT;
+    n = cl_env("T27OS_CALL_PORT", e[0..32]);
+    if (n > 0) { port = cl_port_of(e[0..32], n); }
+    cl_put_ip(cl, CL_ME_IP, bind);
+    cl[CL_ME_PORT] = @as(u8, @intCast((port >> 8) & 255));
+    cl[CL_ME_PORT + 1] = @as(u8, @intCast(port & 255));
+    n = cl_env("T27OS_CALL_PEER", e[0..32]);
+    if (n > 0 and n <= CV_ADDR_MAX) {
+        var i : usize = 0;
+        while (i < n and cv_addr_char(@as(u32, e[i]))) {
+            cl[CL_ADDR + i] = e[i];
+            i = i + 1;
+        }
+        cl[CL_ALEN] = @as(u8, @intCast(i));
+    }
+    if (bind == 0 or port == 0 or !cv_lan_ok(bind)) {
+        cl[CL_NOTE] = @as(u8, @intCast(CV_N_BIND));
+        return;
+    }
+    var audio : u32 = CS_AUDIO_DEV;
+    n = cl_env("T27OS_CALL_AUDIO", e[0..32]);
+    if (n == 4 and e[0] == 116 and e[1] == 101 and e[2] == 115 and e[3] == 116) { audio = CS_AUDIO_TEST; }
+    var me : [10]u8 = undefined;
+    cv_fp_of(bind, port, me[0..10]);
+    if (cs_open(s, me[0..10], bind, port, audio)) {
+        cl[CL_UP] = 1;
+    } else {
+        cl[CL_NOTE] = @as(u8, @intCast(CV_N_SOCKET));
+    }
+}
+
+/// Copy the session into the region draw() reads. The counters and the clock change at most once a second, so a call
+/// redraws the window once a second, not on every frame that arrives.
+pub fn cl_snapshot(cl: []u8, s: []u8, w: []u64, now: u64) -> void {
+    const st : u32 = cs_state(s);
+    var code : [6]u8 = undefined;
+    const have : bool = cs_code(s, code[0..6]);
+    if (st != CK_VERIFY and st != CK_ACTIVE) { cl[CL_SAID] = 0; }
+    cl[CL_VIEW] = @as(u8, @intCast(cv_view(st, have, cl[CL_SAID] != 0)));
+    var i : usize = 0;
+    while (i < 6) {
+        if (have) { cl[CL_CODE + i] = code[i]; } else { cl[CL_CODE + i] = 0; }
+        i = i + 1;
+    }
+    var fp : [10]u8 = undefined;
+    const ip : u64 = cs_peer(s, fp[0..10]);
+    if (ip != 0) {
+        i = 0;
+        while (i < 10) {
+            cl[CL_PFP + i] = fp[i];
+            i = i + 1;
+        }
+        cl_put_ip(cl, CL_PIP, ip);
+    }
+    if (cs_muted(s)) { cl[CL_MUTED] = 1; } else { cl[CL_MUTED] = 0; }
+    cl[CL_REASON] = @as(u8, @intCast(cs_reason(s) & 255));
+    const changed : bool = @as(u64, st) != w[CLW_PREV];
+    var secs : u64 = cl_get32(cl, CL_SECS);
+    if (st == CK_ACTIVE and w[CLW_T_ACTIVE] != 0 and now >= w[CLW_T_ACTIVE]) { secs = (now - w[CLW_T_ACTIVE]) / 1000; }
+    if (changed or secs != cl_get32(cl, CL_SECS)) {
+        cl_put32(cl, CL_SECS, secs);
+        cl_put32(cl, CL_SENT, cs_stat(s, CS_ST_SENT));
+        cl_put32(cl, CL_RECV, cs_stat(s, CS_ST_ACCEPTED));
+        cl_put32(cl, CL_REJ, cs_stat(s, CS_ST_REJ_AEAD));
+        cl_put32(cl, CL_GAP, w[CLW_GAP]);
+        cl_put32(cl, CL_N10, w[CLW_N10]);
+        cl_put32(cl, CL_NPOLL, w[CLW_NPOLL]);
+        cl_put32(cl, CL_CAPT, cs_stat(s, 1002));
+        cl_put32(cl, CL_UNDER, cs_stat(s, 1004));
+        cl_put32(cl, CL_OVER, cs_stat(s, 1005));
+        cl_put32(cl, CL_TXO, cs_stat(s, 1007));
+    }
+    w[CLW_PREV] = @as(u64, st);
+}
+
+/// One pass of the main loop: read the socket (cs_poll, every event), measure the gap since the last poll while the
+/// call carries audio, refresh the snapshot. True when a call started ringing here (the window opens the panel).
+pub fn cl_tick(cl: []u8, s: []u8, w: []u64) -> bool {
+    if (cl[CL_UP] == 0) { return false; }
+    const now : u64 = ckh_ms();
+    if (cs_state(s) == CK_ACTIVE and w[CLW_LAST] != 0) {
+        var gap : u64 = 0;
+        if (now > w[CLW_LAST]) { gap = now - w[CLW_LAST]; }
+        if (gap > w[CLW_GAP]) { w[CLW_GAP] = gap; }
+        if (gap > 10) { w[CLW_N10] = w[CLW_N10] + 1; }
+        w[CLW_NPOLL] = w[CLW_NPOLL] + 1;
+    }
+    var rang : bool = false;
+    var ev : u32 = cs_poll(s);
+    var k : u32 = 0;
+    while (ev != CS_EV_NONE and k < 32) {
+        if (ev == CS_EV_RINGING) { rang = true; }
+        if (ev == CS_EV_CALLING or ev == CS_EV_RINGING) {
+            cl[CL_SAID] = 0;
+            cl[CL_TALKED] = 0;
+            cl_put32(cl, CL_SECS, 0);
+        }
+        if (ev == CS_EV_ACTIVE) {
+            w[CLW_T_ACTIVE] = ckh_ms();
+            w[CLW_GAP] = 0;
+            w[CLW_N10] = 0;
+            w[CLW_NPOLL] = 0;
+            cl[CL_TALKED] = 1;
+        }
+        ev = cs_poll(s);
+        k = k + 1;
+    }
+    cl_snapshot(cl, s, w, ckh_ms());
+    // the gap is measured from here: the time inside cs_poll (opening the audio queues once) is the poll's own work
+    w[CLW_LAST] = ckh_ms();
+    return rang;
+}
+
+/// CALL (the button or Return): the typed address, its test fingerprint, cs_call. A refusal is a note under the field.
+pub fn cl_dial(cl: []u8, s: []u8) -> void {
+    cl[CL_FOCUS] = 0;
+    if (cl[CL_UP] == 0) {
+        if (cl[CL_NOTE] == 0) { cl[CL_NOTE] = @as(u8, @intCast(CV_N_SOCKET)); }
+        return;
+    }
+    const a : u64 = cv_parse_addr(cl[CL_ADDR .. CL_ADDR + CV_ADDR_MAX], @as(usize, cl[CL_ALEN]));
+    var note : u32 = 0;
+    if (a == 0) {
+        note = CV_N_ADDR;
+    } else if (!cv_lan_ok(cv_addr_ip(a))) {
+        note = CV_N_LAN;
+    } else if (cv_addr_ip(a) == cl_ip(cl, CL_ME_IP) and cv_addr_port(a) == cl_me_port(cl)) {
+        note = CV_N_SELF;
+    } else {
+        var fp : [10]u8 = undefined;
+        cv_fp_of(cv_addr_ip(a), cv_addr_port(a), fp[0..10]);
+        if (!cs_call(s, cv_addr_ip(a), cv_addr_port(a), fp[0..10])) { note = CV_N_REFUSED; }
+    }
+    cl[CL_NOTE] = @as(u8, @intCast(note));
+}
+
+/// One person's action (call_view cv_action) as one cs_* call; then a fresh snapshot.
+pub fn cl_do(cl: []u8, s: []u8, w: []u64, act: u32) -> void {
+    // with calls off (cl_boot left a note) the block was never opened: only the field and CALL answer, with the note
+    if (cl[CL_UP] == 0 and act != CV_A_FOCUS and act != CV_A_DIAL) { return; }
+    if (act == CV_A_FOCUS) {
+        cl[CL_FOCUS] = 1;
+        cl[CL_NOTE] = 0;
+    } else if (act == CV_A_DIAL) {
+        cl_dial(cl, s);
+    } else if (act == CV_A_HANGUP) {
+        cs_hangup(s);
+    } else if (act == CV_A_ANSWER) {
+        cs_answer(s);
+    } else if (act == CV_A_DECLINE) {
+        cs_decline(s);
+    } else if (act == CV_A_MATCH) {
+        if (cs_confirm(s, true)) { cl[CL_SAID] = 1; }
+    } else if (act == CV_A_DIFFER) {
+        cs_confirm(s, false);
+    } else if (act == CV_A_MUTE) {
+        cs_mute(s, !cs_muted(s));
+    } else if (act == CV_A_CLOSE) {
+        cs_dismiss(s);
+        cl[CL_NOTE] = 0;
+        cl[CL_TALKED] = 0;
+        cl_put32(cl, CL_SECS, 0);
+    }
+    if (cl[CL_UP] != 0) { cl_snapshot(cl, s, w, ckh_ms()); }
+}
+
+/// One typed UTF-16 unit into the address field: digits, dots and a colon only.
+pub fn cl_unit(cl: []u8, unit: u32) -> void {
+    const n : usize = @as(usize, cl[CL_ALEN]);
+    if (!cv_addr_char(unit) or n >= CV_ADDR_MAX) { return; }
+    cl[CL_ADDR + n] = @as(u8, @intCast(unit));
+    cl[CL_ALEN] = @as(u8, @intCast(n + 1));
+    cl[CL_NOTE] = 0;
+}
+
+pub fn cl_back(cl: []u8) -> void {
+    if (cl[CL_ALEN] > 0) { cl[CL_ALEN] = cl[CL_ALEN] - 1; }
+    cl[CL_NOTE] = 0;
+}
+
+/// While a call is up the process asks the system not to nap or coalesce its timers (NSProcessInfo activity,
+/// NSActivityUserInitiated | NSActivityLatencyCritical): a window in the background must still poll every 10 ms.
+pub const CL_ACTIVITY : u64 = 1095233437695;
+fn cl_activity_begin() -> u64 {
+    const pi : u64 = msg0(cls("NSProcessInfo"), sel("processInfo"));
+    const tok : u64 = msg2(pi, sel("beginActivityWithOptions:reason:"), CL_ACTIVITY, cf("T27 OS call"));
+    if (tok != 0) { msg0(tok, sel("retain")); }
+    return tok;
+}
+fn cl_activity_end(tok: u64) -> void {
+    const pi : u64 = msg0(cls("NSProcessInfo"), sel("processInfo"));
+    msg1(pi, sel("endActivity:"), tok);
+    msg0(tok, sel("release"));
+}
+
+/// The right edge of the title bar's CALL pill: left of the profile circle.
+pub fn cl_head_right(sw: f64) -> f64 { return pf_head_cx(sw) - PRF_HEAD_R - CV_HEAD_GAP; }
+pub fn on_cl_head(x: f64, y: f64, sw: f64) -> bool { return cv_head_hit(x, y, cl_head_right(sw), TITLE_H); }
+
+/// The pill: outlined while no call is up, filled dim while one is, brighter while it rings here.
+fn draw_cl_head(c: u64, kit: [48]u64, sw: f64, mx: f64, my: f64, cl: []const u8) -> void {
+    const bx : f64 = cv_head_x(cl_head_right(sw));
+    const by : f64 = cv_head_y(TITLE_H);
+    const view : u32 = @as(u32, cl[CL_VIEW]);
+    round_rect(c, bx, by, CV_HEAD_W, CV_HEAD_H, 0.5 * CV_HEAD_H);
+    if (view == CV_RINGING) {
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, 0.38);
+        cg_fill_path(c);
+        round_rect(c, bx, by, CV_HEAD_W, CV_HEAD_H, 0.5 * CV_HEAD_H);
+    } else if (cv_live(view)) {
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, 0.16);
+        cg_fill_path(c);
+        round_rect(c, bx, by, CV_HEAD_W, CV_HEAD_H, 0.5 * CV_HEAD_H);
+    }
+    var ring : f64 = lv(kit, THV_LABEL_WHITE);
+    if (cl[CL_OPEN] != 0 or on_cl_head(mx, my, sw)) { ring = lv(kit, THV_TEXT_WHITE); }
+    cg_line_width(c, 1.0);
+    cg_stroke_rgba(c, 1.0, 1.0, 1.0, ring);
+    cg_stroke_path(c);
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+    const lw : f64 = bytes_w(kit, "CALL", 4, 9.0, WEIGHT_SEMIBOLD, false);
+    draw_bytes(c, kit, "CALL", 4, bx + 0.5 * (CV_HEAD_W - lw), by + 12.5, 9.0, WEIGHT_SEMIBOLD, false);
+}
+
+/// Text wrapped in the panel's width, at most `lines` lines from the baseline `base`.
+fn draw_cl_wrap(c: u64, kit: [48]u64, msg: []const u8, x: f64, right: f64, base: f64, size: f64, lines: u32, sh: f64) -> void {
+    var from : usize = 0;
+    var ln : u32 = 0;
+    while (from < msg.len and ln < lines) {
+        const rest : []const u8 = msg[from .. msg.len];
+        const b : f64 = base + (size + 3.5) * @as(f64, @floatFromInt(ln));
+        var cut : usize = wrap_at(kit, rest, rest.len, size, 0.0, right - x);
+        if (ln + 1 == lines) { cut = rest.len; }
+        if (cut == 0) { cut = rest.len; }
+        if (b < sh - 6.0) { draw_fit(c, kit, rest, cut, x, b, size, 0.0, false, right); }
+        from = from + cut;
+        if (from < msg.len and msg[from] == 32) { from = from + 1; }
+        ln = ln + 1;
+    }
+}
+
+fn draw_cl_btn(c: u64, kit: [48]u64, bx: f64, by: f64, bw: f64, word: []const u8, over: bool) -> void {
+    draw_plate(c, bx - 2.0, by - 2.0, bw + 4.0, CV_BTN_H + 4.0);
+    round_rect(c, bx, by, bw, CV_BTN_H, 5.0);
+    cg_line_width(c, 1.0);
+    cg_stroke_rgba(c, 1.0, 1.0, 1.0, STRICT_HOVER_EDGE);
+    if (over) { cg_stroke_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE)); }
+    cg_stroke_path(c);
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+    const lw : f64 = bytes_w(kit, word, word.len, 9.5, WEIGHT_SEMIBOLD, false);
+    draw_bytes(c, kit, word, word.len, bx + 0.5 * (bw - lw), by + 17.0, 9.5, WEIGHT_SEMIBOLD, false);
+}
+
+fn draw_call_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, cl: []const u8) -> void {
+    const l : f64 = qp_left(sw);
+    const t : f64 = WS_TOP;
+    const x : f64 = l + QP_PAD;
+    const right : f64 = l + QP_W - QP_PAD;
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LINE_WHITE));
+    cg_fill_rect(c, l, t, HAIR, sh - t);
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+    draw_bytes(c, kit, "CALL", 4, x, t + 25.0, 11.5, WEIGHT_SEMIBOLD, false);
+    draw_close_x(c, sw - QP_PAD - 8.0, t + 20.0, on_panel_close(mx, my, sw, t), 1.0);
+    const view : u32 = @as(u32, cl[CL_VIEW]);
+    var line : [96]u8 = undefined;
+    // this device: where it listens and its test fingerprint (the caller dials the address; see call_view.t27)
+    var n : usize = put_bytes(line[0..96], 0, "THIS DEVICE  ");
+    n = n + cv_addr_text(cl_ip(cl, CL_ME_IP), cl_me_port(cl), line[n..96]);
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+    draw_fit(c, kit, line[0..96], n, x, t + CV_ME_Y, 9.5, 0.0, false, right);
+    if (cl[CL_UP] != 0) {
+        var me : [10]u8 = undefined;
+        cv_fp_of(cl_ip(cl, CL_ME_IP), cl_me_port(cl), me[0..10]);
+        n = put_bytes(line[0..96], 0, "fp ");
+        n = n + fp_text(me[0..10], line[n..96]);
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+        draw_fit(c, kit, line[0..96], n, x, t + CV_FPME_Y, 9.5, 0.0, true, right);
+    }
+    const hit : u32 = cv_hit(mx, my, l, QP_W, t, view);
+    if (view == CV_IDLE) {
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+        draw_bytes(c, kit, "ADDRESS", 7, x, t + CV_LABEL_Y, 9.5, 0.0, false);
+        const fx : f64 = cv_field_x(l);
+        const fy : f64 = cv_field_y(t);
+        const fw : f64 = cv_field_w(QP_W);
+        const typing : bool = cl[CL_FOCUS] != 0;
+        round_rect(c, fx, fy, fw, CV_FIELD_H, 5.0);
+        cg_line_width(c, 1.0);
+        cg_stroke_rgba(c, 1.0, 1.0, 1.0, STRICT_HOVER_EDGE);
+        if (typing) { cg_stroke_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE)); }
+        if (!typing and hit == CV_H_FIELD) { cg_stroke_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE)); }
+        cg_stroke_path(c);
+        var shown : [24]u8 = undefined;
+        var an : usize = @as(usize, cl[CL_ALEN]);
+        var i : usize = 0;
+        while (i < an) {
+            shown[i] = cl[CL_ADDR + i];
+            i = i + 1;
+        }
+        if (typing) {
+            shown[an] = 95;
+            an = an + 1;
+        }
+        if (an > 0) {
+            cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+            draw_fit(c, kit, shown[0..24], an, fx + 8.0, fy + 17.5, 11.0, 0.0, true, fx + fw - 8.0);
+        } else {
+            cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+            draw_bytes(c, kit, "192.168.15.4:47727", 18, fx + 8.0, fy + 17.5, 11.0, 0.0, true);
+        }
+    } else {
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+        const tt : []const u8 = cv_title(view);
+        draw_fit(c, kit, tt, tt.len, x, t + CV_TITLE_Y, 14.0, WEIGHT_SEMIBOLD, false, right);
+        // who: the address the test fingerprint names (else the IPv4 the packets came from) and the fingerprint
+        const fa : u64 = cv_fp_addr(cl[CL_PFP .. CL_PFP + 10]);
+        n = put_bytes(line[0..96], 0, "WITH  ");
+        if (fa != 0) {
+            n = n + cv_addr_text(cv_addr_ip(fa), cv_addr_port(fa), line[n..96]);
+        } else {
+            n = n + cv_addr_text(cl_ip(cl, CL_PIP), 0, line[n..96]) - 2;
+        }
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+        draw_fit(c, kit, line[0..96], n, x, t + CV_PEER_Y, 11.0, 0.0, false, right);
+        n = put_bytes(line[0..96], 0, "fp ");
+        n = n + fp_text(cl[CL_PFP .. CL_PFP + 10], line[n..96]);
+        if (view == CV_RINGING) { n = put_bytes(line[0..96], n, "  (no nickname sent)"); }
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+        draw_fit(c, kit, line[0..96], n, x, t + CV_PFP_Y, 9.5, 0.0, true, right);
+        var big : [16]u8 = undefined;
+        if (view == CV_COMPARE or view == CV_WAIT) {
+            const bn : usize = cv_code_text(cl[CL_CODE .. CL_CODE + 6], big[0..16]);
+            cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+            draw_bytes(c, kit, big[0..16], bn, x, t + CV_BIG_Y, 34.0, WEIGHT_SEMIBOLD, true);
+        } else if (view == CV_ACTIVE) {
+            const bn : usize = cv_clock(cl_get32(cl, CL_SECS), big[0..16]);
+            cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+            const cw : f64 = draw_bytes(c, kit, big[0..16], bn, x, t + CV_BIG_Y, 34.0, WEIGHT_SEMIBOLD, true);
+            n = put_bytes(line[0..96], 0, "code ");
+            n = n + cv_code_text(cl[CL_CODE .. CL_CODE + 6], line[n..96]);
+            if (cl[CL_MUTED] != 0) { n = put_bytes(line[0..96], n, "   MIC OFF"); }
+            cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+            draw_fit(c, kit, line[0..96], n, x + cw + 14.0, t + CV_BIG_Y - 4.0, 9.5, WEIGHT_SEMIBOLD, true, right);
+        } else if (view == CV_ENDED or view == CV_FAILED) {
+            const rt : []const u8 = cl_reason_text(@as(u32, cl[CL_REASON]));
+            cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+            draw_cl_wrap(c, kit, rt, x, right, t + CV_BIG_Y - 30.0, 11.0, 2, sh);
+            if (cl[CL_TALKED] != 0) {
+                n = put_bytes(line[0..96], 0, "lasted ");
+                n = n + cv_clock(cl_get32(cl, CL_SECS), line[n..96]);
+                cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+                draw_fit(c, kit, line[0..96], n, x, t + CV_BIG_Y, 11.0, 0.0, true, right);
+            }
+        }
+    }
+    // the buttons of the view (call_view cv_btn_word), one row
+    var b : u32 = 0;
+    while (b < cv_btn_count(view)) {
+        const word : []const u8 = cv_btn_word(view, b, cl[CL_MUTED] != 0);
+        draw_cl_btn(c, kit, cv_btn_x(l, QP_W, b), cv_row_y(t, view), cv_btn_w(QP_W), word, hit == CV_H_B0 + b);
+        b = b + 1;
+    }
+    if (view == CV_IDLE) {
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+        draw_cl_wrap(c, kit, cv_note_text(@as(u32, cl[CL_NOTE])), x, right, t + CV_NOTE_Y, 9.5, 3, sh);
+        return;
+    }
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+    draw_cl_wrap(c, kit, cv_hint(view), x, right, t + CV_HINT_Y, 9.5, 3, sh);
+    if (view == CV_ACTIVE or ((view == CV_ENDED or view == CV_FAILED) and cl[CL_TALKED] != 0)) {
+        // what the session counted: sealed frames sent and accepted, AEAD refusals, the longest gap between two polls
+        n = put_bytes(line[0..96], 0, "sent ");
+        n = put_dec(line[0..96], n, cl_get32(cl, CL_SENT));
+        n = put_bytes(line[0..96], n, "  received ");
+        n = put_dec(line[0..96], n, cl_get32(cl, CL_RECV));
+        n = put_bytes(line[0..96], n, "  rejected ");
+        n = put_dec(line[0..96], n, cl_get32(cl, CL_REJ));
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+        draw_fit(c, kit, line[0..96], n, x, t + CV_HINT_Y + 44.0, 9.5, 0.0, true, right);
+        n = put_bytes(line[0..96], 0, "poll gap max ");
+        n = put_dec(line[0..96], n, cl_get32(cl, CL_GAP));
+        n = put_bytes(line[0..96], n, " ms  over 10 ms ");
+        n = put_dec(line[0..96], n, cl_get32(cl, CL_N10));
+        n = put_bytes(line[0..96], n, " of ");
+        n = put_dec(line[0..96], n, cl_get32(cl, CL_NPOLL));
+        draw_fit(c, kit, line[0..96], n, x, t + CV_HINT_Y + 58.0, 9.5, 0.0, true, right);
+        n = put_bytes(line[0..96], 0, "audio captured ");
+        n = put_dec(line[0..96], n, cl_get32(cl, CL_CAPT));
+        n = put_bytes(line[0..96], n, "  underruns ");
+        n = put_dec(line[0..96], n, cl_get32(cl, CL_UNDER));
+        n = put_bytes(line[0..96], n, "  overruns ");
+        n = put_dec(line[0..96], n, cl_get32(cl, CL_OVER) + cl_get32(cl, CL_TXO));
+        draw_fit(c, kit, line[0..96], n, x, t + CV_HINT_Y + 72.0, 9.5, 0.0, true, right);
+    }
+}
+
 fn draw(c: u64, kit: [48]u64, frame: u32, state: u32, hov: u32, ma: f64, shown: u32, task: u32, space: u32, sp: u32, ss: u64, cur: u32, collapsed: bool, mx: f64, my: f64, z: f64, sw: f64, sh: f64, ws: u32, full: bool, qp: bool, ring: [8]u64, n: u32, now: u64, sug: u32, god: bool, glow: f64, dk: [128]u64, dp: bool, darmed: u32, doff: u32, dgo: u32, dlive: bool, dlabel: u64, tst: []const u32, tcells: []const u32, topen: u32, tcur: bool, kyp: bool, kstored: []const u32, kmask: []const u8, kmlen: []const u32, kst: []const u32, kfail: []const u32, kopen: []const u64, kedit: u32, kbuf: []const u8, klen: u32, karm: u32, kbusy: u32, kemask: u32, kewhy: u32, ktpick: u32, hs: u32, cons: bool, dc: []u64, gal: []const u8, gt: []const u32, evd: u32, evpk: u64, pb: []const u8, sst: []const u32, tg: []const u64, tb: []const u8) -> void {
     // evp, evn2 and evpr travel packed (the draw call is at the 64 parameter limit)
     const evp : u32 = @as(u32, @intCast(evpk % 1048576));
@@ -8730,6 +9390,8 @@ fn draw(c: u64, kit: [48]u64, frame: u32, state: u32, hov: u32, ma: f64, shown: 
     const evpr : u32 = @as(u32, @intCast(evpk / 1099511627776));
     // P. the PROFILE panel is open while its flag byte in the text store says so
     const pfp : bool = tb[TBO_PF + PF_OPEN] != 0;
+    // CL. the CALL panel, the same way
+    const clp : bool = tb[TBO_CL + CL_OPEN] != 0;
     draw_backdrop(c, sw, sh, full);
     const ha : f64 = 1.0 - ma;
     if (ha > 0.0) {
@@ -8742,8 +9404,8 @@ fn draw(c: u64, kit: [48]u64, frame: u32, state: u32, hov: u32, ma: f64, shown: 
         // t27u, an empty frame with the petal's name for every other petal
         if (shown == PETAL_CHAT and cons == false) {
             draw_chat(c, kit, shown, task, space, sp, ss, cur, ma, collapsed, mx, my, sw, sh, ws, dlabel, dp, full, topen != PANE_NONE, sst, tb);
-            if (topen != PANE_NONE and sst[SST_LVSEL] == LV_NONE) { draw_term(c, kit, tst, tcells, tcur, ma, collapsed, sw, sh, ws, full, qp or dp or kyp or pfp, mx, my, tg); }
-            if (topen != PANE_NONE and sst[SST_LVSEL] == LV_NONE and sst[SST_SRV] != SRV_UP) { draw_srv_banner(c, kit, sst[SST_SRV], content_x(ws, collapsed), WS_TOP + HEADER_H, content_w(sw, ws, collapsed, qp or dp or kyp or pfp), sh - WS_TOP - HEADER_H, mx, my, ma, full); }
+            if (topen != PANE_NONE and sst[SST_LVSEL] == LV_NONE) { draw_term(c, kit, tst, tcells, tcur, ma, collapsed, sw, sh, ws, full, qp or dp or kyp or pfp or clp, mx, my, tg); }
+            if (topen != PANE_NONE and sst[SST_LVSEL] == LV_NONE and sst[SST_SRV] != SRV_UP) { draw_srv_banner(c, kit, sst[SST_SRV], content_x(ws, collapsed), WS_TOP + HEADER_H, content_w(sw, ws, collapsed, qp or dp or kyp or pfp or clp), sh - WS_TOP - HEADER_H, mx, my, ma, full); }
             if (topen != PANE_NONE and sst[SST_LVSEL] == LV_NONE) { draw_light_dot(c, sw - 124.0, WS_TOP + 0.5 * HEADER_H, dot_light(topen == VIEW_EDITOR, pane_light_input(topen)), ma); }
             draw_switch(c, kit, "CONSOLE >", sw, ma, mx, my);
         } else {
@@ -8751,14 +9413,15 @@ fn draw(c: u64, kit: [48]u64, frame: u32, state: u32, hov: u32, ma: f64, shown: 
         }
     }
     if (ma > 0.0 and shown == PETAL_CHAT and cons == false and sst[SST_QDASH] != 0 and ws != WS_COMPACT) {
-        draw_qdash(c, kit, tg, sst, tb, qd_area_x(ws, collapsed), WS_TOP, qd_area_w(sw, ws, collapsed, qp or dp or kyp or pfp), qd_area_h(sh), mx, my, full, ma);
+        draw_qdash(c, kit, tg, sst, tb, qd_area_x(ws, collapsed), WS_TOP, qd_area_w(sw, ws, collapsed, qp or dp or kyp or pfp or clp), qd_area_h(sh), mx, my, full, ma);
     }
     // exactly one right-hand panel is drawn (the Queen's, else DOCTOR's, else KEYS'): its ground first
-    if (qp or dp or kyp or pfp) { draw_panel_ground(c, sw, sh, full); }
+    if (qp or dp or kyp or pfp or clp) { draw_panel_ground(c, sw, sh, full); }
     if (qp) { draw_queen_panel(c, kit, sw, sh, mx, my, view_of(menu_open(state), shown), space, ss, cur, ring, n, now, sug, god, evd, evp, evn2, evpr); }
     if (dp and qp == false) { draw_doctor_panel(c, kit, dk, sw, sh, mx, my, darmed, doff, dgo, dlive); }
     if (kyp and qp == false and dp == false) { draw_keys_panel(c, kit, sw, sh, mx, my, kstored, kmask, kmlen, kst, kfail, kopen, now, kedit, kbuf, klen, karm, kbusy, kemask, kewhy, ktpick); }
     if (pfp and qp == false and dp == false and kyp == false) { draw_profile_panel(c, kit, sw, sh, mx, my, tb[TBO_PF .. TBO_PF + PF_CAP], tg[TPG_PF_IMG]); }
+    if (clp and qp == false and dp == false and kyp == false and pfp == false) { draw_call_panel(c, kit, sw, sh, mx, my, tb[TBO_CL .. TBO_CL + CL_CAP]); }
     if (ma > 0.0) {
         var uws : u32 = ws;
         if (shown != PETAL_CHAT or cons) { uws = home_ws(ws); }
@@ -8769,7 +9432,7 @@ fn draw(c: u64, kit: [48]u64, frame: u32, state: u32, hov: u32, ma: f64, shown: 
         draw_god_strip(c, kit, tg, sst, sw, sh, full, ma, god);
         draw_footer(c, kit, tg, sst, mx, my, sw, sh, full, ma, kyp, dlabel, dp);
     }
-    draw_titlebar(c, kit, sw, full, ma, tg, god, mx, my, tb[TBO_PF .. TBO_PF + PF_CAP]);
+    draw_titlebar(c, kit, sw, full, ma, tg, god, mx, my, tb[TBO_PF .. TBO_PF + PF_CAP], tb[TBO_CL .. TBO_CL + CL_CAP]);
     draw_edge_glow(c, sw, sh, glow, frame);
 }
 
@@ -10130,20 +10793,38 @@ pub fn main() -> void {
     }
     // the tool pages (B, K, Q): their state words and text store, all zero, counters "not measured"
     var tgv : [256]u64 = undefined;
-    var tbv : [77312]u8 = undefined;
+    var tbv : [77568]u8 = undefined;
     var tgz : usize = 0;
     while (tgz < 256) {
         tgv[tgz] = 0;
         tgz = tgz + 1;
     }
     tgz = 0;
-    while (tgz < 77312) {
+    while (tgz < 77568) {
         tbv[tgz] = 0;
         tgz = tgz + 1;
     }
     // P. the PROFILE panel: closed at launch; the profile file is read and the picture decoded once, here, never in draw()
     var pfp : bool = false;
     pf_boot(tbv[TBO_PF .. TBO_PF + PF_CAP], tgv[0..256]);
+    // CL. the call session: opened once, here; its block is a local of main and never moves (the audio callbacks
+    // hold its address). The CALL panel is closed at launch; a call that rings opens it.
+    var clp : bool = false;
+    // a call that rang during a tick after the event wait opens the panel at the top of the next pass
+    var clring : bool = false;
+    var csv : [74304]u8 = undefined;
+    var clw : [10]u64 = undefined;
+    var clz : usize = 0;
+    while (clz < 74304) {
+        csv[clz] = 0;
+        clz = clz + 1;
+    }
+    clz = 0;
+    while (clz < 10) {
+        clw[clz] = 0;
+        clz = clz + 1;
+    }
+    cl_boot(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN]);
     var tgm : u32 = 0;
     while (tgm < M_COUNT) {
         tgv[TPG_Q_AFTER + tgm] = @as(u64, qb_nm());
@@ -10387,6 +11068,21 @@ pub fn main() -> void {
         const tpk : u32 = page_kind(hh);
         const tpg : bool = hscreen and ma >= 0.5 and shown != PETAL_CHAT and tpk != PAGE_NONE and tgv[TPG_DASH] == 0 and dcv[D_LIVE] == 0;
         var sug : u32 = shown_suggestion(suggest_for(sessions_in(ss, space), cur != SESSION_NONE, screen and ktpick != TERM_NONE, edone, space), dismissed);
+        // CL. the call: every event of the session, then the snapshot draw() reads; a call that rings here opens the
+        // CALL panel in the place of the other right-hand panels (it is never answered for the person)
+        if (cl_tick(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN], clw[0..10]) or clring) {
+            clp = true;
+            qp = false;
+            god = false;
+            dp = false;
+            kyp = false;
+            karm = KY_NONE;
+            kedit = KY_NONE;
+            klen = 0;
+            pf_leave(tbv[TBO_PF .. TBO_PF + PF_CAP], PRF_EV_CLOSE);
+            pfp = false;
+            clring = false;
+        }
         var ev : u64 = msg_event(app, s_next, 0xffffffffffffffff, msg_f(date_cls, s_wait, fwait), mode, true);
         while (ev != 0) {
             const ty : u64 = msg0(ev, s_type);
@@ -10414,11 +11110,28 @@ pub fn main() -> void {
                 } else if (on_hdr_btn(mx, my, hdr_right(sw), TITLE_H, hdr_ready)) {
                     // the header's UPDATE NOW, the same press as the update line
                     tgv[TPG_U_GO] = 1;
+                } else if (on_cl_head(mx, my, sw)) {
+                    // CL. the CALL pill opens or closes the CALL panel; it takes the place of the other right-hand panels
+                    clp = clp == false;
+                    tbv[TBO_CL + CL_FOCUS] = 0;
+                    if (clp) {
+                        qp = false;
+                        god = false;
+                        dp = false;
+                        kyp = false;
+                        karm = KY_NONE;
+                        kedit = KY_NONE;
+                        klen = 0;
+                        pf_leave(tbv[TBO_PF .. TBO_PF + PF_CAP], PRF_EV_CLOSE);
+                        pfp = false;
+                    }
+                    tsince = 0;
                 } else if (on_pf_head(mx, my, sw)) {
                     // P. the profile circle opens or closes the PROFILE panel; it takes the place of the Queen, DOCTOR and KEYS panels
                     pf_leave(tbv[TBO_PF .. TBO_PF + PF_CAP], PRF_EV_CLOSE);
                     pfp = pfp == false;
                     if (pfp) {
+                        clp = false;
                         qp = false;
                         god = false;
                         dp = false;
@@ -10452,6 +11165,7 @@ pub fn main() -> void {
                             qp = false;
                             god = false;
                             pfp = false;
+                            clp = false;
                             dp = false;
                             keys_refresh(kstored[0..9], kmask[0..144], kmlen[0..9]);
                             // the refresh also hands the server every numbered key again (a server that restarted forgot them)
@@ -10463,18 +11177,18 @@ pub fn main() -> void {
                         }
                     } else if (on_doctor_link(mx, my, sw, sh) or sbp == PG_DOCTOR) {
                         dp = dp == false;
-                        if (dp) { qp = false; god = false; kyp = false; pfp = false; }
+                        if (dp) { qp = false; god = false; kyp = false; pfp = false; clp = false; }
                         darmed = ARMED_NONE;
                     } else if (sbp == PG_QUEEN) {
                         qp = qp == false;
-                        if (qp) { dp = false; kyp = false; pfp = false; }
+                        if (qp) { dp = false; kyp = false; pfp = false; clp = false; }
                         last_act = now;
                     }
                     tsince = 0;
-                } else if (qd_open(sst[0..560], screen, ws) and on_qd_area(mx, my, sw, sh, ws, collapsed, qp or dp or kyp or pfp)) {
+                } else if (qd_open(sst[0..560], screen, ws) and on_qd_area(mx, my, sw, sh, ws, collapsed, qp or dp or kyp or pfp or clp)) {
                     // the CONTROL DASHBOARD takes every click in its rectangle (queen_dash.t27 qd_hit)
                     const qx0 : f64 = qd_area_x(ws, collapsed);
-                    const qw0 : f64 = qd_area_w(sw, ws, collapsed, qp or dp or kyp or pfp);
+                    const qw0 : f64 = qd_area_w(sw, ws, collapsed, qp or dp or kyp or pfp or clp);
                     const qh0 : f64 = qd_area_h(sh);
                     const qlt : u32 = qd_table_rows(WS_TOP, qw0, qh0);
                     const qlr : u32 = qd_lane_rows_shown(qlt);
@@ -10522,9 +11236,21 @@ pub fn main() -> void {
                 } else if (screen and sst[SST_LVSEL] != LV_NONE and ws != WS_COMPACT and lgh == LVH_BODY) {
                     // L. the log view is a view of its own: a click in it reaches nothing under it
                     tsince = 0;
-                } else if (screen and topen != PANE_NONE and srvp != SRV_UP and sst[SST_LVSEL] == LV_NONE and tp_retry_hit(mx, my, content_x(ws, collapsed), WS_TOP + HEADER_H, content_w(sw, ws, collapsed, qp or dp or kyp or pfp), sh - WS_TOP - HEADER_H)) {
+                } else if (screen and topen != PANE_NONE and srvp != SRV_UP and sst[SST_LVSEL] == LV_NONE and tp_retry_hit(mx, my, content_x(ws, collapsed), WS_TOP + HEADER_H, content_w(sw, ws, collapsed, qp or dp or kyp or pfp or clp), sh - WS_TOP - HEADER_H)) {
                     // T. the Retry button of the pane server banner: start the server again
                     srvretry = true;
+                    tsince = 0;
+                } else if (clp and on_panel(mx, my, sw, WS_TOP)) {
+                    // CL. the CALL panel: close, the address field and the buttons of the view (call_view cv_action)
+                    if (on_panel_close(mx, my, sw, WS_TOP)) {
+                        clp = false;
+                        tbv[TBO_CL + CL_FOCUS] = 0;
+                    } else {
+                        const clv : u32 = @as(u32, tbv[TBO_CL + CL_VIEW]);
+                        const cla : u32 = cv_action(clv, cv_hit(mx, my, qp_left(sw), QP_W, WS_TOP, clv));
+                        if (cla != CV_A_FOCUS) { tbv[TBO_CL + CL_FOCUS] = 0; }
+                        cl_do(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN], clw[0..10], cla);
+                    }
                     tsince = 0;
                 } else if (pfp and on_panel(mx, my, sw, WS_TOP)) {
                     // P. the PROFILE panel: close, the big circle and CHOOSE PICTURE, REMOVE PICTURE, the nickname field, SAVE, CANCEL
@@ -10687,11 +11413,11 @@ pub fn main() -> void {
                     if (tmi == MENU_PASTE) { tact = CMD_PASTE; }
                     if (tmi == MENU_ALL) { tact = CMD_SELECT_ALL; }
                     tsince = 0;
-                } else if (term_up(screen, topen) and vt_chip_shown(tst[0..32]) and tp_chip_hit(mx, my, content_x(ws, collapsed), WS_TOP + HEADER_H, content_w(sw, ws, collapsed, qp or dp or kyp or pfp), sh - WS_TOP - HEADER_H)) {
+                } else if (term_up(screen, topen) and vt_chip_shown(tst[0..32]) and tp_chip_hit(mx, my, content_x(ws, collapsed), WS_TOP + HEADER_H, content_w(sw, ws, collapsed, qp or dp or kyp or pfp or clp), sh - WS_TOP - HEADER_H)) {
                     // T. the "jump to live" chip: back to the live screen
                     vt_to_live(tst[0..32]);
                     tsince = 0;
-                } else if (term_click(term_up(screen, topen), mx, my, sw, sh, ws, collapsed, qp or dp or kyp or pfp)) {
+                } else if (term_click(term_up(screen, topen), mx, my, sw, sh, ws, collapsed, qp or dp or kyp or pfp or clp)) {
                     // T. a click on the terminal pane is the pane's: its cursor goes solid and nothing under it
                     // reacts (no card, no petal, no bar); every control the chain below answers lies outside
                     // on_term (the title bar, the header, the dashboard bar, the sidebar), or is a card.
@@ -10884,6 +11610,7 @@ pub fn main() -> void {
                         qp = false;
                         god = false;
                         pfp = false;
+                        clp = false;
                         dp = false;
                         keys_refresh(kstored[0..9], kmask[0..544], kmlen[0..9]);
                         // the refresh also hands the server every numbered key again (a server that restarted forgot them)
@@ -10896,7 +11623,7 @@ pub fn main() -> void {
                 } else if ((screen or hscreen) and on_doctor_link(mx, my, sw, sh)) {
                     // D. DOCTOR in the foot opens or closes the panel; it takes the Queen panel's place
                     dp = dp == false;
-                    if (dp) { qp = false; god = false; kyp = false; pfp = false; }
+                    if (dp) { qp = false; god = false; kyp = false; pfp = false; clp = false; }
                     darmed = ARMED_NONE;
                 } else if ((screen or hscreen) and on_repo_link(mx, my, sw, sh)) {
                     // W. OPEN SOURCE T27 opens the repository in the default browser
@@ -10989,7 +11716,7 @@ pub fn main() -> void {
                 msg_point(msg1(ev, s_value, k_click), s_get, pt);
                 mx = view_to_scene(pt[0], fr[2], fr[3], 0, sw, sh);
                 my = view_to_scene(pt[1], fr[2], fr[3], 1, sw, sh);
-                if (term_click(term_up(screen, topen), mx, my, sw, sh, ws, collapsed, qp or dp or kyp or pfp)) {
+                if (term_click(term_up(screen, topen), mx, my, sw, sh, ws, collapsed, qp or dp or kyp or pfp or clp)) {
                     tgv[TPG_T_MENU] = 1;
                     tgv[TPG_T_MX] = @as(u64, @intFromFloat(ti_menu_x(mx, sw)));
                     tgv[TPG_T_MY] = @as(u64, @intFromFloat(ti_menu_y(my, sh)));
@@ -11065,7 +11792,7 @@ pub fn main() -> void {
                 }
                 used = true;
             }
-            if (ty == EV_SCROLL and term_up(screen, topen) and on_term(mx, my, sw, sh, ws, collapsed, qp or dp or kyp or pfp) and (qp or dp or kyp or pfp) == false) {
+            if (ty == EV_SCROLL and term_up(screen, topen) and on_term(mx, my, sw, sh, ws, collapsed, qp or dp or kyp or pfp or clp) and (qp or dp or kyp or pfp or clp) == false) {
                 // T. the wheel over a terminal pane: on the main screen it scrolls the history by sub-row pixels; on the
                 // alternate screen it goes to the program as arrows, or as mouse reports when it asked for them (vt.t27)
                 const wdy : f64 = msg_real(ev, s_scroll_y);
@@ -11120,7 +11847,7 @@ pub fn main() -> void {
                 }
                 used = true;
             }
-            if (ty == EV_SCROLL and tpg == false and hscreen and dcv[D_LIVE] == 0 and on_home_view(mx, my, ws, collapsed) and ((qp or kyp or dp or pfp) and on_panel(mx, my, sw, WS_TOP)) == false) {
+            if (ty == EV_SCROLL and tpg == false and hscreen and dcv[D_LIVE] == 0 and on_home_view(mx, my, ws, collapsed) and ((qp or kyp or dp or pfp or clp) and on_panel(mx, my, sw, WS_TOP)) == false) {
                 // H. a home tab's page scrolls with the wheel or trackpad; the offset stays between the top and the end
                 var hdy : f64 = msg_real(ev, s_scroll_y);
                 if (msg0(ev, s_precise) % 256 == 0) { hdy = hdy * 16.0; }
@@ -11182,8 +11909,43 @@ pub fn main() -> void {
                     const r : u32 = on_queen_key(qp, god);
                     if (god) { ctl = C_GOD_OFF; } else { ctl = C_QUEEN_KEY; }
                     qp = r % 2 == 1;
-                    if (qp) { kyp = false; pfp = false; }
+                    if (qp) { kyp = false; pfp = false; clp = false; }
                     god = r / 2 % 2 == 1;
+                } else if (clp and tbv[TBO_CL + CL_FOCUS] != 0) {
+                    // CL. the address is being typed: Return calls, Esc stops typing, Backspace drops a character, Cmd+V pastes
+                    const ck : u32 = ky_key(@as(u32, @intCast(key)), cmd);
+                    if (ck == KE_CANCEL) {
+                        tbv[TBO_CL + CL_FOCUS] = 0;
+                    } else if (ck == KE_BACK) {
+                        cl_back(tbv[TBO_CL .. TBO_CL + CL_CAP]);
+                    } else if (ck == KE_SAVE) {
+                        cl_do(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN], clw[0..10], CV_A_DIAL);
+                    } else if (ck == KE_PASTE) {
+                        const cpb : u64 = msg0(cls("NSPasteboard"), sel("generalPasteboard"));
+                        const cps : u64 = msg1(cpb, sel("stringForType:"), cf("public.utf8-plain-text"));
+                        if (cps != 0) {
+                            const cpn : usize = ns_bytes(cps, ktmp[0..256]);
+                            var cpj : usize = 0;
+                            while (cpj < cpn) {
+                                cl_unit(tbv[TBO_CL .. TBO_CL + CL_CAP], @as(u32, ktmp[cpj]));
+                                cpj = cpj + 1;
+                            }
+                        }
+                    } else if (ck == KE_CHAR) {
+                        const cc2 : u64 = msg0(ev, s_chars);
+                        var cn2 : u64 = 0;
+                        if (cc2 != 0) { cn2 = dk_len(dk, cc2); }
+                        var cj2 : u64 = 0;
+                        while (cj2 < cn2) {
+                            cl_unit(tbv[TBO_CL .. TBO_CL + CL_CAP], @as(u32, @intCast(msg_char(cc2, s_char_at, cj2) & 65535)));
+                            cj2 = cj2 + 1;
+                        }
+                    } else {
+                        used = false;
+                    }
+                } else if (clp and key == KEY_ESCAPE and cmd == false) {
+                    // CL. Escape outside the field closes the CALL panel; a call that is up goes on
+                    clp = false;
                 } else if (pfp and pf_editing(tbv[TBO_PF .. TBO_PF + PF_CAP])) {
                     // P. the nickname is being typed: Return saves, Esc cancels, Backspace drops a code point, Cmd+V pastes text
                     const pk : u32 = ky_key(@as(u32, @intCast(key)), cmd);
@@ -11467,7 +12229,9 @@ pub fn main() -> void {
             qdp = qdp + 1;
         }
         tgv[TPG_QD_FLAGS] = qd_fl_with_keys(tgv[TPG_QD_FLAGS], qdk, sb_worst_light(sst[0..560]));
-        qd_tick(tgv[0..256], tbv[0..77312], dhb[0..dhn], now, sst[SST_QDASH] != 0 and screen);
+        // CL. and between the loop's slower parts, so no stretch of it keeps the call's socket waiting
+        if (cl_tick(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN], clw[0..10])) { clring = true; }
+        qd_tick(tgv[0..256], tbv[0..77568], dhb[0..dhn], now, sst[SST_QDASH] != 0 and screen);
         god_tick(tgv[0..256], tbv[0..65536], dhb[0..dhn], now, god, sst[SST_QRUN]);
         // L. the LANES block of the chat sidebar: the feed job, the tail of a clicked lane, the table once a second
         const lvup : bool = menu_open(state) and ma >= 0.5 and shown == PETAL_CHAT and cons2 == false and ws == WS_EXPANDED and collapsed == false;
@@ -11682,7 +12446,7 @@ pub fn main() -> void {
             const toy : f64 = WS_TOP + HEADER_H;
             // the grid ends at the left edge of an open right-hand panel: the pty gets the narrower size
             // through the resize below, and nothing of the terminal is under the panel
-            const tw : f64 = content_w(sw, ws, collapsed, qp or dp or kyp or pfp);
+            const tw : f64 = content_w(sw, ws, collapsed, qp or dp or kyp or pfp or clp);
             const th : f64 = sh - toy;
             // a drag changes the size every frame: the pane takes it once it has held TP_SETTLE frames, so
             // the grid and the ring replay run once per resize instead of once per frame
@@ -11869,7 +12633,7 @@ pub fn main() -> void {
         if (home_live and hov == PETAL_NONE and centre_hit(to_box(vx, 480, BOX_CX, sc), to_box(vy, 270, BOX_CY, sc))) { hov = PETAL_CENTRE; }
         var on_control : bool = on_home_button(mx, my, sw) or on_full_button(mx, my, sw) or on_dock_button(mx, my, sw) or on_god_switch(mx, my, hdr_right(sw), TITLE_H);
         if (on_hdr_btn(mx, my, hdr_right(sw), TITLE_H, tgv[TPG_U_ON] != 0 and tgv[TPG_U_ST] == (U_STAGED as u64))) { on_control = true; }
-        if (qd_open(sst[0..560], screen, ws) and on_qd_area(mx, my, sw, sh, ws, collapsed, qp or dp or kyp or pfp) and qd_hit(mx, my, qd_area_x(ws, collapsed), WS_TOP, qd_area_w(sw, ws, collapsed, qp or dp or kyp or pfp), qd_area_h(sh), qd_lane_rows_shown(qd_table_rows(WS_TOP, qd_area_w(sw, ws, collapsed, qp or dp or kyp or pfp), qd_area_h(sh))), qd_queue_rows_shown(qd_table_rows(WS_TOP, qd_area_w(sw, ws, collapsed, qp or dp or kyp or pfp), qd_area_h(sh)))) != QD_QH_NONE) { on_control = true; }
+        if (qd_open(sst[0..560], screen, ws) and on_qd_area(mx, my, sw, sh, ws, collapsed, qp or dp or kyp or pfp or clp) and qd_hit(mx, my, qd_area_x(ws, collapsed), WS_TOP, qd_area_w(sw, ws, collapsed, qp or dp or kyp or pfp or clp), qd_area_h(sh), qd_lane_rows_shown(qd_table_rows(WS_TOP, qd_area_w(sw, ws, collapsed, qp or dp or kyp or pfp or clp), qd_area_h(sh))), qd_queue_rows_shown(qd_table_rows(WS_TOP, qd_area_w(sw, ws, collapsed, qp or dp or kyp or pfp or clp), qd_area_h(sh)))) != QD_QH_NONE) { on_control = true; }
         if ((screen or hscreen) and sb_hit(kit, tgv[0..256], sst[0..560], mx, my, sw, sh) != SB_NONE) { on_control = true; }
         if (hscreen and on_nav_back(mx, my, full)) { on_control = true; }
         if (screen and (on_nav_back(mx, my, full) or on_side_toggle(mx, my, ws, collapsed))) { on_control = true; }
@@ -11888,12 +12652,23 @@ pub fn main() -> void {
         if ((screen or hscreen) and on_update_strip(mx, my, sh, sws, collapsed, strip_kind(@as(u8, @intCast(tgv[TPG_U_ST])), @as(u8, @intCast(tgv[TPG_U_WHY]))) != STRIP_HIDDEN and tgv[TPG_U_ON] != 0)) { on_control = true; }
         if (dp and (on_panel_close(mx, my, sw, WS_TOP) or dk_btn_at(dk, mx, my, sw, sh, doff) != NS_NOT_FOUND)) { on_control = true; }
         if (on_pf_head(mx, my, sw)) { on_control = true; }
+        if (on_cl_head(mx, my, sw)) { on_control = true; }
+        if (clp and (on_panel_close(mx, my, sw, WS_TOP) or cv_hit(mx, my, qp_left(sw), QP_W, WS_TOP, @as(u32, tbv[TBO_CL + CL_VIEW])) != CV_H_NONE)) { on_control = true; }
         if (pfp and (on_panel_close(mx, my, sw, WS_TOP) or prf_panel_hit_d(mx, my, qp_left(sw), QP_W, WS_TOP, pf_has(tbv[TBO_PF .. TBO_PF + PF_CAP]), prf_squeeze(WS_TOP, sh)) != PRF_H_NONE or on_pf_cancel(mx, my, qp_left(sw), WS_TOP - prf_squeeze(WS_TOP, sh)))) { on_control = true; }
         if (qp and (on_panel_close(mx, my, sw, WS_TOP) or on_god(mx, my, sw, WS_TOP) or ((sug != A_NONE or evd != 0) and (on_confirm(mx, my, sw, WS_TOP) or on_dismiss(mx, my, sw, WS_TOP))))) { on_control = true; }
-        if (hov != PETAL_NONE or on_control) { msg0(hand, s_cursor_set); } else { msg0(arrow, s_cursor_set); }
+        var cwant : u64 = 2;
+        if (hov != PETAL_NONE or on_control) { cwant = 1; }
+        const cnow : u64 = ckh_ms();
+        if (cl_cursor_due(cv_live(@as(u32, tbv[TBO_CL + CL_VIEW])), cwant, clw[CLW_CURSOR], cnow, clw[CLW_CURSOR_MS])) {
+            if (cwant == 1) { msg0(hand, s_cursor_set); } else { msg0(arrow, s_cursor_set); }
+            clw[CLW_CURSOR] = cwant;
+            clw[CLW_CURSOR_MS] = cnow;
+        }
         // P. the panel's flag byte is what draw() reads; the frame key folds in the whole profile region, so a typed
         // letter, a status line or a picture changes it and the frame is drawn
         if (pfp) { tbv[TBO_PF + PF_OPEN] = 1; } else { tbv[TBO_PF + PF_OPEN] = 0; }
+        if (clp) { tbv[TBO_CL + CL_OPEN] = 1; } else { tbv[TBO_CL + CL_OPEN] = 0; }
+        if (cl_tick(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN], clw[0..10])) { clring = true; }
         // U. the frame gate: fold what this frame shows into a key; an unchanged key with nothing
         // animating keeps the image already on the layer (frame_gate.t27)
         var fk : u64 = fg_mix(fg_mix(fg_mix(fg_mix(0, @as(u64, state)), @as(u64, hov)), fg_level(ma)), @as(u64, shown));
@@ -11907,6 +12682,12 @@ pub fn main() -> void {
         fk = fg_mix(fg_mix(fk, tgv[TPG_G_LAST]), tgv[TPG_G_NEXT]);
         fk = fg_mix(fg_mix(fk, @as(u64, sst[SST_QDASH])), tgv[TPG_QD_FLAGS]);
         fk = fg_mix(fk, tgv[TPG_PF_IMG]);
+        // CL. the call snapshot changes at most once a second while a call is up (cl_snapshot)
+        var fkc : usize = 0;
+        while (fkc < CL_KEY_N) {
+            fk = fg_mix(fk, @as(u64, tbv[TBO_CL + fkc]));
+            fkc = fkc + 1;
+        }
         var fki2 : usize = 0;
         while (fki2 < 144) {
             fk = fg_mix(fk, @as(u64, tbv[TBO_PF + fki2]));
@@ -11944,16 +12725,24 @@ pub fn main() -> void {
         fsince = fg_since(fsince, fdraw);
         fshown = fk;
         fwait = fg_wait_anim(fquiet, tlink == PANE_LIVE and topen != PANE_NONE, fanim, FRAME_S);
+        // CL. while a call is up the loop wakes at least every 5 ms, so cs_poll runs well inside its 10 ms
+        if (cv_live(@as(u32, tbv[TBO_CL + CL_VIEW])) and fwait > 0.005) { fwait = 0.005; }
+        if (cv_live(@as(u32, tbv[TBO_CL + CL_VIEW])) and clw[CLW_ACT] == 0) {
+            clw[CLW_ACT] = cl_activity_begin();
+        } else if (cv_live(@as(u32, tbv[TBO_CL + CL_VIEW])) == false and clw[CLW_ACT] != 0) {
+            cl_activity_end(clw[CLW_ACT]);
+            clw[CLW_ACT] = 0;
+        }
         msg_flag(tx_cls, s_quiet, true);
         if (fdraw and narrow) {
-            draw(cc, kit, frame, state, hov, ma, shown, task, space, sp, ss, cur, collapsed, mx, my, z, sw, sh, ws, full, qp, ring, evn, now, sug, god, glow, dk, dp, darmed, doff, dgo, walking, dlabel, tst[0..32], tcells[0..960000], topen, tcur, kyp, kstored[0..9], kmask[0..544], kmlen[0..9], kst[0..72], kfail[0..9], kopen[0..9], kedit, kbuf[0..256], klen, karm, kbusy, kemask, kewhy, ktpick, hs, cons2, dcv[0..512], gal[0..49152], gt[0..2560], evd, @as(u64, evp) + @as(u64, evn2) * 1048576 + @as(u64, evpr) * 1099511627776, pbuf[0..4160], sst[0..560], tgv[0..256], tbv[0..77312]);
+            draw(cc, kit, frame, state, hov, ma, shown, task, space, sp, ss, cur, collapsed, mx, my, z, sw, sh, ws, full, qp, ring, evn, now, sug, god, glow, dk, dp, darmed, doff, dgo, walking, dlabel, tst[0..32], tcells[0..960000], topen, tcur, kyp, kstored[0..9], kmask[0..544], kmlen[0..9], kst[0..72], kfail[0..9], kopen[0..9], kedit, kbuf[0..256], klen, karm, kbusy, kemask, kewhy, ktpick, hs, cons2, dcv[0..512], gal[0..49152], gt[0..2560], evd, @as(u64, evp) + @as(u64, evn2) * 1048576 + @as(u64, evpr) * 1099511627776, pbuf[0..4160], sst[0..560], tgv[0..256], tbv[0..77568]);
             const whole : u64 = cg_image(cc);
             const img : u64 = cg_crop(whole, 0.0, 0.0, sw * RETINA, sh * RETINA);
             msg1(layer, s_contents, img);
             cg_image_release(img);
             cg_image_release(whole);
         } else if (fdraw) {
-            draw(c, kit, frame, state, hov, ma, shown, task, space, sp, ss, cur, collapsed, mx, my, z, sw, sh, ws, full, qp, ring, evn, now, sug, god, glow, dk, dp, darmed, doff, dgo, walking, dlabel, tst[0..32], tcells[0..960000], topen, tcur, kyp, kstored[0..9], kmask[0..544], kmlen[0..9], kst[0..72], kfail[0..9], kopen[0..9], kedit, kbuf[0..256], klen, karm, kbusy, kemask, kewhy, ktpick, hs, cons2, dcv[0..512], gal[0..49152], gt[0..2560], evd, @as(u64, evp) + @as(u64, evn2) * 1048576 + @as(u64, evpr) * 1099511627776, pbuf[0..4160], sst[0..560], tgv[0..256], tbv[0..77312]);
+            draw(c, kit, frame, state, hov, ma, shown, task, space, sp, ss, cur, collapsed, mx, my, z, sw, sh, ws, full, qp, ring, evn, now, sug, god, glow, dk, dp, darmed, doff, dgo, walking, dlabel, tst[0..32], tcells[0..960000], topen, tcur, kyp, kstored[0..9], kmask[0..544], kmlen[0..9], kst[0..72], kfail[0..9], kopen[0..9], kedit, kbuf[0..256], klen, karm, kbusy, kemask, kewhy, ktpick, hs, cons2, dcv[0..512], gal[0..49152], gt[0..2560], evd, @as(u64, evp) + @as(u64, evn2) * 1048576 + @as(u64, evpr) * 1099511627776, pbuf[0..4160], sst[0..560], tgv[0..256], tbv[0..77568]);
             const whole : u64 = cg_image(c);
             const img : u64 = cg_crop(whole, 0.0, 0.0, sw * WIDE_RETINA, sh * WIDE_RETINA);
             msg1(layer, s_contents, img);
@@ -11961,6 +12750,8 @@ pub fn main() -> void {
             cg_image_release(whole);
         }
         if (fdraw) { vt_clean(tst[0..32]); }
+        // CL. once more after the frame: a slow draw does not leave the call's socket and audio ring unread
+        if (cl_tick(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN], clw[0..10])) { clring = true; }
         // K. keep what the window shows: write it once a change has held still (window_keep.t27)
         const wk_fl : u64 = wk_flags(collapsed, dash, qp, god, dp, auto_open);
         const wk_k : u64 = fg_mix(wk_key(state, shown, task, space, ss, sp, cur, wk_fl, evn), @as(u64, hs));
@@ -13259,7 +14050,9 @@ test a_paste_keeps_the_printable_text_and_says_when_it_left_something_out {
 
 test the_profile_region_fits_the_text_store_and_its_words_are_free {
     assert TBO_PF == TBO_QD_HIVE + QD_HIVE_CAP;
-    assert TBO_PF + PF_CAP == TB_SIZE;
+    // the CALL region (CL) follows it and ends the store
+    assert TBO_PF + PF_CAP == TBO_CL;
+    assert TBO_CL + CL_CAP == TB_SIZE;
     assert PF_TYPED + PRF_NICK_MAX_BYTES <= PF_SAVED;
     assert PF_SAVED + PRF_NICK_MAX_BYTES <= PF_CAP;
     assert PF_HOLD_HI < PF_TYPED;
@@ -13311,7 +14104,7 @@ test the_queen_control_dashboard_is_where_it_is_drawn_and_nothing_overlaps_the_f
     assert qd_open(z[0..560], false, WS_EXPANDED) == false;
     // the dashboard's words and buffers do not collide with the other feeds
     assert TPG_QD_PLANN > TPG_G_NEXT and TPG_QD_FLAGS < TPG_N and SST_QDASH < SST_SIZE and SST_QDASH != SST_DISK;
-    assert TBO_QD_PLAN >= TB_LANES_END and TBO_QD_HIVE + QD_HIVE_CAP == TBO_PF and TBO_PF + PF_CAP == TB_SIZE;
+    assert TBO_QD_PLAN >= TB_LANES_END and TBO_QD_HIVE + QD_HIVE_CAP == TBO_PF and TBO_PF + PF_CAP == TBO_CL and TBO_CL + CL_CAP == TB_SIZE;
     assert TBO_QD_TRIG == TBO_QD_PLAN + QD_PLAN_CAP and TBO_QD_BOARD == TBO_QD_TRIG + QD_TRIG_CAP and TBO_QD_HIVE == TBO_QD_BOARD + QD_BOARD_CAP;
     // the lanes table lists only work rows
     assert qd_lane_index(z[0..560], 0) == LV_NONE;
@@ -13321,4 +14114,112 @@ test the_queen_control_dashboard_is_where_it_is_drawn_and_nothing_overlaps_the_f
     z[SST_LV + LV_F + LVF_DEPTH] = LV_GROUP_DEPTH;
     assert qd_lane_index(z[0..560], 0) == 0;
     assert qd_lane_index(z[0..560], 1) == LV_NONE;
+}
+
+// CL. These tests cover the CALL region, the pill's place, the typing and the fixed lines (no socket, no call, no
+// screen): that a call rings, shows its code and carries audio from this window is a live check, not a test here.
+test the_call_region_ends_the_text_store_and_draw_reads_only_folded_bytes {
+    assert TBO_CL == TBO_PF + PF_CAP;
+    assert TBO_CL + CL_CAP == TB_SIZE;
+    assert CL_ADDR + CV_ADDR_MAX + 1 <= CL_NPOLL;
+    assert CL_NPOLL + 4 <= CL_CAPT and CL_TXO + 4 == CL_KEY_N;
+    assert CL_N10 + 4 <= CL_ADDR and CL_ME_PORT + 2 <= CL_N10;
+    // NSActivityUserInitiated (0x00FFFFFF) | NSActivityLatencyCritical (0xFF00000000)
+    assert CL_ACTIVITY == 16777215 + 1095216660480;
+    assert CL_ME_PORT + 2 <= CL_ADDR;
+    assert CL_REJ + 4 <= CL_ME_IP;
+    assert CL_PFP + 10 <= CL_PIP;
+    assert CL_CODE + 6 <= CL_PFP;
+    assert CL_KEY_N <= CL_CAP;
+}
+
+test the_call_pill_stands_between_the_header_cluster_and_the_profile_circle {
+    const widths : [4]f64 = [480.0, PANEL_W, W_PT, 1440.0];
+    var i : usize = 0;
+    while (i < 4) {
+        const w : f64 = widths[i];
+        const bx : f64 = cv_head_x(cl_head_right(w));
+        assert bx >= hdr_right(w);
+        assert bx + CV_HEAD_W + CV_HEAD_GAP <= pf_head_cx(w) - PRF_HEAD_R + 0.001;
+        const cy : f64 = 0.5 * TITLE_H;
+        assert on_cl_head(bx + 0.5 * CV_HEAD_W, cy, w);
+        assert on_cl_head(bx - 1.0, cy, w) == false;
+        assert on_cl_head(bx + 0.5 * CV_HEAD_W, TITLE_H + 2.0, w) == false;
+        // the pill and the profile circle never answer at each other's centre
+        assert on_pf_head(bx + 0.5 * CV_HEAD_W, cy, w) == false;
+        assert on_cl_head(pf_head_cx(w), pf_head_cy(), w) == false;
+        assert on_god_switch(bx + 0.5 * CV_HEAD_W, cy, hdr_right(w), TITLE_H) == false;
+        assert on_dock_button(bx + 0.5 * CV_HEAD_W, cy, w) == false;
+        i = i + 1;
+    }
+}
+
+test the_address_field_takes_digits_dots_and_a_colon_and_stops_at_21 {
+    var cl : [256]u8 = undefined;
+    pft_blank(cl[0..256]);
+    cl_unit(cl[0..256], 49);
+    cl_unit(cl[0..256], 50);
+    cl_unit(cl[0..256], 55);
+    cl_unit(cl[0..256], 97);
+    cl_unit(cl[0..256], 1103);
+    cl_unit(cl[0..256], 32);
+    assert cl[CL_ALEN] == 3;
+    cl_back(cl[0..256]);
+    assert cl[CL_ALEN] == 2;
+    cl_back(cl[0..256]);
+    cl_back(cl[0..256]);
+    cl_back(cl[0..256]);
+    assert cl[CL_ALEN] == 0;
+    var k : u32 = 0;
+    while (k < 40) {
+        cl_unit(cl[0..256], 57);
+        k = k + 1;
+    }
+    assert @as(usize, cl[CL_ALEN]) == CV_ADDR_MAX;
+    // a typed character clears a note
+    cl[CL_NOTE] = 3;
+    cl_back(cl[0..256]);
+    assert cl[CL_NOTE] == 0;
+}
+
+test with_calls_off_only_call_answers_and_it_says_why {
+    var cl : [256]u8 = undefined;
+    pft_blank(cl[0..256]);
+    var s : [16]u8 = undefined;
+    var w : [8]u64 = undefined;
+    cl[CL_NOTE] = @as(u8, @intCast(CV_N_BIND));
+    cl_do(cl[0..256], s[0..16], w[0..8], CV_A_HANGUP);
+    cl_do(cl[0..256], s[0..16], w[0..8], CV_A_ANSWER);
+    assert cl[CL_NOTE] == @as(u8, @intCast(CV_N_BIND));
+    cl[CL_NOTE] = 0;
+    cl_do(cl[0..256], s[0..16], w[0..8], CV_A_DIAL);
+    assert cl[CL_NOTE] == @as(u8, @intCast(CV_N_SOCKET));
+    assert cv_note_text(CV_N_SOCKET).len > 0;
+}
+
+test during_a_call_the_cursor_is_set_on_a_change_or_every_200_ms_and_always_without_one {
+    assert cl_cursor_due(false, 1, 1, 1000, 999);
+    assert cl_cursor_due(true, 1, 2, 1000, 999);
+    assert cl_cursor_due(true, 1, 1, 1000, 900) == false;
+    assert cl_cursor_due(true, 1, 1, 1100, 900);
+    assert cl_cursor_due(true, 2, 2, 5, 900);
+}
+
+test every_reason_a_call_ends_with_has_its_line_and_ports_parse {
+    var r : u32 = 1;
+    while (r <= 13) {
+        assert cl_reason_text(r).len > 0;
+        r = r + 1;
+    }
+    assert cl_reason_text(0).len == 0;
+    assert cl_port_of("47728", 5) == 47728;
+    assert cl_port_of("0", 1) == 0;
+    assert cl_port_of("65536", 5) == 0;
+    assert cl_port_of("4x", 2) == 0;
+    assert cl_port_of("", 0) == 0;
+    var b : [8]u8 = undefined;
+    cl_put32(b[0..8], 0, 305419896);
+    assert cl_get32(b[0..8], 0) == 305419896;
+    cl_put_ip(b[0..8], 4, 3232239364);
+    assert cl_ip(b[0..8], 4) == 3232239364;
 }

@@ -430,9 +430,13 @@ pub const APP_PTY_SPEC : str = "specs/t27os/pty_server.t27";
 pub const APP_PLIST_SPEC : str = "specs/t27os/plist_main.t27";
 pub const APP_FILE_COUNT : u32 = 3;
 
-/// The frameworks the window links, in link order, after -lSystem -lobjc. The PTY server links -lSystem only.
-pub const APP_FRAMEWORKS : [9]str = ["Foundation", "AppKit", "CoreGraphics", "CoreText", "CoreFoundation", "QuartzCore", "Security", "WebKit", "ImageIO"];
-pub const APP_FRAMEWORK_COUNT : u32 = 9;
+/// The frameworks the window links, in link order, after -lSystem -lobjc -lffi. The PTY server links -lSystem only.
+/// AudioToolbox and libffi are the call's (call_session.t27: AudioQueue for the microphone and the speakers, and
+/// AES-128-GCM from CommonCrypto through ffi_call, as call_crypto_probe.t27 explains).
+pub const APP_FRAMEWORKS : [10]str = ["Foundation", "AppKit", "CoreGraphics", "CoreText", "CoreFoundation", "QuartzCore", "Security", "WebKit", "ImageIO", "AudioToolbox"];
+pub const APP_FRAMEWORK_COUNT : u32 = 10;
+/// The system library the window links besides libSystem and libobjc.
+pub const APP_LIB_FFI : str = "-lffi";
 
 /// The oldest macOS the app runs on: the platform version passed to ld and written as LSMinimumSystemVersion.
 pub const APP_MIN_MACOS : str = "11.0";
@@ -536,24 +540,27 @@ pub fn plist_text(out : []u8, cap : usize, version : []const u8, version_len : u
     w = put_line(out, cap, w, "</string>", 9);
     w = put_line(out, cap, w, "<key>LSMinimumSystemVersion</key><string>11.0</string>", 54);
     w = put_line(out, cap, w, "<key>NSHighResolutionCapable</key><true/>", 41);
+    w = put_line(out, cap, w, "<key>NSMicrophoneUsageDescription</key><string>T27 OS uses the microphone during a call you answer or start.</string>", 117);
     w = put_line(out, cap, w, "<key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>", 88);
     w = put_line(out, cap, w, "</dict>", 7);
     w = put_line(out, cap, w, "</plist>", 8);
     return w;
 }
 
-test the_app_has_three_files_and_nine_frameworks {
+test the_app_has_three_files_and_ten_frameworks {
     assert(APP_FILE_COUNT == 3);
     assert(app_file_at(0) == "target/t27os/T27OS.app/Contents/MacOS/T27OS");
     assert(app_file_at(1) == "target/t27os/T27OS.app/Contents/Info.plist");
     assert(app_file_at(2) == "target/t27os/t27os-pty");
     assert(app_file_at(3) == "");
-    assert(APP_FRAMEWORK_COUNT == 9);
+    assert(APP_FRAMEWORK_COUNT == 10);
     assert(framework_at(0) == "Foundation");
     assert(framework_at(6) == "Security");
     assert(framework_at(7) == "WebKit");
     assert(framework_at(8) == "ImageIO");
-    assert(framework_at(9) == "");
+    assert(framework_at(9) == "AudioToolbox");
+    assert(framework_at(10) == "");
+    assert(APP_LIB_FFI == "-lffi");
 }
 
 test the_app_builds_on_apple_silicon_only {
@@ -608,6 +615,7 @@ test the_plist_names_the_bundle_the_version_and_the_minimum_system {
     assert(buf_has(out[0..1024], n, "<key>CFBundleVersion</key><string>42</string>", 45));
     assert(buf_has(out[0..1024], n, "<key>LSMinimumSystemVersion</key><string>11.0</string>", 54));
     assert(buf_has(out[0..1024], n, "<key>NSHighResolutionCapable</key><true/>", 41));
+    assert(buf_has(out[0..1024], n, "<key>NSMicrophoneUsageDescription</key><string>T27 OS uses the microphone during a call you answer or start.</string>", 117));
     assert(buf_has(out[0..1024], n, "<plist version='1.0'>", 21));
     assert(buf_has(out[0..1024], n, "</plist>", 8));
     assert(out[n - 1] == 10);
