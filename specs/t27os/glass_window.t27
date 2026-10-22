@@ -9188,13 +9188,21 @@ pub fn cl_reason_text(r: u32) -> str {
     return "";
 }
 
-/// An environment variable (at most 31 bytes) into out; its length, 0 when unset.
+/// How many bytes of a variable of length n are copied into a buffer of cap bytes: at most 31, never past cap.
+pub fn cl_env_cap(n: u64, cap: usize) -> u64 {
+    var m : u64 = n;
+    if (m > 31) { m = 31; }
+    if (m > @as(u64, cap)) { m = @as(u64, cap); }
+    return m;
+}
+
+/// An environment variable (at most 31 bytes, cut at out.len) into out; its length, 0 when unset.
 fn cl_env(name: []const u8, out: []u8) -> usize {
     const a : u64 = sys_getenv(name);
     if (a == 0) { return 0; }
     var n : u64 = sys_strlen(a);
-    if (n > 31) { n = 31; }
-    sys_peek(out[0..32], a, n);
+    n = cl_env_cap(n, out.len);
+    sys_peek(out, a, n);
     return @as(usize, @intCast(n));
 }
 
@@ -15411,6 +15419,14 @@ test during_a_call_the_cursor_is_set_on_a_change_or_every_200_ms_and_always_with
     assert cl_cursor_due(true, 1, 1, 1000, 900) == false;
     assert cl_cursor_due(true, 1, 1, 1100, 900);
     assert cl_cursor_due(true, 2, 2, 5, 900);
+}
+
+test an_environment_variable_is_cut_at_the_buffer_it_is_read_into {
+    assert cl_env_cap(4, 32) == 4;
+    assert cl_env_cap(40, 32) == 31;
+    assert cl_env_cap(20, 16) == 16;
+    assert cl_env_cap(16, 16) == 16;
+    assert cl_env_cap(5, 0) == 0;
 }
 
 test every_reason_a_call_ends_with_has_its_line_and_ports_parse {
