@@ -8,8 +8,9 @@
 // dlsym address of the .t27 fn vidp_frame (a t27b all-scalar fn is exported, callback_probe.t27 proved the trick for
 // AudioQueue). The method has FIVE scalar parameters (self, cmd, output, sampleBuffer, connection), not four.
 // The camera delivers BGRA frames on a private serial dispatch queue (a thread of its own); vidp_frame counts
-// them, notes the clock of the first and last, the frame size, a hash of 4096 sampled bytes, and writes the first
-// 10 frames as 320x240 JPEG (quality 0.5) to /tmp/vid/NN.jpg through ImageIO.
+// them, notes the clock of the first and last, the frame size, a hash of 4096 sampled bytes, and writes 10 frames (every 6th from the 30th, the first ones are dark while exposure settles) as 320x240 JPEG (quality 0.5)
+// to /tmp/vid/NN.jpg through ImageIO, with min/max/mean of the raw and the 320x240 pixels, and dumps frame 40 raw to
+// /tmp/vid/raw_frame.bgra.
 // The camera permission is the system's: if AVCaptureDevice authorizationStatusForMediaType is not 3 (authorized),
 // the probe prints the exact status and stops; it never tries to get around TCC. VIDP_ASK=1 lets a status of 0
 // (not determined) go on, which makes the system ask once.
@@ -51,6 +52,9 @@ fn vp_thread() -> u64 { return @extern("pthread_self"); }
 fn vp_mkdir(path: []const u8, mode: u32) -> i32 { return @extern("mkdir"); }
 fn vp_calloc(n: u64, size: u64) -> u64 { return @extern("calloc"); }
 fn vp_free(p: u64) -> void { @extern("free"); }
+fn vp_open(path: []const u8, flags: i32, mode: u32) -> i32 { return @extern("open"); }
+fn vp_close(fd: i32) -> i32 { return @extern("close"); }
+fn vp_write_at(fd: i32, p: u64, n: u64) -> i64 { return @extern("write"); }
 fn vp_cf_str(alloc: u64, bytes: []const u8, n: usize, enc: u32, ext: bool) -> u64 { return @extern("CFStringCreateWithBytes"); }
 fn vp_cf_url(alloc: u64, path: u64, style: u64, is_dir: bool) -> u64 { return @extern("CFURLCreateWithFileSystemPath"); }
 fn vp_cf_num(alloc: u64, kind: u64, p: []const u8) -> u64 { return @extern("CFNumberCreate"); }
@@ -123,6 +127,67 @@ fn vp_konst(name: []const u8) -> u64 {
 /// 12 callbacks that found no pixel buffer, 16..25 hash of the first 10 frames.
 const VP_SLOT_HASH : u64 = 16;
 
+/// More slots: 13 JPEG frames saved so far (the next JPEG index), 14 raw frame dumped (0/1), 15 frame number of the dump;
+/// 26..35 frame number (0-based) of each saved JPEG; 40..79 sampled raw stats of each saved frame (min, max, mean x100,
+/// non-zero channel count; 4 slots each); 80..119 the same for the 320x240 image just before JPEG encoding;
+/// 120..123 the full raw stats of the dumped frame (min, max, mean x100, non-zero channels), 124 its channel count;
+/// 136..199 sampled mean x100 of each of the first 64 frames (the warm-up curve).
+const VP_SLOT_RAWSTAT : u64 = 40;
+const VP_SLOT_JPGSTAT : u64 = 80;
+const VP_SLOT_FULL : u64 = 120;
+const VP_SLOT_CURVE : u64 = 136;
+/// JPEGs are taken from this frame on (a camera needs about a second to settle exposure), every VP_EVERY-th frame.
+const VP_WARM : u64 = 30;
+const VP_EVERY : u64 = 6;
+/// The frame whose BGRA bytes go to /tmp/vid/raw_frame.bgra.
+const VP_RAW_AT : u64 = 40;
+
+/// Stats of the B, G, R bytes of a BGRA image (alpha is skipped), looking at every sx-th pixel of every sy-th row:
+/// writes min, max, mean x100, non-zero count to st slots at..at+3 and returns the channel count looked at.
+fn vp_stats(base: u64, row: u64, w: u64, h: u64, sx: u64, sy: u64, st: u64, at: u64) -> u64 {
+    var mn : u64 = 255;
+    var mx : u64 = 0;
+    var sum : u64 = 0;
+    var nz : u64 = 0;
+    var cnt : u64 = 0;
+    var px : [4]u8 = undefined;
+    var y : u64 = 0;
+    while (y < h) {
+        var x : u64 = 0;
+        while (x < w) {
+            sys_peek(px[0..4], base + y * row + x * 4, 4);
+            var c : usize = 0;
+            while (c < 3) {
+                const v : u64 = @as(u64, @intCast(px[c]));
+                if (v < mn) { mn = v; }
+                if (v > mx) { mx = v; }
+                if (v != 0) { nz = nz + 1; }
+                sum = sum + v;
+                cnt = cnt + 1;
+                c = c + 1;
+            }
+            x = x + sx;
+        }
+        y = y + sy;
+    }
+    if (cnt == 0) { return 0; }
+    vp_put(st + at * 8, mn);
+    vp_put(st + (at + 1) * 8, mx);
+    vp_put(st + (at + 2) * 8, sum * 100 / cnt);
+    vp_put(st + (at + 3) * 8, nz);
+    return cnt;
+}
+
+/// All bytes of the locked frame to /tmp/vid/raw_frame.bgra (row * h bytes, rows as the camera gave them).
+fn vp_dump_raw(base: u64, row: u64, h: u64) -> bool {
+    const fd : i32 = vp_open("/tmp/vid/raw_frame.bgra", 1537, 420);
+    if (fd < 0) { return false; }
+    const n : u64 = row * h;
+    const w : i64 = vp_write_at(fd, base, n);
+    vp_close(fd);
+    return w == @as(i64, @intCast(n));
+}
+
 /// "/tmp/vid/NN.jpg" for frame index i (0..99) into out; the length.
 fn vp_path(i: u64, out: []u8) -> usize {
     const t : []const u8 = "/tmp/vid/";
@@ -144,7 +209,7 @@ fn vp_stride(n: u64) -> u64 {
 }
 
 /// A 320x240 JPEG of the locked BGRA buffer at `base` into the file `idx`; true when ImageIO wrote it.
-fn vp_write_jpeg(base: u64, w: u64, h: u64, row: u64, idx: u64) -> bool {
+fn vp_write_jpeg(base: u64, w: u64, h: u64, row: u64, idx: u64, st: u64) -> bool {
     const space : u64 = vp_cg_rgb();
     const sctx : u64 = vp_cg_bitmap(base, @as(usize, w), @as(usize, h), 8, @as(usize, row), space, VP_BITMAP_INFO);
     if (sctx == 0) { vp_cg_space_release(space); return false; }
@@ -155,6 +220,7 @@ fn vp_write_jpeg(base: u64, w: u64, h: u64, row: u64, idx: u64) -> bool {
         const dctx : u64 = vp_cg_bitmap(mem, @as(usize, VP_W), @as(usize, VP_H), 8, @as(usize, VP_W * 4), space, VP_BITMAP_INFO);
         if (dctx != 0) {
             vp_cg_draw(dctx, 0.0, 0.0, 320.0, 240.0, simg);
+            vp_stats(mem, VP_W * 4, VP_W, VP_H, 1, 1, st, VP_SLOT_JPGSTAT + idx * 4);
             const dimg : u64 = vp_cg_image(dctx);
             if (dimg != 0) {
                 var pb : [16]u8 = undefined;
@@ -219,21 +285,38 @@ pub fn vidp_frame(me: u64, cmd: u64, output: u64, sbuf: u64, conn: u64) -> u64 {
     const row : u64 = vp_pb_row(pb);
     vp_put(st + 72, row);
     vp_put(st + 80, @as(u64, vp_pb_fmt(pb)));
-    if (base != 0 and n < VP_KEEP and vp_pb_fmt(pb) == VP_BGRA) {
-        // hash of about 4096 sampled bytes, so two frames can be told apart without trusting the encoder
-        const total : u64 = row * h;
-        const step : u64 = vp_stride(total);
-        var hsh : u64 = 7;
-        var p : u64 = 0;
-        var one : [1]u8 = undefined;
-        while (p < total) {
-            sys_peek(one[0..1], base + p, 1);
-            hsh = (hsh * 31 + @as(u64, @intCast(one[0]))) % 1000000007;
-            p = p + step;
+    if (base != 0 and vp_pb_fmt(pb) == VP_BGRA) {
+        // warm-up curve: sampled mean x100 of each of the first 64 frames
+        if (n < 64) {
+            vp_stats(base, row, w, h, 16, 16, st, 127);
+            vp_put(st + (VP_SLOT_CURVE + n) * 8, vp_get(st + 129 * 8));
         }
-        vp_put(st + (VP_SLOT_HASH + n) * 8, hsh);
-        if (vp_write_jpeg(base, w, h, row, n)) { vp_put(st + 40, vp_get(st + 40) + 1); }
-        else { vp_put(st + 48, vp_get(st + 48) + 1); }
+        if (n == VP_RAW_AT and vp_get(st + 14 * 8) == 0) {
+            const cc : u64 = vp_stats(base, row, w, h, 1, 1, st, VP_SLOT_FULL);
+            vp_put(st + 124 * 8, cc);
+            if (vp_dump_raw(base, row, h)) { vp_put(st + 14 * 8, 1); } else { vp_put(st + 14 * 8, 2); }
+            vp_put(st + 15 * 8, n);
+        }
+        const k : u64 = vp_get(st + 13 * 8);
+        if (k < VP_KEEP and n >= VP_WARM and (n - VP_WARM) % VP_EVERY == 0) {
+            // hash of about 4096 sampled bytes, so two frames can be told apart without trusting the encoder
+            const total : u64 = row * h;
+            const step : u64 = vp_stride(total);
+            var hsh : u64 = 7;
+            var p : u64 = 0;
+            var one : [1]u8 = undefined;
+            while (p < total) {
+                sys_peek(one[0..1], base + p, 1);
+                hsh = (hsh * 31 + @as(u64, @intCast(one[0]))) % 1000000007;
+                p = p + step;
+            }
+            vp_put(st + (VP_SLOT_HASH + k) * 8, hsh);
+            vp_put(st + (26 + k) * 8, n);
+            vp_stats(base, row, w, h, 4, 4, st, VP_SLOT_RAWSTAT + k * 4);
+            if (vp_write_jpeg(base, w, h, row, k, st)) { vp_put(st + 40, vp_get(st + 40) + 1); }
+            else { vp_put(st + 48, vp_get(st + 48) + 1); }
+            vp_put(st + 13 * 8, k + 1);
+        }
     }
     vp_pb_unlock(pb, 1);
     vp_put(st, n + 1);
@@ -333,28 +416,28 @@ fn vp_fake_sample(k: u64) -> u64 {
 }
 
 pub fn main() -> void {
-    var sb : [192]u8 = undefined;
+    var sb : [2048]u8 = undefined;
     var z : usize = 0;
-    while (z < 192) { sb[z] = 0; z = z + 1; }
-    const st : u64 = sys_addr(sb[0..192], sb[0..192], 0);
+    while (z < 2048) { sb[z] = 0; z = z + 1; }
+    const st : u64 = sys_addr(sb[0..2048], sb[0..2048], 0);
     vp_put(st + 64, VP_MAGIC);
     // Never true (the magic is set): only makes sure vidp_frame is emitted and so exported.
     if (vp_get(st + 64) == 99) { vidp_frame(0, 0, 0, 0, 0); }
     vp_mkdir("/tmp/vid", 493);
 
     if (sys_getenv("VIDP_SELFTEST") != 0) {
-        // No camera: the same delegate class, reached through objc_msgSend with 10 synthetic frames.
+        // No camera: the same delegate class, reached through objc_msgSend with 90 synthetic frames (JPEGs start at frame 30).
         const d : u64 = vp_make_delegate(st);
         if (d == 0) { sys_exit(4); }
         var k : u64 = 0;
-        while (k < 10) {
+        while (k < 90) {
             const fsb : u64 = vp_fake_sample(k);
             if (fsb == 0) { say_line("synthetic sample buffer failed\n"); sys_exit(4); }
             msg3(d, vp_sel("captureOutput:didOutputSampleBuffer:fromConnection:"), 0, fsb, 0);
             vp_release(fsb);
             k = k + 1;
         }
-        const ok : bool = vp_get(st) == 10 and vp_get(st + 40) == 10;
+        const ok : bool = vp_get(st) == 90 and vp_get(st + 40) == 10;
         say_num("SELFTEST delegate calls: ", vp_get(st));
         say_num("SELFTEST JPEG written: ", vp_get(st + 40));
         say_num("SELFTEST width x: ", vp_get(st + 24));
@@ -426,13 +509,13 @@ pub fn main() -> void {
     if (!can_out) { sys_exit(4); }
     msg1(sess, vp_sel("addOutput:"), out);
 
-    // 5 seconds.
+    // 9 seconds (the JPEGs start at frame 30 and the 10th is frame 84, about 5.5 s at 16 FPS).
     const t0 : u64 = vp_us();
     msg0(sess, vp_sel("startRunning"));
     const running : bool = msg_test(sess, vp_sel("isRunning"));
     say("session is running", running);
     var s : u32 = 0;
-    while (s < 50) {
+    while (s < 90) {
         vp_run(mode, 0.1, false);
         s = s + 1;
         if (s % 10 == 0) { say_num("frames so far: ", vp_get(st)); }
@@ -443,7 +526,7 @@ pub fn main() -> void {
     vp_run(mode, 0.1, false);
 
     const frames : u64 = vp_get(st);
-    say_num("start-up (startRunning to first frame), ms: ", (vp_get(st + 8) - t0) / 1000);
+    if (frames > 0) { say_num("start-up (startRunning to first frame), ms: ", (vp_get(st + 8) - t0) / 1000); }
     say_num("frames: ", frames);
     say_num("width: ", vp_get(st + 24));
     say_num("height: ", vp_get(st + 32));
@@ -460,15 +543,37 @@ pub fn main() -> void {
     say_num("JPEG failed: ", vp_get(st + 48));
     var i : u64 = 0;
     var distinct : u64 = 0;
-    while (i < VP_KEEP and i < frames) {
+    const kept : u64 = vp_get(st + 13 * 8);
+    while (i < kept) {
         var pb2 : [16]u8 = undefined;
         const pn : usize = vp_path(i, pb2[0..16]);
         sys_write(1, pb2[0..16], @as(u64, pn));
-        say_num("  sampled-pixel hash: ", vp_get(st + (VP_SLOT_HASH + i) * 8));
+        say_num("  frame number: ", vp_get(st + (26 + i) * 8));
+        say_num("    raw sampled min: ", vp_get(st + (VP_SLOT_RAWSTAT + i * 4) * 8));
+        say_num("    raw sampled max: ", vp_get(st + (VP_SLOT_RAWSTAT + i * 4 + 1) * 8));
+        say_num("    raw sampled mean x100: ", vp_get(st + (VP_SLOT_RAWSTAT + i * 4 + 2) * 8));
+        say_num("    raw sampled non-zero channels: ", vp_get(st + (VP_SLOT_RAWSTAT + i * 4 + 3) * 8));
+        say_num("    320x240 pre-JPEG min: ", vp_get(st + (VP_SLOT_JPGSTAT + i * 4) * 8));
+        say_num("    320x240 pre-JPEG max: ", vp_get(st + (VP_SLOT_JPGSTAT + i * 4 + 1) * 8));
+        say_num("    320x240 pre-JPEG mean x100: ", vp_get(st + (VP_SLOT_JPGSTAT + i * 4 + 2) * 8));
+        say_num("    320x240 pre-JPEG non-zero channels: ", vp_get(st + (VP_SLOT_JPGSTAT + i * 4 + 3) * 8));
+        say_num("    sampled-pixel hash: ", vp_get(st + (VP_SLOT_HASH + i) * 8));
         if (i == 0 or vp_get(st + (VP_SLOT_HASH + i) * 8) != vp_get(st + (VP_SLOT_HASH + i - 1) * 8)) { distinct = distinct + 1; }
         i = i + 1;
     }
     say_num("frames whose hash differs from the previous one: ", distinct);
+    say_num("RAW DUMP state (1 written, 2 failed, 0 none): ", vp_get(st + 14 * 8));
+    say_num("RAW frame number: ", vp_get(st + 15 * 8));
+    say_num("RAW full min: ", vp_get(st + VP_SLOT_FULL * 8));
+    say_num("RAW full max: ", vp_get(st + (VP_SLOT_FULL + 1) * 8));
+    say_num("RAW full mean x100: ", vp_get(st + (VP_SLOT_FULL + 2) * 8));
+    say_num("RAW full non-zero channels: ", vp_get(st + (VP_SLOT_FULL + 3) * 8));
+    say_num("RAW full channels counted: ", vp_get(st + 124 * 8));
+    var c : u64 = 0;
+    while (c < 64 and c < frames) {
+        say_num("curve frame mean x100: ", vp_get(st + (VP_SLOT_CURVE + c) * 8));
+        c = c + 4;
+    }
     if (proto == 0) { say_line("note: objc_getProtocol not found by dlsym (not needed, the selector is what AVFoundation calls)\n"); }
     if (frames > 0 and vp_get(st + 40) >= VP_KEEP) { say_line("CAPTURE OK (frames only, not a video call)\n"); sys_exit(0); }
     say_line("CAPTURE NOT PROVEN: see the counters above\n");
