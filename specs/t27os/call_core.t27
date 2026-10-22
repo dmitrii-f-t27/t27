@@ -597,6 +597,9 @@ pub fn gr_list_port(b: []const u8, n: usize) -> u64 {
 // 100 ms away.
 
 pub const CK_T_VIDEO : u32 = 33;
+/// A chat frame (owner, 2026-10-22): sealed like media, carried only by a message session (call_session
+/// CS_AUDIO_NONE); its plaintext is chat_core.t27's payload (text part, ACK or READ).
+pub const CK_T_TEXT : u32 = 34;
 pub const VC_PART : usize = 1000;
 pub const VC_HDR : usize = 12;
 pub const VC_PT_MAX : usize = 1012;

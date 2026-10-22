@@ -111,6 +111,7 @@ use t27os::call_core::CK_T_CONFIRM;
 use t27os::call_core::CK_T_BYE;
 use t27os::call_core::CK_T_MEDIA;
 use t27os::call_core::CK_T_VIDEO;
+use t27os::call_core::CK_T_TEXT;
 use t27os::call_core::VC_JPEG_MAX;
 use t27os::call_core::VC_SRC_CAM;
 use t27os::call_core::VC_PT_MAX;
@@ -334,6 +335,20 @@ pub const CS_AUDIO_TEST : u32 = 2;
 /// Like TEST (no devices) but the frames are a quiet triangle wave that names its sender, they go through the jitter
 /// buffer, and a software speaker mixes the members every 10 ms exactly as the device callback does. A test mode.
 pub const CS_AUDIO_TONE : u32 = 3;
+/// A message session (chat, owner 2026-10-22): the same handshake and sealed channel, no audio and no video at all;
+/// it alone carries CK_T_TEXT frames (cs_text_send / cs_text_take). The audio block is unused in this mode, so the
+/// received text frames queue there (CS_TXQ).
+pub const CS_AUDIO_NONE : u32 = 4;
+/// Text counters (cs_stat): sealed and sent, opened and queued, dropped because the queue was full.
+pub const CS_ST_TEXT_TX : u32 = 54;
+pub const CS_ST_TEXT_RX : u32 = 55;
+pub const CS_ST_TEXT_DROP : u32 = 56;
+/// The queue of received text frames of a message session, inside the unused audio block: head u64, tail u64, then
+/// CS_TXQ_N entries of CS_TXE bytes (length u16 LE, the opened payload).
+pub const CS_TXQ : usize = 10240;
+pub const CS_TXQ_N : u64 = 64;
+pub const CS_TXE : usize = 736;
+pub const CS_TXT_MAX : usize = 720;
 
 pub const CS_EV_NONE : u32 = 0;
 pub const CS_EV_CALLING : u32 = 1;
@@ -626,7 +641,7 @@ fn cs_send_sealed_bye(s: []u8) -> void {
 /// fingerprint is not 10 bytes, the mode is unknown or the OS refuses.
 pub fn cs_open(s: []u8, me_fp: []const u8, bind_ip: u64, port: u64, audio: u32) -> bool {
     if (s.len < CS_LEN or me_fp.len != 10 or bind_ip > 4294967295 or port > 65535) { return false; }
-    if (audio != CS_AUDIO_DEV and audio != CS_AUDIO_TEST and audio != CS_AUDIO_TONE) { return false; }
+    if (audio != CS_AUDIO_DEV and audio != CS_AUDIO_TEST and audio != CS_AUDIO_TONE and audio != CS_AUDIO_NONE) { return false; }
     ck_wipe(s[0..CS_LEN]);
     ck_put(s, EP_ME, me_fp);
     s[1] = @as(u8, @intCast(CK_IDLE));
@@ -983,6 +998,7 @@ fn cs_audio_stop(s: []u8) -> void {
 /// A call enters ACTIVE on this link. A group link beyond the first only resets its own jitter buffer and takes its
 /// place in the microphone ring; the first link starts the devices unless a group already runs them.
 fn cs_audio_enter(s: []u8) -> bool {
+    if (cs_g(s, CS_MODE) == @as(u64, CS_AUDIO_NONE)) { return true; }
     if (cg(s, LG_SLAVE) != 0) {
         cs_audio_reset(s);
         const pm : u64 = cs_aud(s) - cg(s, LG_IDX) * CS_LEN;
@@ -1000,6 +1016,7 @@ fn cs_audio_enter(s: []u8) -> bool {
 
 /// A call leaves ACTIVE on this link. The devices stop with the last link that carries media.
 fn cs_audio_leave(s: []u8) -> void {
+    if (cs_g(s, CS_MODE) == @as(u64, CS_AUDIO_NONE)) { return; }
     if (cg(s, LG_SLAVE) != 0) { return; }
     var k : usize = 1;
     const nl : usize = cs_links(s);
@@ -1217,7 +1234,11 @@ fn cs_on_packet(s: []u8, m: []const u8, from: []const u8) -> void {
         ckh_go(ep, ev);
         return;
     }
-    if (typ == CK_T_MEDIA or typ == CK_T_BYE or typ == CK_T_VIDEO) {
+    if (typ == CK_T_TEXT and cs_g(s, CS_MODE) != @as(u64, CS_AUDIO_NONE)) {
+        cs_add(s, CS_ST_REJ_STATE, 1);
+        return;
+    }
+    if (typ == CK_T_MEDIA or typ == CK_T_BYE or typ == CK_T_VIDEO or typ == CK_T_TEXT) {
         var pt : [1928]u8 = undefined;
         const o : i64 = ckh_open(ep, m, pt[0..1928]);
         if (o == -2) { cs_add(s, CS_ST_REJ_STATE, 1); return; }
@@ -1231,6 +1252,10 @@ fn cs_on_packet(s: []u8, m: []const u8, from: []const u8) -> void {
         }
         if (typ == CK_T_VIDEO) {
             cs_take_video(s, pt[0..@as(usize, @intCast(o))]);
+            return;
+        }
+        if (typ == CK_T_TEXT) {
+            cs_take_text(s, pt[0..@as(usize, @intCast(o))]);
             return;
         }
         cs_take_media(s, pt[0..@as(usize, @intCast(o))]);
@@ -1821,7 +1846,7 @@ fn csg_pump(s: []u8, now: u64) -> void {
         if (act > 0 and cg(s, G_AUDIO_RUN) == 0) { cs_audio_start(s); }
         if (act == 0 and cg(s, G_AUDIO_RUN) == 1) { cs_audio_stop(s); }
     }
-    if (act > 0) {
+    if (act > 0 and cs_g(s, CS_MODE) != @as(u64, CS_AUDIO_NONE)) {
         const mode : u64 = cs_g(s, CS_MODE);
         if (mode == @as(u64, CS_AUDIO_TEST) or mode == @as(u64, CS_AUDIO_TONE)) { cs_tone_tick(s); }
         const pm : u64 = cs_aud(s);
@@ -2031,6 +2056,54 @@ fn cs_vtick(s: []u8, now: u64) -> void {
     if (took > cvg(s, VT_MAKE_MAX)) { cvp(s, VT_MAKE_MAX, took); }
 }
 
+// ---------------------------------------------------------------- text (message session)
+
+fn cs_tq(s: []const u8, k: usize) -> u64 { return get_u64(s, CS_AUD + CS_TXQ + k * 8); }
+fn cs_tqp(s: []u8, k: usize, v: u64) -> void { put_u64(s, CS_AUD + CS_TXQ + k * 8, v); }
+fn cs_tqe(i: u64) -> usize { return CS_AUD + CS_TXQ + 16 + @as(usize, @intCast(i % CS_TXQ_N)) * CS_TXE; }
+
+/// One opened text payload of a message session into the queue; a full queue drops it (its sender sends it again,
+/// it was not acknowledged).
+fn cs_take_text(s: []u8, pt: []const u8) -> void {
+    const h : u64 = cs_tq(s, 0);
+    const t : u64 = cs_tq(s, 1);
+    if (pt.len == 0 or pt.len > CS_TXT_MAX or t - h >= CS_TXQ_N) {
+        cs_add(s, CS_ST_TEXT_DROP, 1);
+        return;
+    }
+    const e : usize = cs_tqe(t);
+    s[e] = @as(u8, @intCast(pt.len & 255));
+    s[e + 1] = @as(u8, @intCast(pt.len >> 8));
+    ck_put(s, e + 2, pt);
+    cs_tqp(s, 1, t + 1);
+    cs_add(s, CS_ST_TEXT_RX, 1);
+}
+
+/// Seal one text payload (chat_core) and send it: only in a message session that is ACTIVE. False otherwise or when
+/// the send failed.
+pub fn cs_text_send(s: []u8, pt: []const u8) -> bool {
+    if (!cs_live(s) or cs_g(s, CS_MODE) != @as(u64, CS_AUDIO_NONE) or ckh_state(s[0..EP_LEN]) != CK_ACTIVE) { return false; }
+    if (pt.len == 0 or pt.len > CS_TXT_MAX) { return false; }
+    var fr : [808]u8 = undefined;
+    const m : usize = ckh_seal(s[0..EP_LEN], CK_T_TEXT, pt, fr[0..808]);
+    if (m == 0 or !cs_send(s, fr[0..m])) { return false; }
+    cs_add(s, CS_ST_TEXT_TX, 1);
+    return true;
+}
+
+/// The oldest received text payload into out: its length, 0 when the queue is empty (or out is short: it stays).
+pub fn cs_text_take(s: []u8, out: []u8) -> usize {
+    if (!cs_live(s) or cs_g(s, CS_MODE) != @as(u64, CS_AUDIO_NONE)) { return 0; }
+    const h : u64 = cs_tq(s, 0);
+    if (h == cs_tq(s, 1)) { return 0; }
+    const e : usize = cs_tqe(h);
+    const n : usize = @as(usize, s[e]) | (@as(usize, s[e + 1]) << 8);
+    if (out.len < n) { return 0; }
+    ck_put(out, 0, s[e + 2..e + 2 + n]);
+    cs_tqp(s, 0, h + 1);
+    return n;
+}
+
 // ---------------------------------------------------------------- the poll
 
 /// Which link of a window slice a datagram belongs to. A one to one session, and any window with no group open, has
@@ -2137,6 +2210,10 @@ test the_block_holds_its_parts_without_overlap {
     assert G_MEM + 3 * 3 <= 96;
     assert 96 * 8 <= CS_GBODY;
     assert CS_K_JB_MAX < 64;
+    // the text queue of a message session sits in the audio block, past every slot the audio code writes
+    assert CS_TXQ >= 8192 and CS_TXQ + 16 + @as(usize, @intCast(CS_TXQ_N)) * CS_TXE <= CBP_F_BYTES;
+    assert CS_TXE >= 2 + CS_TXT_MAX;
+    assert CS_K_VENC < CS_ST_TEXT_TX and CS_ST_TEXT_DROP < 64;
 }
 
 test a_sealed_media_frame_is_header_packet_tag_and_fits_a_datagram {
@@ -2354,6 +2431,47 @@ test a_block_that_is_not_open_refuses_every_action {
     assert cs_open(s[0..CS_LEN], fp[0..10], 0, 65536, CS_AUDIO_TEST) == false;
     assert cs_open(s[0..CS_LEN], fp[0..10], 0, 47727, 9) == false;
     assert cs_g(s[0..CS_LEN], CS_MAGIC) == 0 and s[EP_ME] == 0;
+}
+
+test a_message_session_queues_text_and_a_call_refuses_it {
+    var s : [165504]u8 = undefined;
+    cs_t_live(s[0..CS_LEN]);
+    var pt : [720]u8 = undefined;
+    var out : [720]u8 = undefined;
+    pt[0] = 1;
+    pt[1] = 0;
+    pt[2] = 7;
+    // a call with audio neither sends nor takes text, and an idle message session does not send it
+    cs_p(s[0..CS_LEN], CS_MODE, @as(u64, CS_AUDIO_TEST));
+    assert cs_text_send(s[0..CS_LEN], pt[0..20]) == false;
+    assert cs_text_take(s[0..CS_LEN], out[0..720]) == 0;
+    cs_p(s[0..CS_LEN], CS_MODE, @as(u64, CS_AUDIO_NONE));
+    assert cs_text_send(s[0..CS_LEN], pt[0..20]) == false;
+    assert cs_text_take(s[0..CS_LEN], out[0..720]) == 0;
+    // queued in arrival order, taken once each
+    cs_take_text(s[0..CS_LEN], pt[0..20]);
+    pt[2] = 8;
+    cs_take_text(s[0..CS_LEN], pt[0..720]);
+    assert cs_stat(s[0..CS_LEN], CS_ST_TEXT_RX) == 2;
+    assert cs_text_take(s[0..CS_LEN], out[0..10]) == 0;
+    assert cs_text_take(s[0..CS_LEN], out[0..720]) == 20 and out[2] == 7;
+    assert cs_text_take(s[0..CS_LEN], out[0..720]) == 720 and out[2] == 8;
+    assert cs_text_take(s[0..CS_LEN], out[0..720]) == 0;
+    // a full queue drops the newest and counts it
+    var k : u64 = 0;
+    while (k < CS_TXQ_N + 3) {
+        cs_take_text(s[0..CS_LEN], pt[0..20]);
+        k = k + 1;
+    }
+    assert cs_stat(s[0..CS_LEN], CS_ST_TEXT_DROP) == 3;
+    // a session with audio never hands queued text out
+    cs_p(s[0..CS_LEN], CS_MODE, @as(u64, CS_AUDIO_DEV));
+    assert cs_text_take(s[0..CS_LEN], out[0..720]) == 0;
+    cs_p(s[0..CS_LEN], CS_MODE, @as(u64, CS_AUDIO_NONE));
+    k = 0;
+    while (cs_text_take(s[0..CS_LEN], out[0..720]) == 20) { k = k + 1; }
+    assert k == CS_TXQ_N;
+    assert cs_text_send(s[0..CS_LEN - 1], pt[0..20]) == false;
 }
 
 test the_window_reads_state_peer_code_reason_mute_and_counters {
