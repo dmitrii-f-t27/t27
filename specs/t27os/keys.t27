@@ -54,6 +54,18 @@ pub const P_OLLAMA : u32 = 5;
 pub const P_GITHUB : u32 = 6;
 pub const P_CURSOR : u32 = 7;
 pub const P_GONKA : u32 = 8;
+/// NVIDIA direct (nvidia_direct.t27): id 9, the id dmitrii-f-t27/t27#6 gives it, outside the PROVIDER_COUNT
+/// rows on purpose: its keys are one JSON item of their own service, not MAX_KEYS items under ai.t27.os.
+pub const P_NVIDIA : u32 = 9;
+/// The OpenAI-protocol base URL, its chat endpoint, the model every request names unless told otherwise.
+pub const NV_BASE_URL : str = "https://integrate.api.nvidia.com/v1";
+pub const NV_CHAT_URL : str = "https://integrate.api.nvidia.com/v1/chat/completions";
+pub const NV_MODEL_DEFAULT : str = "nvidia/nemotron-3-ultra-550b-a55b";
+/// Models never sent on this account (comma list): deepseek-v4.1-flash gave no answer in 70 s (2026-10-22).
+pub const NV_DEAD_MODELS : str = "deepseek-ai/deepseek-v4.1-flash";
+/// Where the key list lives: Keychain service and account, value {"keys":["nvapi-...", ...]}.
+pub const NV_KC_SERVICE : str = "nvidia-api-keys";
+pub const NV_KC_ACCOUNT : str = "dmitrii-f-t27";
 
 /// Provider names in cell order; also the Keychain account of each.
 pub const PROVIDER_NAMES : str = "anthropic,openai,gemini,openrouter,zai,ollama,github,cursor,gonka";

@@ -129,6 +129,8 @@ use t27os::keys_host::kc_get_n;
 use t27os::keys_host::kc_del_n;
 use t27os::keys_host::kc_has;
 use t27os::keys_probe::probe;
+use t27os::nvidia_host::nv_line;
+use t27os::nvidia_host::nv_check_main;
 use t27os::keysync_host::ks_view_fill;
 use t27os::keysync::KD_ROW_H;
 use t27os::keysync::kd_rows_fit;
@@ -5645,6 +5647,7 @@ fn bytes_w(kit: [48]u64, s: []const u8, n: usize, size: f64, weight: f64, mono: 
 fn keys_refresh(stored: []u32, mask: []u8, mlen: []u32) -> void {
     // the Devices view (keysync.t27) rides after the 144 mask bytes: refreshed with the keys
     if (mask.len >= 544) { ks_view_fill(mask[144..544]); }
+    if (mask.len >= 640) { nv_mask_fill(mask[544..640]); }
     var key : [256]u8 = undefined;
     var p : u32 = 0;
     while (p < PROVIDER_COUNT) {
@@ -5670,6 +5673,20 @@ fn keys_refresh(stored: []u32, mask: []u8, mlen: []u32) -> void {
             k = k + 1;
         }
         p = p + 1;
+    }
+}
+
+/// The NVIDIA direct line (nvidia_host.t27 nv_line) into m: its length in m[0], the text after it (95 bytes at
+/// most). It rides at 544 of the KEYS mask buffer, after the Devices view.
+fn nv_mask_fill(m: []u8) -> void {
+    var line : [96]u8 = undefined;
+    var n : usize = nv_line(line[0..96]);
+    if (n > m.len - 1) { n = m.len - 1; }
+    m[0] = @as(u8, @intCast(n));
+    var i : usize = 0;
+    while (i < n) {
+        m[1 + i] = line[i];
+        i = i + 1;
     }
 }
 
@@ -5744,7 +5761,12 @@ fn draw_keys_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, sto
     if (kedit != KY_NONE) { hint = 9; }
     n = csv_field(KEYS_WORDS, hint, w[0..48]);
     cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
-    draw_bytes(c, kit, w[0..48], n, x, t + 46.0, 9.5, 0.0, false);
+    // not typing: the NVIDIA direct line (nvidia_direct.t27 nv_status_line) stands where the hint stood
+    if (kedit == KY_NONE and mask.len >= 640 and mask[544] > 0) {
+        draw_bytes(c, kit, mask[545..640], @as(usize, mask[544]), x, t + 46.0, 9.5, 0.0, false);
+    } else {
+        draw_bytes(c, kit, w[0..48], n, x, t + 46.0, 9.5, 0.0, false);
+    }
     var p : u32 = 0;
     while (p < PROVIDER_COUNT) {
         const y : f64 = ky_row_top(t, p);
@@ -11675,6 +11697,8 @@ fn set_prefill(dc: []u64, pb: []u8, line: []const u8) -> void {
 pub fn main() -> void {
     // a helper process of the updater (update_agent.t27: serve or fetch) never opens a window
     if (ug_main()) { return; }
+    // T27OS_NVIDIA_CHECK=<1..5>: the direct NVIDIA checks with key rotation (nvidia_host.t27), then the process ends
+    if (nv_check_main()) { return; }
     const s_alloc : u64 = sel("alloc");
     const app : u64 = msg0(cls("NSApplication"), sel("sharedApplication"));
     msg1(app, sel("setActivationPolicy:"), 0);
@@ -12258,7 +12282,7 @@ pub fn main() -> void {
     // and the next number it reads), and the editors found
     var kyp : bool = false;
     var kstored : [9]u32 = undefined;
-    var kmask : [544]u8 = undefined;
+    var kmask : [640]u8 = undefined;
     var kmlen : [9]u32 = undefined;
     var kst : [72]u32 = undefined;
     var kfail : [9]u32 = undefined;
@@ -12296,6 +12320,7 @@ pub fn main() -> void {
         kopen[ki] = 0;
         ki = ki + 1;
     }
+    kmask[544] = 0;
     var kz : u32 = 0;
     while (kz < 72) {
         kst[kz] = ST_STORED;
@@ -12568,6 +12593,7 @@ pub fn main() -> void {
                             clp = false;
                             dp = false;
                             keys_refresh(kstored[0..9], kmask[0..144], kmlen[0..9]);
+                            nv_mask_fill(kmask[544..640]);
                             // the refresh also hands the server every numbered key again (a server that restarted forgot them)
                             if (tfd >= 0) { keys_sync(tfd, kst[0..72], tout[0..4100]); }
                             const khn : usize = ns_bytes(home_dir(), khome[0..256]);
@@ -12758,7 +12784,7 @@ pub fn main() -> void {
                                 }
                                 karm = KY_NONE;
                                 kfail[kq] = 0;
-                                keys_refresh(kstored[0..9], kmask[0..544], kmlen[0..9]);
+                                keys_refresh(kstored[0..9], kmask[0..640], kmlen[0..9]);
                             } else if (kact == KA_CHECK) {
                                 kbusy = kq;
                                 kbk = 0;
@@ -13029,7 +13055,7 @@ pub fn main() -> void {
                         pfp = false;
                         clp = false;
                         dp = false;
-                        keys_refresh(kstored[0..9], kmask[0..544], kmlen[0..9]);
+                        keys_refresh(kstored[0..9], kmask[0..640], kmlen[0..9]);
                         // the refresh also hands the server every numbered key again (a server that restarted forgot them)
                         if (tfd >= 0) { keys_sync(tfd, kst[0..72], tout[0..4100]); }
                         const khn : usize = ns_bytes(home_dir(), khome[0..256]);
@@ -13478,7 +13504,7 @@ pub fn main() -> void {
                                 }
                             }
                             keys_wipe(kbuf[0..256]);
-                            keys_refresh(kstored[0..9], kmask[0..544], kmlen[0..9]);
+                            keys_refresh(kstored[0..9], kmask[0..640], kmlen[0..9]);
                             kedit = KY_NONE;
                             klen = 0;
                         }
@@ -14248,14 +14274,14 @@ pub fn main() -> void {
         }
         msg_flag(tx_cls, s_quiet, true);
         if (fdraw and narrow) {
-            draw(cc, kit, frame, state, hov, ma, shown, task, space, sp, ss, cur, collapsed, mx, my, z, sw, sh, ws, full, qp, ring, evn, now, sug, god, glow, dk, dp, darmed, doff, dgo, walking, dlabel, tst[0..32], tcells[0..960000], topen, tcur, kyp, kstored[0..9], kmask[0..544], kmlen[0..9], kst[0..72], kfail[0..9], kopen[0..9], kedit, kbuf[0..256], klen, karm, kbusy, kemask, kewhy, ktpick, hs, cons2, dcv[0..512], gal[0..49152], gt[0..2560], evd, @as(u64, evp) + @as(u64, evn2) * 1048576 + @as(u64, evpr) * 1099511627776, pbuf[0..4160], sst[0..560], tgv[0..256], tbv[0..85504]);
+            draw(cc, kit, frame, state, hov, ma, shown, task, space, sp, ss, cur, collapsed, mx, my, z, sw, sh, ws, full, qp, ring, evn, now, sug, god, glow, dk, dp, darmed, doff, dgo, walking, dlabel, tst[0..32], tcells[0..960000], topen, tcur, kyp, kstored[0..9], kmask[0..640], kmlen[0..9], kst[0..72], kfail[0..9], kopen[0..9], kedit, kbuf[0..256], klen, karm, kbusy, kemask, kewhy, ktpick, hs, cons2, dcv[0..512], gal[0..49152], gt[0..2560], evd, @as(u64, evp) + @as(u64, evn2) * 1048576 + @as(u64, evpr) * 1099511627776, pbuf[0..4160], sst[0..560], tgv[0..256], tbv[0..85504]);
             const whole : u64 = cg_image(cc);
             const img : u64 = cg_crop(whole, 0.0, 0.0, sw * RETINA, sh * RETINA);
             msg1(layer, s_contents, img);
             cg_image_release(img);
             cg_image_release(whole);
         } else if (fdraw) {
-            draw(c, kit, frame, state, hov, ma, shown, task, space, sp, ss, cur, collapsed, mx, my, z, sw, sh, ws, full, qp, ring, evn, now, sug, god, glow, dk, dp, darmed, doff, dgo, walking, dlabel, tst[0..32], tcells[0..960000], topen, tcur, kyp, kstored[0..9], kmask[0..544], kmlen[0..9], kst[0..72], kfail[0..9], kopen[0..9], kedit, kbuf[0..256], klen, karm, kbusy, kemask, kewhy, ktpick, hs, cons2, dcv[0..512], gal[0..49152], gt[0..2560], evd, @as(u64, evp) + @as(u64, evn2) * 1048576 + @as(u64, evpr) * 1099511627776, pbuf[0..4160], sst[0..560], tgv[0..256], tbv[0..85504]);
+            draw(c, kit, frame, state, hov, ma, shown, task, space, sp, ss, cur, collapsed, mx, my, z, sw, sh, ws, full, qp, ring, evn, now, sug, god, glow, dk, dp, darmed, doff, dgo, walking, dlabel, tst[0..32], tcells[0..960000], topen, tcur, kyp, kstored[0..9], kmask[0..640], kmlen[0..9], kst[0..72], kfail[0..9], kopen[0..9], kedit, kbuf[0..256], klen, karm, kbusy, kemask, kewhy, ktpick, hs, cons2, dcv[0..512], gal[0..49152], gt[0..2560], evd, @as(u64, evp) + @as(u64, evn2) * 1048576 + @as(u64, evpr) * 1099511627776, pbuf[0..4160], sst[0..560], tgv[0..256], tbv[0..85504]);
             const whole : u64 = cg_image(c);
             const img : u64 = cg_crop(whole, 0.0, 0.0, sw * WIDE_RETINA, sh * WIDE_RETINA);
             msg1(layer, s_contents, img);
