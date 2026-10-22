@@ -592,7 +592,6 @@ use t27os::editors::foot_status_fits;
 use t27os::editors::foot_chips;
 use t27os::release::current_version;
 use t27os::release::UPD_DIR;
-use t27os::release::F_MANIFEST;
 use t27os::release::F_PENDING;
 use t27os::release::F_KEPT;
 use t27os::release::F_REJECTED;
@@ -629,6 +628,16 @@ use t27os::release::EV_SWAP;
 use t27os::release::U_IDLE;
 use t27os::release::U_STAGED;
 use t27os::release::manifest_check;
+use t27os::release::manifest_check_from;
+use t27os::release::manifest_owner;
+use t27os::release::manifest_file;
+use t27os::release::channel_parse;
+use t27os::release::channel_fetches;
+use t27os::release::channel_pick;
+use t27os::release::SRC_UPSTREAM;
+use t27os::release::SRC_FORK;
+use t27os::release::SRC_NONE;
+use t27os::release::M_OK;
 use t27os::release::manifest_build;
 use t27os::release::manifest_version;
 use t27os::release::offer;
@@ -7034,6 +7043,11 @@ pub const TPG_U_TOAST : u32 = 181;
 pub const TPG_V_REV : u32 = 182;
 pub const TPG_V_DIRTY : u32 = 183;
 pub const TPG_U_TSEC : u32 = 184;
+/// The update channel (release.t27 CH_*, from T27OS_UPDATE_CHANNEL at launch), the source of the manifest the update
+/// follows (SRC_*) and the owner its files are on (OW_*).
+pub const TPG_U_CHAN : u32 = 185;
+pub const TPG_U_SRC : u32 = 186;
+pub const TPG_U_OWN : u32 = 187;
 pub const UP_CHECK : u64 = 1;
 pub const UP_DOWNLOAD : u64 = 2;
 pub const UP_STAGE : u64 = 3;
@@ -7047,8 +7061,9 @@ pub const UP_MAN : usize = 2048;
 pub const UP_SUMS : usize = 2560;
 pub const UP_VER : usize = 128;
 pub const UP_CAP : usize = 6000;
-/// A job that outlives this is killed; the download is the long one.
-pub const UP_KILL_CHECK_S : u64 = 60;
+/// A job that outlives this is killed; the download is the long one. The poll is up to three 20-second fetches (the
+/// live data and the manifests of both sources).
+pub const UP_KILL_CHECK_S : u64 = 90;
 pub const UP_KILL_LONG_S : u64 = 900;
 
 /// Panes the server lists as working or blocked on you: the swap never happens while one is.
@@ -7079,7 +7094,7 @@ fn up_fail(tg: []u64, why: u8, mark_bad: bool) -> void {
     tg[TPG_U_WHY] = @as(u64, why);
     tg[TPG_U_GO] = 0;
     if (mark_bad) { tg[TPG_U_FAILB] = tg[TPG_U_CAND]; }
-    // any failed step backs the next poll off (a download that keeps failing must not retry every minute)
+    // any failed step backs the next poll off (a download that keeps failing must not retry every hour)
     tg[TPG_U_FAILS] = @as(u64, fails_after(false, @as(u32, @intCast(tg[TPG_U_FAILS]))));
 }
 
@@ -7115,11 +7130,42 @@ fn up_boot(tg: []u64, tb: []u8, hb: []const u8, bp: []const u8, now: u64) -> voi
     }
 }
 
-/// A poll finished: judge the manifest it fetched and start the download of a newer build.
-fn up_checked(tg: []u64, tb: []u8, hb: []const u8, now: u64) -> void {
-    const mn : usize = tg_read(hb, UPD_DIR, F_MANIFEST, tb[TBO_SCR .. TBO_SCR + UP_MAN]);
+/// Read the manifest fetched from src into tb[TBO_SCR ..]; its length.
+fn up_man_read(tb: []u8, hb: []const u8, src: u8) -> usize {
+    return tg_read(hb, UPD_DIR, manifest_file(src), tb[TBO_SCR .. TBO_SCR + UP_MAN]);
+}
+
+/// Is the manifest of src, as fetched by this channel, one the app may follow? Its version and build go to vb[0], vb[1].
+fn up_src_ok(tb: []u8, hb: []const u8, ch: u8, src: u8, vb: []u64) -> bool {
+    vb[0] = 0;
+    vb[1] = 0;
+    if (channel_fetches(ch, src) == false) { return false; }
+    const mn : usize = up_man_read(tb, hb, src);
     const man : []const u8 = tb[TBO_SCR .. TBO_SCR + mn];
-    const chk : u8 = manifest_check(man, mn);
+    if (manifest_check_from(man, mn, src) != M_OK) { return false; }
+    vb[0] = manifest_version(man, mn);
+    vb[1] = manifest_build(man, mn);
+    return true;
+}
+
+/// A poll finished: pick the channel's manifest (release.t27 channel_pick), judge it and start the download of a newer build.
+fn up_checked(tg: []u64, tb: []u8, hb: []const u8, now: u64) -> void {
+    const ch : u8 = @as(u8, @intCast(tg[TPG_U_CHAN]));
+    var uv : [2]u64 = undefined;
+    var fv : [2]u64 = undefined;
+    const uok : bool = up_src_ok(tb, hb, ch, SRC_UPSTREAM, uv[0..2]);
+    const fok : bool = up_src_ok(tb, hb, ch, SRC_FORK, fv[0..2]);
+    const src : u8 = channel_pick(ch, uok, uv[0], @as(u32, @intCast(uv[1])), fok, fv[0], @as(u32, @intCast(fv[1])));
+    if (src == SRC_NONE) {
+        // no manifest of this channel can be followed: never fall back to another source's file
+        tg[TPG_U_ST] = @as(u64, update_step(@as(u8, @intCast(tg[TPG_U_ST])), EV_NO_OFFER, 0));
+        tg[TPG_U_WHY] = @as(u64, WHY_MANIFEST);
+        return;
+    }
+    const pick : u8 = src;
+    const mn : usize = up_man_read(tb, hb, pick);
+    const man : []const u8 = tb[TBO_SCR .. TBO_SCR + mn];
+    const chk : u8 = manifest_check_from(man, mn, pick);
     const cb : u64 = manifest_build(man, mn);
     var bld : u32 = 0;
     if (cb != NO_FIELD) { bld = @as(u32, @intCast(cb)); }
@@ -7129,6 +7175,8 @@ fn up_checked(tg: []u64, tb: []u8, hb: []const u8, now: u64) -> void {
     if (off == OFFER_UPDATE) {
         tg[TPG_U_CAND] = @as(u64, bld);
         tg[TPG_U_CANDV] = ver;
+        tg[TPG_U_SRC] = @as(u64, pick);
+        tg[TPG_U_OWN] = @as(u64, manifest_owner(man, mn));
         tg[TPG_U_WHY] = @as(u64, WHY_NONE);
         if (tg[TPG_U_STAGED] == @as(u64, bld)) {
             tg[TPG_U_ST] = @as(u64, U_STAGED);
@@ -7136,7 +7184,7 @@ fn up_checked(tg: []u64, tb: []u8, hb: []const u8, now: u64) -> void {
         }
         const out : []u8 = tb[TBO_CMD + 6 .. TBO_CMD + 6 + UP_CAP];
         tg[TPG_U_ST] = @as(u64, update_step(st, EV_OFFER, 0));
-        if (up_start(tg, tb, download_cmd(out, UP_CAP, hb, hb.len, ver, bld), UP_DOWNLOAD, now) == false) { up_fail(tg, WHY_DOWNLOAD, false); }
+        if (up_start(tg, tb, download_cmd(out, UP_CAP, hb, hb.len, ver, bld, @as(u8, @intCast(tg[TPG_U_OWN]))), UP_DOWNLOAD, now) == false) { up_fail(tg, WHY_DOWNLOAD, false); }
         return;
     }
     tg[TPG_U_ST] = @as(u64, update_step(st, EV_NO_OFFER, 0));
@@ -7147,7 +7195,7 @@ fn up_checked(tg: []u64, tb: []u8, hb: []const u8, now: u64) -> void {
 /// The download finished: its digests against the manifest, then the stage job.
 fn up_downloaded(tg: []u64, tb: []u8, hb: []const u8, now: u64) -> void {
     const b : u32 = @as(u32, @intCast(tg[TPG_U_CAND]));
-    const mn : usize = tg_read(hb, UPD_DIR, F_MANIFEST, tb[TBO_SCR .. TBO_SCR + UP_MAN]);
+    const mn : usize = up_man_read(tb, hb, @as(u8, @intCast(tg[TPG_U_SRC])));
     var fb : [48]u8 = undefined;
     const fn1 : usize = put_build_file(fb[0..48], 48, 0, b, "sums.txt");
     const sn : usize = tg_read(hb, UPD_DIR, fb[0..fn1], tb[TBO_SCR + UP_MAN .. TBO_SCR + UP_SUMS]);
@@ -7164,7 +7212,7 @@ fn up_downloaded(tg: []u64, tb: []u8, hb: []const u8, now: u64) -> void {
 /// The stage finished (unzipped, signed, versions asked): every digest, every tool's commit, then staged or refused.
 fn up_staged(tg: []u64, tb: []u8, hb: []const u8) -> void {
     const b : u32 = @as(u32, @intCast(tg[TPG_U_CAND]));
-    const mn : usize = tg_read(hb, UPD_DIR, F_MANIFEST, tb[TBO_SCR .. TBO_SCR + UP_MAN]);
+    const mn : usize = up_man_read(tb, hb, @as(u8, @intCast(tg[TPG_U_SRC])));
     const man : []const u8 = tb[TBO_SCR .. TBO_SCR + mn];
     var fb : [48]u8 = undefined;
     var fl : usize = put_build_file(fb[0..48], 48, 0, b, "sums.txt");
@@ -7275,7 +7323,7 @@ fn update_tick(tg: []u64, tb: []u8, hb: []const u8, bp: []const u8, now: u64, bu
         const out : []u8 = tb[TBO_CMD + 6 .. TBO_CMD + 6 + UP_CAP];
         tg[TPG_U_LAST] = now;
         tg[TPG_U_GO] = 0;
-        if (up_start(tg, tb, check_cmd(out, UP_CAP, hb, hb.len), UP_CHECK, now)) {
+        if (up_start(tg, tb, check_cmd(out, UP_CAP, hb, hb.len, @as(u8, @intCast(tg[TPG_U_CHAN]))), UP_CHECK, now)) {
             tg[TPG_U_ST] = @as(u64, update_step(st, EV_CHECK, busy));
         }
         tg_bump(tg);
@@ -12044,6 +12092,10 @@ pub fn main() -> void {
         ac_log(tbv[TBO_CL .. TBO_CL + CL_CAP]);
     }
     tgv[TPG_U_BLEN] = @as(u64, bundle_len(ubp[0..ubn], ubn));
+    // T27OS_UPDATE_CHANNEL (a service key): upstream, fork, or auto when unset or anything else
+    var uch : [16]u8 = undefined;
+    const uchn : usize = cl_env("T27OS_UPDATE_CHANNEL", uch[0..16]);
+    tgv[TPG_U_CHAN] = @as(u64, channel_parse(uch[0..uchn], uchn));
     // S. the window title is the header text (statusbar.t27 header_text: the plist's constants), never typed; the host
     // name and the commit the bundle names are kept for the footer bar
     var wtb : [64]u8 = undefined;
@@ -15381,6 +15433,9 @@ test the_header_cluster_and_the_footer_bar_are_where_they_are_drawn_and_a_merge_
     // the state lives in words the host owns, none of them colliding
     assert TPG_SB_HOST + 3 == TPG_SB_HOSTN;
     assert TPG_SB_AT > TPG_SB_COMMITN and TPG_G_NEXT < TPG_N and TPG_SB_HOST > TPG_U_STAGED;
+    // the update channel, source and owner sit in the free run after TPG_U_TSEC, below TPG_O_HP
+    assert TPG_U_CHAN > TPG_U_TSEC and TPG_U_SRC == TPG_U_CHAN + 1 and TPG_U_OWN == TPG_U_SRC + 1 and TPG_U_OWN < TPG_O_HP;
+    assert UP_KILL_CHECK_S >= 3 * 20;
     assert SST_QRUN > SST_LV + 64 * LV_F - 1 and SST_DISK < SST_SIZE and SST_QFEED > SST_SRV;
     // the footer's items all have a page and the right end keeps its three links
     assert item_page(IT_GOD) == PG_GOD and item_page(IT_UPD) == PG_UPDATE and item_page(IT_LIGHT) == PG_KEYS;
