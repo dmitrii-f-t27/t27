@@ -1455,6 +1455,9 @@ use t27os::doctor::shows_word;
 use t27os::doctor::enters;
 use t27os::doctor::pass_done;
 use t27os::doctor::pass_due;
+use t27os::doctor::rescan_due;
+use t27os::doctor::idle_next;
+use t27os::doctor::checks_due;
 use t27os::doctor::job_due;
 use t27os::doctor::made_again;
 use t27os::doctor::heavy;
@@ -1632,6 +1635,13 @@ use t27os::frame_gate::fg_wait_anim;
 use t27os::frame_gate::fg_ticks;
 use t27os::frame_gate::fg_whole;
 use t27os::frame_gate::fg_mouse;
+use t27os::frame_gate::fg_orbit_step;
+use t27os::frame_gate::fg_draw_vis;
+use t27os::frame_gate::fg_shown_after;
+use t27os::frame_gate::fg_wait_vis;
+use t27os::frame_gate::fg_new_pids;
+use t27os::frame_gate::fg_cpu_permille;
+use t27os::frame_gate::FG_PERF_S;
 use t27os::text_cache::tc_style;
 use t27os::text_cache::tc_flush;
 use t27os::text_cache::tc_room;
@@ -2345,6 +2355,10 @@ fn cf_release(o: u64) -> void { @extern("CFRelease"); }
 fn unix_time(t: u64) -> u64 { return @extern("time"); }
 /// Seconds since 2001 with sub-second precision: the clock of the animations.
 fn abs_time() -> f64 { return @extern("CFAbsoluteTimeGetCurrent"); }
+/// T27OS_PERF: this process's rusage_info_v0 (flavor 0) and the mach timebase its CPU times are counted in.
+fn pf_rusage(pid: i32, flavor: i32, buf: []u8) -> i32 { return @extern("proc_pid_rusage"); }
+fn pf_getpid() -> i32 { return @extern("getpid"); }
+fn pf_timebase(buf: []u8) -> i32 { return @extern("mach_timebase_info"); }
 fn class_named(name: u64) -> u64 { return @extern("NSClassFromString"); }
 fn sel_named(name: u64) -> u64 { return @extern("NSSelectorFromString"); }
 fn pool_push() -> u64 { return @extern("objc_autoreleasePoolPush"); }
@@ -9391,6 +9405,34 @@ fn cl_stat_num(label: []const u8, v: u64) -> void {
     sys_write(2, d[i..24], @as(u64, 24 - i));
 }
 
+/// T27OS_PERF: user + system CPU of this process in nanoseconds (rusage_info_v0 user 16, system 24, in mach time units
+/// scaled by the timebase numer / denom); ru keeps the sample for the memory fields; 0 when the call fails.
+fn pf_cpu_ns(ru: []u8, tb: []const u8) -> u64 {
+    if (pf_rusage(pf_getpid(), 0, ru) != 0) { return 0; }
+    const t : u64 = upv_get64(ru, 16) + upv_get64(ru, 24);
+    const numer : u64 = @as(u64, tb[0]) + 256 * @as(u64, tb[1]) + 65536 * @as(u64, tb[2]) + 16777216 * @as(u64, tb[3]);
+    const denom : u64 = @as(u64, tb[4]) + 256 * @as(u64, tb[5]) + 65536 * @as(u64, tb[6]) + 16777216 * @as(u64, tb[7]);
+    if (numer == 0 or denom == 0) { return t; }
+    return t / denom * numer;
+}
+
+/// T27OS_PERF: one line every FG_PERF_S seconds: loop ticks and draws a second (tenths), children started, CPU per mille
+/// of one core, resident and physical footprint in MB (rusage_info_v0 64 and 72), and whether the window is on screen.
+fn pf_line(ticks: u64, draws: u64, spawns: u64, cpu: u64, ru: []const u8, secs: f64, vis: bool) -> void {
+    var s10 : u64 = @as(u64, @intFromFloat(secs * 10.0));
+    if (s10 == 0) { s10 = 1; }
+    cl_stat_num("T27OS_PERF ticks_x10/s=", ticks * 100 / s10);
+    cl_stat_num(" draws_x10/s=", draws * 100 / s10);
+    cl_stat_num(" spawns=", spawns);
+    cl_stat_num(" cpu_permille=", cpu);
+    cl_stat_num(" rss_mb=", upv_get64(ru, 64) / 1048576);
+    cl_stat_num(" footprint_mb=", upv_get64(ru, 72) / 1048576);
+    var v : u64 = 0;
+    if (vis) { v = 1; }
+    cl_stat_num(" visible=", v);
+    sys_write(2, "\n", 1);
+}
+
 /// T27OS_CALL_STATS: one line a second while ACTIVE, the counters the panel does not show.
 fn cl_stats_line(cl: []u8, s: []u8, secs: u64) -> void {
     cl_stat_num("CALLSTAT t=", secs);
@@ -12219,8 +12261,31 @@ pub fn main() -> void {
     // the frame gate (frame_gate.t27): the key on screen, frames since the last draw and since the key
     // last changed, a count of grid updates, and the next event wait
     var fshown : u64 = 0;
+    var fbase : u64 = 0;
     var fsince : u32 = 9999;
     var fquiet : u32 = 0;
+    // whether the window is on screen (NSWindowOcclusionStateVisible), read each frame
+    const s_occ : u64 = sel("occlusionState");
+    var fvis : bool = true;
+    // D. walks finished, and that count when the last check pass ended (doctor.t27 checks_due)
+    var wdone : u64 = 0;
+    var jseen : u64 = 0;
+    // T27OS_PERF=1: loop ticks, draws, children started, and the CPU / memory sample at the start of the window
+    var pfe : [8]u8 = undefined;
+    const pf_on : bool = cl_env("T27OS_PERF", pfe[0..8]) == 1 and pfe[0] == 49;
+    var pf_t0 : f64 = abs_time();
+    var pf_ticks : u64 = 0;
+    var pf_draws : u64 = 0;
+    var pf_spawns : u64 = 0;
+    var pf_prev : [18]u64 = undefined;
+    var pf_cur : [18]u64 = undefined;
+    var pfi : usize = 0;
+    while (pfi < 18) { pf_prev[pfi] = 0; pf_cur[pfi] = 0; pfi = pfi + 1; }
+    var pf_ru : [96]u8 = undefined;
+    var pf_tb : [8]u8 = undefined;
+    pf_tb[0] = 0;
+    pf_timebase(pf_tb[0..8]);
+    var pf_cpu0 : u64 = pf_cpu_ns(pf_ru[0..96], pf_tb[0..8]);
     var tfed : u64 = 0;
     var wacc : u32 = 0;
     var wlast : bool = true;
@@ -13524,7 +13589,7 @@ pub fn main() -> void {
         kanban_tick(tgv[0..256], tbv[0..49152], dhb[0..dhn], now, open2 and tpk2 == PAGE_KANBAN);
         queen_tick(tgv[0..256], tbv[0..49152], dhb[0..dhn], now, open2 and tpk2 == PAGE_QUEEN);
         }
-        // H. HIVE: the page's feed while it is open, and this machine's heartbeat every 5 minutes (devices.t27): the lanes
+        // H. HIVE: the page's feed while it is open, and this machine's heartbeat every 10 minutes (devices.t27): the lanes
         // feed runs first, so the beat carries the lanes as they are now, then hive_publish pushes refs/swarm/alive/<host>
         const hv_up : bool = open2 and tpk2 == PAGE_HIVE;
         if (bgoff == false and tgv[TPG_H_WANT] == 0 and tgv[TPG_H_PUB_PID] == 0 and dv_publish_due(true, now, tgv[TPG_H_PUB_LAST])) {
@@ -13663,13 +13728,14 @@ pub fn main() -> void {
             if (qhead >= dk_count(dk, dk[DK_QUEUE])) {
                 if (dk_sweep(dk, wpass) > 0) { darmed = ARMED_NONE; }
                 walking = false;
+                wdone = wdone + 1;
                 qhead = 0;
                 widle = 0;
                 dnow = true;
             }
         } else {
-            widle = widle + 1;
-            if (pass_due(widle)) {
+            widle = idle_next(widle);
+            if (rescan_due(widle, wpass, dp)) {
                 wpass = wpass + 1;
                 dk_start_pass(dk);
                 walking = true;
@@ -13685,17 +13751,19 @@ pub fn main() -> void {
                     msg2(dk[DK_TASKS], dk[DK_REPLACE], js, dk[DK_NULL]);
                     dnow = true;
                 }
-            } else if (bgoff == false and jrest == 0 and dk_count(dk, dk[DK_PATHS]) > 0) {
+            } else if (bgoff == false and jrest == 0 and dk_count(dk, dk[DK_PATHS]) > 0 and checks_due(jr == 0 and jj == 0, walking, wdone, jseen, dp)) {
                 if (jr >= dk_count(dk, dk[DK_PATHS])) {
                     jr = 0;
                     jj = 0;
                     jpass = jpass + 1;
+                    jseen = wdone;
                     jrest = RESCAN_FRAMES;
                 } else {
                     while (jj < JOB_COUNT and job_due(jj, jpass) == false) { jj = jj + 1; }
                     if (jj < JOB_COUNT) {
                         const nt : u64 = dk_launch(dk, js, dk_at(dk, dk[DK_PATHS], jr), jj);
                         if (nt != 0) {
+                            pf_spawns = pf_spawns + 1;
                             msg2(dk[DK_TASKS], dk[DK_REPLACE], js, nt);
                             msg0(nt, dk[DK_RELEASE]);
                         }
@@ -14074,12 +14142,19 @@ pub fn main() -> void {
             }
         }
         // the home logo flies in for ANIM_FRAMES, the menu waves open and shut, the GOD MODE edge glows
-        const fanim : bool = frame < ANIM_FRAMES or (ma > 0.0 and ma < 1.0) or glow > 0.0 or ov_animates(ov_visible(@as(i64, @intFromFloat((1.0 - ma) * 1000.0))), tgv[TPG_O_RM] != 0, @as(usize, tgv[TPG_O_N]));
-        const fdraw : bool = fg_draw_due(fk, fshown, fanim, fsince);
-        fquiet = fg_quiet(fquiet, fk != fshown or fanim or tbusy);
+        // the formula orbit steps FG_ORBIT_FPS times a second through the key instead of animating at 60 fps, and a window
+        // off screen draws nothing (frame_gate.t27, load audit 2026-10-22); the quiet count looks at the key without the orbit
+        fvis = (msg0(win, s_occ) / 2) % 2 == 1;
+        const forb : bool = fvis and ov_animates(ov_visible(@as(i64, @intFromFloat((1.0 - ma) * 1000.0))), tgv[TPG_O_RM] != 0, @as(usize, tgv[TPG_O_N]));
+        const fanim : bool = frame < ANIM_FRAMES or (ma > 0.0 and ma < 1.0) or glow > 0.0;
+        const fkey : u64 = fg_mix(fk, fg_orbit_step(a_now, forb));
+        const fdraw : bool = fg_draw_vis(fkey, fshown, fanim, fsince, fvis);
+        fquiet = fg_quiet(fquiet, fk != fbase or fanim or tbusy);
         fsince = fg_since(fsince, fdraw);
-        fshown = fk;
-        fwait = fg_wait_anim(fquiet, tlink == PANE_LIVE and topen != PANE_NONE, fanim, FRAME_S);
+        fshown = fg_shown_after(fshown, fkey, fdraw);
+        fbase = fk;
+        fwait = fg_wait_vis(fquiet, tlink == PANE_LIVE and topen != PANE_NONE, fanim, forb, fvis, FRAME_S);
+        if (fdraw) { pf_draws = pf_draws + 1; }
         // CL. while a call is up the loop wakes at least every 5 ms, so cs_poll runs well inside its 10 ms
         if (cv_live(@as(u32, tbv[TBO_CL + CL_VIEW])) and fwait > 0.005) { fwait = 0.005; }
         if (cv_live(@as(u32, tbv[TBO_CL + CL_VIEW])) and clw[CLW_ACT] == 0) {
@@ -14174,6 +14249,44 @@ pub fn main() -> void {
                 argv[1] = 0;
                 exec_self(path, argv);
                 waited = RELOAD_IDLE;
+            }
+        }
+        // T27OS_PERF: children started this frame (a job slot holding a new pid), and the line every FG_PERF_S seconds
+        if (pf_on) {
+            pf_ticks = pf_ticks + 1;
+            pf_cur[0] = tgv[TPG_BN_PID];
+            pf_cur[1] = tgv[TPG_BA_PID];
+            pf_cur[2] = tgv[TPG_K_PID];
+            pf_cur[3] = tgv[TPG_Q_PID];
+            pf_cur[4] = tgv[TPG_H_PID];
+            pf_cur[5] = tgv[TPG_H_PUB_PID];
+            pf_cur[6] = tgv[TPG_L_PID];
+            pf_cur[7] = tgv[TPG_L_TPID];
+            pf_cur[8] = tgv[TPG_U_PID];
+            pf_cur[9] = tgv[TPG_QD_PID];
+            pf_cur[10] = tgv[TPG_G_PID];
+            pf_cur[11] = srvpid;
+            var pfj : usize = 0;
+            while (pfj < 6) {
+                pf_cur[12 + pfj] = @as(u64, jpid[pfj]);
+                pfj = pfj + 1;
+            }
+            pf_spawns = pf_spawns + @as(u64, fg_new_pids(pf_prev[0..18], pf_cur[0..18], 18));
+            pfj = 0;
+            while (pfj < 18) {
+                pf_prev[pfj] = pf_cur[pfj];
+                pfj = pfj + 1;
+            }
+            const pf_t : f64 = abs_time();
+            if (pf_t >= pf_t0 + @as(f64, @floatFromInt(FG_PERF_S))) {
+                const pf_cpu : u64 = pf_cpu_ns(pf_ru[0..96], pf_tb[0..8]);
+                const pf_wall : u64 = @as(u64, @intFromFloat((pf_t - pf_t0) * 1000000000.0));
+                pf_line(pf_ticks, pf_draws, pf_spawns, fg_cpu_permille(pf_cpu - pf_cpu0, pf_wall), pf_ru[0..96], pf_t - pf_t0, fvis);
+                pf_t0 = pf_t;
+                pf_cpu0 = pf_cpu;
+                pf_ticks = 0;
+                pf_draws = 0;
+                pf_spawns = 0;
             }
         }
         frame = frame + a_frames;
