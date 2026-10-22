@@ -327,8 +327,15 @@ pub const AC_COPY_Y : f64 = 156.0;
 pub const AC_COPY_W : f64 = 84.0;
 pub const AC_STATE_Y : f64 = 202.0;
 pub const AC_BUILD_Y : f64 = 216.0;
-pub const AC_FR_LABEL_Y : f64 = 236.0;
-pub const AC_ROWS_Y : f64 = 242.0;
+/// The UPDATE part (update_view.t27): its first line across the panel (the offer with the friend's nickname, or the
+/// state), the second line (progress, reason or what this device serves) and its one button at the right of the second.
+pub const AC_UPD_Y : f64 = 236.0;
+pub const AC_UPD2_Y : f64 = 253.0;
+pub const AC_UPD_BTN_Y : f64 = 241.0;
+pub const AC_UPD_BTN_W : f64 = 64.0;
+pub const AC_UPD_BTN_H : f64 = 18.0;
+pub const AC_FR_LABEL_Y : f64 = 274.0;
+pub const AC_ROWS_Y : f64 = 280.0;
 pub const AC_ROW_H : f64 = 28.0;
 pub const AC_ARROW_W : f64 = 20.0;
 pub const AC_ARROW_H : f64 = 16.0;
@@ -355,6 +362,8 @@ pub const AC_H_DOWN : u32 = 7;
 pub const AC_H_IFIELD : u32 = 8;
 pub const AC_H_PASTE : u32 = 9;
 pub const AC_H_ADD : u32 = 10;
+/// The UPDATE part's button (UPDATE, CANCEL or RESTART, update_view.upv_button).
+pub const AC_H_UPD : u32 = 11;
 /// Per row i (0..15): the row (a click calls), copy that friend's key, remove (asks), YES, NO.
 pub const AC_H_ROW : u32 = 16;
 pub const AC_H_FCOPY : u32 = 32;
@@ -376,6 +385,7 @@ pub fn ac_ifield_y(t: f64, h: f64) -> f64 { return t + h - AC_IFIELD_FROM_BOTTOM
 pub fn ac_btn_y(t: f64, h: f64) -> f64 { return t + h - AC_BTN_FROM_BOTTOM; }
 pub fn ac_note_y(t: f64, h: f64) -> f64 { return t + h - AC_NOTE_FROM_BOTTOM; }
 pub fn ac_copy_x(l: f64, w: f64) -> f64 { return l + w - QP_PAD - AC_COPY_W; }
+pub fn ac_upd_btn_x(l: f64, w: f64) -> f64 { return l + w - QP_PAD - AC_UPD_BTN_W; }
 
 /// The zones at the right end of a row: remove, copy-key; and while the row asks for its confirmation, YES and NO.
 pub fn ac_del_x(l: f64, w: f64) -> f64 { return l + w - QP_PAD - AC_ZONE_DEL_W; }
@@ -384,9 +394,10 @@ pub fn ac_no_x(l: f64, w: f64) -> f64 { return l + w - QP_PAD - AC_ZONE_YES_W; }
 pub fn ac_yes_x(l: f64, w: f64) -> f64 { return ac_no_x(l, w) - AC_ZONE_GAP - AC_ZONE_YES_W; }
 
 /// What a point means. `drawn` rows are in view (ac_rows_drawn), `count` friends in all, `vis` rows fit, `conf` is the
-/// row waiting for its confirmation (FV_ROWS_SNAP when none).
-pub fn ac_hit(x: f64, y: f64, l: f64, w: f64, t: f64, h: f64, drawn: usize, count: usize, vis: usize, conf: usize) -> u32 {
+/// row waiting for its confirmation (FV_ROWS_SNAP when none), `upd` whether the UPDATE part shows its button.
+pub fn ac_hit(x: f64, y: f64, l: f64, w: f64, t: f64, h: f64, drawn: usize, count: usize, vis: usize, conf: usize, upd: bool) -> u32 {
     if (fv_in(x, y, l + QP_PAD, t + AC_KEY_Y, w - 2.0 * QP_PAD, AC_KEY_H)) { return AC_H_KEY; }
+    if (upd and fv_in(x, y, ac_upd_btn_x(l, w), t + AC_UPD_BTN_Y, AC_UPD_BTN_W, AC_UPD_BTN_H)) { return AC_H_UPD; }
     if (fv_in(x, y, ac_copy_x(l, w), t + AC_COPY_Y, AC_COPY_W, CV_BTN_H)) { return AC_H_COPYKEY; }
     if (fv_in(x, y, ac_nick_x(l), t + AC_NICK_Y, ac_nick_w(w), AC_NICK_H)) { return AC_H_NICK; }
     if (fv_in(x, y, ac_save_x(l, w), t + AC_NICK_Y, AC_SAVE_W, AC_NICK_H)) { return AC_H_SAVE; }
@@ -568,7 +579,7 @@ test ac_the_rows_that_fit_follow_the_height_of_the_panel {
     assert ac_rows_vis(0.0) == 1;
     assert ac_rows_vis(100.0) == 1;
     // the default window: 540 tall, the panel from 35 down is 505
-    assert ac_rows_vis(505.0) == 4;
+    assert ac_rows_vis(505.0) == 3;
     assert ac_rows_vis(560.0) == 5;
     assert ac_rows_vis(2000.0) == AC_ROWS_MAX;
     // every count of rows ends above the add part
@@ -587,24 +598,24 @@ test ac_the_boxes_hit_their_own_target {
     const h : f64 = 600.0;
     const none : usize = FV_ROWS_SNAP;
     // top: the key box, its COPY button, the nickname field, SAVE, the picture link
-    assert ac_hit(l + 40.0, t + AC_KEY_Y + 6.0, l, w, t, h, 3, 3, 5, none) == AC_H_KEY;
-    assert ac_hit(ac_copy_x(l, w) + 4.0, t + AC_COPY_Y + 4.0, l, w, t, h, 3, 3, 5, none) == AC_H_COPYKEY;
-    assert ac_hit(ac_nick_x(l) + 6.0, t + AC_NICK_Y + 6.0, l, w, t, h, 3, 3, 5, none) == AC_H_NICK;
-    assert ac_hit(ac_save_x(l, w) + 6.0, t + AC_NICK_Y + 6.0, l, w, t, h, 3, 3, 5, none) == AC_H_SAVE;
-    assert ac_hit(ac_nick_x(l) + 6.0, t + AC_PIC_Y + 4.0, l, w, t, h, 3, 3, 5, none) == AC_H_PICTURE;
+    assert ac_hit(l + 40.0, t + AC_KEY_Y + 6.0, l, w, t, h, 3, 3, 5, none, false) == AC_H_KEY;
+    assert ac_hit(ac_copy_x(l, w) + 4.0, t + AC_COPY_Y + 4.0, l, w, t, h, 3, 3, 5, none, false) == AC_H_COPYKEY;
+    assert ac_hit(ac_nick_x(l) + 6.0, t + AC_NICK_Y + 6.0, l, w, t, h, 3, 3, 5, none, false) == AC_H_NICK;
+    assert ac_hit(ac_save_x(l, w) + 6.0, t + AC_NICK_Y + 6.0, l, w, t, h, 3, 3, 5, none, false) == AC_H_SAVE;
+    assert ac_hit(ac_nick_x(l) + 6.0, t + AC_PIC_Y + 4.0, l, w, t, h, 3, 3, 5, none, false) == AC_H_PICTURE;
     // the rows: body (call), copy a friend's key, remove
-    assert ac_hit(l + 40.0, ac_row_y(t, 0) + 4.0, l, w, t, h, 3, 3, 5, none) == AC_H_ROW;
-    assert ac_hit(l + 40.0, ac_row_y(t, 2) + 4.0, l, w, t, h, 3, 3, 5, none) == AC_H_ROW + 2;
-    assert ac_hit(l + 40.0, ac_row_y(t, 3) + 4.0, l, w, t, h, 3, 3, 5, none) == AC_H_NONE;
-    assert ac_hit(ac_fcopy_x(l, w) + 4.0, ac_row_y(t, 1) + 4.0, l, w, t, h, 3, 3, 5, none) == AC_H_FCOPY + 1;
-    assert ac_hit(ac_del_x(l, w) + 4.0, ac_row_y(t, 1) + 4.0, l, w, t, h, 3, 3, 5, none) == AC_H_DEL + 1;
+    assert ac_hit(l + 40.0, ac_row_y(t, 0) + 4.0, l, w, t, h, 3, 3, 5, none, false) == AC_H_ROW;
+    assert ac_hit(l + 40.0, ac_row_y(t, 2) + 4.0, l, w, t, h, 3, 3, 5, none, false) == AC_H_ROW + 2;
+    assert ac_hit(l + 40.0, ac_row_y(t, 3) + 4.0, l, w, t, h, 3, 3, 5, none, false) == AC_H_NONE;
+    assert ac_hit(ac_fcopy_x(l, w) + 4.0, ac_row_y(t, 1) + 4.0, l, w, t, h, 3, 3, 5, none, false) == AC_H_FCOPY + 1;
+    assert ac_hit(ac_del_x(l, w) + 4.0, ac_row_y(t, 1) + 4.0, l, w, t, h, 3, 3, 5, none, false) == AC_H_DEL + 1;
     // the zone between COPY and the remove mark belongs to no button but the row (a call)
-    assert ac_hit(ac_del_x(l, w) - 2.0, ac_row_y(t, 1) + 4.0, l, w, t, h, 3, 3, 5, none) == AC_H_ROW + 1;
+    assert ac_hit(ac_del_x(l, w) - 2.0, ac_row_y(t, 1) + 4.0, l, w, t, h, 3, 3, 5, none, false) == AC_H_ROW + 1;
     // the add part
-    assert ac_hit(cv_field_x(l) + 4.0, ac_ifield_y(t, h) + 4.0, l, w, t, h, 3, 3, 5, none) == AC_H_IFIELD;
-    assert ac_hit(cv_btn_x(l, w, 0) + 4.0, ac_btn_y(t, h) + 4.0, l, w, t, h, 3, 3, 5, none) == AC_H_PASTE;
-    assert ac_hit(cv_btn_x(l, w, 1) + 4.0, ac_btn_y(t, h) + 4.0, l, w, t, h, 3, 3, 5, none) == AC_H_ADD;
-    assert ac_hit(l + 5.0, t + 5.0, l, w, t, h, 3, 3, 5, none) == AC_H_NONE;
+    assert ac_hit(cv_field_x(l) + 4.0, ac_ifield_y(t, h) + 4.0, l, w, t, h, 3, 3, 5, none, false) == AC_H_IFIELD;
+    assert ac_hit(cv_btn_x(l, w, 0) + 4.0, ac_btn_y(t, h) + 4.0, l, w, t, h, 3, 3, 5, none, false) == AC_H_PASTE;
+    assert ac_hit(cv_btn_x(l, w, 1) + 4.0, ac_btn_y(t, h) + 4.0, l, w, t, h, 3, 3, 5, none, false) == AC_H_ADD;
+    assert ac_hit(l + 5.0, t + 5.0, l, w, t, h, 3, 3, 5, none, false) == AC_H_NONE;
 }
 
 test ac_a_row_that_asks_to_remove_answers_yes_no_and_nothing_else {
@@ -612,13 +623,13 @@ test ac_a_row_that_asks_to_remove_answers_yes_no_and_nothing_else {
     const w : f64 = 300.0;
     const t : f64 = 35.0;
     const h : f64 = 600.0;
-    assert ac_hit(ac_yes_x(l, w) + 4.0, ac_row_y(t, 1) + 4.0, l, w, t, h, 3, 3, 5, 1) == AC_H_YES + 1;
-    assert ac_hit(ac_no_x(l, w) + 4.0, ac_row_y(t, 1) + 4.0, l, w, t, h, 3, 3, 5, 1) == AC_H_NO + 1;
+    assert ac_hit(ac_yes_x(l, w) + 4.0, ac_row_y(t, 1) + 4.0, l, w, t, h, 3, 3, 5, 1, false) == AC_H_YES + 1;
+    assert ac_hit(ac_no_x(l, w) + 4.0, ac_row_y(t, 1) + 4.0, l, w, t, h, 3, 3, 5, 1, false) == AC_H_NO + 1;
     // a click on the body of the row that asks means NO; the copy and remove marks are gone from it
-    assert ac_hit(l + 40.0, ac_row_y(t, 1) + 4.0, l, w, t, h, 3, 3, 5, 1) == AC_H_NO + 1;
-    assert ac_hit(ac_del_x(l, w) + 4.0, ac_row_y(t, 1) + 4.0, l, w, t, h, 3, 3, 5, 1) == AC_H_NO + 1;
+    assert ac_hit(l + 40.0, ac_row_y(t, 1) + 4.0, l, w, t, h, 3, 3, 5, 1, false) == AC_H_NO + 1;
+    assert ac_hit(ac_del_x(l, w) + 4.0, ac_row_y(t, 1) + 4.0, l, w, t, h, 3, 3, 5, 1, false) == AC_H_NO + 1;
     // the other rows keep their buttons
-    assert ac_hit(ac_del_x(l, w) + 4.0, ac_row_y(t, 0) + 4.0, l, w, t, h, 3, 3, 5, 1) == AC_H_DEL;
+    assert ac_hit(ac_del_x(l, w) + 4.0, ac_row_y(t, 0) + 4.0, l, w, t, h, 3, 3, 5, 1, false) == AC_H_DEL;
     assert ac_yes_x(l, w) + AC_ZONE_YES_W + AC_ZONE_GAP == ac_no_x(l, w);
     assert ac_no_x(l, w) + AC_ZONE_YES_W == l + w - QP_PAD;
 }
@@ -629,9 +640,9 @@ test ac_the_arrows_exist_only_for_a_list_longer_than_the_window {
     const t : f64 = 35.0;
     const h : f64 = 600.0;
     const none : usize = FV_ROWS_SNAP;
-    assert ac_hit(ac_up_x(l, w) + 4.0, ac_arrow_y(t) + 4.0, l, w, t, h, 5, 12, 5, none) == AC_H_UP;
-    assert ac_hit(ac_down_x(l, w) + 4.0, ac_arrow_y(t) + 4.0, l, w, t, h, 5, 12, 5, none) == AC_H_DOWN;
-    assert ac_hit(ac_up_x(l, w) + 4.0, ac_arrow_y(t) + 4.0, l, w, t, h, 5, 5, 5, none) == AC_H_NONE;
+    assert ac_hit(ac_up_x(l, w) + 4.0, ac_arrow_y(t) + 4.0, l, w, t, h, 5, 12, 5, none, false) == AC_H_UP;
+    assert ac_hit(ac_down_x(l, w) + 4.0, ac_arrow_y(t) + 4.0, l, w, t, h, 5, 12, 5, none, false) == AC_H_DOWN;
+    assert ac_hit(ac_up_x(l, w) + 4.0, ac_arrow_y(t) + 4.0, l, w, t, h, 5, 5, 5, none, false) == AC_H_NONE;
     assert ac_wheel_area(l + 50.0, ac_row_y(t, 2), l, w, t, 5);
     assert ac_wheel_area(l + 50.0, t + AC_KEY_Y, l, w, t, 5) == false;
 }
@@ -645,7 +656,9 @@ test ac_the_boxes_keep_their_order_down_the_panel_and_do_not_overlap {
         assert AC_PIC_Y + AC_PIC_H < AC_KEY_LABEL_Y;
         assert AC_KEY_Y + AC_KEY_H <= AC_COPY_Y;
         assert AC_COPY_Y + CV_BTN_H < AC_STATE_Y - 8.0;
-        assert AC_STATE_Y < AC_BUILD_Y and AC_BUILD_Y < AC_FR_LABEL_Y - 8.0;
+        assert AC_STATE_Y < AC_BUILD_Y and AC_BUILD_Y + 12.0 <= AC_UPD_Y and AC_UPD_Y + 3.0 <= AC_UPD_BTN_Y;
+        assert AC_UPD_BTN_Y < AC_UPD2_Y - 8.0 and AC_UPD2_Y < AC_UPD_BTN_Y + AC_UPD_BTN_H;
+        assert AC_UPD_BTN_Y + AC_UPD_BTN_H < AC_FR_LABEL_Y - 12.0;
         assert AC_FR_LABEL_Y < AC_ROWS_Y;
         // the add part is anchored to the bottom and starts below the last row that fits
         const v : usize = ac_rows_vis(h);
@@ -735,4 +748,21 @@ test ac_a_pasted_message_with_a_key_inside_pastes_as_the_key {
     assert ac_paste_find("no key here", 11) == 0;
     assert ac_paste_find("T27", 3) == 0;
     assert ac_paste_find("T2", 2) == 0;
+}
+
+test ac_the_update_button_answers_only_when_it_is_shown {
+    const l : f64 = 660.0;
+    const w : f64 = 300.0;
+    const t : f64 = 35.0;
+    const h : f64 = 600.0;
+    const none : usize = FV_ROWS_SNAP;
+    const bx : f64 = ac_upd_btn_x(l, w) + 6.0;
+    const by : f64 = t + AC_UPD_BTN_Y + 6.0;
+    assert ac_hit(bx, by, l, w, t, h, 3, 3, 5, none, true) == AC_H_UPD;
+    assert ac_hit(bx, by, l, w, t, h, 3, 3, 5, none, false) == AC_H_NONE;
+    // it stands right of the second line, inside the panel, between the first line and the friends
+    assert ac_upd_btn_x(l, w) + AC_UPD_BTN_W == l + w - QP_PAD;
+    assert AC_UPD_Y < AC_UPD_BTN_Y and AC_UPD_BTN_Y + AC_UPD_BTN_H < AC_FR_LABEL_Y - 14.0;
+    // the friends' first row is no longer where the button is
+    assert ac_hit(l + 40.0, ac_row_y(t, 0) + 4.0, l, w, t, h, 3, 3, 5, none, true) == AC_H_ROW;
 }

@@ -147,6 +147,31 @@ use t27os::friends_view::fv_get32;
 use t27os::friends_view::fv_put32;
 use t27os::friends_view::fv_row_addr;
 use t27os::friends_view::fv_offline_note;
+use t27os::update_core::upd_txt_add;
+use t27os::update_core::upd_txt_add_port;
+use t27os::update_core::upd_txt_uport;
+use t27os::update_core::upd_txt_build;
+use t27os::update_core::upd_txt_version;
+use t27os::update_core::upd_neighbour_newer;
+use t27os::update_core::um_author_known;
+use t27os::update_core::um_ver_part;
+use t27os::update_view::upv_get32;
+use t27os::update_view::upv_put32;
+use t27os::update_view::UPV_TXTUP;
+use t27os::update_view::UPV_MYBUILD;
+use t27os::update_view::UPV_MYVEROK;
+use t27os::update_view::UPV_MYMAJ;
+use t27os::update_view::UPV_MYMIN;
+use t27os::update_view::UPV_MYPAT;
+use t27os::update_view::UPV_SPORT;
+use t27os::update_view::UPV_OBUILD;
+use t27os::update_view::UPV_OPORT;
+use t27os::update_view::UPV_OIP;
+use t27os::update_view::UPV_OMAJ;
+use t27os::update_view::UPV_OMIN;
+use t27os::update_view::UPV_OPAT;
+use t27os::update_view::UPV_NICK;
+use t27os::update_view::UPV_NICKLEN;
 
 fn fe_dlsym(h: u64, name: []const u8) -> u64 { return @extern("dlsym"); }
 fn fe_poke(dst: u64, src: []const u8, n: u64) -> u64 { return @extern("memmove"); }
@@ -380,11 +405,12 @@ pub fn fe_net(cl: []u8, ip: u64, port: u64) -> bool {
         nick[i] = cl[FV_MYNICK + i];
         i = i + 1;
     }
-    const tn : usize = txt_build(cl[FV_INV..FV_INV + INVITE_LEN], @as(u32, @intCast(port)), nick[0..24], nn, cl[FE_TXT..FE_TXT + 96]);
+    var tn : usize = txt_build(cl[FV_INV..FV_INV + INVITE_LEN], @as(u32, @intCast(port)), nick[0..24], nn, cl[FE_TXT..FE_TXT + 96]);
     if (tn == 0) {
         cl[FV_NET] = @as(u8, @intCast(FV_NET_FAIL));
         return false;
     }
+    tn = fe_txt_update(cl, tn);
     // "<nick> <4 hex>" as the instance name (NUL-terminated)
     var nm : usize = 0;
     while (nm < nn) {
@@ -411,6 +437,101 @@ pub fn fe_net(cl: []u8, ip: u64, port: u64) -> bool {
         return false;
     }
     cl[FV_NET] = @as(u8, @intCast(FV_NET_UP));
+    return true;
+}
+
+/// The update keys after fp/port/nick (update_view.t27): ver and build of this bundle when it has them, then "up=" when
+/// the window serves its bundle on a port. A record with no room for "up" keeps ver and build (UPV_TXTUP stays 0, the
+/// panel says "not announced"); a bundle with no build announces as before. The record's new length.
+fn fe_txt_update(cl: []u8, tn: usize) -> usize {
+    cl[UPV_TXTUP] = 0;
+    const build : u64 = upv_get32(cl, UPV_MYBUILD);
+    if (cl[UPV_MYVEROK] == 0 or build == 0) { return tn; }
+    var a : [96]u8 = undefined;
+    const k : usize = upd_txt_add(cl[FE_TXT..FE_TXT + 96], tn, @as(u32, cl[UPV_MYMAJ]), @as(u32, cl[UPV_MYMIN]), @as(u32, cl[UPV_MYPAT]), @as(u32, @intCast(build)), a[0..96]);
+    if (k == 0) { return tn; }
+    var b : [96]u8 = undefined;
+    var n : usize = k;
+    const sport : u64 = upv_get32(cl, UPV_SPORT);
+    var k2 : usize = 0;
+    if (sport != 0) { k2 = upd_txt_add_port(a[0..96], k, @as(u32, @intCast(sport)), b[0..96]); }
+    var i : usize = 0;
+    if (k2 > 0) {
+        n = k2;
+        while (i < n) {
+            cl[FE_TXT + i] = b[i];
+            i = i + 1;
+        }
+        cl[UPV_TXTUP] = 1;
+        return n;
+    }
+    while (i < n) {
+        cl[FE_TXT + i] = a[i];
+        i = i + 1;
+    }
+    return n;
+}
+
+/// The newest build a friend (or this device's own key, from another process) announces next to us with an update port:
+/// its address (the best allowed one, as fe_match picks), port, build, version and the nickname it announces, into the
+/// UPV_O* bytes. True when there is one; the bytes are cleared when there is none. own_ver/own_build: this bundle.
+pub fn fe_offer(cl: []u8, own_ver: u64, own_build: u32) -> bool {
+    const block_at : u64 = fe_base(cl[FE_BR..FE_BR + BR_LEN]);
+    var best_b : u32 = 0;
+    var best_ip : u64 = 0;
+    var best_port : u32 = 0;
+    var best_v : u64 = 0;
+    var best_k : usize = BR_COUNT;
+    var k : usize = 0;
+    while (k < BR_COUNT) {
+        const e : u64 = ih_entry(block_at, k);
+        if (fe_peek32(e + BE_STATE) == BS_ADDRESSED) {
+            var tb : [128]u8 = undefined;
+            const tl : usize = fe_read_txt(e, tb[0..128]);
+            var pfp : [10]u8 = undefined;
+            const ip : u64 = fe_entry_ip(e);
+            if (txt_fp(tb[0..128], tl, pfp[0..10]) == INV_OK and cv_lan_ok(ip)) {
+                const known : bool = um_author_known(cl[FE_FT..FE_FT + FT_LEN], cl[FE_FP..FE_FP + FP_BYTES], pfp[0..10]);
+                const up : u32 = upd_txt_uport(tb[0..128], tl);
+                const b : u32 = upd_txt_build(tb[0..128], tl);
+                if (known and up != 0 and upd_neighbour_newer(tb[0..128], tl, own_ver, own_build)) {
+                    if (b > best_b or (b == best_b and fe_better(best_ip, ip))) {
+                        best_b = b;
+                        best_ip = ip;
+                        best_port = up;
+                        best_v = upd_txt_version(tb[0..128], tl);
+                        best_k = k;
+                    }
+                }
+            }
+        }
+        k = k + 1;
+    }
+    if (best_k >= BR_COUNT) {
+        upv_put32(cl, UPV_OBUILD, 0);
+        upv_put32(cl, UPV_OPORT, 0);
+        upv_put32(cl, UPV_OIP, 0);
+        cl[UPV_NICKLEN] = 0;
+        return false;
+    }
+    upv_put32(cl, UPV_OBUILD, @as(u64, best_b));
+    upv_put32(cl, UPV_OPORT, @as(u64, best_port));
+    upv_put32(cl, UPV_OIP, best_ip);
+    cl[UPV_OMAJ] = @as(u8, @intCast(um_ver_part(best_v, 2) & 255));
+    cl[UPV_OMIN] = @as(u8, @intCast(um_ver_part(best_v, 1) & 255));
+    cl[UPV_OPAT] = @as(u8, @intCast(um_ver_part(best_v, 0) & 255));
+    var tb2 : [128]u8 = undefined;
+    const tl2 : usize = fe_read_txt(ih_entry(block_at, best_k), tb2[0..128]);
+    var nk : [32]u8 = undefined;
+    const key : [4]u8 = [110, 105, 99, 107];
+    var kn : usize = txt_get(tb2[0..128], tl2, key[0..4], nk[0..32]);
+    if (kn > NICK_MAX) { kn = NICK_MAX; }
+    var i : usize = 0;
+    while (i < kn) {
+        cl[UPV_NICK + i] = nk[i];
+        i = i + 1;
+    }
+    cl[UPV_NICKLEN] = @as(u8, @intCast(kn));
     return true;
 }
 
@@ -1046,4 +1167,34 @@ test fe_removing_a_friend_closes_the_list_and_moves_the_seen_records_with_it {
     assert fe_remove(cl[0..8000], 0, 10000) == FN_RM_NOSAVE;
     assert cl[FV_COUNT] == 2 and cl[FV_SCROLL] == 1 and cl[FV_SHOWN] == 1;
     assert cl[fv_row_at(0) + FR_FP] == 3;
+}
+
+test fe_the_announcement_carries_ver_build_and_the_update_port {
+    var cl : [8192]u8 = undefined;
+    fe_zero(cl[0..8192], 0, 8192);
+    const fp : [10]u8 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    var inv : [25]u8 = undefined;
+    invite_make(fp[0..10], inv[0..25]);
+    const nick : [5]u8 = [116, 50, 55, 111, 115];
+    var tn : usize = txt_build(inv[0..25], 47727, nick[0..5], 5, cl[FE_TXT..FE_TXT + 96]);
+    // a bundle with no build announces exactly as before
+    assert fe_txt_update(cl[0..8192], tn) == tn and cl[UPV_TXTUP] == 0;
+    cl[UPV_MYVEROK] = 1;
+    cl[UPV_MYMAJ] = 0;
+    cl[UPV_MYMIN] = 1;
+    cl[UPV_MYPAT] = 3;
+    upv_put32(cl[0..8192], UPV_MYBUILD, 7068);
+    // no server port yet: ver and build only
+    const k : usize = fe_txt_update(cl[0..8192], tn);
+    assert k == tn + 21 and cl[UPV_TXTUP] == 0;
+    assert upd_txt_build(cl[FE_TXT..FE_TXT + 96], k) == 7068 and upd_txt_uport(cl[FE_TXT..FE_TXT + 96], k) == 0;
+    // with the server's port: "up=" too, and fp and port still read
+    tn = txt_build(inv[0..25], 47727, nick[0..5], 5, cl[FE_TXT..FE_TXT + 96]);
+    upv_put32(cl[0..8192], UPV_SPORT, 52144);
+    const k2 : usize = fe_txt_update(cl[0..8192], tn);
+    assert k2 == tn + 30 and cl[UPV_TXTUP] == 1;
+    assert upd_txt_uport(cl[FE_TXT..FE_TXT + 96], k2) == 52144;
+    assert txt_port(cl[FE_TXT..FE_TXT + 96], k2) == 47727;
+    var back : [10]u8 = undefined;
+    assert txt_fp(cl[FE_TXT..FE_TXT + 96], k2, back[0..10]) == INV_OK and back[9] == 10;
 }

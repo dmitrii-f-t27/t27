@@ -29,6 +29,7 @@ use t27os::pty_sys::sys_waitpid;
 use t27os::pty_sys::sys_environ;
 use t27os::pty_sys::sys_peek;
 use t27os::pty_sys::sys_addr;
+use t27os::pty_sys::sys_kill;
 use t27os::keysync_host::ks_sign;
 use t27os::keysync_host::ks_verify;
 use t27os::peer_identity::PUB_BYTES;
@@ -116,6 +117,31 @@ use t27os::update_core::EV_INSTALL;
 use t27os::update_core::EV_INSTALLED;
 use t27os::update_core::EV_FAIL;
 use t27os::update_core::st_next;
+use t27os::update_core::uk_verdict;
+use t27os::update_core::uk_pid_of;
+use t27os::update_core::uk_pid_text;
+use t27os::update_core::UK_NONE;
+use t27os::update_core::UK_REMOVE;
+use t27os::update_core::UW_LEN;
+use t27os::update_core::UW_PHASE;
+use t27os::update_core::UW_WHY;
+use t27os::update_core::UW_OFFER;
+use t27os::update_core::UW_FETCH;
+use t27os::update_core::UW_STEP;
+use t27os::update_core::UW_UNDO;
+use t27os::update_core::UW_HAVE;
+use t27os::update_core::UW_TOTAL;
+use t27os::update_core::UW_R_FETCH;
+use t27os::update_core::UW_P_MANIFEST;
+use t27os::update_core::UW_P_FETCH;
+use t27os::update_core::UW_P_INSTALL;
+use t27os::update_core::UW_P_DONE;
+use t27os::update_core::UW_P_FAILED;
+use t27os::update_core::uw_init;
+use t27os::update_core::uw_ok;
+use t27os::update_core::uw_put64;
+use t27os::update_core::uw_get64;
+use t27os::update_core::uw_from_manifest;
 
 // UH_* results of uh_check_manifest: 0 = good, 1..6 = the um_offer refusal (OF_*), 10 = the signature is not true.
 pub const UH_OK : u32 = 0;
@@ -937,17 +963,239 @@ pub const UR_STEP : usize = 4;
 pub const UR_UNDO : usize = 5;
 pub const UR_BUNDLE : usize = 6;
 
-/// The lock next to the app (<app>.lock, a directory: mkdir is atomic): taken by one update, refused to a second.
+fn uh_getpid() -> i32 { return @extern("getpid"); }
+fn uh_errno_at() -> u64 { return @extern("__error"); }
+fn uh_stat(path: []const u8, st: []u8) -> i32 { return @extern("stat"); }
+fn uh_time(t: u64) -> i64 { return @extern("time"); }
+fn uh_getsockname(fd: i32, sa: []u8, len: []u8) -> i32 { return @extern("getsockname"); }
+
+/// The lock next to the app (<app>.lock, a directory: mkdir is atomic): taken by one update, refused to a second. The
+/// pid of the taker goes into <app>.lock/pid (update_core.uk_pid_text), so a lock left by a dead process can be judged.
 pub fn uh_lock(app: []const u8, an: usize) -> bool {
     var p : [512]u8 = undefined;
     if (ui_join(app, an, ".lock", p[0..512]) == 0) { return false; }
-    return sys_mkdir(p[0..512], 448) == 0;
+    if (sys_mkdir(p[0..512], 448) != 0) { return false; }
+    var f : [512]u8 = undefined;
+    if (ui_join(app, an, ".lock/pid", f[0..512]) == 0) { return true; }
+    var t : [16]u8 = undefined;
+    const n : usize = uk_pid_text(@as(u32, @intCast(uh_getpid())), t[0..16]);
+    const fd : i32 = sys_creat(f[0..512], 420);
+    if (fd >= 0) {
+        uh_write_full(fd, t[0..n], n);
+        sys_close(fd);
+    }
+    return true;
 }
 
 pub fn uh_unlock(app: []const u8, an: usize) -> void {
     var p : [512]u8 = undefined;
-    if (ui_join(app, an, ".lock", p[0..512]) == 0) { return; }
+    var f : [512]u8 = undefined;
+    if (ui_join(app, an, ".lock", p[0..512]) == 0 or ui_join(app, an, ".lock/pid", f[0..512]) == 0) { return; }
+    sys_unlink(f[0..512]);
     uh_rmdir(p[0..512]);
+}
+
+/// Seconds since 1970.
+pub fn uh_now_s() -> u64 {
+    const t : i64 = uh_time(0);
+    if (t < 0) { return 0; }
+    return @as(u64, @intCast(t));
+}
+
+/// The modification second of path (NUL-terminated), -1 when it does not exist. struct stat of arm64 macOS: 144 bytes,
+/// st_mtimespec.tv_sec at 48.
+pub fn uh_mtime(path: []const u8) -> i64 {
+    var st : [144]u8 = undefined;
+    if (uh_stat(path, st[0..144]) != 0) { return -1; }
+    var v : u64 = 0;
+    var i : usize = 0;
+    while (i < 8) {
+        v = v | (@as(u64, st[48 + i]) << @as(u6, @intCast(8 * i)));
+        i = i + 1;
+    }
+    return @as(i64, @intCast(v & 9223372036854775807));
+}
+
+/// Is a process with this pid there? kill(pid, 0) succeeds, or fails with EPERM (it runs under another user).
+pub fn uh_pid_alive(pid: u32) -> bool {
+    if (pid == 0) { return false; }
+    if (sys_kill(@as(i32, @intCast(pid)), 0) == 0) { return true; }
+    var e : [4]u8 = undefined;
+    sys_peek(e[0..4], uh_errno_at(), 4);
+    return e[0] == 1 and e[1] == 0;
+}
+
+// lock info fields (u64 each)
+pub const LK_EXISTS : usize = 0;
+pub const LK_AGE : usize = 1;
+pub const LK_OWNER : usize = 2;
+pub const LK_ALIVE : usize = 3;
+pub const LK_REMOVED : usize = 4;
+pub const LK_LEN : usize = 5;
+
+/// Look at the lock of the app and judge it (update_core.uk_verdict); remove it when the verdict is UK_REMOVE. info: whether
+/// it exists, its age in seconds (now - the directory's mtime), the owner pid from its file (0 when none), whether the
+/// owner runs, and 1 when it was removed. The verdict.
+pub fn uh_lock_sweep(app: []const u8, an: usize, now: u64, info: []u64) -> u32 {
+    var k : usize = 0;
+    while (k < LK_LEN) {
+        info[k] = 0;
+        k = k + 1;
+    }
+    var p : [512]u8 = undefined;
+    var f : [512]u8 = undefined;
+    if (ui_join(app, an, ".lock", p[0..512]) == 0 or ui_join(app, an, ".lock/pid", f[0..512]) == 0) { return UK_NONE; }
+    const mt : i64 = uh_mtime(p[0..512]);
+    if (mt < 0) { return UK_NONE; }
+    info[LK_EXISTS] = 1;
+    if (now > @as(u64, @intCast(mt))) { info[LK_AGE] = now - @as(u64, @intCast(mt)); }
+    var t : [16]u8 = undefined;
+    const fd : i32 = sys_open_ro(f[0..512], 0);
+    if (fd >= 0) {
+        const r : i64 = sys_read(fd, t[0..16], 16);
+        sys_close(fd);
+        if (r > 0) { info[LK_OWNER] = @as(u64, uk_pid_of(t[0..16], @as(usize, @intCast(r)))); }
+    }
+    const owner : u32 = @as(u32, @intCast(info[LK_OWNER]));
+    if (uh_pid_alive(owner)) { info[LK_ALIVE] = 1; }
+    const v : u32 = uk_verdict(true, info[LK_AGE], owner, info[LK_ALIVE] != 0);
+    if (v == UK_REMOVE) {
+        sys_unlink(f[0..512]);
+        if (uh_rmdir(p[0..512]) == 0) { info[LK_REMOVED] = 1; }
+    }
+    return v;
+}
+
+/// Remove the lock when its file names this pid (the window ends its own helper: the lock that helper took goes with it).
+pub fn uh_lock_release_of(app: []const u8, an: usize, pid: u32) -> bool {
+    var f : [512]u8 = undefined;
+    if (pid == 0 or ui_join(app, an, ".lock/pid", f[0..512]) == 0) { return false; }
+    var t : [16]u8 = undefined;
+    const fd : i32 = sys_open_ro(f[0..512], 0);
+    if (fd < 0) { return false; }
+    const r : i64 = sys_read(fd, t[0..16], 16);
+    sys_close(fd);
+    if (r <= 0 or uk_pid_of(t[0..16], @as(usize, @intCast(r))) != pid) { return false; }
+    uh_unlock(app, an);
+    return true;
+}
+
+/// The size of the file at path (NUL-terminated), -1 when it cannot be opened.
+pub fn uh_file_size(path: []const u8) -> i64 {
+    const fd : i32 = sys_open_ro(path, 0);
+    if (fd < 0) { return -1; }
+    const n : i64 = uh_lseek(fd, 0, 2);
+    sys_close(fd);
+    return n;
+}
+
+/// The port a listening socket was given (bound with port 0), 0 when it cannot be read.
+pub fn uh_bound_port(fd: i32) -> u32 {
+    var sa : [16]u8 = undefined;
+    var ln : [4]u8 = undefined;
+    ln[0] = 16;
+    ln[1] = 0;
+    ln[2] = 0;
+    ln[3] = 0;
+    if (uh_getsockname(fd, sa[0..16], ln[0..4]) != 0) { return 0; }
+    return (@as(u32, sa[2]) << 8) | @as(u32, sa[3]);
+}
+
+/// The bundle a device serves: the .app packed by ditto -c -k --keepParent with no compression (a compressed T27OS.app
+/// is under the 1 MiB the offer rule asks for; stored, it is the bundle's own size). zip and app NUL-terminated.
+pub fn uh_zip_app(app: []const u8, zip: []const u8) -> bool {
+    var a : [1200]u8 = undefined;
+    sys_unlink(zip);
+    // seven words, the most uh_run takes: -ck is -c -k
+    var p : usize = uh_arg(a[0..1200], 0, "/usr/bin/ditto");
+    p = uh_arg(a[0..1200], p, "-ck");
+    p = uh_arg(a[0..1200], p, "--zlibCompressionLevel");
+    p = uh_arg(a[0..1200], p, "0");
+    p = uh_arg(a[0..1200], p, "--keepParent");
+    p = uh_arg(a[0..1200], p, app);
+    p = uh_arg(a[0..1200], p, zip);
+    return uh_run(a[0..p], 7) == 0;
+}
+
+/// Write the helper's status record (update_core UW_*) to path (NUL-terminated) through path.tmp and a rename, so the
+/// window never reads half a record. Nothing when path is empty.
+pub fn uh_status_write(path: []const u8, r: []const u8) -> bool {
+    if (path.len == 0 or path[0] == 0) { return false; }
+    var n : usize = 0;
+    while (n < path.len and path[n] != 0) { n = n + 1; }
+    var tp : [520]u8 = undefined;
+    if (ui_join(path, n, ".tmp", tp[0..520]) == 0) { return false; }
+    const fd : i32 = sys_creat(tp[0..520], 420);
+    if (fd < 0) { return false; }
+    const ok : bool = uh_write_full(fd, r, UW_LEN);
+    sys_close(fd);
+    if (ok == false) { return false; }
+    return sys_rename(tp[0..520], path) == 0;
+}
+
+/// Read a status record; false when there is none or it is not whole.
+pub fn uh_status_read(path: []const u8, r: []u8) -> bool {
+    const fd : i32 = sys_open_ro(path, 0);
+    if (fd < 0) { return false; }
+    const n : i64 = sys_read(fd, r[0..UW_LEN], @as(u64, UW_LEN));
+    sys_close(fd);
+    if (n != @as(i64, @intCast(UW_LEN))) { return false; }
+    return uw_ok(r, UW_LEN);
+}
+
+/// Start the program at exe (NUL-terminated) with this process's environment and no arguments, without waiting. Its
+/// pid, 0 when it could not start.
+pub fn uh_spawn(exe: []const u8) -> u32 {
+    var tb : [1024]u8 = undefined;
+    var i : usize = 0;
+    while (i < exe.len and i < 1023 and exe[i] != 0) {
+        tb[i] = exe[i];
+        i = i + 1;
+    }
+    tb[i] = 0;
+    var argv : [8]u64 = undefined;
+    var k : usize = 0;
+    while (k < 8) {
+        argv[k] = 0;
+        k = k + 1;
+    }
+    argv[0] = sys_addr(tb[0..1024], tb[0..1], 0);
+    var ep : [8]u8 = undefined;
+    sys_peek(ep[0..8], sys_environ(), 8);
+    var envp : u64 = 0;
+    i = 0;
+    while (i < 8) {
+        envp = envp | (@as(u64, ep[i]) << @as(u6, @intCast(8 * i)));
+        i = i + 1;
+    }
+    var pid : [2]u32 = undefined;
+    pid[0] = 0;
+    pid[1] = 0;
+    if (sys_spawn(pid, tb[0..1024], 0, 0, argv, envp) != 0) { return 0; }
+    return pid[0];
+}
+
+/// A helper started by uh_spawn: 0 while it runs, 1 when it ended with exit 0, 2 when it failed or is gone (reaped here).
+pub fn uh_reap(pid: u32) -> u32 {
+    if (pid == 0) { return 2; }
+    var st : [2]u32 = undefined;
+    st[0] = 0;
+    st[1] = 0;
+    const w : i32 = sys_waitpid(@as(i32, @intCast(pid)), st, 1);
+    if (w == 0) { return 0; }
+    if (w < 0) { return 2; }
+    if ((st[0] & 127) == 0 and ((st[0] >> 8) & 255) == 0) { return 1; }
+    return 2;
+}
+
+/// End a helper (SIGTERM) and wait for it.
+pub fn uh_stop(pid: u32) -> void {
+    if (pid == 0) { return; }
+    sys_kill(@as(i32, @intCast(pid)), 15);
+    var st : [2]u32 = undefined;
+    st[0] = 0;
+    st[1] = 0;
+    sys_waitpid(@as(i32, @intCast(pid)), st, 0);
 }
 
 // uh_update settings (u64 each; t27b passes at most 8 parameters, so the scalars travel in one slice)
@@ -966,8 +1214,35 @@ pub const UC_LEN : usize = 7;
 /// cfg[UC_VER], size), then the bundle is fetched with resume and its SHA-256 compared AFTER, then installed with undo.
 /// res: UR_STATE ST_DONE / ST_FAILED (ST_IDLE when the lock was busy), UR_WHY the FR_* reason, UR_OFFER the manifest
 /// verdict (UH_OK or OF_* / UH_SIG), UR_FETCH the UF_* code, and the install fields. stats as uh_fetch. cfg[UC_RETRY]
-/// (1 = retry), cfg[UC_HEALTH], cfg[UC_FAIL_AT] as uh_fetch / uh_install.
-pub fn uh_update(cfg: []const u64, ft: []const u8, own_fp: []const u8, app: []const u8, res: []u32, stats: []u64) -> bool {
+/// (1 = retry), cfg[UC_HEALTH], cfg[UC_FAIL_AT] as uh_fetch / uh_install. sp: where the status record goes (the helper
+/// of the window, update_core UW_*), written at each phase; an empty slice for none.
+pub fn uh_update(cfg: []const u64, ft: []const u8, own_fp: []const u8, app: []const u8, res: []u32, stats: []u64, sp: []const u8) -> bool {
+    var rec : [96]u8 = undefined;
+    uw_init(rec[0..96], UW_R_FETCH, @as(u32, @intCast(uh_getpid())));
+    rec[UW_PHASE] = @as(u8, @intCast(UW_P_MANIFEST));
+    uh_status_write(sp, rec[0..96]);
+    var z : usize = 0;
+    while (z < 7) {
+        res[z] = 0;
+        z = z + 1;
+    }
+    const ok : bool = uh_update_run(cfg, ft, own_fp, app, res, stats, sp, rec[0..96]);
+    rec[UW_WHY] = @as(u8, @intCast(res[UR_WHY] & 255));
+    rec[UW_OFFER] = @as(u8, @intCast(res[UR_OFFER] & 255));
+    rec[UW_FETCH] = @as(u8, @intCast(res[UR_FETCH] & 255));
+    rec[UW_STEP] = @as(u8, @intCast(res[UR_STEP] & 255));
+    rec[UW_UNDO] = @as(u8, @intCast(res[UR_UNDO] & 255));
+    if (ok) {
+        rec[UW_PHASE] = @as(u8, @intCast(UW_P_DONE));
+        uw_put64(rec[0..96], UW_HAVE, uw_get64(rec[0..96], UW_TOTAL));
+    } else {
+        rec[UW_PHASE] = @as(u8, @intCast(UW_P_FAILED));
+    }
+    uh_status_write(sp, rec[0..96]);
+    return ok;
+}
+
+fn uh_update_run(cfg: []const u64, ft: []const u8, own_fp: []const u8, app: []const u8, res: []u32, stats: []u64, sp: []const u8, rec: []u8) -> bool {
     if (cfg.len < UC_LEN) { return false; }
     const ip : u64 = cfg[UC_IP];
     const port : u64 = cfg[UC_PORT];
@@ -1007,6 +1282,9 @@ pub fn uh_update(cfg: []const u64, ft: []const u8, own_fp: []const u8, app: []co
     var dn : usize = ui_base_at(app, an);
     if (dn > 0) { dn = dn - 1; }
     ui_part_path(app, dn, m[UM_OFF_SHA..UM_OFF_SHA + 32], part[0..512]);
+    uw_from_manifest(rec, m[0..216]);
+    rec[UW_PHASE] = @as(u8, @intCast(UW_P_FETCH));
+    uh_status_write(sp, rec);
     res[UR_FETCH] = uh_fetch(ip, port, m[0..216], part[0..512], retry, stats);
     if (res[UR_FETCH] != UF_DONE) {
         res[UR_WHY] = FR_NET;
@@ -1018,6 +1296,9 @@ pub fn uh_update(cfg: []const u64, ft: []const u8, own_fp: []const u8, app: []co
     st = st_next(st, EV_FETCHED);
     st = st_next(st, EV_VERIFIED);
     st = st_next(st, EV_INSTALL);
+    rec[UW_PHASE] = @as(u8, @intCast(UW_P_INSTALL));
+    uw_put64(rec, UW_HAVE, um_size_of(m[0..216]));
+    uh_status_write(sp, rec);
     var ir : [4]u32 = undefined;
     const ok : bool = uh_install(app, an, part[0..512], m[0..216], health, fail_at, ir[0..4]);
     sys_unlink(part[0..512]);

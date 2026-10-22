@@ -18,6 +18,10 @@
 //             stranger's manifest, a lower build, a bundle of another app, a build that fails its health check after the
 //             swap, a failed rename, a busy lock, a request for a bundle the server does not have. Prints
 //             CASE | EXPECT | GOT and what is live after each case. Never touches T27OS.app or ~/.t27os.
+//   offer     a neighbour with a newer build for the app under test: UP_APP (a .app), HOME of that app (same identity),
+//             UP_SECONDS (120), UP_NAME (upd-probe), UP_EXPECT=1 wants one whole bundle sent. See up_offer.
+//   lock      the lock next to an app (/tmp/t27uh-lock-test.app.lock): taken with this pid, kept while its owner runs,
+//             kept for 10 minutes after its owner died, removed after that (uh_lock_sweep), released only by its owner.
 //   serve     the server half of xfer (started by it): UP_SRV_M (manifest file), UP_SRV_ZIP (bundle), UP_SRV_READY
 //             (file made once listening), UP_CUT_AT / UP_FLIP_AT (test aids, 0 = off), UP_PORT, UP_SECONDS.
 // UP_SECONDS (default 8), UP_PORT (default 47741; xfer and serve: 47790), UP_NICK (default t27os), UP_NAME (instance name, default the nick),
@@ -151,6 +155,27 @@ use t27os::update_core::UM_OFF_SHA;
 use t27os::update_core::ui_part_path;
 use t27os::update_core::fr_text;
 use t27os::update_core::ui_build_text;
+use t27os::update_core::upd_txt_add_port;
+use t27os::update_host::uh_zip_app;
+use t27os::update_host::uh_bound_port;
+use t27os::update_host::uh_lock;
+use t27os::update_host::uh_unlock;
+use t27os::update_host::uh_lock_sweep;
+use t27os::update_host::uh_lock_release_of;
+use t27os::update_host::uh_pid_alive;
+use t27os::update_host::uh_mtime;
+use t27os::update_host::uh_now_s;
+use t27os::update_host::uh_write_full;
+use t27os::update_host::LK_EXISTS;
+use t27os::update_host::LK_AGE;
+use t27os::update_host::LK_OWNER;
+use t27os::update_host::LK_ALIVE;
+use t27os::update_host::LK_REMOVED;
+use t27os::update_core::UK_NONE;
+use t27os::update_core::UK_KEEP_FRESH;
+use t27os::update_core::UK_KEEP_ALIVE;
+use t27os::update_core::UK_REMOVE;
+use t27os::update_core::ui_join;
 
 fn up_peek32(at: u64) -> u32 {
     var c : [4]u8 = undefined;
@@ -1103,7 +1128,7 @@ fn up_xfer() -> bool {
     pid = up_spawn_server(d200[0..192], n200, 0, 0);
     up_zero(st[0..8], res[0..8]);
     up_cfg(cfg[0..7], 100, 1, 0);
-    ok = uh_update(cfg[0..7], ftb[0..1108], fpb[0..10], app[0..an], res[0..8], st[0..8]);
+    ok = uh_update(cfg[0..7], ftb[0..1108], fpb[0..10], app[0..an], res[0..8], st[0..8], app[0..0]);
     up_stop(pid);
     up_live(x[0..128], xn, lv[0..5]);
     all = up_case_row("1 success: friend's build 200 over build 100", "done, live 200 runs, .prev 100, all bytes in 64 KiB chunks", ok and res[UR_STATE] == ST_DONE and lv[LV_BUILD] == 200 and lv[LV_HEALTH] == 1 and lv[LV_PREV] == 100 and lv[LV_NEW] == 0 and lv[LV_LOCK] == 0 and st[FS_BYTES] == size and st[FS_CHUNKS] == (size + 65535) / 65536) and all;
@@ -1114,7 +1139,7 @@ fn up_xfer() -> bool {
     pid = up_spawn_server(d200[0..192], n200, 0, 700000);
     up_zero(st[0..8], res[0..8]);
     up_cfg(cfg[0..7], 100, 1, 0);
-    ok = uh_update(cfg[0..7], ftb[0..1108], fpb[0..10], app[0..an], res[0..8], st[0..8]);
+    ok = uh_update(cfg[0..7], ftb[0..1108], fpb[0..10], app[0..an], res[0..8], st[0..8], app[0..0]);
     up_stop(pid);
     up_live(x[0..128], xn, lv[0..5]);
     var part : [256]u8 = undefined;
@@ -1127,7 +1152,7 @@ fn up_xfer() -> bool {
     pid = up_spawn_server(d200[0..192], n200, cut, 0);
     up_zero(st[0..8], res[0..8]);
     up_cfg(cfg[0..7], 100, 1, 0);
-    ok = uh_update(cfg[0..7], ftb[0..1108], fpb[0..10], app[0..an], res[0..8], st[0..8]);
+    ok = uh_update(cfg[0..7], ftb[0..1108], fpb[0..10], app[0..an], res[0..8], st[0..8], app[0..0]);
     up_stop(pid);
     up_live(x[0..128], xn, lv[0..5]);
     all = up_case_row("3 server cuts the connection after 900000 bytes, client resumes", "done, 2 connections, resumed from the last whole chunk, live 200", ok and res[UR_STATE] == ST_DONE and st[FS_CONNS] == 2 and st[FS_RESUMED] == whole and st[FS_BYTES] == size and lv[LV_BUILD] == 200 and lv[LV_HEALTH] == 1) and all;
@@ -1138,7 +1163,7 @@ fn up_xfer() -> bool {
     pid = up_spawn_server(d200[0..192], n200, cut, 0);
     up_zero(st[0..8], res[0..8]);
     up_cfg(cfg[0..7], 100, 0, 0);
-    ok = uh_update(cfg[0..7], ftb[0..1108], fpb[0..10], app[0..an], res[0..8], st[0..8]);
+    ok = uh_update(cfg[0..7], ftb[0..1108], fpb[0..10], app[0..an], res[0..8], st[0..8], app[0..0]);
     var sha : [32]u8 = undefined;
     const kept : i64 = uh_file_sha(part[0..256], sha[0..32]);
     up_live(x[0..128], xn, lv[0..5]);
@@ -1149,7 +1174,7 @@ fn up_xfer() -> bool {
     up_say(" bytes\n");
     up_zero(st[0..8], res[0..8]);
     up_cfg(cfg[0..7], 100, 1, 0);
-    ok = uh_update(cfg[0..7], ftb[0..1108], fpb[0..10], app[0..an], res[0..8], st[0..8]);
+    ok = uh_update(cfg[0..7], ftb[0..1108], fpb[0..10], app[0..an], res[0..8], st[0..8], app[0..0]);
     up_stop(pid);
     up_live(x[0..128], xn, lv[0..5]);
     all = up_case_row("4b a new run resumes from the part", "done, one connection from the part's size, only the rest fetched, live 200", ok and res[UR_STATE] == ST_DONE and st[FS_CONNS] == 1 and st[FS_FROM] == whole and st[FS_BYTES] == size - whole and lv[LV_BUILD] == 200 and lv[LV_HEALTH] == 1 and up_exists(part[0..256]) == false) and all;
@@ -1160,7 +1185,7 @@ fn up_xfer() -> bool {
     pid = up_spawn_server(d200[0..192], n200, 0, 0);
     up_zero(st[0..8], res[0..8]);
     up_cfg(cfg[0..7], 100, 1, 0);
-    ok = uh_update(cfg[0..7], fte[0..1108], fpb[0..10], app[0..an], res[0..8], st[0..8]);
+    ok = uh_update(cfg[0..7], fte[0..1108], fpb[0..10], app[0..an], res[0..8], st[0..8], app[0..0]);
     up_stop(pid);
     up_live(x[0..128], xn, lv[0..5]);
     all = up_case_row("5 bundle from an author who is not a friend", "refused before download: offer 3, no bundle connection, live 100", ok == false and res[UR_STATE] == ST_FAILED and res[UR_WHY] == 1 and res[UR_OFFER] == 3 and st[FS_CONNS] == 0 and st[FS_BYTES] == 0 and lv[LV_BUILD] == 100) and all;
@@ -1171,7 +1196,7 @@ fn up_xfer() -> bool {
     pid = up_spawn_server(d200[0..192], n200, 0, 0);
     up_zero(st[0..8], res[0..8]);
     up_cfg(cfg[0..7], 300, 1, 0);
-    ok = uh_update(cfg[0..7], ftb[0..1108], fpb[0..10], app[0..an], res[0..8], st[0..8]);
+    ok = uh_update(cfg[0..7], ftb[0..1108], fpb[0..10], app[0..an], res[0..8], st[0..8], app[0..0]);
     up_stop(pid);
     up_live(x[0..128], xn, lv[0..5]);
     all = up_case_row("6 build 200 offered to a device on build 300", "refused before download: offer 4 (rollback), no bundle connection", ok == false and res[UR_OFFER] == 4 and st[FS_CONNS] == 0 and st[FS_BYTES] == 0 and lv[LV_BUILD] == 100) and all;
@@ -1182,7 +1207,7 @@ fn up_xfer() -> bool {
     pid = up_spawn_server(d202[0..192], n202, 0, 0);
     up_zero(st[0..8], res[0..8]);
     up_cfg(cfg[0..7], 100, 1, 0);
-    ok = uh_update(cfg[0..7], ftb[0..1108], fpb[0..10], app[0..an], res[0..8], st[0..8]);
+    ok = uh_update(cfg[0..7], ftb[0..1108], fpb[0..10], app[0..an], res[0..8], st[0..8], app[0..0]);
     up_stop(pid);
     up_live(x[0..128], xn, lv[0..5]);
     all = up_case_row("7 bundle of another app (com.example.other)", "failed at check: bundle 2 (id), undo clean, live 100 untouched, no .prev", ok == false and res[UR_WHY] == 5 and res[UR_STEP] == 2 and res[UR_BUNDLE] == 2 and res[UR_UNDO] == 1 and lv[LV_BUILD] == 100 and lv[LV_HEALTH] == 1 and lv[LV_PREV] == 0 and lv[LV_NEW] == 0) and all;
@@ -1193,7 +1218,7 @@ fn up_xfer() -> bool {
     pid = up_spawn_server(d201[0..192], n201, 0, 0);
     up_zero(st[0..8], res[0..8]);
     up_cfg(cfg[0..7], 100, 1, 0);
-    ok = uh_update(cfg[0..7], ftb[0..1108], fpb[0..10], app[0..an], res[0..8], st[0..8]);
+    ok = uh_update(cfg[0..7], ftb[0..1108], fpb[0..10], app[0..an], res[0..8], st[0..8], app[0..0]);
     up_stop(pid);
     up_live(x[0..128], xn, lv[0..5]);
     all = up_case_row("8 build 201 is installed and fails its health check", "failed: health (7), undo swap back (3), live 100 runs again", ok == false and res[UR_STATE] == ST_FAILED and res[UR_WHY] == 7 and res[UR_STEP] == 5 and res[UR_UNDO] == 3 and lv[LV_BUILD] == 100 and lv[LV_HEALTH] == 1 and lv[LV_NEW] == 0) and all;
@@ -1204,7 +1229,7 @@ fn up_xfer() -> bool {
     pid = up_spawn_server(d200[0..192], n200, 0, 0);
     up_zero(st[0..8], res[0..8]);
     up_cfg(cfg[0..7], 100, 1, 4);
-    ok = uh_update(cfg[0..7], ftb[0..1108], fpb[0..10], app[0..an], res[0..8], st[0..8]);
+    ok = uh_update(cfg[0..7], ftb[0..1108], fpb[0..10], app[0..an], res[0..8], st[0..8], app[0..0]);
     up_stop(pid);
     up_live(x[0..128], xn, lv[0..5]);
     all = up_case_row("9 moving the new copy in fails after the old one moved out", "failed: move (6), undo restore (2), live 100 runs", ok == false and res[UR_WHY] == 6 and res[UR_STEP] == 4 and res[UR_UNDO] == 2 and lv[LV_BUILD] == 100 and lv[LV_HEALTH] == 1 and lv[LV_NEW] == 0) and all;
@@ -1218,7 +1243,7 @@ fn up_xfer() -> bool {
     pid = up_spawn_server(d200[0..192], n200, 0, 0);
     up_zero(st[0..8], res[0..8]);
     up_cfg(cfg[0..7], 100, 1, 0);
-    ok = uh_update(cfg[0..7], ftb[0..1108], fpb[0..10], app[0..an], res[0..8], st[0..8]);
+    ok = uh_update(cfg[0..7], ftb[0..1108], fpb[0..10], app[0..an], res[0..8], st[0..8], app[0..0]);
     up_stop(pid);
     up_live(x[0..128], xn, lv[0..5]);
     all = up_case_row("10 another update holds the lock", "busy (8), nothing fetched, live 100; in-process: a second start is refused", ok == false and res[UR_WHY] == 8 and st[FS_CONNS] == 0 and lv[LV_BUILD] == 100 and st_next(ST_FETCHING, EV_START) == ST_REJECT) and all;
@@ -1250,6 +1275,175 @@ fn up_xfer() -> bool {
     return all;
 }
 
+fn up_getpid() -> i32 { return @extern("getpid"); }
+
+fn up_utimes(path: []const u8, tv: []const u8) -> i32 { return @extern("utimes"); }
+
+/// Set the modification time of path to `ago` seconds before now (a test aid).
+fn up_age(path: []const u8, ago: u64) -> bool {
+    const t : u64 = uh_now_s() - ago;
+    var tv : [32]u8 = undefined;
+    var i : usize = 0;
+    while (i < 32) {
+        tv[i] = 0;
+        i = i + 1;
+    }
+    i = 0;
+    while (i < 8) {
+        tv[i] = @as(u8, @intCast((t >> @as(u6, @intCast(8 * i))) & 255));
+        tv[16 + i] = tv[i];
+        i = i + 1;
+    }
+    return up_utimes(path, tv[0..32]) == 0;
+}
+
+fn up_put(path: []const u8, b: []const u8, n: usize) -> bool {
+    const fd : i32 = sys_creat(path, 420);
+    if (fd < 0) { return false; }
+    const ok : bool = uh_write_full(fd, b, n);
+    sys_close(fd);
+    return ok;
+}
+
+/// UP_ROLE=lock: a lock left by a dead update goes after ten minutes and not before (needs the OS: stat, utimes, kill).
+fn up_lock_case() -> bool {
+    var all : bool = true;
+    // "/tmp/t27uh-lock-test.app" (24 bytes)
+    const app : [24]u8 = [47, 116, 109, 112, 47, 116, 50, 55, 117, 104, 45, 108, 111, 99, 107, 45, 116, 101, 115, 116, 46, 97, 112, 112];
+    var lk : [64]u8 = undefined;
+    var pf : [64]u8 = undefined;
+    ui_join(app[0..24], 24, ".lock", lk[0..64]);
+    ui_join(app[0..24], 24, ".lock/pid", pf[0..64]);
+    uh_unlock(app[0..24], 24);
+    var info : [5]u64 = undefined;
+    all = up_ok("uh_lock_sweep(app[0..24], 24, uh_now_s(), info[0..5]) == UK_NONE and info[LK_EXISTS] == 0", uh_lock_sweep(app[0..24], 24, uh_now_s(), info[0..5]) == UK_NONE and info[LK_EXISTS] == 0) and all;
+    // taken by this process: its pid is in the file and it runs, so the lock stays whatever its age
+    all = up_ok("uh_lock(app[0..24], 24)", uh_lock(app[0..24], 24)) and all;
+    all = up_ok("uh_lock(app[0..24], 24) == false", uh_lock(app[0..24], 24) == false) and all;
+    all = up_ok("up_age(lk[0..64], 3600)", up_age(lk[0..64], 3600)) and all;
+    all = up_ok("uh_lock_sweep(app[0..24], 24, uh_now_s(), info[0..5]) == UK_KEEP_ALIVE", uh_lock_sweep(app[0..24], 24, uh_now_s(), info[0..5]) == UK_KEEP_ALIVE) and all;
+    all = up_ok("info[LK_OWNER] == @as(u64, @intCast(up_getpid())) and info[LK_ALIVE] == 1 and info[LK_AGE]", info[LK_OWNER] == @as(u64, @intCast(up_getpid())) and info[LK_ALIVE] == 1 and info[LK_AGE] >= 3599) and all;
+    // the owner is a pid that does not run: kept while young, removed once older than 10 minutes
+    const dead : [6]u8 = [57, 57, 57, 57, 57, 10];
+    all = up_ok("uh_pid_alive(99999) == false", uh_pid_alive(99999) == false) and all;
+    all = up_ok("up_put(pf[0..64], dead[0..6], 6)", up_put(pf[0..64], dead[0..6], 6)) and all;
+    all = up_ok("up_age(lk[0..64], 120)", up_age(lk[0..64], 120)) and all;
+    all = up_ok("uh_lock_sweep(app[0..24], 24, uh_now_s(), info[0..5]) == UK_KEEP_FRESH and info[LK_REMOVED", uh_lock_sweep(app[0..24], 24, uh_now_s(), info[0..5]) == UK_KEEP_FRESH and info[LK_REMOVED] == 0) and all;
+    all = up_ok("uh_mtime(lk[0..64]) > 0", uh_mtime(lk[0..64]) > 0) and all;
+    all = up_ok("up_age(lk[0..64], 660)", up_age(lk[0..64], 660)) and all;
+    all = up_ok("uh_lock_sweep(app[0..24], 24, uh_now_s(), info[0..5]) == UK_REMOVE", uh_lock_sweep(app[0..24], 24, uh_now_s(), info[0..5]) == UK_REMOVE) and all;
+    all = up_ok("info[LK_REMOVED] == 1 and info[LK_OWNER] == 99999 and info[LK_AGE] >= 659", info[LK_REMOVED] == 1 and info[LK_OWNER] == 99999 and info[LK_AGE] >= 659) and all;
+    all = up_ok("uh_mtime(lk[0..64]) < 0", uh_mtime(lk[0..64]) < 0) and all;
+    // a new update takes it again at once
+    all = up_ok("uh_lock(app[0..24], 24)", uh_lock(app[0..24], 24)) and all;
+    // the window's own helper ended: its lock is released only by its own pid
+    all = up_ok("uh_lock_release_of(app[0..24], 24, 99999) == false", uh_lock_release_of(app[0..24], 24, 99999) == false) and all;
+    all = up_ok("uh_lock_release_of(app[0..24], 24, @as(u32, @intCast(up_getpid())))", uh_lock_release_of(app[0..24], 24, @as(u32, @intCast(up_getpid())))) and all;
+    all = up_ok("uh_mtime(lk[0..64]) < 0", uh_mtime(lk[0..64]) < 0) and all;
+    return all;
+}
+
+/// UP_ROLE=offer: a neighbour that runs a newer build, as the app sees one. The bundle at UP_APP (an absolute .app path;
+/// its Info.plist names the build) is zipped by uh_zip_app into $UP_DIR/t27os-offer.zip and its manifest signed with the
+/// identity under $HOME/.t27os (run it with the HOME of the app under test: the author is then "this device"); the
+/// probe listens on 127.0.0.1 at a free port and registers _t27call._udp as UP_NAME (default upd-probe) with TXT
+/// fp/port/nick + ver/build + up=<that port>, then answers requests for UP_SECONDS (default 120). Prints each answer.
+/// Passes when everything was set up and, with UP_EXPECT=1, at least one whole bundle was sent.
+fn up_offer() -> bool {
+    var all : bool = true;
+    var app : [512]u8 = undefined;
+    const an : usize = up_env("UP_APP", app[0..512]);
+    var dir : [96]u8 = undefined;
+    var dn : usize = up_env("UP_DIR", dir[0..96]);
+    if (dn == 0) { dn = put_bytes(dir[0..96], 0, "/tmp"); }
+    var zip : [256]u8 = undefined;
+    up_at(dir[0..96], dn, "/t27os-offer.zip", zip[0..256]);
+    var nickb : [32]u8 = undefined;
+    var nn : usize = up_env("UP_NICK", nickb[0..32]);
+    if (nn == 0) { nn = put_bytes(nickb[0..32], 0, "t27os"); }
+    if (nn > NICK_MAX) { nn = NICK_MAX; }
+    var id : [208]u8 = undefined;
+    var fp : [10]u8 = undefined;
+    const r : u32 = ih_identity_open(nickb[0..32], nn, id[0..208], fp[0..10]);
+    all = up_ok("identity opened under $HOME/.t27os", r == IH_CREATED or r == IH_LOADED) and all;
+    var pl : [384]u8 = undefined;
+    var ln : [3]u64 = undefined;
+    var build : u32 = 0;
+    if (an > 0 and uh_plist(app[0..512], an, pl[0..384], ln[0..3])) { build = ui_build_text(pl[128..256], @as(usize, @intCast(ln[1]))); }
+    up_say("offer bundle build ");
+    up_dec(@as(u64, build));
+    up_say("\n");
+    all = up_ok("the bundle's Info.plist names a build", build > 0) and all;
+    all = up_ok("bundle zipped (ditto, stored)", an > 0 and uh_zip_app(app[0..512], zip[0..256])) and all;
+    var sha : [32]u8 = undefined;
+    const size : i64 = uh_file_sha(zip[0..256], sha[0..32]);
+    up_say("zip bytes ");
+    if (size > 0) { up_dec(@as(u64, @intCast(size))); }
+    up_say("\n");
+    const ver : u64 = up_env_version();
+    var m : [216]u8 = undefined;
+    var mok : bool = false;
+    if (size > 0 and all) { mok = uh_make_manifest(id[0..208], up_part(ver, 2), up_part(ver, 1), up_part(ver, 0), build, @as(u64, @intCast(size)), sha[0..32], m[0..216]) == 216; }
+    all = up_ok("manifest signed by this identity", mok) and all;
+    const lfd : i32 = uh_listen(UH_LOOPBACK, 0);
+    const port : u32 = uh_bound_port(lfd);
+    all = up_ok("listening on 127.0.0.1 at a free port", lfd >= 0 and port > 0) and all;
+    if (all == false) { return false; }
+    up_say("update port ");
+    up_dec(@as(u64, port));
+    up_say("\n");
+    var inv : [25]u8 = undefined;
+    invite_make(fp[0..10], inv[0..25]);
+    var t0 : [96]u8 = undefined;
+    var t1 : [96]u8 = undefined;
+    var t2 : [96]u8 = undefined;
+    const n0 : usize = txt_build(inv[0..25], @as(u32, @intCast(up_env_num("UP_PORT", 47799))), nickb[0..32], nn, t0[0..96]);
+    const n1 : usize = upd_txt_add(t0[0..96], n0, up_part(ver, 2), up_part(ver, 1), up_part(ver, 0), build, t1[0..96]);
+    const n2 : usize = upd_txt_add_port(t1[0..96], n1, port, t2[0..96]);
+    all = up_ok("TXT with ver, build and up", n0 > 0 and n1 > n0 and n2 > n1) and all;
+    var name : [64]u8 = undefined;
+    const nl : usize = up_env("UP_NAME", name[0..64]);
+    if (nl == 0) {
+        const k : usize = put_bytes(name[0..64], 0, "upd-probe");
+        name[k] = 0;
+    }
+    var rref : [8]u8 = undefined;
+    put_u64(rref[0..8], 0, 0);
+    var res : [72]u8 = undefined;
+    var i : usize = 0;
+    while (i < 72) {
+        res[i] = 0;
+        i = i + 1;
+    }
+    const rc : i32 = ih_register(rref[0..8], name[0..64], @as(u32, @intCast(up_env_num("UP_PORT", 47799))), t2[0..96], n2, res[0..72]);
+    all = up_ok("DNSServiceRegister taken", rc == 0) and all;
+    const end : u64 = up_now_ms() + up_env_num("UP_SECONDS", 120) * 1000;
+    var bundles : u64 = 0;
+    var st : [2]u64 = undefined;
+    var acked : bool = false;
+    while (up_now_ms() < end) {
+        ih_pump(get_u64(rref[0..8], 0), 0);
+        if (up_peek32(ih_addr(res[0..72])) == 1) { acked = true; }
+        st[0] = 0;
+        st[1] = 0;
+        const code : u32 = uh_serve_one(lfd, m[0..216], zip[0..256], 0, UP_NO_FLIP, 100, st[0..2]);
+        if (code != US_IDLE) {
+            up_say("  answer ");
+            up_dec(@as(u64, code));
+            up_say(" (1 manifest, 2 bundle, 3 refused, 5 io) from offset ");
+            up_dec(st[1]);
+            up_say(", bundle bytes sent ");
+            up_dec(st[0]);
+            up_say("\n");
+            if (code == 2) { bundles = bundles + 1; }
+        }
+    }
+    ih_free(get_u64(rref[0..8], 0));
+    all = up_ok("announcement acknowledged by the daemon", acked) and all;
+    if (up_env_num("UP_EXPECT", 0) == 1) { all = up_ok("a whole bundle was sent", bundles > 0) and all; }
+    return all;
+}
+
 pub fn main() -> void {
     var rb : [16]u8 = undefined;
     const rn : usize = up_env("UP_ROLE", rb[0..16]);
@@ -1265,6 +1459,12 @@ pub fn main() -> void {
         ok = up_xfer();
     } else if (rn == 5 and rb[0] == 115) {
         ok = up_serve();
+    } else if (rn == 5 and rb[0] == 111) {
+        up_say("update probe: offer\n");
+        ok = up_offer();
+    } else if (rn == 4 and rb[0] == 108) {
+        up_say("update probe: lock\n");
+        ok = up_lock_case();
     } else if (rn == 4 and rb[0] == 98) {
         up_say("update probe: both\n");
         ok = up_run(true, true);

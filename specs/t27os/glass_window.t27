@@ -440,6 +440,31 @@ use t27os::account_view::AC_COPY_W;
 use t27os::account_view::AC_STATE_Y;
 use t27os::account_view::AC_BUILD_Y;
 use t27os::account_view::AC_FR_LABEL_Y;
+use t27os::update_agent::ug_main;
+use t27os::update_agent::ug_boot;
+use t27os::update_agent::ug_listen;
+use t27os::update_agent::ug_serve_start;
+use t27os::update_agent::ug_tick;
+use t27os::update_agent::ug_click;
+use t27os::update_view::UPV_BASE;
+use t27os::update_view::UPV_KEY_END;
+use t27os::update_view::UPV_END;
+use t27os::update_view::UPV_ST;
+use t27os::update_view::UPV_S_OFFER;
+use t27os::update_view::UPV_S_DONE;
+use t27os::update_view::UPV_B_NONE;
+use t27os::update_view::upv_button;
+use t27os::update_view::upv_button_word;
+use t27os::update_view::upv_has_offer;
+use t27os::update_view::upv_line1;
+use t27os::update_view::upv_line2;
+use t27os::account_view::AC_UPD_Y;
+use t27os::account_view::AC_UPD2_Y;
+use t27os::account_view::AC_UPD_BTN_Y;
+use t27os::account_view::AC_UPD_BTN_W;
+use t27os::account_view::AC_UPD_BTN_H;
+use t27os::account_view::AC_H_UPD;
+use t27os::account_view::ac_upd_btn_x;
 use t27os::account_view::AC_ARROW_W;
 use t27os::account_view::AC_ARROW_H;
 use t27os::account_view::AC_ROW_H;
@@ -9279,6 +9304,7 @@ pub fn cl_boot(cl: []u8, s: []u8) -> void {
         n = cl_env("T27OS_CALL_TONE_AMP", e[0..32]);
         if (n > 0) { cs_set(s, CS_K_TONE_AMP, cl_port_of(e[0..32], n)); }
         rt_init(cl[FE_TONE .. FE_TONE + RT_BLOCK]);
+        ug_listen(cl, bind);
         fe_net(cl, bind, port);
     } else {
         cl[CL_NOTE] = @as(u8, @intCast(CV_N_SOCKET));
@@ -10125,11 +10151,14 @@ pub fn ac_leave(cl: []u8, pf: []u8) -> void {
     fe_scroll(cl, 0, ckh_ms());
 }
 
+/// The UPDATE part shows its button (update_view.upv_button: UPDATE, CANCEL or RESTART).
+pub fn ac_upd_shown(cl: []const u8) -> bool { return upv_button(@as(u32, cl[UPV_ST]), upv_has_offer(cl)) != UPV_B_NONE; }
+
 /// What a point means in the cabinet at this window size.
 pub fn ac_hit_now(x: f64, y: f64, sw: f64, sh: f64, cl: []const u8) -> u32 {
     const h : f64 = sh - WS_TOP;
     const vis : usize = ac_rows_vis(h);
-    return ac_hit(x, y, qp_left(sw), QP_W, WS_TOP, h, ac_rows_drawn(@as(usize, cl[FV_SHOWN]), vis), @as(usize, cl[FV_COUNT]), vis, ac_conf_row(cl));
+    return ac_hit(x, y, qp_left(sw), QP_W, WS_TOP, h, ac_rows_drawn(@as(usize, cl[FV_SHOWN]), vis), @as(usize, cl[FV_COUNT]), vis, ac_conf_row(cl), ac_upd_shown(cl));
 }
 
 /// This device's key to the clipboard. Without an identity there is nothing to copy and the note says why.
@@ -10263,6 +10292,18 @@ fn ac_log(cl: []const u8) -> void {
     sys_write(2, "\n", 1);
 }
 
+/// The UPDATE part's button: an outlined box AC_UPD_BTN_H tall with its word centred.
+fn draw_ac_btn_small(c: u64, kit: [48]u64, bx: f64, by: f64, bw: f64, word: str, over: bool) -> void {
+    round_rect(c, bx, by, bw, AC_UPD_BTN_H, 5.0);
+    cg_line_width(c, 1.0);
+    cg_stroke_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+    if (over) { cg_stroke_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE)); }
+    cg_stroke_path(c);
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+    const lw : f64 = bytes_w(kit, word, word.len, 9.0, WEIGHT_SEMIBOLD, false);
+    draw_bytes(c, kit, word, word.len, bx + 0.5 * (bw - lw), by + 12.5, 9.0, WEIGHT_SEMIBOLD, false);
+}
+
 /// A small outlined mark in a friend's row (COPY, x, YES, NO).
 fn draw_ac_chip(c: u64, kit: [48]u64, bx: f64, by: f64, bw: f64, word: []const u8, over: bool) -> void {
     round_rect(c, bx, by, bw, 14.0, 4.0);
@@ -10310,7 +10351,7 @@ fn draw_account_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, 
     const count : usize = @as(usize, cl[FV_COUNT]);
     const scroll : usize = @as(usize, cl[FV_SCROLL]);
     const conf : usize = ac_conf_row(cl);
-    const hit : u32 = ac_hit(mx, my, l, QP_W, t, h, drawn, count, vis, conf);
+    const hit : u32 = ac_hit(mx, my, l, QP_W, t, h, drawn, count, vis, conf, ac_upd_shown(cl));
     var line : [96]u8 = undefined;
     var n : usize = 0;
     cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LINE_WHITE));
@@ -10382,6 +10423,22 @@ fn draw_account_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, 
     n = ac_build_line(cl, line[0..96]);
     cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
     draw_fit(c, kit, line[0..96], n, x + 14.0, t + AC_BUILD_Y, 9.5, 0.0, true, right);
+    // UPDATE: a friend's newer build and its one button (UPDATE / CANCEL / RESTART), the progress or the reason, or what
+    // this device serves (update_view.t27)
+    const ub : u32 = upv_button(@as(u32, cl[UPV_ST]), upv_has_offer(cl));
+    var uright : f64 = right;
+    if (ub != UPV_B_NONE) {
+        uright = ac_upd_btn_x(l, QP_W) - 6.0;
+        draw_ac_btn_small(c, kit, ac_upd_btn_x(l, QP_W), t + AC_UPD_BTN_Y, AC_UPD_BTN_W, upv_button_word(ub), hit == AC_H_UPD);
+    }
+    var ul : [128]u8 = undefined;
+    var un : usize = upv_line1(cl, ul[0..128]);
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+    if (cl[UPV_ST] != 0) { cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE)); }
+    draw_fit(c, kit, ul[0..128], un, x, t + AC_UPD_Y, 9.5, WEIGHT_SEMIBOLD, false, right);
+    un = upv_line2(cl, ul[0..128]);
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+    draw_fit(c, kit, ul[0..128], un, x, t + AC_UPD2_Y, 9.0, 0.0, false, uright);
     // the friends: a window of the list, the arrows and the range when the list is longer than the window
     n = put_bytes(line[0..96], 0, "FRIENDS");
     if (count > 0) {
@@ -11427,6 +11484,8 @@ fn set_prefill(dc: []u64, pb: []u8, line: []const u8) -> void {
 // ---- the app ----
 
 pub fn main() -> void {
+    // a helper process of the updater (update_agent.t27: serve or fetch) never opens a window
+    if (ug_main()) { return; }
     const s_alloc : u64 = sel("alloc");
     const app : u64 = msg0(cls("NSApplication"), sel("sharedApplication"));
     msg1(app, sel("setActivationPolicy:"), 0);
@@ -11918,7 +11977,29 @@ pub fn main() -> void {
         clw[clz] = 0;
         clz = clz + 1;
     }
+    // U. the updater (release.t27): the running build is the bundle's CFBundleVersion, the bundle the executable's folder;
+    // a copy that is not a built bundle (build 0) does not update itself
+    var ubp : [320]u8 = undefined;
+    const ubn : usize = ns_bytes(exe, ubp[0..320]);
+    var ubd : [16]u8 = undefined;
+    const ubl : usize = ns_bytes(msg1(msg0(cls("NSBundle"), sel("mainBundle")), sel("objectForInfoDictionaryKey:"), cf("CFBundleVersion")), ubd[0..16]);
+    tgv[TPG_U_CUR] = @as(u64, parse_build(ubd[0..ubl], ubl));
+    // A. the cabinet shows the bundle's version and build and the time since launch; T27OS_ACCOUNT=open opens it at
+    // launch, =copy also puts this device's key on the clipboard (the click's own path) and logs one ACCOUNTSTAT line
+    // (test aids, off by default)
+    var acv : [16]u8 = undefined;
+    const acn : usize = ns_bytes(msg1(msg0(cls("NSBundle"), sel("mainBundle")), sel("objectForInfoDictionaryKey:"), cf("CFBundleShortVersionString")), acv[0..16]);
+    ac_boot(tbv[TBO_CL .. TBO_CL + CL_CAP], acv[0..16], acn, tgv[TPG_U_CUR], unix_time(0));
+    // UPD. updates from friends nearby (update_agent.t27): the paths, this bundle's version and build, the stale lock next
+    // to the install target removed; the server's port is taken in cl_boot (it goes into the announcement) and its helper
+    // starts once the identity is open
+    var qje : [8]u8 = undefined;
+    const quietjobs : bool = cl_env("T27OS_QUIET_JOBS", qje[0..8]) == 1 and qje[0] == 49;
+    var ugp : [2304]u8 = undefined;
+    ugp[0] = 0;
+    ug_boot(tbv[TBO_CL .. TBO_CL + CL_CAP], ugp[0..2304], ubp[0..ubn], ubp[0..bundle_len(ubp[0..ubn], ubn)], acv[0..acn], tgv[TPG_U_CUR]);
     cl_boot(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN * 3]);
+    ug_serve_start(tbv[TBO_CL .. TBO_CL + CL_CAP], ugp[0..2304], tbv[TBO_CL + CL_UP] != 0 and tbv[TBO_CL + FV_NET] == @as(u8, @intCast(FV_NET_UP)));
     var tgm : u32 = 0;
     while (tgm < M_COUNT) {
         tgv[TPG_Q_AFTER + tgm] = @as(u64, qb_nm());
@@ -11937,19 +12018,6 @@ pub fn main() -> void {
     dcv[D_SEL_ALLOC] = s_alloc;
     var dhb : [256]u8 = undefined;
     const dhn : usize = ns_bytes(home_dir(), dhb[0..256]);
-    // U. the updater (release.t27): the running build is the bundle's CFBundleVersion, the bundle the executable's folder;
-    // a copy that is not a built bundle (build 0) does not update itself
-    var ubp : [320]u8 = undefined;
-    const ubn : usize = ns_bytes(exe, ubp[0..320]);
-    var ubd : [16]u8 = undefined;
-    const ubl : usize = ns_bytes(msg1(msg0(cls("NSBundle"), sel("mainBundle")), sel("objectForInfoDictionaryKey:"), cf("CFBundleVersion")), ubd[0..16]);
-    tgv[TPG_U_CUR] = @as(u64, parse_build(ubd[0..ubl], ubl));
-    // A. the cabinet shows the bundle's version and build and the time since launch; T27OS_ACCOUNT=open opens it at
-    // launch, =copy also puts this device's key on the clipboard (the click's own path) and logs one ACCOUNTSTAT line
-    // (test aids, off by default)
-    var acv : [16]u8 = undefined;
-    const acn : usize = ns_bytes(msg1(msg0(cls("NSBundle"), sel("mainBundle")), sel("objectForInfoDictionaryKey:"), cf("CFBundleShortVersionString")), acv[0..16]);
-    ac_boot(tbv[TBO_CL .. TBO_CL + CL_CAP], acv[0..16], acn, tgv[TPG_U_CUR], unix_time(0));
     var ace : [16]u8 = undefined;
     const acen : usize = cl_env("T27OS_ACCOUNT", ace[0..16]);
     if (acen > 0) {
@@ -12367,6 +12435,8 @@ pub fn main() -> void {
                         if (clv == CV_IDLE and tbv[TBO_CL + AC_ON] != 0) {
                             // A. the cabinet: a hit is the nickname, the key, a friend's row or one of its marks, the add part
                             const ach : u32 = ac_hit_now(mx, my, sw, sh, tbv[TBO_CL .. TBO_CL + CL_CAP]);
+                            // UPD. UPDATE / CANCEL / RESTART; RESTART started the installed copy, this one quits
+                            if (ach == AC_H_UPD and ug_click(tbv[TBO_CL .. TBO_CL + CL_CAP], ugp[0..2304])) { sys_exit(0); }
                             const acr : u32 = ac_do(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN * 3], clw[0..10], tbv[TBO_PF .. TBO_PF + PF_CAP], ach, ac_rows_vis(sh - WS_TOP));
                             if (acr == 1) {
                                 ac_leave(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_PF .. TBO_PF + PF_CAP]);
@@ -13377,7 +13447,10 @@ pub fn main() -> void {
         // nothing and reap nothing: their git and du children ran beside the call and a 1.3 s stall of this loop on the
         // second machine fell in the same second as one of them (measured, cause not proven). They resume when the call ends.
         const oncall : bool = cv_live(@as(u32, tbv[TBO_CL + CL_VIEW]));
-        if (oncall == false) {
+        // T27OS_QUIET_JOBS=1 (a test aid, off by default): none of these jobs start either, so a test instance pushes no
+        // heartbeat, fetches no feed and asks GitHub for no release (update_agent.t27 runs a second copy for a test)
+        const bgoff : bool = oncall or quietjobs;
+        if (bgoff == false) {
         bench_tick(tgv[0..256], tbv[0..49152], dhb[0..dhn], now, open2 and tpk2 == PAGE_BENCH);
         kanban_tick(tgv[0..256], tbv[0..49152], dhb[0..dhn], now, open2 and tpk2 == PAGE_KANBAN);
         queen_tick(tgv[0..256], tbv[0..49152], dhb[0..dhn], now, open2 and tpk2 == PAGE_QUEEN);
@@ -13385,12 +13458,12 @@ pub fn main() -> void {
         // H. HIVE: the page's feed while it is open, and this machine's heartbeat every 5 minutes (devices.t27): the lanes
         // feed runs first, so the beat carries the lanes as they are now, then hive_publish pushes refs/swarm/alive/<host>
         const hv_up : bool = open2 and tpk2 == PAGE_HIVE;
-        if (oncall == false and tgv[TPG_H_WANT] == 0 and tgv[TPG_H_PUB_PID] == 0 and dv_publish_due(true, now, tgv[TPG_H_PUB_LAST])) {
+        if (bgoff == false and tgv[TPG_H_WANT] == 0 and tgv[TPG_H_PUB_PID] == 0 and dv_publish_due(true, now, tgv[TPG_H_PUB_LAST])) {
             tgv[TPG_H_WANT] = now;
             tgv[TPG_H_PUB_LAST] = now;
         }
         if (hv_up or tgv[TPG_H_WANT] != 0) { tgv[TPG_Q_ROOTLEN] = @as(u64, qn_root(dk, space, tbv[0..49152])); }
-        if (oncall == false) {
+        if (bgoff == false) {
             hive_tick(tgv[0..256], tbv[0..71936], dhb[0..dhn], now, hv_up);
             update_tick(tgv[0..256], tbv[0..49152], dhb[0..dhn], ubp[0..ubn], now, up_busy(sst[0..560]));
         }
@@ -13429,7 +13502,8 @@ pub fn main() -> void {
         tgv[TPG_QD_FLAGS] = qd_fl_with_keys(tgv[TPG_QD_FLAGS], qdk, sb_worst_light(sst[0..560]));
         // CL. and between the loop's slower parts, so no stretch of it keeps the call's socket waiting
         if (cl_tick(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN * 3], clw[0..10])) { clring = true; }
-        if (oncall == false) {
+        ug_tick(tbv[TBO_CL .. TBO_CL + CL_CAP], ugp[0..2304], ckh_ms());
+        if (bgoff == false) {
             qd_tick(tgv[0..256], tbv[0..85504], dhb[0..dhn], now, sst[SST_QDASH] != 0 and screen);
             god_tick(tgv[0..256], tbv[0..65536], dhb[0..dhn], now, god, sst[SST_QRUN]);
         }
@@ -13438,7 +13512,7 @@ pub fn main() -> void {
         if (lvcur != cur) { sst[SST_LVSEL] = LV_NONE; }
         lvtail = 0;
         if (lvup and sst[SST_LVSEL] != LV_NONE and sst[SST_LVKEY] == LV_SCRIPT) { lvtail = sst[SST_LVKEY + 1]; }
-        if (oncall == false) { lanes_tick(tgv[0..256], tbv[0..65536], dhb[0..dhn], now, lvup or hv_up or tgv[TPG_H_WANT] != 0, lvtail); }
+        if (bgoff == false) { lanes_tick(tgv[0..256], tbv[0..65536], dhb[0..dhn], now, lvup or hv_up or tgv[TPG_H_WANT] != 0, lvtail); }
         sst[SST_LVTAIL] = @as(u32, @intCast(tgv[TPG_L_TLEN]));
         if ((lvup or hv_up) and now != lvat) {
             lvat = now;
@@ -13458,7 +13532,7 @@ pub fn main() -> void {
             if (msg0(msg0(cls("NSWorkspace"), sel("sharedWorkspace")), sel("accessibilityDisplayShouldReduceMotion")) % 256 != 0) { tgv[TPG_O_RMSYS] = 1; }
         }
         orbit_tick(tgv[0..256], z, sw, sh, mx, my, abs_time(), tgv[TPG_O_RMSYS] != 0);
-        if (oncall == false and menu_open(state) and (shown != PETAL_CHAT or cons2)) {
+        if (bgoff == false and menu_open(state) and (shown != PETAL_CHAT or cons2)) {
             dash_tick(dcv[0..512], gal[0..49152], gt[0..2560], dhb[0..dhn], jpid[0..6], jwi[0..6], now);
             thumbs_load(dcv[0..512], gal[0..49152], gt[0..2560], dhb[0..dhn]);
             if (dcv[D_WEB] != 0) {
@@ -13503,7 +13577,7 @@ pub fn main() -> void {
         }
         // K. pre-flight (M12): once at start, check the stored key behind each claude profile, in the order
         // keys.t27 PROFILE_PROVIDER gives (all PROFILE_COUNT of them), so the first pane already avoids a dead key
-        if (kbusy == KY_NONE and kpre < PROFILE_COUNT and oncall == false) {
+        if (kbusy == KY_NONE and kpre < PROFILE_COUNT and bgoff == false) {
             const kpp : u32 = PROFILE_PROVIDER[kpre];
             kpre = kpre + 1;
             if (probe_has(kpp) and kc_has(kpp)) {
@@ -13542,7 +13616,7 @@ pub fn main() -> void {
                     msg2(dk[DK_TASKS], dk[DK_REPLACE], js, dk[DK_NULL]);
                     dnow = true;
                 }
-            } else if (oncall == false and jrest == 0 and dk_count(dk, dk[DK_PATHS]) > 0) {
+            } else if (bgoff == false and jrest == 0 and dk_count(dk, dk[DK_PATHS]) > 0) {
                 if (jr >= dk_count(dk, dk[DK_PATHS])) {
                     jr = 0;
                     jj = 0;
@@ -13892,6 +13966,11 @@ pub fn main() -> void {
         // CL. the call snapshot changes at most once a second while a call is up (cl_snapshot)
         var fkc : usize = 0;
         while (fkc < CL_KEY_N) {
+            fk = fg_mix(fk, @as(u64, tbv[TBO_CL + fkc]));
+            fkc = fkc + 1;
+        }
+        fkc = UPV_BASE;
+        while (fkc < UPV_KEY_END) {
             fk = fg_mix(fk, @as(u64, tbv[TBO_CL + fkc]));
             fkc = fkc + 1;
         }
@@ -15500,9 +15579,9 @@ test the_cabinet_is_shown_only_when_its_mode_is_on_and_no_call_is_in_the_way {
 }
 
 test a_point_in_the_cabinet_means_the_same_to_the_click_the_cursor_and_the_drawing {
-    var cl : [1024]u8 = undefined;
+    var cl : [8192]u8 = undefined;
     var i : usize = 0;
-    while (i < 1024) {
+    while (i < 8192) {
         cl[i] = 0;
         i = i + 1;
     }
@@ -15510,24 +15589,24 @@ test a_point_in_the_cabinet_means_the_same_to_the_click_the_cursor_and_the_drawi
     const sw : f64 = 960.0;
     const sh : f64 = 540.0;
     const l : f64 = qp_left(sw);
-    // 12 friends, the snapshot holds 8, the 540 high window has room for 4 rows
+    // 12 friends, the snapshot holds 8, the 540 high window has room for 3 rows (the UPDATE part takes the fourth)
     cl[FV_COUNT] = 12;
     cl[FV_SHOWN] = 8;
-    assert ac_rows_vis(sh - WS_TOP) == 4;
-    assert ac_hit_now(l + 40.0, ac_row_y(WS_TOP, 3) + 4.0, sw, sh, cl[0..1024]) == AC_H_ROW + 3;
-    // the fifth row is not drawn, so it answers nothing
-    assert ac_hit_now(l + 40.0, ac_row_y(WS_TOP, 4) + 4.0, sw, sh, cl[0..1024]) != AC_H_ROW + 4;
-    // the arrows exist (12 > 4) and the add part is under the rows
-    assert ac_hit_now(ac_down_x(l, QP_W) + 4.0, ac_arrow_y(WS_TOP) + 4.0, sw, sh, cl[0..1024]) == AC_H_DOWN;
-    assert ac_hit_now(ac_copy_x(l, QP_W) + 4.0, WS_TOP + AC_COPY_Y + 4.0, sw, sh, cl[0..1024]) == AC_H_COPYKEY;
-    assert ac_hit_now(l + 40.0, WS_TOP + AC_KEY_Y + 6.0, sw, sh, cl[0..1024]) == AC_H_KEY;
+    assert ac_rows_vis(sh - WS_TOP) == 3;
+    assert ac_hit_now(l + 40.0, ac_row_y(WS_TOP, 2) + 4.0, sw, sh, cl[0..8192]) == AC_H_ROW + 2;
+    // the fourth row is not drawn, so it answers nothing
+    assert ac_hit_now(l + 40.0, ac_row_y(WS_TOP, 3) + 4.0, sw, sh, cl[0..8192]) != AC_H_ROW + 3;
+    // the arrows exist (12 > 3) and the add part is under the rows
+    assert ac_hit_now(ac_down_x(l, QP_W) + 4.0, ac_arrow_y(WS_TOP) + 4.0, sw, sh, cl[0..8192]) == AC_H_DOWN;
+    assert ac_hit_now(ac_copy_x(l, QP_W) + 4.0, WS_TOP + AC_COPY_Y + 4.0, sw, sh, cl[0..8192]) == AC_H_COPYKEY;
+    assert ac_hit_now(l + 40.0, WS_TOP + AC_KEY_Y + 6.0, sw, sh, cl[0..8192]) == AC_H_KEY;
     // a row that asks to remove turns its marks into YES / NO
     cl[fv_row_at(1) + FR_FP] = 7;
-    ac_conf_set(cl[0..1024], cl[fv_row_at(1) + FR_FP .. fv_row_at(1) + FR_FP + 10]);
-    assert ac_hit_now(ac_yes_x(l, QP_W) + 4.0, ac_row_y(WS_TOP, 1) + 4.0, sw, sh, cl[0..1024]) == AC_H_YES + 1;
-    assert ac_hit_now(ac_del_x(l, QP_W) + 4.0, ac_row_y(WS_TOP, 1) + 4.0, sw, sh, cl[0..1024]) == AC_H_NO + 1;
+    ac_conf_set(cl[0..8192], cl[fv_row_at(1) + FR_FP .. fv_row_at(1) + FR_FP + 10]);
+    assert ac_hit_now(ac_yes_x(l, QP_W) + 4.0, ac_row_y(WS_TOP, 1) + 4.0, sw, sh, cl[0..8192]) == AC_H_YES + 1;
+    assert ac_hit_now(ac_del_x(l, QP_W) + 4.0, ac_row_y(WS_TOP, 1) + 4.0, sw, sh, cl[0..8192]) == AC_H_NO + 1;
     // outside the panel nothing answers
-    assert ac_hit_now(l - 20.0, ac_row_y(WS_TOP, 1) + 4.0, sw, sh, cl[0..1024]) == AC_H_NONE;
+    assert ac_hit_now(l - 20.0, ac_row_y(WS_TOP, 1) + 4.0, sw, sh, cl[0..8192]) == AC_H_NONE;
 }
 
 test the_cabinet_boxes_stay_inside_the_slot_at_the_widths_the_window_has {
@@ -15543,4 +15622,18 @@ test the_cabinet_boxes_stay_inside_the_slot_at_the_widths_the_window_has {
         assert ac_up_x(l, QP_W) + AC_ARROW_W < ac_down_x(l, QP_W);
         i = i + 1;
     }
+}
+
+test the_update_state_sits_after_the_friends_engine_inside_the_call_region {
+    assert UPV_BASE >= FE_END and UPV_END <= CL_CAP and UPV_KEY_END <= UPV_END;
+    // the cabinet's UPDATE button shows only for a state that has one
+    var cl : [8192]u8 = undefined;
+    var i : usize = 0;
+    while (i < 8192) {
+        cl[i] = 0;
+        i = i + 1;
+    }
+    assert ac_upd_shown(cl[0..8192]) == false;
+    cl[UPV_ST] = @as(u8, @intCast(UPV_S_DONE));
+    assert ac_upd_shown(cl[0..8192]);
 }
