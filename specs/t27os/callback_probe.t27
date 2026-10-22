@@ -395,6 +395,10 @@ const CBP_F_JB : u64 = 64;
 /// Playback starts at, and is trimmed back to, this many buffered frames; more than CBP_F_MAX is an overrun.
 const CBP_F_TARGET : u64 = 6;
 const CBP_F_MAX : u64 = 12;
+const CBP_F_GROW : u64 = 2;
+const CBP_F_CAP : u64 = 30;
+const CBP_F_SLACK : u64 = 8;
+const CBP_F_QUIET : u64 = 5000000;
 /// Part F block: 64 u64 header slots (512 bytes), tx ring 8 x 960, rx seq+1 per slot, rx kind per slot
 /// (1 primary, 2 redundant copy), capture us per seq % 64, rx data 64 x 960, last played frame 960.
 /// Header: 0 in calls, 1 out calls, 2 frames captured, 3 frames handled by the sender, 4 underruns, 5 overruns,
@@ -421,11 +425,16 @@ const CBP_F_LAST : u64 = 71168;
 /// 9 ended because the peer went silent, 10 max gap between received packets us, 11 bind IPv4,
 /// 12 jitter target frames, 13 jitter max frames, 14 sendto EAGAIN retries (the frame stays queued),
 /// 15 discard captured frames (the queues run before the shared start time).
+/// Adaptive jitter buffer (calls only, 8 more u64 slots 16..23): 16 adaptive on, 17 floor target frames (the target
+/// the call started with), 18 time us of the last underrun event or shrink, 19 grow events, 20 shrink events,
+/// 21 highest target reached. An underrun event raises the target by CBP_F_GROW up to CBP_F_CAP and plays warm-up
+/// silence until that many frames are buffered again; CBP_F_QUIET us without an event lower it by one frame down to
+/// the floor. The overrun limit follows the target: target + CBP_F_SLACK, at most CBP_F_CAP + CBP_F_SLACK.
 const CBP_F_EXT : u64 = 72128;
-const CBP_F_BYTES : usize = 72256;
+const CBP_F_BYTES : usize = 72320;
 const CBP_LOOPBACK : u64 = 2130706433;
 
-fn cbp_f_size() -> u64 { return CBP_F_EXT + 128; }
+fn cbp_f_size() -> u64 { return CBP_F_EXT + 192; }
 
 /// What the storm does with packet seq: 0 send, 1 drop (every 20th), 2 send seq+1 first, then seq (every 100).
 pub fn cbp_storm(seq: u64) -> u64 {
@@ -721,8 +730,25 @@ fn cbp_fpull(p: u64, aq: u64, buf: u64) -> i32 {
     var depth : u64 = 0;
     if (hi > play) { depth = hi - play; }
     const now : u64 = cbp_us();
-    const target : u64 = cbp_get(p + CBP_F_EXT + 96);
-    const most : u64 = cbp_get(p + CBP_F_EXT + 104);
+    const ext : u64 = p + CBP_F_EXT;
+    var target : u64 = cbp_get(ext + 96);
+    var most : u64 = cbp_get(ext + 104);
+    const adapt : bool = cbp_get(ext + 128) != 0;
+    if (adapt and cbp_get(p + 112) == 0) {
+        // Quiet for CBP_F_QUIET: one frame less, never below the floor.
+        const lastev : u64 = cbp_get(ext + 144);
+        if (lastev == 0) { cbp_put(ext + 144, now); }
+        if (lastev != 0 and now - lastev >= CBP_F_QUIET) {
+            cbp_put(ext + 144, now);
+            if (target > cbp_get(ext + 136)) {
+                target = target - 1;
+                most = target + CBP_F_SLACK;
+                cbp_put(ext + 96, target);
+                cbp_put(ext + 104, most);
+                cbp_inc(ext + 160, 1);
+            }
+        }
+    }
     if (cbp_get(p + 112) != 0 and depth >= target) {
         cbp_put(p + 112, 0);
         cbp_put(p + 448, now);
@@ -743,6 +769,17 @@ fn cbp_fpull(p: u64, aq: u64, buf: u64) -> i32 {
         if (depth == 0) {
             cbp_zero(data, 960);
             cbp_inc(p + 32, 1);
+            if (adapt) {
+                // An underrun event: a longer target, and the buffer refills before the next frame is played.
+                if (target + CBP_F_GROW <= CBP_F_CAP) { target = target + CBP_F_GROW; } else { target = CBP_F_CAP; }
+                most = target + CBP_F_SLACK;
+                cbp_put(ext + 96, target);
+                cbp_put(ext + 104, most);
+                cbp_put(ext + 144, now);
+                cbp_inc(ext + 152, 1);
+                cbp_emax(ext + 168, target);
+                cbp_put(p + 112, 1);
+            }
         } else {
             const slot : u64 = play % CBP_F_JB;
             const last : u64 = p + CBP_F_LAST;
@@ -790,10 +827,10 @@ pub fn cbp_fout(user: u64, aq: u64, buf: u64) -> u64 {
 /// Part F: microphone -> tx ring -> UDP 127.0.0.1:47727 under the storm -> jitter buffer -> speakers, 20 s.
 /// Part G (CBP_PEER set): the same loop between two hosts, one socket, no storm, CBP_SECONDS (default 25).
 fn cbp_part_f(mode: u64, fmt: []const u8) -> bool {
-    var blk : [72256]u8 = undefined;
+    var blk : [72320]u8 = undefined;
     var z : usize = 0;
     while (z < CBP_F_BYTES) { blk[z] = 0; z = z + 1; }
-    const p : u64 = sys_addr(blk[0..72256], blk[0..72256], 0);
+    const p : u64 = sys_addr(blk[0..72320], blk[0..72320], 0);
     const ext : u64 = p + CBP_F_EXT;
     cbp_put(p + 72, CBP_D_MAGIC);
     cbp_put(p + 112, 1);
@@ -1693,7 +1730,7 @@ test the_duplex_ring_fits_its_block {
 }
 
 test the_network_block_and_packet_fit {
-    assert cbp_f_size() == 72256;
+    assert cbp_f_size() == 72320;
     assert @as(u64, CBP_F_BYTES) == cbp_f_size();
     assert CBP_F_EXT == CBP_F_LAST + 960;
     assert CBP_F_TXD == 64 * 8 and CBP_F_RXS == CBP_F_TXD + CBP_F_TX * 960;
@@ -1702,6 +1739,7 @@ test the_network_block_and_packet_fit {
     // Header 8 + frame 960 + redundant frame 960 fits one UDP datagram (net.inet.udp.maxdgram 9216).
     assert 8 + 960 + 960 == 1928 and 1928 < 9216;
     assert CBP_F_TARGET < CBP_F_MAX and CBP_F_MAX + CBP_F_TX < CBP_F_JB;
+    assert CBP_F_CAP + CBP_F_SLACK + CBP_F_TX < CBP_F_JB and CBP_F_CAP + CBP_F_SLACK <= 40;
 }
 
 test the_storm_drops_5_percent_and_swaps_1_in_100 {

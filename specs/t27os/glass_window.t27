@@ -9149,6 +9149,11 @@ fn cl_stats_line(cl: []u8, s: []u8, secs: u64) -> void {
     cl_stat_num(" under=", cs_stat(s, 1004));
     cl_stat_num(" over=", cs_stat(s, 1005));
     cl_stat_num(" txo=", cs_stat(s, 1007));
+    cl_stat_num(" warm=", cs_stat(s, 1015));
+    cl_stat_num(" jb=", cs_stat(s, 10028));
+    cl_stat_num(" jbmax=", cs_stat(s, 10037));
+    cl_stat_num(" grow=", cs_stat(s, 10035));
+    cl_stat_num(" shrink=", cs_stat(s, 10036));
     cl_stat_num(" ring_cb=", rt_stat(cl[FE_TONE .. FE_TONE + RT_BLOCK], RT_S_CB));
     sys_write(2, "\n", 1);
 }
@@ -11182,10 +11187,10 @@ pub fn main() -> void {
     var clp : bool = false;
     // a call that rang during a tick after the event wait opens the panel at the top of the next pass
     var clring : bool = false;
-    var csv : [74304]u8 = undefined;
+    var csv : [74368]u8 = undefined;
     var clw : [10]u64 = undefined;
     var clz : usize = 0;
-    while (clz < 74304) {
+    while (clz < 74368) {
         csv[clz] = 0;
         clz = clz + 1;
     }

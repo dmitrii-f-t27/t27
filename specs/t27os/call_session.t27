@@ -168,7 +168,7 @@ use t27os::callback_probe::CBP_F_JB;
 
 /// Endpoint of call_crypto_probe (EP_LEN = 960 bytes) at 0; then 64 u64 slots; then the last handshake message
 /// (INVITE, ANSWER or REVEAL) and the last CONFIRM, kept for resends; the peer's sockaddr; the event ring; and at
-/// CS_AUD the part F audio block of callback_probe (72256 bytes), whose address the audio callbacks receive.
+/// CS_AUD the part F audio block of callback_probe (72320 bytes), whose address the audio callbacks receive.
 pub const CS_SLOTS : usize = 960;
 pub const CS_L1 : usize = 1472;
 pub const CS_L2 : usize = 1728;
@@ -176,7 +176,7 @@ pub const CS_PADDR : usize = 1856;
 pub const CS_EVQ : usize = 1872;
 pub const CS_EVQ_N : u64 = 16;
 pub const CS_AUD : usize = 2048;
-pub const CS_LEN : usize = 74304;
+pub const CS_LEN : usize = 74368;
 
 /// Slots (u64 LE at CS_SLOTS + 8 k). The first ones are also the window's counters through cs_stat.
 pub const CS_ST_SENT : u32 = 0;
@@ -572,7 +572,7 @@ pub fn cs_mute(s: []u8, on: bool) -> bool {
 }
 
 pub fn cs_stat(s: []u8, k: u32) -> u64 {
-    if (k >= 1000 and k < 1000 + 64) { return cbp_get(cs_aud(s) + @as(u64, k - 1000) * 8); }
+    if (k >= 1000 and k < 1000 + 9040) { return cbp_get(cs_aud(s) + @as(u64, k - 1000) * 8); }
     if (k < 64) { return cs_g(s, k); }
     return 0;
 }
@@ -657,6 +657,8 @@ fn cs_audio_reset(s: []u8) -> void {
     cbp_put(p + CBP_F_EXT, 1);
     cbp_put(p + CBP_F_EXT + 96, cs_g(s, CS_K_JB_TARGET));
     cbp_put(p + CBP_F_EXT + 104, cs_g(s, CS_K_JB_MAX));
+    cbp_put(p + CBP_F_EXT + 128, 1);
+    cbp_put(p + CBP_F_EXT + 136, cs_g(s, CS_K_JB_TARGET));
     cs_p(s, CS_NEXT_TONE, ckh_ms());
     if (ckh_caller(s[0..EP_LEN])) { cs_p(s, CS_TAGME, 65); } else { cs_p(s, CS_TAGME, 66); }
 }
