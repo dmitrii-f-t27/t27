@@ -195,6 +195,9 @@ pub const CS_ST_AUDIO_ON : u32 = 12;
 pub const CS_ST_AUDIO_ERR : u32 = 13;
 pub const CS_ST_MUTED_SENT : u32 = 14;
 pub const CS_ST_NONZERO_RX : u32 = 15;
+/// Sum and peak of |sample| (16-bit LE) over every received frame: mean loudness = sum / (480 * frames).
+pub const CS_ST_ABS_SUM : u32 = 16;
+pub const CS_ST_ABS_PEAK : u32 = 17;
 const CS_FD : u32 = 20;
 const CS_MODE : u32 = 21;
 const CS_MUTED : u32 = 22;
@@ -798,6 +801,18 @@ fn cs_take_media(s: []u8, pt: []const u8) -> void {
     } else {
         const nz : u64 = cbp_nz(ckh_at(pt[8..968], pt[8..968], 0), 960);
         cs_add(s, CS_ST_NONZERO_RX, nz);
+        var j : usize = 8;
+        var sum : u64 = 0;
+        var pk : u64 = cs_g(s, CS_ST_ABS_PEAK);
+        while (j + 1 < 968) {
+            var v : u64 = @as(u64, pt[j]) | (@as(u64, pt[j + 1]) << 8);
+            if (v >= 32768) { v = 65536 - v; }
+            sum = sum + v;
+            if (v > pk) { pk = v; }
+            j = j + 2;
+        }
+        cs_add(s, CS_ST_ABS_SUM, sum);
+        cs_p(s, CS_ST_ABS_PEAK, pk);
     }
     const p : u64 = cs_aud(s);
     cbp_inc(p + 168, 1);

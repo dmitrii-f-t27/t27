@@ -313,6 +313,12 @@ use t27os::call_session::cs_hangup;
 use t27os::call_session::cs_dismiss;
 use t27os::call_session::cs_reason;
 use t27os::call_session::cs_stat;
+use t27os::call_session::CS_ST_ZERO_FRAMES;
+use t27os::call_session::CS_ST_MUTED_SENT;
+use t27os::call_session::CS_ST_NONZERO_RX;
+use t27os::call_session::CS_ST_ABS_SUM;
+use t27os::call_session::CS_ST_ABS_PEAK;
+use t27os::pty_sys::sys_write;
 use t27os::call_core::CK_IDLE;
 use t27os::call_core::CK_ACTIVE;
 use t27os::call_core::CK_VERIFY;
@@ -8889,6 +8895,8 @@ pub const CL_OVER : usize = 108;
 pub const CL_TXO : usize = 112;
 /// The bytes the frame key folds in: everything draw() reads.
 pub const CL_KEY_N : usize = 116;
+/// Not drawn: 1 when T27OS_CALL_STATS is set, the call counters go to stderr once a second (a test aid, off by default).
+pub const CL_STATS : usize = 120;
 /// The window's own call clock (main's [10]u64): when ACTIVE began, when the last poll returned, the longest gap from
 /// the end of one poll to the start of the next while ACTIVE, the state the last snapshot saw, the system activity
 /// token held while a call is up, the gaps over 10 ms and the polls counted while ACTIVE.
@@ -9007,6 +9015,7 @@ pub fn cl_boot(cl: []u8, s: []u8) -> void {
         return;
     }
     var audio : u32 = CS_AUDIO_DEV;
+    if (cl_env("T27OS_CALL_STATS", e[0..32]) > 0) { cl[CL_STATS] = 1; }
     n = cl_env("T27OS_CALL_AUDIO", e[0..32]);
     if (n == 4 and e[0] == 116 and e[1] == 101 and e[2] == 115 and e[3] == 116) { audio = CS_AUDIO_TEST; }
     var me : [10]u8 = undefined;
@@ -9016,6 +9025,38 @@ pub fn cl_boot(cl: []u8, s: []u8) -> void {
     } else {
         cl[CL_NOTE] = @as(u8, @intCast(CV_N_SOCKET));
     }
+}
+
+/// One decimal field of the stats line.
+fn cl_stat_num(label: []const u8, v: u64) -> void {
+    var d : [24]u8 = undefined;
+    var i : usize = 24;
+    var x : u64 = v;
+    if (x == 0) { i = i - 1; d[i] = 48; }
+    while (x > 0 and i > 0) {
+        i = i - 1;
+        d[i] = @as(u8, @intCast(48 + (x % 10)));
+        x = x / 10;
+    }
+    sys_write(2, label, @as(u64, label.len));
+    sys_write(2, d[i..24], @as(u64, 24 - i));
+}
+
+/// T27OS_CALL_STATS: one line a second while ACTIVE, the counters the panel does not show.
+fn cl_stats_line(cl: []const u8, s: []u8, secs: u64) -> void {
+    cl_stat_num("CALLSTAT t=", secs);
+    cl_stat_num(" sent=", cs_stat(s, CS_ST_SENT));
+    cl_stat_num(" recv=", cs_stat(s, CS_ST_ACCEPTED));
+    cl_stat_num(" zero_rx=", cs_stat(s, CS_ST_ZERO_FRAMES));
+    cl_stat_num(" muted_sent=", cs_stat(s, CS_ST_MUTED_SENT));
+    cl_stat_num(" nonzero_rx=", cs_stat(s, CS_ST_NONZERO_RX));
+    cl_stat_num(" abs_sum=", cs_stat(s, CS_ST_ABS_SUM));
+    cl_stat_num(" abs_peak=", cs_stat(s, CS_ST_ABS_PEAK));
+    cl_stat_num(" capt=", cs_stat(s, 1002));
+    cl_stat_num(" under=", cs_stat(s, 1004));
+    cl_stat_num(" over=", cs_stat(s, 1005));
+    cl_stat_num(" txo=", cs_stat(s, 1007));
+    sys_write(2, "\n", 1);
 }
 
 /// Copy the session into the region draw() reads. The counters and the clock change at most once a second, so a call
@@ -9058,6 +9099,7 @@ pub fn cl_snapshot(cl: []u8, s: []u8, w: []u64, now: u64) -> void {
         cl_put32(cl, CL_UNDER, cs_stat(s, 1004));
         cl_put32(cl, CL_OVER, cs_stat(s, 1005));
         cl_put32(cl, CL_TXO, cs_stat(s, 1007));
+        if (cl[CL_STATS] != 0 and st == CK_ACTIVE) { cl_stats_line(cl, s, secs); }
     }
     w[CLW_PREV] = @as(u64, st);
 }
