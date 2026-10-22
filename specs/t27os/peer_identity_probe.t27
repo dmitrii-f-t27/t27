@@ -322,9 +322,9 @@ fn pip_run(announce: bool, browse: bool) -> bool {
     var txn : usize = 0;
     var name : [64]u8 = undefined;
     // the state block of the browser lives here for the whole run
-    var block : [2064]u8 = undefined;
+    var block : [4112]u8 = undefined;
     i = 0;
-    while (i < 2064) {
+    while (i < 4112) {
         block[i] = 0;
         i = i + 1;
     }
@@ -344,7 +344,7 @@ fn pip_run(announce: bool, browse: bool) -> bool {
         i = i + 1;
     }
     var code : u64 = 0;
-    const block_at : u64 = ih_addr(block[0..2064]);
+    const block_at : u64 = ih_addr(block[0..4112]);
 
     if (announce) {
         txn = txt_build(inv[0..25], port, nickb[0..32], nn, txt[0..96]);

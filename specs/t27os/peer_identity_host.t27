@@ -300,7 +300,7 @@ pub fn ih_friends_save(t: []const u8) -> bool {
 
 // ---------------------------------------------------------------- mDNS state blocks
 
-pub const BR_COUNT : usize = 8;
+pub const BR_COUNT : usize = 16;
 pub const BR_HDR : usize = 16;
 pub const BE_LEN : usize = 256;
 pub const BE_NAME : usize = 0;
@@ -311,7 +311,7 @@ pub const BE_TXTLEN : usize = 76;
 pub const BE_TXT : usize = 80;
 pub const BE_HOST : usize = 208;
 pub const BE_IP : usize = 252;
-pub const BR_LEN : usize = 2064;
+pub const BR_LEN : usize = 4112;
 /// Entry states.
 pub const BS_NEW : u32 = 1;
 pub const BS_RESOLVING : u32 = 2;

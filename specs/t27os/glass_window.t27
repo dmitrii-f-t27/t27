@@ -322,7 +322,87 @@ use t27os::pty_sys::sys_write;
 use t27os::call_core::CK_IDLE;
 use t27os::call_core::CK_ACTIVE;
 use t27os::call_core::CK_VERIFY;
+use t27os::call_core::CK_CALLING;
+use t27os::call_core::CK_RINGING;
+use t27os::call_core::CK_ENDED;
+use t27os::call_core::CK_FAILED;
 use t27os::call_crypto_probe::ckh_ms;
+use t27os::peer_identity::INVITE_LEN;
+use t27os::peer_identity::invite_make;
+use t27os::friends_view::FV_COUNT;
+use t27os::friends_view::FV_SHOWN;
+use t27os::friends_view::FV_DEBUG;
+use t27os::friends_view::FV_INVLEN;
+use t27os::friends_view::FV_NET;
+use t27os::friends_view::FV_OPEN;
+use t27os::friends_view::FV_INV;
+use t27os::friends_view::FV_TYPED;
+use t27os::friends_view::FV_END;
+use t27os::friends_view::FV_ROWS_SNAP;
+use t27os::friends_view::FV_NET_UP;
+use t27os::friends_view::FR_NICKLEN;
+use t27os::friends_view::FR_NICK;
+use t27os::friends_view::FR_FP;
+use t27os::friends_view::FR_ONLINE;
+use t27os::friends_view::FV_INV_LABEL_Y;
+use t27os::friends_view::FV_INV_Y;
+use t27os::friends_view::FV_INV_BOX_Y;
+use t27os::friends_view::FV_INV_BOX_H;
+use t27os::friends_view::FV_FR_LABEL_Y;
+use t27os::friends_view::FV_ROW_H;
+use t27os::friends_view::FV_ADD_LABEL_Y;
+use t27os::friends_view::FV_IFIELD_Y;
+use t27os::friends_view::FV_BTN_Y;
+use t27os::friends_view::FV_NOTE_Y;
+use t27os::friends_view::FV_DBG_LABEL_Y;
+use t27os::friends_view::FV_DFIELD_Y;
+use t27os::friends_view::FV_DCALL_Y;
+use t27os::friends_view::FV_H_NONE;
+use t27os::friends_view::FV_H_INVITE;
+use t27os::friends_view::FV_H_IFIELD;
+use t27os::friends_view::FV_H_ADD;
+use t27os::friends_view::FV_H_DEBUG;
+use t27os::friends_view::FV_H_DFIELD;
+use t27os::friends_view::FV_H_DCALL;
+use t27os::friends_view::FV_H_ROW;
+use t27os::friends_view::FN_IDENT;
+use t27os::friends_view::FN_COPIED;
+use t27os::friends_view::FN_KEYNEED;
+use t27os::friends_view::fv_hit;
+use t27os::friends_view::fv_row_y;
+use t27os::friends_view::fv_row_at;
+use t27os::friends_view::fv_rows_drawn;
+use t27os::friends_view::fv_row_line;
+use t27os::friends_view::fv_find_fp;
+use t27os::friends_view::fv_note_text;
+use t27os::friends_view::fv_note_is_mine;
+use t27os::friends_view::fv_offline_text;
+use t27os::friends_view::fv_inv_char;
+use t27os::friends_view::fv_short_fp;
+use t27os::friends_engine::FE_FP;
+use t27os::friends_engine::FE_TONE;
+use t27os::friends_engine::FE_END;
+use t27os::friends_engine::fe_identity;
+use t27os::friends_engine::fe_net;
+use t27os::friends_engine::fe_tick;
+use t27os::friends_engine::fe_dial_done;
+use t27os::friends_engine::fe_add;
+use t27os::friends_engine::fe_typed_key;
+use t27os::friends_engine::fe_call;
+use t27os::friends_engine::fe_stop;
+use t27os::ringtone::RT_BLOCK;
+use t27os::ringtone::RT_S_CB;
+use t27os::ringtone::RT_S_STARTS;
+use t27os::ringtone::RT_S_STOPS;
+use t27os::ringtone::rt_init;
+use t27os::ringtone::rt_follow;
+use t27os::ringtone::rt_stat;
+use t27os::ringtone::rt_stat_line;
+use t27os::ringtone::rt_out;
+use t27os::peer_identity_host::ih_reg_cb;
+use t27os::peer_identity_host::ih_browse_cb;
+use t27os::peer_identity_host::ih_resolve_h;
+use t27os::peer_identity_host::ih_addr_cb;
 use t27os::pty_sys::sys_getenv;
 use t27os::keysync::fp_text;
 use t27os::keysync::FP_TEXT_LEN;
@@ -5689,7 +5769,7 @@ pub const TBO_HIVE : usize = 65536;
 pub const TBO_HIVE_N : usize = 6144;
 pub const TBO_HLANES : usize = 71680;
 pub const TBO_HLANES_N : usize = 256;
-pub const TB_SIZE : usize = 77568;
+pub const TB_SIZE : usize = 85504;
 pub const TG_KEY_RETURN : u64 = 36;
 pub const TG_KEY_BACKSPACE : u64 = 51;
 pub const TG_EV_CHAR : u32 = 99;
@@ -8863,7 +8943,7 @@ fn draw_profile_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, 
 // The session block (CS_LEN bytes) is a local of main(): it never moves, as the audio callbacks need.
 // ======================================================================================================
 pub const TBO_CL : usize = 77312;
-pub const CL_CAP : usize = 256;
+pub const CL_CAP : usize = 8192;
 pub const CL_OPEN : usize = 0;
 pub const CL_VIEW : usize = 1;
 pub const CL_FOCUS : usize = 2;
@@ -8894,7 +8974,7 @@ pub const CL_UNDER : usize = 104;
 pub const CL_OVER : usize = 108;
 pub const CL_TXO : usize = 112;
 /// The bytes the frame key folds in: everything draw() reads.
-pub const CL_KEY_N : usize = 116;
+pub const CL_KEY_N : usize = 736;
 /// Not drawn: 1 when T27OS_CALL_STATS is set, the call counters go to stderr once a second (a test aid, off by default).
 pub const CL_STATS : usize = 120;
 /// The window's own call clock (main's [10]u64): when ACTIVE began, when the last poll returned, the longest gap from
@@ -9018,10 +9098,17 @@ pub fn cl_boot(cl: []u8, s: []u8) -> void {
     if (cl_env("T27OS_CALL_STATS", e[0..32]) > 0) { cl[CL_STATS] = 1; }
     n = cl_env("T27OS_CALL_AUDIO", e[0..32]);
     if (n == 4 and e[0] == 116 and e[1] == 101 and e[2] == 115 and e[3] == 116) { audio = CS_AUDIO_TEST; }
+    // the fingerprint of this device's identity is the one the call frames name (a call is addressed to a key); a
+    // damaged identity file is left as found and calls stay off
     var me : [10]u8 = undefined;
-    cv_fp_of(bind, port, me[0..10]);
+    if (!fe_identity(cl, me[0..10])) {
+        cl[CL_NOTE] = @as(u8, @intCast(FN_IDENT));
+        return;
+    }
     if (cs_open(s, me[0..10], bind, port, audio)) {
         cl[CL_UP] = 1;
+        rt_init(cl[FE_TONE .. FE_TONE + RT_BLOCK]);
+        fe_net(cl, bind, port);
     } else {
         cl[CL_NOTE] = @as(u8, @intCast(CV_N_SOCKET));
     }
@@ -9043,7 +9130,7 @@ fn cl_stat_num(label: []const u8, v: u64) -> void {
 }
 
 /// T27OS_CALL_STATS: one line a second while ACTIVE, the counters the panel does not show.
-fn cl_stats_line(cl: []const u8, s: []u8, secs: u64) -> void {
+fn cl_stats_line(cl: []u8, s: []u8, secs: u64) -> void {
     cl_stat_num("CALLSTAT t=", secs);
     cl_stat_num(" sent=", cs_stat(s, CS_ST_SENT));
     cl_stat_num(" recv=", cs_stat(s, CS_ST_ACCEPTED));
@@ -9056,6 +9143,7 @@ fn cl_stats_line(cl: []const u8, s: []u8, secs: u64) -> void {
     cl_stat_num(" under=", cs_stat(s, 1004));
     cl_stat_num(" over=", cs_stat(s, 1005));
     cl_stat_num(" txo=", cs_stat(s, 1007));
+    cl_stat_num(" ring_cb=", rt_stat(cl[FE_TONE .. FE_TONE + RT_BLOCK], RT_S_CB));
     sys_write(2, "\n", 1);
 }
 
@@ -9136,13 +9224,40 @@ pub fn cl_tick(cl: []u8, s: []u8, w: []u64) -> bool {
         ev = cs_poll(s);
         k = k + 1;
     }
+    // the friends: the daemon, the matches, the snapshot; a friend named by T27OS_FRIEND_DIAL is called as a click would
+    const now2 : u64 = ckh_ms();
+    const frow : usize = fe_tick(cl, now2);
+    if (frow < FV_ROWS_SNAP) {
+        const st0 : u32 = cs_state(s);
+        if (st0 == CK_IDLE or st0 == CK_ENDED or st0 == CK_FAILED) {
+            cl[CL_NOTE] = @as(u8, @intCast(fe_call(cl, s, frow)));
+            fe_dial_done(cl);
+        }
+    }
+    cl_ring(cl, s);
     cl_snapshot(cl, s, w, ckh_ms());
     // the gap is measured from here: the time inside cs_poll (opening the audio queues once) is the poll's own work
     w[CLW_LAST] = ckh_ms();
     return rang;
 }
 
-/// CALL (the button or Return): the typed address, its test fingerprint, cs_call. A refusal is a note under the field.
+/// The call signal follows the call state (ringtone.t27); with T27OS_CALL_STATS a line goes to stderr when its queue
+/// opens or closes, with the counters.
+pub fn cl_ring(cl: []u8, s: []u8) -> void {
+    if (cl[CL_UP] == 0) { return; }
+    const tone : []u8 = cl[FE_TONE .. FE_TONE + RT_BLOCK];
+    const a : u64 = rt_stat(tone, RT_S_STARTS) + rt_stat(tone, RT_S_STOPS);
+    rt_follow(tone, cs_state(s));
+    if (cl[CL_STATS] != 0 and rt_stat(tone, RT_S_STARTS) + rt_stat(tone, RT_S_STOPS) != a) {
+        var line : [256]u8 = undefined;
+        const n : usize = rt_stat_line(tone, line[0..256]);
+        sys_write(2, line[0..n], @as(u64, n));
+        sys_write(2, "\n", 1);
+    }
+}
+
+/// The debug call: the typed address, and the key typed in the add field (a valid invite) as the fingerprint of whoever
+/// answers there. A refusal is a note under the fields.
 pub fn cl_dial(cl: []u8, s: []u8) -> void {
     cl[CL_FOCUS] = 0;
     if (cl[CL_UP] == 0) {
@@ -9159,10 +9274,52 @@ pub fn cl_dial(cl: []u8, s: []u8) -> void {
         note = CV_N_SELF;
     } else {
         var fp : [10]u8 = undefined;
-        cv_fp_of(cv_addr_ip(a), cv_addr_port(a), fp[0..10]);
-        if (!cs_call(s, cv_addr_ip(a), cv_addr_port(a), fp[0..10])) { note = CV_N_REFUSED; }
+        if (!fe_typed_key(cl, fp[0..10])) {
+            note = FN_KEYNEED;
+        } else if (!cs_call(s, cv_addr_ip(a), cv_addr_port(a), fp[0..10])) {
+            note = CV_N_REFUSED;
+        }
     }
     cl[CL_NOTE] = @as(u8, @intCast(note));
+}
+
+/// Return in a field: the invite field adds the friend, the address field makes the debug call.
+pub fn cl_enter(cl: []u8, s: []u8, w: []u64) -> void {
+    if (cl[CL_FOCUS] == 2) {
+        cl[CL_NOTE] = @as(u8, @intCast(fe_add(cl, ckh_ms())));
+    } else {
+        cl_do(cl, s, w, CV_A_DIAL);
+    }
+}
+
+/// One hit in the IDLE view (friends_view fv_hit) as one action: copy my invite, focus a field, add a friend, show or hide
+/// the debug part, the debug call, or call the friend of a row.
+pub fn cl_front(cl: []u8, s: []u8, w: []u64, hit: u32) -> void {
+    cl[CL_FOCUS] = 0;
+    if (hit == FV_H_NONE) { return; }
+    cl[CL_NOTE] = 0;
+    if (hit == FV_H_INVITE) {
+        pb_copy(cl[FV_INV .. FV_INV + INVITE_LEN], INVITE_LEN);
+        cl[CL_NOTE] = @as(u8, @intCast(FN_COPIED));
+    } else if (hit == FV_H_IFIELD) {
+        cl[CL_FOCUS] = 2;
+    } else if (hit == FV_H_ADD) {
+        cl[CL_NOTE] = @as(u8, @intCast(fe_add(cl, ckh_ms())));
+    } else if (hit == FV_H_DEBUG) {
+        if (cl[FV_DEBUG] == 0) { cl[FV_DEBUG] = 1; } else { cl[FV_DEBUG] = 0; }
+    } else if (hit == FV_H_DFIELD) {
+        cl[CL_FOCUS] = 1;
+    } else if (hit == FV_H_DCALL) {
+        cl_do(cl, s, w, CV_A_DIAL);
+    } else if (hit >= FV_H_ROW) {
+        if (cl[CL_UP] != 0) {
+            cl[CL_NOTE] = @as(u8, @intCast(fe_call(cl, s, @as(usize, hit - FV_H_ROW))));
+            cl_ring(cl, s);
+            cl_snapshot(cl, s, w, ckh_ms());
+        } else if (cl[CL_NOTE] == 0) {
+            cl[CL_NOTE] = @as(u8, @intCast(CV_N_SOCKET));
+        }
+    }
 }
 
 /// One person's action (call_view cv_action) as one cs_* call; then a fresh snapshot.
@@ -9192,11 +9349,24 @@ pub fn cl_do(cl: []u8, s: []u8, w: []u64, act: u32) -> void {
         cl[CL_TALKED] = 0;
         cl_put32(cl, CL_SECS, 0);
     }
-    if (cl[CL_UP] != 0) { cl_snapshot(cl, s, w, ckh_ms()); }
+    if (cl[CL_UP] != 0) {
+        cl_ring(cl, s);
+        cl_snapshot(cl, s, w, ckh_ms());
+    }
 }
 
-/// One typed UTF-16 unit into the address field: digits, dots and a colon only.
+/// One typed UTF-16 unit into the focused field: the invite field takes letters, digits and the dash (25 at most); the
+/// address field digits, dots and a colon only.
 pub fn cl_unit(cl: []u8, unit: u32) -> void {
+    if (cl[CL_FOCUS] == 2) {
+        const ic : u32 = fv_inv_char(unit);
+        const m : usize = @as(usize, cl[FV_INVLEN]);
+        if (ic == 0 or m >= INVITE_LEN) { return; }
+        cl[FV_TYPED + m] = @as(u8, @intCast(ic));
+        cl[FV_INVLEN] = @as(u8, @intCast(m + 1));
+        cl[CL_NOTE] = 0;
+        return;
+    }
     const n : usize = @as(usize, cl[CL_ALEN]);
     if (!cv_addr_char(unit) or n >= CV_ADDR_MAX) { return; }
     cl[CL_ADDR + n] = @as(u8, @intCast(unit));
@@ -9205,7 +9375,11 @@ pub fn cl_unit(cl: []u8, unit: u32) -> void {
 }
 
 pub fn cl_back(cl: []u8) -> void {
-    if (cl[CL_ALEN] > 0) { cl[CL_ALEN] = cl[CL_ALEN] - 1; }
+    if (cl[CL_FOCUS] == 2) {
+        if (cl[FV_INVLEN] > 0) { cl[FV_INVLEN] = cl[FV_INVLEN] - 1; }
+    } else if (cl[CL_ALEN] > 0) {
+        cl[CL_ALEN] = cl[CL_ALEN] - 1;
+    }
     cl[CL_NOTE] = 0;
 }
 
@@ -9282,6 +9456,146 @@ fn draw_cl_btn(c: u64, kit: [48]u64, bx: f64, by: f64, bw: f64, word: []const u8
     draw_bytes(c, kit, word, word.len, bx + 0.5 * (bw - lw), by + 17.0, 9.5, WEIGHT_SEMIBOLD, false);
 }
 
+/// A filled or outlined 8 px dot: a friend is online (filled) or not (outlined).
+fn draw_cl_dot(c: u64, kit: [48]u64, dx: f64, dy: f64, on: bool) -> void {
+    round_rect(c, dx, dy, 8.0, 8.0, 4.0);
+    if (on) {
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+        cg_fill_path(c);
+    } else {
+        cg_line_width(c, 1.0);
+        cg_stroke_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+        cg_stroke_path(c);
+    }
+}
+
+/// One text field of the panel: the box, the text (a caret while it is typed in) or the grey example.
+fn draw_cl_field(c: u64, kit: [48]u64, fx: f64, fy: f64, fw: f64, typing: bool, over: bool, txt: []const u8, tn: usize, example: []const u8) -> void {
+    round_rect(c, fx, fy, fw, CV_FIELD_H, 5.0);
+    cg_line_width(c, 1.0);
+    cg_stroke_rgba(c, 1.0, 1.0, 1.0, STRICT_HOVER_EDGE);
+    if (typing) { cg_stroke_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE)); }
+    if (!typing and over) { cg_stroke_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE)); }
+    cg_stroke_path(c);
+    var shown : [32]u8 = undefined;
+    var an : usize = tn;
+    if (an > 30) { an = 30; }
+    var i : usize = 0;
+    while (i < an) {
+        shown[i] = txt[i];
+        i = i + 1;
+    }
+    if (typing) {
+        shown[an] = 95;
+        an = an + 1;
+    }
+    if (an > 0) {
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+        draw_fit(c, kit, shown[0..32], an, fx + 8.0, fy + 17.5, 10.5, 0.0, true, fx + fw - 8.0);
+    } else {
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+        draw_fit(c, kit, example, example.len, fx + 8.0, fy + 17.5, 10.5, 0.0, true, fx + fw - 8.0);
+    }
+}
+
+/// The IDLE view of the CALL panel: this device's invite, the friends (nickname, short fingerprint, online or not and
+/// when last met), the field that adds a friend by invite, and the debug call by address.
+fn draw_cl_front(c: u64, kit: [48]u64, sh: f64, mx: f64, my: f64, l: f64, t: f64, cl: []const u8) -> void {
+    const x : f64 = l + QP_PAD;
+    const right : f64 = l + QP_W - QP_PAD;
+    const shown : u32 = @as(u32, cl[FV_SHOWN]);
+    const debug : bool = cl[FV_DEBUG] != 0;
+    const hit : u32 = fv_hit(mx, my, l, QP_W, t, shown, debug);
+    var line : [96]u8 = undefined;
+    // my invite: a click copies it
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+    draw_bytes(c, kit, "YOUR INVITE", 11, x, t + FV_INV_LABEL_Y, 9.5, 0.0, false);
+    if (hit == FV_H_INVITE) { draw_bytes(c, kit, "click to copy", 13, x + 90.0, t + FV_INV_LABEL_Y, 9.5, 0.0, false); }
+    if (cl[CL_UP] != 0) {
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+        draw_fit(c, kit, cl[FV_INV .. FV_INV + INVITE_LEN], INVITE_LEN, x, t + FV_INV_Y, 10.5, 0.0, true, right);
+    }
+    // the friends
+    var n : usize = put_bytes(line[0..96], 0, "FRIENDS");
+    if (cl[FV_COUNT] > 0) {
+        n = put_bytes(line[0..96], n, "  ");
+        n = put_dec(line[0..96], n, @as(u64, cl[FV_COUNT]));
+    }
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+    draw_fit(c, kit, line[0..96], n, x, t + FV_FR_LABEL_Y, 9.5, 0.0, false, right);
+    if (cl[CL_UP] != 0 and cl[FV_NET] != @as(u8, @intCast(FV_NET_UP))) {
+        draw_bytes(c, kit, "not announcing on the network", 29, x + 90.0, t + FV_FR_LABEL_Y, 9.5, 0.0, false);
+    }
+    const rows : usize = fv_rows_drawn(shown);
+    if (shown == 0) {
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+        draw_cl_wrap(c, kit, "No friends yet. Paste a friend's invite below, or send them yours.", x, right, t + FV_FR_LABEL_Y + 20.0, 9.5, 2, sh);
+    }
+    var i : usize = 0;
+    while (i < rows) {
+        const ry : f64 = fv_row_y(t, i);
+        const r : usize = fv_row_at(i);
+        const online : bool = cl[r + FR_ONLINE] != 0;
+        if (hit == FV_H_ROW + @as(u32, @intCast(i))) {
+            round_rect(c, x - 4.0, ry, right - x + 8.0, FV_ROW_H - 2.0, 5.0);
+            cg_line_width(c, 1.0);
+            cg_stroke_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+            cg_stroke_path(c);
+        }
+        draw_cl_dot(c, kit, x + 1.0, ry + 7.0, online);
+        const nl : usize = @as(usize, cl[r + FR_NICKLEN]);
+        if (nl > 0) {
+            cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+            draw_fit(c, kit, cl[r + FR_NICK .. r + FR_NICK + nl], nl, x + 16.0, ry + 13.0, 11.0, WEIGHT_SEMIBOLD, false, right - 40.0);
+        } else {
+            cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+            draw_bytes(c, kit, "(no name yet)", 13, x + 16.0, ry + 13.0, 11.0, 0.0, false);
+        }
+        if (online) {
+            cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+            draw_bytes(c, kit, "CALL", 4, right - 28.0, ry + 13.0, 9.5, WEIGHT_SEMIBOLD, false);
+        }
+        n = fv_row_line(cl, i, line[0..96]);
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+        draw_fit(c, kit, line[0..96], n, x + 16.0, ry + 25.0, 9.0, 0.0, true, right);
+        i = i + 1;
+    }
+    if (cl[FV_COUNT] > 5) {
+        n = put_bytes(line[0..96], 0, "+");
+        n = put_dec(line[0..96], n, @as(u64, cl[FV_COUNT]) - 5);
+        n = put_bytes(line[0..96], n, " more are not shown");
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+        draw_fit(c, kit, line[0..96], n, x, t + FV_ADD_LABEL_Y - 8.0, 9.0, 0.0, false, right);
+    }
+    // add a friend by invite
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+    draw_bytes(c, kit, "ADD A FRIEND", 12, x, t + FV_ADD_LABEL_Y, 9.5, 0.0, false);
+    draw_cl_field(c, kit, cv_field_x(l), t + FV_IFIELD_Y, cv_field_w(QP_W), cl[CL_FOCUS] == 2, hit == FV_H_IFIELD, cl[FV_TYPED .. FV_TYPED + INVITE_LEN], @as(usize, cl[FV_INVLEN]), "T27-XXXX-XXXX-XXXX-XXXX-C");
+    draw_cl_btn(c, kit, cv_btn_x(l, QP_W, 0), t + FV_BTN_Y, cv_btn_w(QP_W), "ADD", hit == FV_H_ADD);
+    var dword : []const u8 = "DEBUG";
+    if (debug) { dword = "HIDE DEBUG"; }
+    draw_cl_btn(c, kit, cv_btn_x(l, QP_W, 1), t + FV_BTN_Y, cv_btn_w(QP_W), dword, hit == FV_H_DEBUG);
+    // the note under the buttons: a result of the last action, or why the friend that was clicked cannot be called
+    const code : u32 = @as(u32, cl[CL_NOTE]);
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+    if (code >= 32 and code < 38) {
+        n = put_bytes(line[0..96], 0, "Cannot call now: ");
+        const why : []const u8 = fv_offline_text(code);
+        n = put_bytes(line[0..96], n, why);
+        draw_cl_wrap(c, kit, line[0..n], x, right, t + FV_NOTE_Y, 9.5, 3, sh);
+    } else if (fv_note_is_mine(code)) {
+        draw_cl_wrap(c, kit, fv_note_text(code), x, right, t + FV_NOTE_Y, 9.5, 3, sh);
+    } else {
+        draw_cl_wrap(c, kit, cv_note_text(code), x, right, t + FV_NOTE_Y, 9.5, 3, sh);
+    }
+    if (debug) {
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+        draw_bytes(c, kit, "DEBUG: ADDRESS, CALLED WITH THE KEY TYPED ABOVE", 46, x, t + FV_DBG_LABEL_Y, 9.0, 0.0, false);
+        draw_cl_field(c, kit, cv_field_x(l), t + FV_DFIELD_Y, cv_field_w(QP_W), cl[CL_FOCUS] == 1, hit == FV_H_DFIELD, cl[CL_ADDR .. CL_ADDR + CV_ADDR_MAX], @as(usize, cl[CL_ALEN]), "192.168.15.4:47727");
+        draw_cl_btn(c, kit, cv_btn_x(l, QP_W, 0), t + FV_DCALL_Y, cv_btn_w(QP_W), "CALL", hit == FV_H_DCALL);
+    }
+}
+
 fn draw_call_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, cl: []const u8) -> void {
     const l : f64 = qp_left(sw);
     const t : f64 = WS_TOP;
@@ -9294,68 +9608,59 @@ fn draw_call_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, cl:
     draw_close_x(c, sw - QP_PAD - 8.0, t + 20.0, on_panel_close(mx, my, sw, t), 1.0);
     const view : u32 = @as(u32, cl[CL_VIEW]);
     var line : [96]u8 = undefined;
-    // this device: where it listens and its test fingerprint (the caller dials the address; see call_view.t27)
+    // this device: where it listens and the fingerprint of its identity (the key a friend calls)
     var n : usize = put_bytes(line[0..96], 0, "THIS DEVICE  ");
     n = n + cv_addr_text(cl_ip(cl, CL_ME_IP), cl_me_port(cl), line[n..96]);
     cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
     draw_fit(c, kit, line[0..96], n, x, t + CV_ME_Y, 9.5, 0.0, false, right);
     if (cl[CL_UP] != 0) {
-        var me : [10]u8 = undefined;
-        cv_fp_of(cl_ip(cl, CL_ME_IP), cl_me_port(cl), me[0..10]);
         n = put_bytes(line[0..96], 0, "fp ");
-        n = n + fp_text(me[0..10], line[n..96]);
+        n = n + fp_text(cl[FE_FP .. FE_FP + 10], line[n..96]);
         cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
         draw_fit(c, kit, line[0..96], n, x, t + CV_FPME_Y, 9.5, 0.0, true, right);
     }
-    const hit : u32 = cv_hit(mx, my, l, QP_W, t, view);
     if (view == CV_IDLE) {
-        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
-        draw_bytes(c, kit, "ADDRESS", 7, x, t + CV_LABEL_Y, 9.5, 0.0, false);
-        const fx : f64 = cv_field_x(l);
-        const fy : f64 = cv_field_y(t);
-        const fw : f64 = cv_field_w(QP_W);
-        const typing : bool = cl[CL_FOCUS] != 0;
-        round_rect(c, fx, fy, fw, CV_FIELD_H, 5.0);
-        cg_line_width(c, 1.0);
-        cg_stroke_rgba(c, 1.0, 1.0, 1.0, STRICT_HOVER_EDGE);
-        if (typing) { cg_stroke_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE)); }
-        if (!typing and hit == CV_H_FIELD) { cg_stroke_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE)); }
-        cg_stroke_path(c);
-        var shown : [24]u8 = undefined;
-        var an : usize = @as(usize, cl[CL_ALEN]);
-        var i : usize = 0;
-        while (i < an) {
-            shown[i] = cl[CL_ADDR + i];
-            i = i + 1;
-        }
-        if (typing) {
-            shown[an] = 95;
-            an = an + 1;
-        }
-        if (an > 0) {
-            cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
-            draw_fit(c, kit, shown[0..24], an, fx + 8.0, fy + 17.5, 11.0, 0.0, true, fx + fw - 8.0);
-        } else {
-            cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
-            draw_bytes(c, kit, "192.168.15.4:47727", 18, fx + 8.0, fy + 17.5, 11.0, 0.0, true);
-        }
-    } else {
+        draw_cl_front(c, kit, sh, mx, my, l, t, cl);
+        return;
+    }
+    const hit : u32 = cv_hit(mx, my, l, QP_W, t, view);
+    if (view != CV_IDLE) {
         cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
         const tt : []const u8 = cv_title(view);
         draw_fit(c, kit, tt, tt.len, x, t + CV_TITLE_Y, 14.0, WEIGHT_SEMIBOLD, false, right);
-        // who: the address the test fingerprint names (else the IPv4 the packets came from) and the fingerprint
+        // who: the friend the fingerprint belongs to (the nickname that friend announced), else the address a test
+        // fingerprint names, else "someone not in your friends" with the invite that adds them
         const fa : u64 = cv_fp_addr(cl[CL_PFP .. CL_PFP + 10]);
+        const fr : usize = fv_find_fp(cl, cl[CL_PFP .. CL_PFP + 10]);
         n = put_bytes(line[0..96], 0, "WITH  ");
-        if (fa != 0) {
+        if (fr < FV_ROWS_SNAP) {
+            const fnl : usize = @as(usize, cl[fv_row_at(fr) + FR_NICKLEN]);
+            if (fnl > 0) {
+                var fk : usize = 0;
+                while (fk < fnl) {
+                    line[n + fk] = cl[fv_row_at(fr) + FR_NICK + fk];
+                    fk = fk + 1;
+                }
+                n = n + fnl;
+                n = put_bytes(line[0..96], n, "  (friend)");
+            } else {
+                n = put_bytes(line[0..96], n, "a friend");
+            }
+        } else if (fa != 0) {
             n = n + cv_addr_text(cv_addr_ip(fa), cv_addr_port(fa), line[n..96]);
         } else {
-            n = n + cv_addr_text(cl_ip(cl, CL_PIP), 0, line[n..96]) - 2;
+            n = put_bytes(line[0..96], n, "someone not in your friends");
         }
         cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
         draw_fit(c, kit, line[0..96], n, x, t + CV_PEER_Y, 11.0, 0.0, false, right);
-        n = put_bytes(line[0..96], 0, "fp ");
-        n = n + fp_text(cl[CL_PFP .. CL_PFP + 10], line[n..96]);
-        if (view == CV_RINGING) { n = put_bytes(line[0..96], n, "  (no nickname sent)"); }
+        if (fr >= FV_ROWS_SNAP and fa == 0) {
+            n = put_bytes(line[0..96], 0, "invite ");
+            invite_make(cl[CL_PFP .. CL_PFP + 10], line[n..96]);
+            n = n + INVITE_LEN;
+        } else {
+            n = put_bytes(line[0..96], 0, "fp ");
+            n = n + fp_text(cl[CL_PFP .. CL_PFP + 10], line[n..96]);
+        }
         cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
         draw_fit(c, kit, line[0..96], n, x, t + CV_PFP_Y, 9.5, 0.0, true, right);
         var big : [16]u8 = undefined;
@@ -10835,14 +11140,14 @@ pub fn main() -> void {
     }
     // the tool pages (B, K, Q): their state words and text store, all zero, counters "not measured"
     var tgv : [256]u64 = undefined;
-    var tbv : [77568]u8 = undefined;
+    var tbv : [85504]u8 = undefined;
     var tgz : usize = 0;
     while (tgz < 256) {
         tgv[tgz] = 0;
         tgz = tgz + 1;
     }
     tgz = 0;
-    while (tgz < 77568) {
+    while (tgz < 85504) {
         tbv[tgz] = 0;
         tgz = tgz + 1;
     }
@@ -11289,9 +11594,14 @@ pub fn main() -> void {
                         tbv[TBO_CL + CL_FOCUS] = 0;
                     } else {
                         const clv : u32 = @as(u32, tbv[TBO_CL + CL_VIEW]);
-                        const cla : u32 = cv_action(clv, cv_hit(mx, my, qp_left(sw), QP_W, WS_TOP, clv));
-                        if (cla != CV_A_FOCUS) { tbv[TBO_CL + CL_FOCUS] = 0; }
-                        cl_do(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN], clw[0..10], cla);
+                        if (clv == CV_IDLE) {
+                            // CL. the friends view: a hit is the invite, a friend's row, the add field and button, the debug part
+                            cl_front(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN], clw[0..10], fv_hit(mx, my, qp_left(sw), QP_W, WS_TOP, @as(u32, tbv[TBO_CL + FV_SHOWN]), tbv[TBO_CL + FV_DEBUG] != 0));
+                        } else {
+                            const cla : u32 = cv_action(clv, cv_hit(mx, my, qp_left(sw), QP_W, WS_TOP, clv));
+                            if (cla != CV_A_FOCUS) { tbv[TBO_CL + CL_FOCUS] = 0; }
+                            cl_do(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN], clw[0..10], cla);
+                        }
                     }
                     tsince = 0;
                 } else if (pfp and on_panel(mx, my, sw, WS_TOP)) {
@@ -11961,7 +12271,7 @@ pub fn main() -> void {
                     } else if (ck == KE_BACK) {
                         cl_back(tbv[TBO_CL .. TBO_CL + CL_CAP]);
                     } else if (ck == KE_SAVE) {
-                        cl_do(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN], clw[0..10], CV_A_DIAL);
+                        cl_enter(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN], clw[0..10]);
                     } else if (ck == KE_PASTE) {
                         const cpb : u64 = msg0(cls("NSPasteboard"), sel("generalPasteboard"));
                         const cps : u64 = msg1(cpb, sel("stringForType:"), cf("public.utf8-plain-text"));
@@ -12273,7 +12583,7 @@ pub fn main() -> void {
         tgv[TPG_QD_FLAGS] = qd_fl_with_keys(tgv[TPG_QD_FLAGS], qdk, sb_worst_light(sst[0..560]));
         // CL. and between the loop's slower parts, so no stretch of it keeps the call's socket waiting
         if (cl_tick(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN], clw[0..10])) { clring = true; }
-        qd_tick(tgv[0..256], tbv[0..77568], dhb[0..dhn], now, sst[SST_QDASH] != 0 and screen);
+        qd_tick(tgv[0..256], tbv[0..85504], dhb[0..dhn], now, sst[SST_QDASH] != 0 and screen);
         god_tick(tgv[0..256], tbv[0..65536], dhb[0..dhn], now, god, sst[SST_QRUN]);
         // L. the LANES block of the chat sidebar: the feed job, the tail of a clicked lane, the table once a second
         const lvup : bool = menu_open(state) and ma >= 0.5 and shown == PETAL_CHAT and cons2 == false and ws == WS_EXPANDED and collapsed == false;
@@ -12695,7 +13005,9 @@ pub fn main() -> void {
         if (dp and (on_panel_close(mx, my, sw, WS_TOP) or dk_btn_at(dk, mx, my, sw, sh, doff) != NS_NOT_FOUND)) { on_control = true; }
         if (on_pf_head(mx, my, sw)) { on_control = true; }
         if (on_cl_head(mx, my, sw)) { on_control = true; }
-        if (clp and (on_panel_close(mx, my, sw, WS_TOP) or cv_hit(mx, my, qp_left(sw), QP_W, WS_TOP, @as(u32, tbv[TBO_CL + CL_VIEW])) != CV_H_NONE)) { on_control = true; }
+        if (clp and on_panel_close(mx, my, sw, WS_TOP)) { on_control = true; }
+        if (clp and tbv[TBO_CL + CL_VIEW] == 0 and fv_hit(mx, my, qp_left(sw), QP_W, WS_TOP, @as(u32, tbv[TBO_CL + FV_SHOWN]), tbv[TBO_CL + FV_DEBUG] != 0) != FV_H_NONE) { on_control = true; }
+        if (clp and tbv[TBO_CL + CL_VIEW] != 0 and cv_hit(mx, my, qp_left(sw), QP_W, WS_TOP, @as(u32, tbv[TBO_CL + CL_VIEW])) != CV_H_NONE) { on_control = true; }
         if (pfp and (on_panel_close(mx, my, sw, WS_TOP) or prf_panel_hit_d(mx, my, qp_left(sw), QP_W, WS_TOP, pf_has(tbv[TBO_PF .. TBO_PF + PF_CAP]), prf_squeeze(WS_TOP, sh)) != PRF_H_NONE or on_pf_cancel(mx, my, qp_left(sw), WS_TOP - prf_squeeze(WS_TOP, sh)))) { on_control = true; }
         if (qp and (on_panel_close(mx, my, sw, WS_TOP) or on_god(mx, my, sw, WS_TOP) or ((sug != A_NONE or evd != 0) and (on_confirm(mx, my, sw, WS_TOP) or on_dismiss(mx, my, sw, WS_TOP))))) { on_control = true; }
         var cwant : u64 = 2;
@@ -12710,6 +13022,7 @@ pub fn main() -> void {
         // letter, a status line or a picture changes it and the frame is drawn
         if (pfp) { tbv[TBO_PF + PF_OPEN] = 1; } else { tbv[TBO_PF + PF_OPEN] = 0; }
         if (clp) { tbv[TBO_CL + CL_OPEN] = 1; } else { tbv[TBO_CL + CL_OPEN] = 0; }
+        tbv[TBO_CL + FV_OPEN] = tbv[TBO_CL + CL_OPEN];
         if (cl_tick(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN], clw[0..10])) { clring = true; }
         // U. the frame gate: fold what this frame shows into a key; an unchanged key with nothing
         // animating keeps the image already on the layer (frame_gate.t27)
@@ -12777,14 +13090,14 @@ pub fn main() -> void {
         }
         msg_flag(tx_cls, s_quiet, true);
         if (fdraw and narrow) {
-            draw(cc, kit, frame, state, hov, ma, shown, task, space, sp, ss, cur, collapsed, mx, my, z, sw, sh, ws, full, qp, ring, evn, now, sug, god, glow, dk, dp, darmed, doff, dgo, walking, dlabel, tst[0..32], tcells[0..960000], topen, tcur, kyp, kstored[0..9], kmask[0..544], kmlen[0..9], kst[0..72], kfail[0..9], kopen[0..9], kedit, kbuf[0..256], klen, karm, kbusy, kemask, kewhy, ktpick, hs, cons2, dcv[0..512], gal[0..49152], gt[0..2560], evd, @as(u64, evp) + @as(u64, evn2) * 1048576 + @as(u64, evpr) * 1099511627776, pbuf[0..4160], sst[0..560], tgv[0..256], tbv[0..77568]);
+            draw(cc, kit, frame, state, hov, ma, shown, task, space, sp, ss, cur, collapsed, mx, my, z, sw, sh, ws, full, qp, ring, evn, now, sug, god, glow, dk, dp, darmed, doff, dgo, walking, dlabel, tst[0..32], tcells[0..960000], topen, tcur, kyp, kstored[0..9], kmask[0..544], kmlen[0..9], kst[0..72], kfail[0..9], kopen[0..9], kedit, kbuf[0..256], klen, karm, kbusy, kemask, kewhy, ktpick, hs, cons2, dcv[0..512], gal[0..49152], gt[0..2560], evd, @as(u64, evp) + @as(u64, evn2) * 1048576 + @as(u64, evpr) * 1099511627776, pbuf[0..4160], sst[0..560], tgv[0..256], tbv[0..85504]);
             const whole : u64 = cg_image(cc);
             const img : u64 = cg_crop(whole, 0.0, 0.0, sw * RETINA, sh * RETINA);
             msg1(layer, s_contents, img);
             cg_image_release(img);
             cg_image_release(whole);
         } else if (fdraw) {
-            draw(c, kit, frame, state, hov, ma, shown, task, space, sp, ss, cur, collapsed, mx, my, z, sw, sh, ws, full, qp, ring, evn, now, sug, god, glow, dk, dp, darmed, doff, dgo, walking, dlabel, tst[0..32], tcells[0..960000], topen, tcur, kyp, kstored[0..9], kmask[0..544], kmlen[0..9], kst[0..72], kfail[0..9], kopen[0..9], kedit, kbuf[0..256], klen, karm, kbusy, kemask, kewhy, ktpick, hs, cons2, dcv[0..512], gal[0..49152], gt[0..2560], evd, @as(u64, evp) + @as(u64, evn2) * 1048576 + @as(u64, evpr) * 1099511627776, pbuf[0..4160], sst[0..560], tgv[0..256], tbv[0..77568]);
+            draw(c, kit, frame, state, hov, ma, shown, task, space, sp, ss, cur, collapsed, mx, my, z, sw, sh, ws, full, qp, ring, evn, now, sug, god, glow, dk, dp, darmed, doff, dgo, walking, dlabel, tst[0..32], tcells[0..960000], topen, tcur, kyp, kstored[0..9], kmask[0..544], kmlen[0..9], kst[0..72], kfail[0..9], kopen[0..9], kedit, kbuf[0..256], klen, karm, kbusy, kemask, kewhy, ktpick, hs, cons2, dcv[0..512], gal[0..49152], gt[0..2560], evd, @as(u64, evp) + @as(u64, evn2) * 1048576 + @as(u64, evpr) * 1099511627776, pbuf[0..4160], sst[0..560], tgv[0..256], tbv[0..85504]);
             const whole : u64 = cg_image(c);
             const img : u64 = cg_crop(whole, 0.0, 0.0, sw * WIDE_RETINA, sh * WIDE_RETINA);
             msg1(layer, s_contents, img);
@@ -14164,7 +14477,12 @@ test the_call_region_ends_the_text_store_and_draw_reads_only_folded_bytes {
     assert TBO_CL == TBO_PF + PF_CAP;
     assert TBO_CL + CL_CAP == TB_SIZE;
     assert CL_ADDR + CV_ADDR_MAX + 1 <= CL_NPOLL;
-    assert CL_NPOLL + 4 <= CL_CAPT and CL_TXO + 4 == CL_KEY_N;
+    assert CL_NPOLL + 4 <= CL_CAPT and CL_TXO + 4 <= CL_STATS and CL_STATS < CL_KEY_N;
+    // the friends snapshot (friends_view) follows the call core and is folded into the frame key; the engine's blocks
+    // (friends_engine) and the signal's block (ringtone) follow it, are not folded, and end inside the region
+    assert FV_END == CL_KEY_N and CL_TXO + 4 <= 256;
+    assert FE_TONE + RT_BLOCK <= FE_END and FE_END <= CL_CAP;
+    assert FV_OPEN > CL_STATS and FV_COUNT >= 256;
     assert CL_N10 + 4 <= CL_ADDR and CL_ME_PORT + 2 <= CL_N10;
     // NSActivityUserInitiated (0x00FFFFFF) | NSActivityLatencyCritical (0xFF00000000)
     assert CL_ACTIVITY == 16777215 + 1095216660480;
@@ -14264,4 +14582,27 @@ test every_reason_a_call_ends_with_has_its_line_and_ports_parse {
     assert cl_get32(b[0..8], 0) == 305419896;
     cl_put_ip(b[0..8], 4, 3232239364);
     assert cl_ip(b[0..8], 4) == 3232239364;
+}
+
+test the_invite_field_takes_a_pasted_invite_in_capitals_and_stops_at_25 {
+    var cl : [8192]u8 = undefined;
+    var z : usize = 0;
+    while (z < 8192) { cl[z] = 0; z = z + 1; }
+    cl[CL_FOCUS] = 2;
+    const inv : [29]u8 = [116, 50, 55, 45, 51, 51, 112, 48, 45, 98, 118, 106, 121, 45, 106, 106, 54, 110, 32, 45, 102, 120, 115, 103, 45, 54, 10, 120, 120];
+    var i : usize = 0;
+    while (i < 29) {
+        cl_unit(cl[0..8192], @as(u32, inv[i]));
+        i = i + 1;
+    }
+    // spaces and the line end are dropped, letters are made capital, 25 characters at most
+    assert cl[FV_INVLEN] == 25;
+    assert cl[FV_TYPED] == 84 and cl[FV_TYPED + 4] == 51 and cl[FV_TYPED + 6] == 80 and cl[FV_TYPED + 24] == 54;
+    // the address field is untouched
+    assert cl[CL_ALEN] == 0;
+    cl_back(cl[0..8192]);
+    assert cl[FV_INVLEN] == 24;
+    cl[CL_FOCUS] = 0;
+    cl_unit(cl[0..8192], 55);
+    assert cl[CL_ALEN] == 1 and cl[FV_INVLEN] == 24;
 }
