@@ -14,8 +14,10 @@
 //     NOTE: no person compares the code in a message session, and the call's fingerprints are not yet bound to the
 //     peer_identity keys (call_session.t27: "binding to keysync device keys is the next slice"), so a message
 //     session is encrypted but not authenticated against a man in the middle on the LAN. Behaviour, not an audit.
-// A window drives one friend's chat with chm_init, chm_send, chm_open (the chat is shown: READ) and chm_tick from its
-// main loop; chm_stat reads the counters. The window side is the next step; chat_probe.t27 drives it headless.
+// A window drives one friend's chat with chm_init, chm_addr (the friend's address changed), chm_send, chm_open (the chat
+// is shown: READ) and chm_tick from its main loop; chm_stat reads the counters. One log is open at a time: a session
+// from another friend is left ringing and reported (CHM_E_OTHER, chm_ringing) so the window can open that friend's log
+// and answer on its next tick; chat_probe.t27 drives it headless, glass_window.t27 from the cabinet (chat_view.t27).
 module T27osChatHost;
 
 use t27os::pty_sys::sys_rename;
@@ -30,6 +32,7 @@ use t27os::peer_identity_host::IH_PATH_MAX;
 use t27os::peer_identity::ft_find;
 use t27os::peer_identity::FT_MAX;
 use t27os::call_core::CK_IDLE;
+use t27os::call_core::CK_RINGING;
 use t27os::call_core::CK_ACTIVE;
 use t27os::call_core::CK_ENDED;
 use t27os::call_core::CK_FAILED;
@@ -45,7 +48,6 @@ use t27os::call_session::cs_dismiss;
 use t27os::call_session::cs_text_send;
 use t27os::call_session::cs_text_take;
 use t27os::call_session::CS_EV_NONE;
-use t27os::call_session::CS_EV_RINGING;
 use t27os::call_session::CS_EV_CODE;
 use t27os::call_session::CS_EV_ACTIVE;
 use t27os::call_session::CS_EV_ENDED;
@@ -201,6 +203,8 @@ const M_FP : usize = 192;
 pub const CHM_E_NEW : u32 = 1;
 pub const CHM_E_STATUS : u32 = 2;
 pub const CHM_E_DIRTY : u32 = 4;
+/// Another friend than the one of this log rings: still ringing; chm_ringing names it.
+pub const CHM_E_OTHER : u32 = 8;
 
 fn mg(m: []const u8, k: usize) -> u64 { return get_u64(m, k * 8); }
 fn mp(m: []u8, k: usize, v: u64) -> void { put_u64(m, k * 8, v); }
@@ -222,6 +226,18 @@ pub fn chm_init(m: []u8, fp: []const u8, ip: u64, port: u64) -> bool {
         i = i + 1;
     }
     return true;
+}
+
+/// The friend's address changed (found again, or lost: ip 0 stops the dialing); the counters and the READ state stay.
+pub fn chm_addr(m: []u8, ip: u64, port: u64) -> void {
+    mp(m, M_IP, ip);
+    mp(m, M_PORT, port);
+}
+
+/// The friend whose session rings unanswered, into fp[0..10]; false when none rings.
+pub fn chm_ringing(s: []const u8, fp: []u8) -> bool {
+    if (cs_state(s) != CK_RINGING) { return false; }
+    return cs_peer(s, fp) != 0;
 }
 
 pub fn chm_stat(m: []const u8, k: u32) -> u64 {
@@ -276,16 +292,7 @@ pub fn chm_tick(m: []u8, s: []u8, log: []u8, asm: []u8, friends: []const u8, me_
     var e : u32 = cs_poll(s);
     var guard : u32 = 0;
     while (e != CS_EV_NONE and guard < 32) {
-        if (e == CS_EV_RINGING) {
-            var fp : [10]u8 = undefined;
-            cs_peer(s, fp[0..10]);
-            if (ft_find(friends, fp[0..10]) != FT_MAX and chm_peer_is(m, s)) {
-                cs_answer(s);
-            } else {
-                ma(m, CHM_REFUSED);
-                cs_decline(s);
-            }
-        } else if (e == CS_EV_CODE) {
+        if (e == CS_EV_CODE) {
             cs_confirm(s, true);
         } else if (e == CS_EV_ACTIVE) {
             ma(m, CHM_SESSIONS);
@@ -297,6 +304,20 @@ pub fn chm_tick(m: []u8, s: []u8, log: []u8, asm: []u8, friends: []const u8, me_
         }
         e = cs_poll(s);
         guard = guard + 1;
+    }
+    // a session that rings: the friend of this log is answered, another friend is left ringing for the window, anyone
+    // else is declined (read from the state, so a session the window switched logs for is answered on this tick)
+    if (cs_state(s) == CK_RINGING) {
+        var rf : [10]u8 = undefined;
+        cs_peer(s, rf[0..10]);
+        if (ft_find(friends, rf[0..10]) == FT_MAX) {
+            ma(m, CHM_REFUSED);
+            cs_decline(s);
+        } else if (chm_peer_is(m, s)) {
+            cs_answer(s);
+        } else {
+            ev = ev | CHM_E_OTHER;
+        }
     }
     const st : u32 = cs_state(s);
     if (st == CK_ACTIVE) {
@@ -412,4 +433,8 @@ test the_log_path_is_the_chat_folder_and_the_fingerprint {
     assert chm_set(m[0..256], CHM_K_DROP, 5) and chm_stat(m[0..256], CHM_K_DROP) == 5;
     assert chm_set(m[0..256], CHM_SESSIONS, 5) == false;
     assert chm_stat(m[0..256], 40) == 0;
+    // a new address keeps the counters
+    chm_addr(m[0..256], 3232235786, 47728);
+    assert chm_stat(m[0..256], CHM_K_DROP) == 5 and mg(m[0..256], M_IP) == 3232235786 and mg(m[0..256], M_PORT) == 47728;
+    assert CHM_E_OTHER != CHM_E_NEW and CHM_E_OTHER != CHM_E_STATUS and CHM_E_OTHER != CHM_E_DIRTY;
 }

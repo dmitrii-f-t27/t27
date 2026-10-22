@@ -533,6 +533,156 @@ use t27os::account_view::ac_range_text;
 use t27os::account_view::ac_row_line;
 use t27os::account_view::ac_paste_find;
 use t27os::account_view::ac_rows_vis;
+use t27os::chat_view::CHV_CAP;
+use t27os::chat_view::CHV_MODE;
+use t27os::chat_view::CHV_FOCUS;
+use t27os::chat_view::CHV_ONLINE;
+use t27os::chat_view::CHV_NOTE;
+use t27os::chat_view::CHV_FP;
+use t27os::chat_view::CHV_UP;
+use t27os::chat_view::CHV_NICKLEN;
+use t27os::chat_view::CHV_NICK;
+use t27os::chat_view::CHV_SCROLL;
+use t27os::chat_view::CHV_COUNT;
+use t27os::chat_view::CHV_PENDING;
+use t27os::chat_view::CHV_AGO;
+use t27os::chat_view::CHV_DIRTY;
+use t27os::chat_view::CHV_TYPED;
+use t27os::chat_view::CHV_ITEMS;
+use t27os::chat_view::CHV_ITEM;
+use t27os::chat_view::CHV_M_OFF;
+use t27os::chat_view::CHV_M_CARD;
+use t27os::chat_view::CHV_M_CHAT;
+use t27os::chat_view::CHV_N_LONG;
+use t27os::chat_view::CHV_N_OFF;
+use t27os::chat_view::CHV_N_OFFLINE;
+use t27os::chat_view::CHV_N_NOVIDEO;
+use t27os::chat_view::CHV_N_NOSAVE;
+use t27os::chat_view::CHV_N_CALLS_OFF;
+use t27os::chat_view::CHV_H_NONE;
+use t27os::chat_view::CHV_H_BACK;
+use t27os::chat_view::CHV_H_MESSAGE;
+use t27os::chat_view::CHV_H_CALL;
+use t27os::chat_view::CHV_H_VIDEO;
+use t27os::chat_view::CHV_H_FIELD;
+use t27os::chat_view::CHV_H_SEND;
+use t27os::chat_view::CHV_H_HIST;
+use t27os::chat_view::CHV_I_BUBBLE;
+use t27os::chat_view::CHV_I_LINE;
+use t27os::chat_view::CHV_I_META;
+use t27os::chat_view::CHV_TZ_BIAS;
+use t27os::chat_view::CHV_BACK_Y;
+use t27os::chat_view::CHV_BACK_W;
+use t27os::chat_view::CHV_CHIP_W;
+use t27os::chat_view::CHV_AV_R;
+use t27os::chat_view::CHV_AV_CY;
+use t27os::chat_view::CHV_NICK_BASE;
+use t27os::chat_view::CHV_FP_BASE;
+use t27os::chat_view::CHV_STATE_BASE;
+use t27os::chat_view::CHV_CARD_BTN_Y;
+use t27os::chat_view::CHV_HINT_BASE;
+use t27os::chat_view::CHV_CARD_NOTE_BASE;
+use t27os::chat_view::CHV_HDR_NICK_BASE;
+use t27os::chat_view::CHV_HDR_STATE_BASE;
+use t27os::chat_view::CHV_FIELD_H;
+use t27os::chat_view::CHV_SEND_W;
+use t27os::chat_view::CHV_FONT;
+use t27os::chat_view::CHV_META_FONT;
+use t27os::chat_view::CHV_WHEEL_PT;
+use t27os::chat_view::chv_mode;
+use t27os::chat_view::chv_is;
+use t27os::chat_view::chv_open_card;
+use t27os::chat_view::chv_open_chat;
+use t27os::chat_view::chv_back;
+use t27os::chat_view::chv_close;
+use t27os::chat_view::chv_friend;
+use t27os::chat_view::chv_unr_get;
+use t27os::chat_view::chv_unr_set;
+use t27os::chat_view::chv_badge_text;
+use t27os::chat_view::chv_status_put;
+use t27os::chat_view::chv_empty_text;
+use t27os::chat_view::chv_wait_put;
+use t27os::chat_view::chv_note_text;
+use t27os::chat_view::chv_card_hint;
+use t27os::chat_view::chv_tail_at;
+use t27os::chat_view::chv_tlen;
+use t27os::chat_view::chv_type_unit;
+use t27os::chat_view::chv_type_bytes;
+use t27os::chat_view::chv_back_unit;
+use t27os::chat_view::chv_take;
+use t27os::chat_view::chv_back_x;
+use t27os::chat_view::chv_card_btn_w;
+use t27os::chat_view::chv_card_btn_x;
+use t27os::chat_view::chv_card_word;
+use t27os::chat_view::chv_av_cx;
+use t27os::chat_view::chv_nick_x;
+use t27os::chat_view::chv_card_hit;
+use t27os::chat_view::chv_hdr_video_x;
+use t27os::chat_view::chv_hdr_call_x;
+use t27os::chat_view::chv_hdr_nick_x;
+use t27os::chat_view::chv_hist_top;
+use t27os::chat_view::chv_hist_h;
+use t27os::chat_view::chv_field_x;
+use t27os::chat_view::chv_field_w;
+use t27os::chat_view::chv_field_y;
+use t27os::chat_view::chv_send_x;
+use t27os::chat_view::chv_note_base;
+use t27os::chat_view::chv_chat_hit;
+use t27os::chat_view::chv_scroll_by;
+use t27os::chat_view::chv_layout;
+use t27os::chat_view::chv_nitems;
+use t27os::chat_view::chv_item_kind;
+use t27os::chat_view::chv_item_dir;
+use t27os::chat_view::chv_item_state;
+use t27os::chat_view::chv_item_x;
+use t27os::chat_view::chv_item_y;
+use t27os::chat_view::chv_item_w;
+use t27os::chat_view::chv_item_h;
+use t27os::chat_view::chv_item_len;
+use t27os::chat_view::chv_item_text;
+use t27os::chat_view::chv_chat_port;
+use t27os::chat_core::CH_DIR_OUT;
+use t27os::chat_core::CH_S_READ;
+use t27os::chat_core::CH_S_FAILED;
+use t27os::chat_core::CH_CALLING_MS;
+use t27os::chat_core::CH_SILENT_MS;
+use t27os::chat_core::CL_KEEP;
+use t27os::chat_core::CF_MAX;
+use t27os::chat_core::CA_LEN;
+use t27os::chat_core::cl_bytes;
+use t27os::chat_core::cl_unread;
+use t27os::chat_core::cl_pending;
+use t27os::chat_host::CHM_LEN;
+use t27os::chat_host::CHM_E_NEW;
+use t27os::chat_host::CHM_E_STATUS;
+use t27os::chat_host::CHM_E_DIRTY;
+use t27os::chat_host::CHM_E_OTHER;
+use t27os::chat_host::CHH_LOADED;
+use t27os::chat_host::CHH_IOERR;
+use t27os::chat_host::chh_load;
+use t27os::chat_host::chh_save;
+use t27os::chat_host::chm_init;
+use t27os::chat_host::chm_addr;
+use t27os::chat_host::chm_ringing;
+use t27os::chat_host::chm_send;
+use t27os::chat_host::chm_open;
+use t27os::chat_host::chm_tick;
+use t27os::call_session::CS_AUDIO_NONE;
+use t27os::call_session::CS_K_CALLING_MS;
+use t27os::call_session::CS_K_SILENT_MS;
+use t27os::peer_identity::ft_count;
+use t27os::peer_identity::ft_fp_at;
+use t27os::peer_identity::ft_find;
+use t27os::peer_identity::FT_LEN;
+use t27os::peer_identity::FT_MAX;
+use t27os::friends_view::fv_row_addr;
+use t27os::friends_view::FR_AGO;
+use t27os::friends_view::FR_IP;
+use t27os::friends_view::FR_PORT;
+use t27os::friends_view::fv_get32;
+use t27os::call_session::CS_EV_ENDED;
+use t27os::call_session::CS_EV_FAILED;
+use t27os::friends_engine::FE_FT;
 use t27os::account_view::ac_max_scroll;
 use t27os::account_view::ac_clamp_scroll;
 use t27os::account_view::ac_scroll_by;
@@ -6008,7 +6158,7 @@ pub const TBO_HIVE : usize = 65536;
 pub const TBO_HIVE_N : usize = 6144;
 pub const TBO_HLANES : usize = 71680;
 pub const TBO_HLANES_N : usize = 256;
-pub const TB_SIZE : usize = 85504;
+pub const TB_SIZE : usize = 93696;
 pub const TG_KEY_RETURN : u64 = 36;
 pub const TG_KEY_BACKSPACE : u64 = 51;
 pub const TG_EV_CHAR : u32 = 99;
@@ -9291,6 +9441,9 @@ pub const CL_CAMP : usize = 152;
 pub const CL_CAMTRY : usize = 160;
 /// Not drawn: the address of the test picture's encoder block (call_vid.t27 vgq_new), two u32, low then high; 0 = none.
 pub const CL_VENC : usize = 161;
+/// Not drawn: 1 while the call started by CALL on a friend's card (a voice call) runs: no camera, no video sent; back to
+/// 0 (and video as launched) once the call block is idle again (ch_tick).
+pub const CL_NOCAM : usize = 228;
 pub const CLW_AUTO_T : usize = 9;
 /// The window's own call clock (main's [10]u64): when ACTIVE began, when the last poll returned, the longest gap from
 /// the end of one poll to the start of the next while ACTIVE, the state the last snapshot saw, the system activity
@@ -9576,7 +9729,7 @@ pub fn cl_camp(cl: []const u8) -> u64 {
 /// generator is the source; every new camera JPEG while LIVE is handed to cs_video_feed. When the call is over the stop
 /// is queued, the camera is free.
 pub fn cl_camera(cl: []u8, s: []u8) -> void {
-    if (cl[CL_VSEND] == 0 or cl[CL_CAMOFF] != 0) { return; }
+    if (cl[CL_VSEND] == 0 or cl[CL_CAMOFF] != 0 or cl[CL_NOCAM] != 0) { return; }
     const st : u32 = cs_state(s);
     var cp : u64 = cl_camp(cl);
     if (st != CK_ACTIVE) {
@@ -10334,8 +10487,8 @@ fn draw_call_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, cl:
 //     opens it; a call that rings shows its own view over it; PROFILE (the picture) opens from the link in it;
 //   - MY KEY: the T27-... string, a click on it or on COPY KEY puts it on the clipboard (pb_copy, the same bytes
 //     a friend pastes into ADD A FRIEND); the short fingerprint stands beside it;
-//   - a friend's row: a click calls (online) or says why not; COPY puts the friend's key on the clipboard; the x asks
-//     REMOVE? and only YES removes.
+//   - a friend's row: a click opens the friend's card (block CH: MESSAGE, CALL, VIDEO); the unread count stands on the
+//     row; COPY puts the friend's key on the clipboard; the x asks REMOVE? and only YES removes.
 // ======================================================================================================
 pub const AC_WHEEL_STEP : f64 = 14.0;
 
@@ -10556,7 +10709,7 @@ fn draw_ac_arrow(c: u64, kit: [48]u64, ax: f64, ay: f64, up: bool, live: bool, o
     cg_fill_path(c);
 }
 
-fn draw_account_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, cl: []const u8, pf: []const u8, img: u64) -> void {
+fn draw_account_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, cl: []const u8, pf: []const u8, img: u64, ch: []const u8) -> void {
     const l : f64 = qp_left(sw);
     const t : f64 = WS_TOP;
     const h : f64 = sh - t;
@@ -10719,10 +10872,8 @@ fn draw_account_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, 
             draw_ac_chip(c, kit, ac_yes_x(l, QP_W), ry + 2.0, AC_ZONE_YES_W, "YES", hit == AC_H_YES + k);
             draw_ac_chip(c, kit, ac_no_x(l, QP_W), ry + 2.0, AC_ZONE_YES_W, "NO", hit == AC_H_NO + k);
         } else {
-            if (online) {
-                cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
-                draw_bytes(c, kit, "CALL", 4, ac_fcopy_x(l, QP_W) - 30.0, ry + 12.0, 9.5, WEIGHT_SEMIBOLD, false);
-            }
+            const unr : u32 = chv_unr_get(ch, cl[r + FR_FP .. r + FR_FP + 10]);
+            if (unr > 0) { draw_ch_badge(c, kit, ac_fcopy_x(l, QP_W) - 6.0, ry + 8.0, unr); }
             draw_ac_chip(c, kit, ac_fcopy_x(l, QP_W), ry + 2.0, AC_ZONE_COPY_W, "COPY", hit == AC_H_FCOPY + k);
             draw_ac_chip(c, kit, ac_del_x(l, QP_W), ry + 2.0, AC_ZONE_DEL_W, "x", hit == AC_H_DEL + k);
         }
@@ -10750,6 +10901,525 @@ fn draw_account_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, 
         draw_cl_wrap(c, kit, fv_note_text(code), x, right, ac_note_y(t, h), 9.5, 2, sh);
     } else {
         draw_cl_wrap(c, kit, cv_note_text(code), x, right, ac_note_y(t, h), 9.5, 2, sh);
+    }
+}
+
+// ======================================================================================================
+// CH. A FRIEND'S CARD AND THE CHAT (owner, 2026-10-22; Refs gHashTag/t27#11560). chat_view.t27 decides (the boxes of the
+// card and of the chat, the history's items, the field, the unread table, the text); chat_core.t27 and chat_host.t27
+// keep the log and run the message session. This block owns the log of the one friend open (a local of main), the
+// message session on the chat port (the call port + 1, chv_chat_port, the same bind address), and turns a hit into one
+// call:
+//   - a click on a friend's row in the cabinet opens the card (MESSAGE, CALL, VIDEO); MESSAGE opens the chat and sends
+//     READ for what it shows; Return or SEND puts the text in the log as PENDING and the session sends it, or it waits
+//     ("will send when online") until the friend is found again;
+//   - CALL and VIDEO close a message session first (its log is written), then call the friend through cl_front /
+//     fe_call, the one path a friend is called by; CALL starts no camera and sends no video (CL_NOCAM, CS_K_VIDEO 0);
+//     when the call is over the cabinet shows the card again;
+//   - one log is open at a time: another friend's session is answered by opening that friend's log, when nothing waits
+//     in the open one and its chat is not on screen; while a call is up the message session is not run.
+//   - T27OS_CHAT=card or =chat (a test aid, off by default): the first friend's card, or chat, once the list is known.
+// ======================================================================================================
+pub const TBO_CH : usize = 85504;
+/// The open log (chat_core cl_bytes(CL_KEEP)) and the file scratch (chat_core CF_MAX + 1), as main declares them.
+pub const CH_LOG_LEN : usize = 1016040;
+pub const CH_BUF_LEN : usize = 1008041;
+/// The window's chat clock (main's [8]u64): a log is open, when it is written next (0 = clean), when the history was
+/// laid out, the history's height then, the test aid still to apply (1 card, 2 chat).
+pub const CHW_LOADED : usize = 0;
+pub const CHW_SAVE_AT : usize = 1;
+pub const CHW_LAYOUT_AT : usize = 2;
+pub const CHW_HH : usize = 3;
+pub const CHW_AID : usize = 4;
+pub const CHW_N : usize = 8;
+/// The history is laid out again at least this often ("today" turns into a date after midnight).
+pub const CH_RELAYOUT_MS : u64 = 30000;
+/// A changed log is written this long after its first change (a burst of ACKs is one write); a sent line at once.
+pub const CH_SAVE_MS : u64 = 1000;
+
+/// The open log belongs to friend fp (chat_core keeps the friend's fingerprint at byte 28 of the log).
+fn ch_log_is(log: []const u8, fp: []const u8) -> bool {
+    var i : usize = 0;
+    while (i < 10) {
+        if (log[28 + i] != fp[i]) { return false; }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn ch_same_fp(a: []const u8, b: []const u8) -> bool {
+    var i : usize = 0;
+    while (i < 10) {
+        if (a[i] != b[i]) { return false; }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// The friend's chat address as ip * 65536 + port from its row; 0 when the friend is not in view or not online.
+pub fn ch_friend_addr(cl: []const u8, fp: []const u8) -> u64 {
+    const row : usize = fv_find_fp(cl, fp);
+    if (row >= FV_ROWS_SNAP) { return 0; }
+    const a : u64 = fv_row_addr(cl, row);
+    if (a == 0) { return 0; }
+    const p : u64 = chv_chat_port(a % 65536);
+    if (p == 0) { return 0; }
+    return (a / 65536) * 65536 + p;
+}
+
+/// Launch, after cl_boot: the message session on the chat port; calls off or a taken port leave messages off
+/// (CHV_UP 0). The unread count of every friend is read from the logs on disk, one after the other in the one buffer.
+pub fn ch_boot(cl: []u8, v: []u8, s: []u8, log: []u8, buf: []u8, w: []u64) -> void {
+    var i : usize = 0;
+    while (i < CHW_N) {
+        w[i] = 0;
+        i = i + 1;
+    }
+    var e : [8]u8 = undefined;
+    const en : usize = cl_env("T27OS_CHAT", e[0..8]);
+    if (en == 4 and e[0] == 99 and e[1] == 97 and e[2] == 114 and e[3] == 100) { w[CHW_AID] = 1; }
+    if (en == 4 and e[0] == 99 and e[1] == 104 and e[2] == 97 and e[3] == 116) { w[CHW_AID] = 2; }
+    if (cl[CL_UP] == 0) { return; }
+    const port : u64 = chv_chat_port(cl_me_port(cl));
+    if (port == 0) { return; }
+    if (cs_open(s, cl[FE_FP .. FE_FP + 10], cl_ip(cl, CL_ME_IP), port, CS_AUDIO_NONE) == false) { return; }
+    cs_set(s, CS_K_CALLING_MS, CH_CALLING_MS);
+    cs_set(s, CS_K_SILENT_MS, CH_SILENT_MS);
+    v[CHV_UP] = 1;
+    const n : usize = @as(usize, ft_count(cl[FE_FT .. FE_FT + FT_LEN]));
+    i = 0;
+    while (i < n and i < FT_MAX) {
+        var fp : [10]u8 = undefined;
+        if (ft_fp_at(cl[FE_FT .. FE_FT + FT_LEN], i, fp[0..10])) {
+            if (chh_load(fp[0..10], log, CL_KEEP, buf) == CHH_LOADED) { chv_unr_set(v, fp[0..10], cl_unread(log)); }
+        }
+        i = i + 1;
+    }
+}
+
+/// The message session goes, whatever its state (a ringing one is declined, a live one hung up).
+fn ch_close_session(s: []u8) -> void {
+    const st : u32 = cs_state(s);
+    if (st == CK_IDLE) { return; }
+    if (st == CK_RINGING) {
+        cs_decline(s);
+    } else if (st != CK_ENDED and st != CK_FAILED) {
+        cs_hangup(s);
+    }
+    cs_dismiss(s);
+}
+
+/// The log of friend fp becomes the open one (the one before it is written first; a session with another friend goes,
+/// a ringing one from fp stays for chm_tick to answer). False when the log cannot be read.
+pub fn ch_open_log(cl: []const u8, v: []u8, s: []u8, m: []u8, log: []u8, buf: []u8, w: []u64, fp: []const u8) -> bool {
+    if (w[CHW_LOADED] != 0 and ch_log_is(log, fp)) { return true; }
+    if (w[CHW_LOADED] != 0 and w[CHW_SAVE_AT] != 0) {
+        if (chh_save(log, buf) == false) { v[CHV_NOTE] = @as(u8, @intCast(CHV_N_NOSAVE)); }
+    }
+    w[CHW_SAVE_AT] = 0;
+    w[CHW_LOADED] = 0;
+    var rf : [10]u8 = undefined;
+    if (chm_ringing(s, rf[0..10]) == false or ch_same_fp(rf[0..10], fp) == false) { ch_close_session(s); }
+    if ((chh_load(fp, log, CL_KEEP, buf) & 255) == CHH_IOERR) { return false; }
+    w[CHW_LOADED] = 1;
+    const a : u64 = ch_friend_addr(cl, fp);
+    chm_init(m, fp, a / 65536, a % 65536);
+    chv_unr_set(v, fp, cl_unread(log));
+    v[CHV_DIRTY] = 1;
+    return true;
+}
+
+/// A friend's row in the cabinet: that friend's card.
+pub fn ch_card(cl: []const u8, v: []u8, row: usize) -> void {
+    if (row >= @as(usize, cl[FV_SHOWN]) or row >= FV_ROWS_SNAP) { return; }
+    const r : usize = fv_row_at(row);
+    chv_open_card(v, cl[r + FR_FP .. r + FR_FP + 10]);
+    chv_friend(v, cl[r + FR_NICK .. r + FR_NICK + 24], @as(usize, cl[r + FR_NICKLEN]), cl[r + FR_ONLINE] != 0, fv_get32(cl, r + FR_AGO));
+}
+
+/// What a point means on the card or in the chat at this window size.
+pub fn ch_hit_now(x: f64, y: f64, sw: f64, sh: f64, v: []const u8) -> u32 {
+    if (chv_mode(v) == CHV_M_CARD) { return chv_card_hit(x, y, qp_left(sw), QP_W, WS_TOP); }
+    if (chv_mode(v) == CHV_M_CHAT) { return chv_chat_hit(x, y, qp_left(sw), QP_W, WS_TOP, sh - WS_TOP); }
+    return CHV_H_NONE;
+}
+
+/// Return or SEND: the typed text into the friend's log as PENDING (written at once); the session sends it, or it
+/// waits for the friend. With messages off the text stays in the field and the note says why.
+pub fn ch_send(cl: []const u8, v: []u8, s: []u8, m: []u8, log: []u8, buf: []u8, w: []u64) -> void {
+    if (chv_mode(v) != CHV_M_CHAT) { return; }
+    if (v[CHV_UP] == 0) {
+        v[CHV_NOTE] = @as(u8, @intCast(CHV_N_OFF));
+        return;
+    }
+    var fp : [10]u8 = undefined;
+    var i : usize = 0;
+    while (i < 10) {
+        fp[i] = v[CHV_FP + i];
+        i = i + 1;
+    }
+    if (ch_open_log(cl, v, s, m, log, buf, w, fp[0..10]) == false) {
+        v[CHV_NOTE] = @as(u8, @intCast(CHV_N_NOSAVE));
+        return;
+    }
+    var t : [2000]u8 = undefined;
+    const n : usize = chv_take(v, t[0..2000]);
+    if (n == 0) { return; }
+    const now : u64 = ckh_ms();
+    if (chm_send(m, log, t[0..n], now) == 0) {
+        v[CHV_NOTE] = @as(u8, @intCast(CHV_N_LONG));
+        return;
+    }
+    w[CHW_SAVE_AT] = now;
+    v[CHV_DIRTY] = 1;
+}
+
+/// CALL (video false) or VIDEO on the card or in the chat: the friend must be online; the message session closes first
+/// and its log is written; then the call goes the way a friend is always called (cl_front, fe_call).
+pub fn ch_call(cl: []u8, v: []u8, s: []u8, log: []u8, buf: []u8, w: []u64, cs: []u8, clw: []u64, video: bool) -> void {
+    v[CHV_NOTE] = 0;
+    if (cl[CL_UP] == 0) {
+        v[CHV_NOTE] = @as(u8, @intCast(CHV_N_CALLS_OFF));
+        return;
+    }
+    const row : usize = fv_find_fp(cl, v[CHV_FP .. CHV_FP + 10]);
+    if (row >= FV_ROWS_SNAP) { return; }
+    if (cl[fv_row_at(row) + FR_ONLINE] == 0) {
+        v[CHV_NOTE] = @as(u8, @intCast(CHV_N_OFFLINE));
+        return;
+    }
+    if (video and cl[CL_VSEND] == 0) {
+        v[CHV_NOTE] = @as(u8, @intCast(CHV_N_NOVIDEO));
+        return;
+    }
+    if (v[CHV_UP] != 0) { ch_close_session(s); }
+    if (w[CHW_LOADED] != 0 and w[CHW_SAVE_AT] != 0) {
+        w[CHW_SAVE_AT] = 0;
+        if (chh_save(log, buf) == false) { v[CHV_NOTE] = @as(u8, @intCast(CHV_N_NOSAVE)); }
+    }
+    if (cs_state(cs) == CK_IDLE) {
+        if (video) {
+            cl[CL_NOCAM] = 0;
+            cs_set(cs, CS_K_VIDEO, 1);
+        } else {
+            cl[CL_NOCAM] = 1;
+            cs_set(cs, CS_K_VIDEO, 0);
+        }
+    }
+    cl_front(cl, cs, clw, FV_H_ROW + @as(u32, @intCast(row)));
+}
+
+/// MESSAGE: the chat with the card's friend, its log open, every incoming line READ (sent with the next session).
+pub fn ch_message(cl: []const u8, v: []u8, s: []u8, m: []u8, log: []u8, buf: []u8, w: []u64) -> void {
+    var fp : [10]u8 = undefined;
+    var i : usize = 0;
+    while (i < 10) {
+        fp[i] = v[CHV_FP + i];
+        i = i + 1;
+    }
+    chv_open_chat(v);
+    if (ch_open_log(cl, v, s, m, log, buf, w, fp[0..10])) {
+        if (chm_open(m, log)) { w[CHW_SAVE_AT] = ckh_ms() + CH_SAVE_MS; }
+        chv_unr_set(v, fp[0..10], 0);
+    } else {
+        v[CHV_NOTE] = @as(u8, @intCast(CHV_N_NOSAVE));
+    }
+    if (v[CHV_UP] == 0) { v[CHV_NOTE] = @as(u8, @intCast(CHV_N_OFF)); }
+}
+
+/// One hit on the card or in the chat as one action.
+pub fn ch_do(cl: []u8, v: []u8, s: []u8, m: []u8, log: []u8, buf: []u8, w: []u64, cs: []u8, clw: []u64, hit: u32) -> void {
+    if (hit == CHV_H_NONE) { return; }
+    if (hit == CHV_H_BACK) {
+        if (w[CHW_LOADED] != 0 and w[CHW_SAVE_AT] != 0) {
+            w[CHW_SAVE_AT] = 0;
+            if (chh_save(log, buf) == false) { v[CHV_NOTE] = @as(u8, @intCast(CHV_N_NOSAVE)); }
+        }
+        chv_back(v);
+        cl[CL_NOTE] = 0;
+    } else if (hit == CHV_H_MESSAGE) {
+        ch_message(cl, v, s, m, log, buf, w);
+    } else if (hit == CHV_H_CALL or hit == CHV_H_VIDEO) {
+        ch_call(cl, v, s, log, buf, w, cs, clw, hit == CHV_H_VIDEO);
+    } else if (hit == CHV_H_FIELD or hit == CHV_H_HIST) {
+        v[CHV_FOCUS] = 1;
+    } else if (hit == CHV_H_SEND) {
+        v[CHV_FOCUS] = 1;
+        ch_send(cl, v, s, m, log, buf, w);
+    }
+}
+
+/// One pass of the main loop: the friend of the card (its name, online, the card closes when it left the list), the
+/// message session (not while a call is up), the save, the history in view. tz is CHV_TZ_BIAS + seconds east of UTC,
+/// h the panel's height.
+pub fn ch_tick(cl: []u8, v: []u8, s: []u8, m: []u8, log: []u8, asm: []u8, buf: []u8, w: []u64, cs: []u8, tz: u64, h: f64) -> void {
+    // the call block goes back to its launch setting once a call is over (CALL turned video and the camera off for it)
+    if (cl[CL_NOCAM] != 0 and cs_state(cs) == CK_IDLE) {
+        cl[CL_NOCAM] = 0;
+        cs_set(cs, CS_K_VIDEO, @as(u64, cl[CL_VSEND]));
+    }
+    // the test aid: the first friend's card or chat once the list is known
+    if (w[CHW_AID] != 0 and cl[FV_SHOWN] > 0 and cl[CL_OPEN] != 0 and cl[AC_ON] != 0) {
+        ch_card(cl, v, 0);
+        if (w[CHW_AID] == 2) { ch_message(cl, v, s, m, log, buf, w); }
+        w[CHW_AID] = 0;
+    }
+    if (chv_mode(v) != CHV_M_OFF) {
+        const row : usize = fv_find_fp(cl, v[CHV_FP .. CHV_FP + 10]);
+        if (row >= FV_ROWS_SNAP) {
+            chv_close(v);
+        } else {
+            const r : usize = fv_row_at(row);
+            chv_friend(v, cl[r + FR_NICK .. r + FR_NICK + 24], @as(usize, cl[r + FR_NICKLEN]), cl[r + FR_ONLINE] != 0, fv_get32(cl, r + FR_AGO));
+        }
+    }
+    if (v[CHV_UP] == 0) { return; }
+    const now : u64 = ckh_ms();
+    if (cs_state(cs) == CK_IDLE) {
+        if (w[CHW_LOADED] == 0) {
+            // no log open: read the socket; a friend whose session rings gets its log opened (answered next pass)
+            var e : u32 = cs_poll(s);
+            var g : u32 = 0;
+            while (e != CS_EV_NONE and g < 32) {
+                if (e == CS_EV_ENDED or e == CS_EV_FAILED) { cs_dismiss(s); }
+                e = cs_poll(s);
+                g = g + 1;
+            }
+            var rf : [10]u8 = undefined;
+            if (chm_ringing(s, rf[0..10])) {
+                if (ft_find(cl[FE_FT .. FE_FT + FT_LEN], rf[0..10]) == FT_MAX) {
+                    cs_decline(s);
+                } else {
+                    ch_open_log(cl, v, s, m, log, buf, w, rf[0..10]);
+                }
+            }
+        } else {
+            var lf : [10]u8 = undefined;
+            var i : usize = 0;
+            while (i < 10) {
+                lf[i] = log[28 + i];
+                i = i + 1;
+            }
+            const a : u64 = ch_friend_addr(cl, lf[0..10]);
+            chm_addr(m, a / 65536, a % 65536);
+            const ev : u32 = chm_tick(m, s, log, asm, cl[FE_FT .. FE_FT + FT_LEN], cl[FE_FP .. FE_FP + 10], now);
+            const shown : bool = chv_mode(v) == CHV_M_CHAT and chv_is(v, lf[0..10]);
+            if ((ev & CHM_E_NEW) != 0 and shown) { chm_open(m, log); }
+            if ((ev & (CHM_E_NEW | CHM_E_STATUS | CHM_E_DIRTY)) != 0) { v[CHV_DIRTY] = 1; }
+            if ((ev & CHM_E_DIRTY) != 0 and w[CHW_SAVE_AT] == 0) { w[CHW_SAVE_AT] = now + CH_SAVE_MS; }
+            chv_unr_set(v, lf[0..10], cl_unread(log));
+            if ((ev & CHM_E_OTHER) != 0 and shown == false and cl_pending(log) == 0) {
+                var of : [10]u8 = undefined;
+                if (chm_ringing(s, of[0..10])) { ch_open_log(cl, v, s, m, log, buf, w, of[0..10]); }
+            }
+        }
+    }
+    if (w[CHW_LOADED] != 0 and w[CHW_SAVE_AT] != 0 and now >= w[CHW_SAVE_AT]) {
+        w[CHW_SAVE_AT] = 0;
+        if (chh_save(log, buf) == false) { v[CHV_NOTE] = @as(u8, @intCast(CHV_N_NOSAVE)); }
+    }
+    if (chv_mode(v) == CHV_M_CHAT and w[CHW_LOADED] != 0 and ch_log_is(log, v[CHV_FP .. CHV_FP + 10])) {
+        const hh : f64 = chv_hist_h(h);
+        const hu : u64 = @as(u64, @intFromFloat(hh));
+        if (v[CHV_DIRTY] != 0 or hu != w[CHW_HH] or now >= w[CHW_LAYOUT_AT] + CH_RELAYOUT_MS) {
+            chv_layout(v, log, now, tz, QP_W, hh);
+            w[CHW_LAYOUT_AT] = now;
+            w[CHW_HH] = hu;
+        }
+    }
+}
+
+/// The unread badge on a friend's row: a white pill ending at `right`, the count in dark ink.
+fn draw_ch_badge(c: u64, kit: [48]u64, right: f64, cy: f64, n: u32) -> void {
+    var b : [8]u8 = undefined;
+    const bn : usize = chv_badge_text(n, b[0..8]);
+    const tw : f64 = bytes_w(kit, b[0..8], bn, 8.5, WEIGHT_SEMIBOLD, false);
+    var bw : f64 = tw + 10.0;
+    if (bw < 16.0) { bw = 16.0; }
+    round_rect(c, right - bw, cy - 7.0, bw, 14.0, 7.0);
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+    cg_fill_path(c);
+    cg_fill_rgba(c, 0.0, 0.0, 0.0, 0.85);
+    draw_bytes(c, kit, b[0..8], bn, right - 0.5 * bw - 0.5 * tw, cy + 3.0, 8.5, WEIGHT_SEMIBOLD, false);
+}
+
+/// The note line of the card: a chat note, else the last call note (why the friend cannot be called now).
+fn draw_ch_note(c: u64, kit: [48]u64, cl: []const u8, v: []const u8, x: f64, right: f64, base: f64, sh: f64) -> void {
+    var line : [96]u8 = undefined;
+    const vc : u32 = @as(u32, v[CHV_NOTE]);
+    const code : u32 = @as(u32, cl[CL_NOTE]);
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+    if (vc != 0) {
+        draw_cl_wrap(c, kit, chv_note_text(vc), x, right, base, 9.5, 2, sh);
+    } else if (code >= 32 and code < 38) {
+        var n : usize = put_bytes(line[0..96], 0, "Cannot call now: ");
+        n = put_bytes(line[0..96], n, fv_offline_text(code));
+        draw_cl_wrap(c, kit, line[0..n], x, right, base, 9.5, 2, sh);
+    } else if (code != 0 and fv_note_is_mine(code)) {
+        draw_cl_wrap(c, kit, fv_note_text(code), x, right, base, 9.5, 2, sh);
+    } else if (code != 0) {
+        draw_cl_wrap(c, kit, cv_note_text(code), x, right, base, 9.5, 2, sh);
+    }
+}
+
+fn draw_ch_card(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, cl: []const u8, v: []const u8) -> void {
+    const l : f64 = qp_left(sw);
+    const t : f64 = WS_TOP;
+    const x : f64 = l + QP_PAD;
+    const right : f64 = l + QP_W - QP_PAD;
+    const hit : u32 = chv_card_hit(mx, my, l, QP_W, t);
+    var line : [96]u8 = undefined;
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LINE_WHITE));
+    cg_fill_rect(c, l, t, HAIR, sh - t);
+    draw_ac_btn_small(c, kit, chv_back_x(l), t + CHV_BACK_Y, CHV_BACK_W, "<", hit == CHV_H_BACK);
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+    draw_bytes(c, kit, "FRIEND", 6, x + CHV_BACK_W + 8.0, t + 25.0, 11.5, WEIGHT_SEMIBOLD, false);
+    draw_close_x(c, sw - QP_PAD - 8.0, t + 20.0, on_panel_close(mx, my, sw, t), 1.0);
+    // the friend: the circle (the nickname's initial), the nickname, the key's short form, online or when last met
+    const nl : usize = @as(usize, v[CHV_NICKLEN]);
+    draw_pf_avatar(c, kit, 0, v[CHV_NICK .. CHV_NICK + 32], nl, chv_av_cx(l), t + CHV_AV_CY, CHV_AV_R, false, 1.0);
+    if (nl > 0) {
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+        draw_fit(c, kit, v[CHV_NICK .. CHV_NICK + 32], nl, chv_nick_x(l), t + CHV_NICK_BASE, 13.0, WEIGHT_SEMIBOLD, false, right);
+    } else {
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+        draw_bytes(c, kit, "(no name yet)", 13, chv_nick_x(l), t + CHV_NICK_BASE, 13.0, 0.0, false);
+    }
+    var n : usize = ac_fp_line(v[CHV_FP .. CHV_FP + 10], line[0..96]);
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+    draw_fit(c, kit, line[0..96], n, chv_nick_x(l), t + CHV_FP_BASE, 9.0, 0.0, true, right);
+    const online : bool = v[CHV_ONLINE] != 0;
+    draw_cl_dot(c, kit, x, t + CHV_STATE_BASE - 8.0, online);
+    n = chv_status_put(line[0..96], online, fv_get32(v, CHV_AGO), chv_unr_get(v, v[CHV_FP .. CHV_FP + 10]));
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+    draw_fit(c, kit, line[0..96], n, x + 14.0, t + CHV_STATE_BASE, 10.0, WEIGHT_SEMIBOLD, false, right);
+    // MESSAGE, CALL, VIDEO
+    var b : u32 = 0;
+    while (b < 3) {
+        draw_cl_btn(c, kit, chv_card_btn_x(l, QP_W, b), t + CHV_CARD_BTN_Y, chv_card_btn_w(QP_W), chv_card_word(b), hit == CHV_H_MESSAGE + b);
+        b = b + 1;
+    }
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+    draw_cl_wrap(c, kit, chv_card_hint(online), x, right, t + CHV_HINT_BASE, 9.5, 2, sh);
+    draw_ch_note(c, kit, cl, v, x, right, t + CHV_CARD_NOTE_BASE, sh);
+}
+
+fn draw_ch_chat(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, v: []const u8) -> void {
+    const l : f64 = qp_left(sw);
+    const t : f64 = WS_TOP;
+    const h : f64 = sh - t;
+    const x : f64 = l + QP_PAD;
+    const right : f64 = l + QP_W - QP_PAD;
+    const hit : u32 = chv_chat_hit(mx, my, l, QP_W, t, h);
+    var line : [96]u8 = undefined;
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LINE_WHITE));
+    cg_fill_rect(c, l, t, HAIR, sh - t);
+    // the header: back, the friend's nickname and state, CALL and VIDEO, the panel's close mark
+    draw_ac_btn_small(c, kit, chv_back_x(l), t + CHV_BACK_Y, CHV_BACK_W, "<", hit == CHV_H_BACK);
+    const nl : usize = @as(usize, v[CHV_NICKLEN]);
+    const nx : f64 = chv_hdr_nick_x(l);
+    if (nl > 0) {
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+        draw_fit(c, kit, v[CHV_NICK .. CHV_NICK + 32], nl, nx, t + CHV_HDR_NICK_BASE, 11.5, WEIGHT_SEMIBOLD, false, chv_hdr_call_x(l, QP_W) - 6.0);
+    } else {
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+        draw_fit(c, kit, "(no name yet)", 13, nx, t + CHV_HDR_NICK_BASE, 11.5, 0.0, false, chv_hdr_call_x(l, QP_W) - 6.0);
+    }
+    const online : bool = v[CHV_ONLINE] != 0;
+    var n : usize = chv_status_put(line[0..96], online, fv_get32(v, CHV_AGO), 0);
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+    draw_fit(c, kit, line[0..96], n, nx, t + CHV_HDR_STATE_BASE, 9.0, 0.0, false, chv_hdr_call_x(l, QP_W) - 6.0);
+    draw_ac_btn_small(c, kit, chv_hdr_call_x(l, QP_W), t + CHV_BACK_Y, CHV_CHIP_W, "CALL", hit == CHV_H_CALL);
+    draw_ac_btn_small(c, kit, chv_hdr_video_x(l, QP_W), t + CHV_BACK_Y, CHV_CHIP_W, "VIDEO", hit == CHV_H_VIDEO);
+    draw_close_x(c, sw - QP_PAD - 8.0, t + 20.0, on_panel_close(mx, my, sw, t), 1.0);
+    // the history: the items chv_layout left, clipped to the area between the header and the field
+    const ht : f64 = chv_hist_top(t);
+    const hh : f64 = chv_hist_h(h);
+    cg_save(c);
+    cg_clip_rect(c, l + 1.0, ht, QP_W - 1.0, hh);
+    const ni : usize = chv_nitems(v);
+    var k : usize = 0;
+    while (k < ni) {
+        const kind : u32 = chv_item_kind(v, k);
+        const ix : f64 = x + chv_item_x(v, k);
+        const iy : f64 = ht + chv_item_y(v, k);
+        const iw : f64 = chv_item_w(v, k);
+        const out : bool = chv_item_dir(v, k) == CH_DIR_OUT;
+        const o : usize = chv_item_text(k);
+        const len : usize = chv_item_len(v, k);
+        if (kind == CHV_I_BUBBLE) {
+            round_rect(c, ix, iy, iw, chv_item_h(v, k), 8.0);
+            if (out) {
+                cg_fill_rgba(c, 1.0, 1.0, 1.0, 0.16);
+                cg_fill_path(c);
+            } else {
+                cg_line_width(c, 1.0);
+                cg_stroke_rgba(c, 1.0, 1.0, 1.0, STRICT_HOVER_EDGE);
+                cg_stroke_path(c);
+            }
+        } else if (kind == CHV_I_LINE) {
+            cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+            draw_fit(c, kit, v[o .. o + len], len, ix, iy + 11.0, CHV_FONT, 0.0, false, ix + iw + 4.0);
+        } else if (kind == CHV_I_META) {
+            const st : u32 = chv_item_state(v, k);
+            var ink : f64 = lv(kit, THV_MUTED_WHITE);
+            if (out and (st == CH_S_READ or st == CH_S_FAILED)) { ink = lv(kit, THV_TEXT_WHITE); }
+            cg_fill_rgba(c, 1.0, 1.0, 1.0, ink);
+            var mx0 : f64 = ix;
+            if (out) { mx0 = ix + iw - bytes_w(kit, v[o .. o + len], len, CHV_META_FONT, 0.0, false); }
+            draw_bytes(c, kit, v[o .. o + len], len, mx0, iy + 9.0, CHV_META_FONT, 0.0, false);
+        }
+        k = k + 1;
+    }
+    cg_restore(c);
+    if (fv_get32(v, CHV_COUNT) == 0) {
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+        draw_cl_wrap(c, kit, chv_empty_text(0), x, right, ht + 0.5 * hh, 10.0, 2, sh);
+    }
+    if (fv_get32(v, CHV_SCROLL) > 0) {
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+        draw_bytes(c, kit, "newer below", 11, right - 52.0, ht + hh - 4.0, 8.5, 0.0, false);
+    }
+    // the field (the end of a long text, a caret while typing) and SEND
+    const fx : f64 = chv_field_x(l);
+    const fy : f64 = chv_field_y(t, h);
+    const fw : f64 = chv_field_w(QP_W);
+    const focus : bool = v[CHV_FOCUS] != 0;
+    round_rect(c, fx, fy, fw, CHV_FIELD_H, 5.0);
+    cg_line_width(c, 1.0);
+    cg_stroke_rgba(c, 1.0, 1.0, 1.0, STRICT_HOVER_EDGE);
+    if (focus) { cg_stroke_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE)); }
+    if (focus == false and hit == CHV_H_FIELD) { cg_stroke_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE)); }
+    cg_stroke_path(c);
+    const tl : usize = chv_tlen(v);
+    if (tl == 0 and focus == false) {
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+        draw_bytes(c, kit, "Write a message", 15, fx + 8.0, fy + 17.0, CHV_FONT, 0.0, false);
+    } else {
+        const at : usize = chv_tail_at(v[CHV_TYPED .. CHV_TYPED + tl], tl, fw - 24.0, CHV_FONT);
+        var tb : [2008]u8 = undefined;
+        var q : usize = 0;
+        while (at + q < tl) {
+            tb[q] = v[CHV_TYPED + at + q];
+            q = q + 1;
+        }
+        if (focus) {
+            tb[q] = 95;
+            q = q + 1;
+        }
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+        draw_fit(c, kit, tb[0..2008], q, fx + 8.0, fy + 17.0, CHV_FONT, 0.0, false, fx + fw - 6.0);
+    }
+    draw_cl_btn(c, kit, chv_send_x(l, QP_W), fy, CHV_SEND_W, "SEND", hit == CHV_H_SEND);
+    // the note line: a chat note, else how many of the own lines wait for the friend
+    const vc : u32 = @as(u32, v[CHV_NOTE]);
+    if (vc != 0) {
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+        draw_fit(c, kit, chv_note_text(vc), chv_note_text(vc).len, x, chv_note_base(t, h), 9.0, 0.0, false, right);
+    } else {
+        n = chv_wait_put(line[0..96], online, @as(u32, @intCast(fv_get32(v, CHV_PENDING))));
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+        draw_fit(c, kit, line[0..96], n, x, chv_note_base(t, h), 9.0, 0.0, false, right);
     }
 }
 
@@ -10793,7 +11463,14 @@ fn draw(c: u64, kit: [48]u64, frame: u32, state: u32, hov: u32, ma: f64, shown: 
     if (pfp and qp == false and dp == false and kyp == false) { draw_profile_panel(c, kit, sw, sh, mx, my, tb[TBO_PF .. TBO_PF + PF_CAP], tg[TPG_PF_IMG]); }
     if (clp and qp == false and dp == false and kyp == false and pfp == false) {
         if (ac_shown(tb[TBO_CL .. TBO_CL + CL_CAP])) {
-            draw_account_panel(c, kit, sw, sh, mx, my, tb[TBO_CL .. TBO_CL + CL_CAP], tb[TBO_PF .. TBO_PF + PF_CAP], tg[TPG_PF_IMG]);
+            const chm0 : u32 = chv_mode(tb[TBO_CH .. TBO_CH + CHV_CAP]);
+            if (chm0 == CHV_M_CARD) {
+                draw_ch_card(c, kit, sw, sh, mx, my, tb[TBO_CL .. TBO_CL + CL_CAP], tb[TBO_CH .. TBO_CH + CHV_CAP]);
+            } else if (chm0 == CHV_M_CHAT) {
+                draw_ch_chat(c, kit, sw, sh, mx, my, tb[TBO_CH .. TBO_CH + CHV_CAP]);
+            } else {
+                draw_account_panel(c, kit, sw, sh, mx, my, tb[TBO_CL .. TBO_CL + CL_CAP], tb[TBO_PF .. TBO_PF + PF_CAP], tg[TPG_PF_IMG], tb[TBO_CH .. TBO_CH + CHV_CAP]);
+            }
         } else {
             draw_call_panel(c, kit, sw, sh, mx, my, tb[TBO_CL .. TBO_CL + CL_CAP]);
         }
@@ -12177,14 +12854,14 @@ pub fn main() -> void {
     }
     // the tool pages (B, K, Q): their state words and text store, all zero, counters "not measured"
     var tgv : [256]u64 = undefined;
-    var tbv : [85504]u8 = undefined;
+    var tbv : [93696]u8 = undefined;
     var tgz : usize = 0;
     while (tgz < 256) {
         tgv[tgz] = 0;
         tgz = tgz + 1;
     }
     tgz = 0;
-    while (tgz < 85504) {
+    while (tgz < 93696) {
         tbv[tgz] = 0;
         tgz = tgz + 1;
     }
@@ -12210,6 +12887,24 @@ pub fn main() -> void {
         clw[clz] = 0;
         clz = clz + 1;
     }
+    // CH. the chat (block CH): the open friend's log, the file scratch, the incoming parts, the driver, the message
+    // session's block (on the chat port) and the window's chat clock; locals of main, never moved
+    var chlog : [1016040]u8 = undefined;
+    var chbuf : [1008041]u8 = undefined;
+    var chasm : [8064]u8 = undefined;
+    var chm : [256]u8 = undefined;
+    var chs : [165504]u8 = undefined;
+    var chw : [8]u64 = undefined;
+    clz = 0;
+    while (clz < CA_LEN) {
+        chasm[clz] = 0;
+        clz = clz + 1;
+    }
+    clz = 0;
+    while (clz < CHM_LEN) {
+        chm[clz] = 0;
+        clz = clz + 1;
+    }
     // U. the updater (release.t27): the running build is the bundle's CFBundleVersion, the bundle the executable's folder;
     // a copy that is not a built bundle (build 0) does not update itself
     var ubp : [320]u8 = undefined;
@@ -12232,6 +12927,7 @@ pub fn main() -> void {
     ugp[0] = 0;
     ug_boot(tbv[TBO_CL .. TBO_CL + CL_CAP], ugp[0..2304], ubp[0..ubn], ubp[0..bundle_len(ubp[0..ubn], ubn)], acv[0..acn], tgv[TPG_U_CUR]);
     cl_boot(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN * 3]);
+    ch_boot(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_CH .. TBO_CH + CHV_CAP], chs[0..CS_LEN], chlog[0..CH_LOG_LEN], chbuf[0..CH_BUF_LEN], chw[0..CHW_N]);
     ug_serve_start(tbv[TBO_CL .. TBO_CL + CL_CAP], ugp[0..2304], tbv[TBO_CL + CL_UP] != 0 and tbv[TBO_CL + FV_NET] == @as(u8, @intCast(FV_NET_UP)));
     var tgm : u32 = 0;
     while (tgm < M_COUNT) {
@@ -12581,6 +13277,7 @@ pub fn main() -> void {
                     } else {
                         clp = true;
                         ac_open(tbv[TBO_CL .. TBO_CL + CL_CAP]);
+                        chv_close(tbv[TBO_CH .. TBO_CH + CHV_CAP]);
                         qp = false;
                         god = false;
                         dp = false;
@@ -12694,16 +13391,27 @@ pub fn main() -> void {
                     // CL. the CALL panel: close, the address field and the buttons of the view (call_view cv_action)
                     if (on_panel_close(mx, my, sw, WS_TOP)) {
                         ac_leave(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_PF .. TBO_PF + PF_CAP]);
+                        chv_close(tbv[TBO_CH .. TBO_CH + CHV_CAP]);
                         clp = false;
                         tbv[TBO_CL + CL_FOCUS] = 0;
                     } else {
                         const clv : u32 = @as(u32, tbv[TBO_CL + CL_VIEW]);
-                        if (clv == CV_IDLE and tbv[TBO_CL + AC_ON] != 0) {
+                        if (clv == CV_IDLE and tbv[TBO_CL + AC_ON] != 0 and chv_mode(tbv[TBO_CH .. TBO_CH + CHV_CAP]) != CHV_M_OFF) {
+                            // CH. a friend's card or the chat: BACK, MESSAGE, CALL, VIDEO, the field, SEND
+                            ch_do(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_CH .. TBO_CH + CHV_CAP], chs[0..CS_LEN], chm[0..CHM_LEN], chlog[0..CH_LOG_LEN], chbuf[0..CH_BUF_LEN], chw[0..CHW_N], csv[0..CS_LEN * 3], clw[0..10], ch_hit_now(mx, my, sw, sh, tbv[TBO_CH .. TBO_CH + CHV_CAP]));
+                        } else if (clv == CV_IDLE and tbv[TBO_CL + AC_ON] != 0) {
                             // A. the cabinet: a hit is the nickname, the key, a friend's row or one of its marks, the add part
                             const ach : u32 = ac_hit_now(mx, my, sw, sh, tbv[TBO_CL .. TBO_CL + CL_CAP]);
                             // UPD. UPDATE / CANCEL / RESTART; RESTART started the installed copy, this one quits
                             if (ach == AC_H_UPD and ug_click(tbv[TBO_CL .. TBO_CL + CL_CAP], ugp[0..2304])) { sys_exit(0); }
-                            const acr : u32 = ac_do(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN * 3], clw[0..10], tbv[TBO_PF .. TBO_PF + PF_CAP], ach, ac_rows_vis(sh - WS_TOP));
+                            var acr : u32 = 0;
+                            if (ach >= AC_H_ROW and ach < AC_H_FCOPY) {
+                                // CH. a friend's row opens the friend's card (a field typed in and a removal asked are dropped)
+                                ac_do(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN * 3], clw[0..10], tbv[TBO_PF .. TBO_PF + PF_CAP], AC_H_NONE, ac_rows_vis(sh - WS_TOP));
+                                ch_card(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_CH .. TBO_CH + CHV_CAP], @as(usize, ach - AC_H_ROW));
+                            } else {
+                                acr = ac_do(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN * 3], clw[0..10], tbv[TBO_PF .. TBO_PF + PF_CAP], ach, ac_rows_vis(sh - WS_TOP));
+                            }
                             if (acr == 1) {
                                 ac_leave(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_PF .. TBO_PF + PF_CAP]);
                                 clp = false;
@@ -13260,7 +13968,16 @@ pub fn main() -> void {
                 }
                 used = true;
             }
-            if (ty == EV_SCROLL and clp and ac_shown(tbv[TBO_CL .. TBO_CL + CL_CAP]) and ac_wheel_area(mx, my, qp_left(sw), QP_W, WS_TOP, ac_rows_vis(sh - WS_TOP))) {
+            if (ty == EV_SCROLL and clp and ac_shown(tbv[TBO_CL .. TBO_CL + CL_CAP]) and chv_mode(tbv[TBO_CH .. TBO_CH + CHV_CAP]) == CHV_M_CHAT and ch_hit_now(mx, my, sw, sh, tbv[TBO_CH .. TBO_CH + CHV_CAP]) == CHV_H_HIST) {
+                // CH. the wheel over the chat's history: a notch moves CHV_WHEEL_PT, a trackpad its own points
+                const hwy : f64 = msg_real(ev, s_scroll_y);
+                var hst : f64 = hwy;
+                if (hst < 0.0) { hst = 0.0 - hst; }
+                if (msg0(ev, s_precise) % 256 == 0) { hst = hst * CHV_WHEEL_PT; }
+                if (hst >= 1.0) { chv_scroll_by(tbv[TBO_CH .. TBO_CH + CHV_CAP], @as(u64, @intFromFloat(hst)), hwy > 0.0); }
+                used = true;
+            }
+            if (ty == EV_SCROLL and clp and ac_shown(tbv[TBO_CL .. TBO_CL + CL_CAP]) and chv_mode(tbv[TBO_CH .. TBO_CH + CHV_CAP]) == CHV_M_OFF and ac_wheel_area(mx, my, qp_left(sw), QP_W, WS_TOP, ac_rows_vis(sh - WS_TOP))) {
                 // A. the wheel over the cabinet's friends moves the list a row; a notch is a row, a trackpad gathers travel
                 const awy : f64 = msg_real(ev, s_scroll_y);
                 var astep : bool = false;
@@ -13428,6 +14145,36 @@ pub fn main() -> void {
                         while (aj2 < an2) {
                             pf_unit(tbv[TBO_PF .. TBO_PF + PF_CAP], @as(u32, @intCast(msg_char(ac2, s_char_at, aj2) & 65535)));
                             aj2 = aj2 + 1;
+                        }
+                    } else {
+                        used = false;
+                    }
+                } else if (clp and ac_shown(tbv[TBO_CL .. TBO_CL + CL_CAP]) and chv_mode(tbv[TBO_CH .. TBO_CH + CHV_CAP]) == CHV_M_CHAT and tbv[TBO_CH + CHV_FOCUS] != 0) {
+                    // CH. a message is being typed: Return sends, Esc goes back to the card, Backspace drops a code point,
+                    // Cmd+V pastes (UTF-8, up to the 2000 bytes of a message)
+                    const hk : u32 = ky_key(@as(u32, @intCast(key)), cmd);
+                    if (hk == KE_CANCEL) {
+                        ch_do(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_CH .. TBO_CH + CHV_CAP], chs[0..CS_LEN], chm[0..CHM_LEN], chlog[0..CH_LOG_LEN], chbuf[0..CH_BUF_LEN], chw[0..CHW_N], csv[0..CS_LEN * 3], clw[0..10], CHV_H_BACK);
+                    } else if (hk == KE_BACK) {
+                        chv_back_unit(tbv[TBO_CH .. TBO_CH + CHV_CAP]);
+                    } else if (hk == KE_SAVE) {
+                        ch_send(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_CH .. TBO_CH + CHV_CAP], chs[0..CS_LEN], chm[0..CHM_LEN], chlog[0..CH_LOG_LEN], chbuf[0..CH_BUF_LEN], chw[0..CHW_N]);
+                    } else if (hk == KE_PASTE) {
+                        const hpb : u64 = msg0(cls("NSPasteboard"), sel("generalPasteboard"));
+                        const hps : u64 = msg1(hpb, sel("stringForType:"), cf("public.utf8-plain-text"));
+                        if (hps != 0) {
+                            var hpt : [2048]u8 = undefined;
+                            const hpn : usize = ns_bytes(hps, hpt[0..2048]);
+                            chv_type_bytes(tbv[TBO_CH .. TBO_CH + CHV_CAP], hpt[0..2048], hpn);
+                        }
+                    } else if (hk == KE_CHAR) {
+                        const hc2 : u64 = msg0(ev, s_chars);
+                        var hn2 : u64 = 0;
+                        if (hc2 != 0) { hn2 = dk_len(dk, hc2); }
+                        var hj2 : u64 = 0;
+                        while (hj2 < hn2) {
+                            chv_type_unit(tbv[TBO_CH .. TBO_CH + CHV_CAP], @as(u32, @intCast(msg_char(hc2, s_char_at, hj2) & 65535)));
+                            hj2 = hj2 + 1;
                         }
                     } else {
                         used = false;
@@ -13772,7 +14519,7 @@ pub fn main() -> void {
         if (cl_tick(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN * 3], clw[0..10])) { clring = true; }
         ug_tick(tbv[TBO_CL .. TBO_CL + CL_CAP], ugp[0..2304], ckh_ms());
         if (bgoff == false) {
-            qd_tick(tgv[0..256], tbv[0..85504], dhb[0..dhn], now, sst[SST_QDASH] != 0 and screen);
+            qd_tick(tgv[0..256], tbv[0..93696], dhb[0..dhn], now, sst[SST_QDASH] != 0 and screen);
             god_tick(tgv[0..256], tbv[0..65536], dhb[0..dhn], now, god, sst[SST_QRUN]);
         }
         // L. the LANES block of the chat sidebar: the feed job, the tail of a clicked lane, the table once a second
@@ -14203,7 +14950,11 @@ pub fn main() -> void {
         if (on_cl_head(mx, my, sw)) { on_control = true; }
         if (clp and on_panel_close(mx, my, sw, WS_TOP)) { on_control = true; }
         if (clp and tbv[TBO_CL + CL_VIEW] == 0 and tbv[TBO_CL + AC_ON] == 0 and fv_hit(mx, my, qp_left(sw), QP_W, WS_TOP, @as(u32, tbv[TBO_CL + FV_SHOWN]), tbv[TBO_CL + FV_DEBUG] != 0) != FV_H_NONE) { on_control = true; }
-        if (clp and tbv[TBO_CL + CL_VIEW] == 0 and tbv[TBO_CL + AC_ON] != 0 and ac_hit_now(mx, my, sw, sh, tbv[TBO_CL .. TBO_CL + CL_CAP]) != AC_H_NONE) { on_control = true; }
+        if (clp and tbv[TBO_CL + CL_VIEW] == 0 and tbv[TBO_CL + AC_ON] != 0 and chv_mode(tbv[TBO_CH .. TBO_CH + CHV_CAP]) == CHV_M_OFF and ac_hit_now(mx, my, sw, sh, tbv[TBO_CL .. TBO_CL + CL_CAP]) != AC_H_NONE) { on_control = true; }
+        if (clp and tbv[TBO_CL + CL_VIEW] == 0 and tbv[TBO_CL + AC_ON] != 0 and chv_mode(tbv[TBO_CH .. TBO_CH + CHV_CAP]) != CHV_M_OFF) {
+            const chh0 : u32 = ch_hit_now(mx, my, sw, sh, tbv[TBO_CH .. TBO_CH + CHV_CAP]);
+            if (chh0 != CHV_H_NONE and chh0 != CHV_H_HIST) { on_control = true; }
+        }
         if (clp and tbv[TBO_CL + CL_VIEW] != 0 and cv_hit(mx, my, qp_left(sw), QP_W, WS_TOP, @as(u32, tbv[TBO_CL + CL_VIEW])) != CV_H_NONE) { on_control = true; }
         if (pfp and (on_panel_close(mx, my, sw, WS_TOP) or prf_panel_hit_d(mx, my, qp_left(sw), QP_W, WS_TOP, pf_has(tbv[TBO_PF .. TBO_PF + PF_CAP]), prf_squeeze(WS_TOP, sh)) != PRF_H_NONE or on_pf_cancel(mx, my, qp_left(sw), WS_TOP - prf_squeeze(WS_TOP, sh)))) { on_control = true; }
         if (qp and (on_panel_close(mx, my, sw, WS_TOP) or on_god(mx, my, sw, WS_TOP) or ((sug != A_NONE or evd != 0) and (on_confirm(mx, my, sw, WS_TOP) or on_dismiss(mx, my, sw, WS_TOP))))) { on_control = true; }
@@ -14223,6 +14974,8 @@ pub fn main() -> void {
         if (clp and tbv[TBO_CL + AC_ON] != 0) { ac_tick(tbv[TBO_CL .. TBO_CL + CL_CAP], now); }
         if (clp and tbv[TBO_CL + AC_ON] != 0) { ac_flash_tick(tbv[TBO_CL .. TBO_CL + CL_CAP], cnow); }
         if (cl_tick(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN * 3], clw[0..10])) { clring = true; }
+        // CH. the friend's card and the chat: the message session, the save, the history in view
+        ch_tick(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_CH .. TBO_CH + CHV_CAP], chs[0..CS_LEN], chm[0..CHM_LEN], chlog[0..CH_LOG_LEN], chasm[0..CA_LEN], chbuf[0..CH_BUF_LEN], chw[0..CHW_N], csv[0..CS_LEN * 3], tgv[TPG_Q_TZ] + CHV_TZ_BIAS - TG_TZ_BIAS, sh - WS_TOP);
         // U. the frame gate: fold what this frame shows into a key; an unchanged key with nothing
         // animating keeps the image already on the layer (frame_gate.t27)
         var fk : u64 = fg_mix(fg_mix(fg_mix(fg_mix(0, @as(u64, state)), @as(u64, hov)), fg_level(ma)), @as(u64, shown));
@@ -14251,6 +15004,23 @@ pub fn main() -> void {
         while (fki2 < 144) {
             fk = fg_mix(fk, @as(u64, tbv[TBO_PF + fki2]));
             fki2 = fki2 + 1;
+        }
+        // CH. the card and the chat: the region's head and unread table, the typed text, the items in view
+        fkc = 0;
+        while (fkc < CHV_TYPED) {
+            fk = fg_mix(fk, @as(u64, tbv[TBO_CH + fkc]));
+            fkc = fkc + 1;
+        }
+        const fkt : usize = CHV_TYPED + chv_tlen(tbv[TBO_CH .. TBO_CH + CHV_CAP]);
+        while (fkc < fkt) {
+            fk = fg_mix(fk, @as(u64, tbv[TBO_CH + fkc]));
+            fkc = fkc + 1;
+        }
+        fkc = CHV_ITEMS;
+        const fke : usize = CHV_ITEMS + chv_nitems(tbv[TBO_CH .. TBO_CH + CHV_CAP]) * CHV_ITEM;
+        while (fkc < fke) {
+            fk = fg_mix(fk, @as(u64, tbv[TBO_CH + fkc]));
+            fkc = fkc + 1;
         }
         fk = fg_mix(fg_mix(fk, @as(u64, hs)), fg_flag(cons2));
         fk = fg_mix(fg_mix(fg_mix(fk, dcv[D_GEN]), dcv[D_DEFER]), dcv[D_LIVE]);
@@ -14301,14 +15071,14 @@ pub fn main() -> void {
         }
         msg_flag(tx_cls, s_quiet, true);
         if (fdraw and narrow) {
-            draw(cc, kit, frame, state, hov, ma, shown, task, space, sp, ss, cur, collapsed, mx, my, z, sw, sh, ws, full, qp, ring, evn, now, sug, god, glow, dk, dp, darmed, doff, dgo, walking, dlabel, tst[0..32], tcells[0..960000], topen, tcur, kyp, kstored[0..9], kmask[0..640], kmlen[0..9], kst[0..72], kfail[0..9], kopen[0..81], kedit, kbuf[0..256], klen, karm, kbusy, kemask, kewhy, ktpick, hs, cons2, dcv[0..512], gal[0..49152], gt[0..2560], evd, @as(u64, evp) + @as(u64, evn2) * 1048576 + @as(u64, evpr) * 1099511627776, pbuf[0..4160], sst[0..560], tgv[0..256], tbv[0..85504]);
+            draw(cc, kit, frame, state, hov, ma, shown, task, space, sp, ss, cur, collapsed, mx, my, z, sw, sh, ws, full, qp, ring, evn, now, sug, god, glow, dk, dp, darmed, doff, dgo, walking, dlabel, tst[0..32], tcells[0..960000], topen, tcur, kyp, kstored[0..9], kmask[0..640], kmlen[0..9], kst[0..72], kfail[0..9], kopen[0..81], kedit, kbuf[0..256], klen, karm, kbusy, kemask, kewhy, ktpick, hs, cons2, dcv[0..512], gal[0..49152], gt[0..2560], evd, @as(u64, evp) + @as(u64, evn2) * 1048576 + @as(u64, evpr) * 1099511627776, pbuf[0..4160], sst[0..560], tgv[0..256], tbv[0..93696]);
             const whole : u64 = cg_image(cc);
             const img : u64 = cg_crop(whole, 0.0, 0.0, sw * RETINA, sh * RETINA);
             msg1(layer, s_contents, img);
             cg_image_release(img);
             cg_image_release(whole);
         } else if (fdraw) {
-            draw(c, kit, frame, state, hov, ma, shown, task, space, sp, ss, cur, collapsed, mx, my, z, sw, sh, ws, full, qp, ring, evn, now, sug, god, glow, dk, dp, darmed, doff, dgo, walking, dlabel, tst[0..32], tcells[0..960000], topen, tcur, kyp, kstored[0..9], kmask[0..640], kmlen[0..9], kst[0..72], kfail[0..9], kopen[0..81], kedit, kbuf[0..256], klen, karm, kbusy, kemask, kewhy, ktpick, hs, cons2, dcv[0..512], gal[0..49152], gt[0..2560], evd, @as(u64, evp) + @as(u64, evn2) * 1048576 + @as(u64, evpr) * 1099511627776, pbuf[0..4160], sst[0..560], tgv[0..256], tbv[0..85504]);
+            draw(c, kit, frame, state, hov, ma, shown, task, space, sp, ss, cur, collapsed, mx, my, z, sw, sh, ws, full, qp, ring, evn, now, sug, god, glow, dk, dp, darmed, doff, dgo, walking, dlabel, tst[0..32], tcells[0..960000], topen, tcur, kyp, kstored[0..9], kmask[0..640], kmlen[0..9], kst[0..72], kfail[0..9], kopen[0..81], kedit, kbuf[0..256], klen, karm, kbusy, kemask, kewhy, ktpick, hs, cons2, dcv[0..512], gal[0..49152], gt[0..2560], evd, @as(u64, evp) + @as(u64, evn2) * 1048576 + @as(u64, evpr) * 1099511627776, pbuf[0..4160], sst[0..560], tgv[0..256], tbv[0..93696]);
             const whole : u64 = cg_image(c);
             const img : u64 = cg_crop(whole, 0.0, 0.0, sw * WIDE_RETINA, sh * WIDE_RETINA);
             msg1(layer, s_contents, img);
@@ -15656,7 +16426,7 @@ test the_profile_region_fits_the_text_store_and_its_words_are_free {
     assert TBO_PF == TBO_QD_HIVE + QD_HIVE_CAP;
     // the CALL region (CL) follows it and ends the store
     assert TBO_PF + PF_CAP == TBO_CL;
-    assert TBO_CL + CL_CAP == TB_SIZE;
+    assert TBO_CL + CL_CAP == TBO_CH and TBO_CH + CHV_CAP == TB_SIZE;
     assert PF_TYPED + PRF_NICK_MAX_BYTES <= PF_SAVED;
     assert PF_SAVED + PRF_NICK_MAX_BYTES <= PF_CAP;
     assert PF_HOLD_HI < PF_TYPED;
@@ -15711,7 +16481,7 @@ test the_queen_control_dashboard_is_where_it_is_drawn_and_nothing_overlaps_the_f
     assert qd_open(z[0..560], false, WS_EXPANDED) == false;
     // the dashboard's words and buffers do not collide with the other feeds
     assert TPG_QD_PLANN > TPG_G_NEXT and TPG_QD_FLAGS < TPG_N and SST_QDASH < SST_SIZE and SST_QDASH != SST_DISK;
-    assert TBO_QD_PLAN >= TB_LANES_END and TBO_QD_HIVE + QD_HIVE_CAP == TBO_PF and TBO_PF + PF_CAP == TBO_CL and TBO_CL + CL_CAP == TB_SIZE;
+    assert TBO_QD_PLAN >= TB_LANES_END and TBO_QD_HIVE + QD_HIVE_CAP == TBO_PF and TBO_PF + PF_CAP == TBO_CL and TBO_CL + CL_CAP == TBO_CH and TBO_CH + CHV_CAP == TB_SIZE;
     assert TBO_QD_TRIG == TBO_QD_PLAN + QD_PLAN_CAP and TBO_QD_BOARD == TBO_QD_TRIG + QD_TRIG_CAP and TBO_QD_HIVE == TBO_QD_BOARD + QD_BOARD_CAP;
     // the lanes table lists only work rows
     assert qd_lane_index(z[0..560], 0) == LV_NONE;
@@ -15727,7 +16497,7 @@ test the_queen_control_dashboard_is_where_it_is_drawn_and_nothing_overlaps_the_f
 // screen): that a call rings, shows its code and carries audio from this window is a live check, not a test here.
 test the_call_region_ends_the_text_store_and_draw_reads_only_folded_bytes {
     assert TBO_CL == TBO_PF + PF_CAP;
-    assert TBO_CL + CL_CAP == TB_SIZE;
+    assert TBO_CL + CL_CAP == TBO_CH and TBO_CH + CHV_CAP == TB_SIZE;
     assert CL_ADDR + CV_ADDR_MAX + 1 <= CL_NPOLL;
     assert CL_NPOLL + 4 <= CL_CAPT and CL_TXO + 4 <= CL_STATS and CL_STATS < CL_KEY_N;
     // the friends snapshot (friends_view) follows the call core and is folded into the frame key; the engine's blocks
@@ -16069,4 +16839,64 @@ test the_footer_update_item_follows_the_friends_offer_before_the_self_updater {
     // the self-updater off and the friend's part done still shows
     tg[TPG_U_ON] = 0;
     assert sb_upd_text(tg[0..256], cl[0..8192], o[0..64]) == 17;
+}
+
+test ch_the_chat_region_follows_the_call_region_and_mains_buffers_have_their_sizes {
+    assert TBO_CH == TBO_CL + CL_CAP and TBO_CH + CHV_CAP == TB_SIZE;
+    assert CH_LOG_LEN == cl_bytes(CL_KEEP) and CH_BUF_LEN == CF_MAX + 1;
+    assert CS_LEN == 165504 and CA_LEN == 8064 and CHM_LEN == 256 and CHW_AID < CHW_N;
+    // the voice-call byte stands after the cabinet's bytes and before the friends snapshot, inside the folded bytes
+    assert CL_NOCAM >= AC_END and CL_NOCAM < FV_BASE and CL_NOCAM < CL_KEY_N;
+}
+
+test ch_a_row_opens_the_card_and_the_hit_follows_the_mode {
+    var cl : [8192]u8 = undefined;
+    var v : [8192]u8 = undefined;
+    var i : usize = 0;
+    while (i < 8192) {
+        cl[i] = 0;
+        v[i] = 0;
+        i = i + 1;
+    }
+    cl[FV_SHOWN] = 2;
+    const r : usize = fv_row_at(1);
+    var k : usize = 0;
+    while (k < 10) {
+        cl[r + FR_FP + k] = @as(u8, @intCast(30 + k));
+        k = k + 1;
+    }
+    cl[r + FR_NICKLEN] = 3;
+    cl[r + FR_NICK] = 65;
+    cl[r + FR_NICK + 1] = 110;
+    cl[r + FR_NICK + 2] = 97;
+    cl[r + FR_ONLINE] = 1;
+    // offline rows and rows out of the list open nothing; row 1 opens Ana's card
+    ch_card(cl[0..8192], v[0..8192], 5);
+    assert chv_mode(v[0..8192]) == CHV_M_OFF;
+    ch_card(cl[0..8192], v[0..8192], 1);
+    assert chv_mode(v[0..8192]) == CHV_M_CARD and v[CHV_NICKLEN] == 3 and v[CHV_NICK] == 65 and v[CHV_ONLINE] == 1;
+    assert chv_is(v[0..8192], cl[r + FR_FP .. r + FR_FP + 10]);
+    const sw : f64 = 1200.0;
+    const sh : f64 = 600.0;
+    const l : f64 = qp_left(sw);
+    const by : f64 = WS_TOP + CHV_CARD_BTN_Y + 6.0;
+    assert ch_hit_now(chv_card_btn_x(l, QP_W, 0) + 6.0, by, sw, sh, v[0..8192]) == CHV_H_MESSAGE;
+    assert ch_hit_now(chv_card_btn_x(l, QP_W, 1) + 6.0, by, sw, sh, v[0..8192]) == CHV_H_CALL;
+    assert ch_hit_now(chv_card_btn_x(l, QP_W, 2) + 6.0, by, sw, sh, v[0..8192]) == CHV_H_VIDEO;
+    // in the chat the same point is the history; the field and SEND sit at the bottom of the panel
+    chv_open_chat(v[0..8192]);
+    assert ch_hit_now(chv_card_btn_x(l, QP_W, 1) + 6.0, by, sw, sh, v[0..8192]) == CHV_H_HIST;
+    assert ch_hit_now(chv_send_x(l, QP_W) + 6.0, chv_field_y(WS_TOP, sh - WS_TOP) + 6.0, sw, sh, v[0..8192]) == CHV_H_SEND;
+    chv_close(v[0..8192]);
+    assert ch_hit_now(chv_send_x(l, QP_W) + 6.0, chv_field_y(WS_TOP, sh - WS_TOP) + 6.0, sw, sh, v[0..8192]) == CHV_H_NONE;
+    // the friend's chat address is its call port + 1 while it is online, else none
+    cl[r + FR_IP] = 192;
+    cl[r + FR_IP + 1] = 168;
+    cl[r + FR_IP + 2] = 1;
+    cl[r + FR_IP + 3] = 10;
+    cl[r + FR_PORT] = 186;
+    cl[r + FR_PORT + 1] = 111;
+    assert ch_friend_addr(cl[0..8192], cl[r + FR_FP .. r + FR_FP + 10]) == 3232235786 * 65536 + 47728;
+    cl[r + FR_ONLINE] = 0;
+    assert ch_friend_addr(cl[0..8192], cl[r + FR_FP .. r + FR_FP + 10]) == 0;
 }

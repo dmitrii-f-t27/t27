@@ -438,6 +438,10 @@ pub const APP_FRAMEWORKS : [13]str = ["Foundation", "AppKit", "CoreGraphics", "C
 pub const APP_FRAMEWORK_COUNT : u32 = 13;
 /// The system library the window links besides libSystem and libobjc.
 pub const APP_LIB_FFI : str = "-lffi";
+/// The main thread's stack the window is linked with (ld -stack_size): main() keeps the call blocks, the terminal cells
+/// and, since the chat (glass_window.t27 block CH), the open chat log and its file scratch (about 2 MB) as locals that
+/// never move; 16 MB leaves room for the drawing calls under them. The PTY server keeps the default.
+pub const APP_STACK_SIZE : str = "0x1000000";
 
 /// The oldest macOS the app runs on: the platform version passed to ld and written as LSMinimumSystemVersion.
 pub const APP_MIN_MACOS : str = "11.0";
@@ -566,6 +570,7 @@ test the_app_has_three_files_and_ten_frameworks {
     assert(framework_at(12) == "CoreVideo");
     assert(framework_at(13) == "");
     assert(APP_LIB_FFI == "-lffi");
+    assert(APP_STACK_SIZE == "0x1000000");
 }
 
 test the_app_builds_on_apple_silicon_only {

@@ -2,7 +2,8 @@
 // specs/t27os/account_view.t27 -- what the ACCOUNT panel of the T27 OS window shows and what a click in it means. Pure
 // decisions only: no @extern, no socket, no clock. One place where a person sees themselves (picture, nickname), their
 // own key (the T27-... string a friend pastes), the state of this device (online or not, the port, the build) and the
-// friends (online or not, call, copy the key, remove after a confirmation, add by key). Owner, 2026-10-22: the person
+// friends (online or not, the unread count, open the friend's card with MESSAGE / CALL / VIDEO (chat_view.t27), copy
+// the key, remove after a confirmation, add by key). Owner, 2026-10-22: the person
 // copies their key, sends it to a friend by any means, the friend pastes it and calls; no address is ever typed.
 // Refs gHashTag/t27#11560.
 //
@@ -413,7 +414,8 @@ pub const AC_H_PASTE : u32 = 9;
 pub const AC_H_ADD : u32 = 10;
 /// The UPDATE part's button (UPDATE, CANCEL or RESTART, update_view.upv_button).
 pub const AC_H_UPD : u32 = 11;
-/// Per row i (0..15): the row (a click calls), copy that friend's key, remove (asks), YES, NO.
+/// Per row i (0..15): the row (a click opens the friend's card, chat_view.t27), copy that friend's key, remove (asks),
+/// YES, NO.
 pub const AC_H_ROW : u32 = 16;
 pub const AC_H_FCOPY : u32 = 32;
 pub const AC_H_DEL : u32 = 48;
@@ -652,13 +654,13 @@ test ac_the_boxes_hit_their_own_target {
     assert ac_hit(ac_nick_x(l) + 6.0, t + AC_NICK_Y + 6.0, l, w, t, h, 3, 3, 5, none, false) == AC_H_NICK;
     assert ac_hit(ac_save_x(l, w) + 6.0, t + AC_NICK_Y + 6.0, l, w, t, h, 3, 3, 5, none, false) == AC_H_SAVE;
     assert ac_hit(ac_nick_x(l) + 6.0, t + AC_PIC_Y + 4.0, l, w, t, h, 3, 3, 5, none, false) == AC_H_PICTURE;
-    // the rows: body (call), copy a friend's key, remove
+    // the rows: body (the friend's card), copy a friend's key, remove
     assert ac_hit(l + 40.0, ac_row_y(t, 0) + 4.0, l, w, t, h, 3, 3, 5, none, false) == AC_H_ROW;
     assert ac_hit(l + 40.0, ac_row_y(t, 2) + 4.0, l, w, t, h, 3, 3, 5, none, false) == AC_H_ROW + 2;
     assert ac_hit(l + 40.0, ac_row_y(t, 3) + 4.0, l, w, t, h, 3, 3, 5, none, false) == AC_H_NONE;
     assert ac_hit(ac_fcopy_x(l, w) + 4.0, ac_row_y(t, 1) + 4.0, l, w, t, h, 3, 3, 5, none, false) == AC_H_FCOPY + 1;
     assert ac_hit(ac_del_x(l, w) + 4.0, ac_row_y(t, 1) + 4.0, l, w, t, h, 3, 3, 5, none, false) == AC_H_DEL + 1;
-    // the zone between COPY and the remove mark belongs to no button but the row (a call)
+    // the zone between COPY and the remove mark belongs to no button but the row (the card)
     assert ac_hit(ac_del_x(l, w) - 2.0, ac_row_y(t, 1) + 4.0, l, w, t, h, 3, 3, 5, none, false) == AC_H_ROW + 1;
     // the add part
     assert ac_hit(cv_field_x(l) + 4.0, ac_ifield_y(t, h) + 4.0, l, w, t, h, 3, 3, 5, none, false) == AC_H_IFIELD;
