@@ -736,6 +736,17 @@ fn cbp_frecv(p: u64, force: bool) -> void {
 fn cbp_fpull(p: u64, aq: u64, buf: u64) -> i32 {
     const data : u64 = cbp_get(buf + 8);
     if (data == 0) { return -1; }
+    cbp_fmix(p, data);
+    var sz4 : [4]u8 = undefined;
+    sz4[0] = 192; sz4[1] = 3; sz4[2] = 0; sz4[3] = 0;
+    cbp_poke(buf + 16, sz4[0..4], 4);
+    return cbp_aq_enqueue(aq, buf, 0, 0);
+}
+
+/// One 10 ms frame (960 bytes) out of the jitter buffer of block p into the memory at `data`: the next frame, a
+/// redundant copy, a concealed repeat or silence, with every counter of the block. A group call pulls one such frame
+/// from each member's block and adds them; a one to one call enqueues it as it is (cbp_fpull).
+fn cbp_fmix(p: u64, data: u64) -> void {
     var play : u64 = cbp_get(p + 96);
     const hi : u64 = cbp_get(p + 104);
     var depth : u64 = 0;
@@ -824,10 +835,6 @@ fn cbp_fpull(p: u64, aq: u64, buf: u64) -> i32 {
         }
         cbp_put(p + 96, play);
     }
-    var sz4 : [4]u8 = undefined;
-    sz4[0] = 192; sz4[1] = 3; sz4[2] = 0; sz4[3] = 0;
-    cbp_poke(buf + 16, sz4[0..4], 4);
-    return cbp_aq_enqueue(aq, buf, 0, 0);
 }
 
 /// Part F output callback (user, queue, buffer).

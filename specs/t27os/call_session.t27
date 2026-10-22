@@ -65,6 +65,9 @@ use t27os::pty_sys::sys_bind;
 use t27os::pty_sys::sys_close;
 use t27os::pty_sys::sys_addr;
 use t27os::pty_sys::sys_peek;
+use t27os::pty_sys::sys_write;
+use t27os::session_store::put_dec;
+use t27os::session_store::put_bytes;
 use t27os::pty_proto::put_u64;
 use t27os::pty_proto::get_u64;
 use t27os::call_core::ck_next;
@@ -101,6 +104,35 @@ use t27os::call_core::CK_T_REVEAL;
 use t27os::call_core::CK_T_CONFIRM;
 use t27os::call_core::CK_T_BYE;
 use t27os::call_core::CK_T_MEDIA;
+use t27os::call_core::GR_PEERS;
+use t27os::call_core::GR_NONE;
+use t27os::call_core::GR_WAITING;
+use t27os::call_core::GR_PARTIAL;
+use t27os::call_core::GR_FULL;
+use t27os::call_core::GR_ENDED;
+use t27os::call_core::GM_NONE;
+use t27os::call_core::GM_KNOWN;
+use t27os::call_core::GM_LINKING;
+use t27os::call_core::GM_UP;
+use t27os::call_core::GM_LEFT;
+use t27os::call_core::GM_FAILED;
+use t27os::call_core::gr_state;
+use t27os::call_core::gm_status;
+use t27os::call_core::gm_pending;
+use t27os::call_core::gr_should_dial;
+use t27os::call_core::gr_s16;
+use t27os::call_core::gr_clamp16;
+use t27os::call_core::gr_put16;
+use t27os::call_core::gr_abs16;
+use t27os::call_core::gr_list_init;
+use t27os::call_core::gr_list_add;
+use t27os::call_core::gr_list_ok;
+use t27os::call_core::gr_list_count;
+use t27os::call_core::gr_list_ip;
+use t27os::call_core::gr_list_port;
+use t27os::call_core::GR_LIST_MAX;
+use t27os::call_core::GR_ENTRY;
+use t27os::call_core::GR_LIST_HDR;
 use t27os::call_core::CK_INVITE_LEN;
 use t27os::call_core::CK_ANSWER_LEN;
 use t27os::call_core::CK_REVEAL_LEN;
@@ -150,6 +182,7 @@ use t27os::callback_probe::cbp_aq_set_param;
 use t27os::callback_probe::cbp_fin;
 use t27os::callback_probe::cbp_fout;
 use t27os::callback_probe::cbp_fpull;
+use t27os::callback_probe::cbp_fmix;
 use t27os::callback_probe::cbp_fstore;
 use t27os::callback_probe::cbp_nz;
 use t27os::callback_probe::CBP_RTLD_DEFAULT;
@@ -177,7 +210,13 @@ pub const CS_PADDR : usize = 1856;
 pub const CS_EVQ : usize = 1872;
 pub const CS_EVQ_N : u64 = 16;
 pub const CS_AUD : usize = 2048;
-pub const CS_LEN : usize = 89728;
+/// After the audio block: 1024 bytes for the group call (96 u64 slots, then a 128 byte control body). One block is
+/// one link of a group; a window holds up to GR_PEERS blocks side by side, link 0 first (it owns the socket and the
+/// devices) and the group-wide slots live in the block of link 0.
+pub const CS_GRP : usize = 89728;
+pub const CS_GRP_LEN : usize = 1024;
+pub const CS_GBODY : usize = 768;
+pub const CS_LEN : usize = 90752;
 
 /// Slots (u64 LE at CS_SLOTS + 8 k). The first ones are also the window's counters through cs_stat.
 pub const CS_ST_SENT : u32 = 0;
@@ -226,9 +265,19 @@ pub const CS_K_VERIFY_MS : u32 = 42;
 pub const CS_K_SILENT_MS : u32 = 43;
 pub const CS_K_JB_TARGET : u32 = 44;
 pub const CS_K_JB_MAX : u32 = 45;
+/// Test aids (set at launch on link 0, off by default): 1 = print GROUPSTAT lines once a second; seconds after the
+/// group is whole at which this member leaves (0 = never); 1 = answer and confirm the group's other links by itself
+/// after 2 s (never the first link: the window's AUTOTEST does that one); the amplitude of the TONE test waveform.
+pub const CS_K_GSTATS : u32 = 46;
+pub const CS_K_GLEAVE_S : u32 = 47;
+pub const CS_K_GAUTO : u32 = 48;
+pub const CS_K_TONE_AMP : u32 = 49;
 
 pub const CS_AUDIO_DEV : u32 = 1;
 pub const CS_AUDIO_TEST : u32 = 2;
+/// Like TEST (no devices) but the frames are a quiet triangle wave that names its sender, they go through the jitter
+/// buffer, and a software speaker mixes the members every 10 ms exactly as the device callback does. A test mode.
+pub const CS_AUDIO_TONE : u32 = 3;
 
 pub const CS_EV_NONE : u32 = 0;
 pub const CS_EV_CALLING : u32 = 1;
@@ -254,6 +303,43 @@ pub const CS_R_ERROR : u32 = 11;
 pub const CS_R_COMMITMENT : u32 = 12;
 pub const CS_R_AUDIO : u32 = 13;
 
+/// Slots of the group region (u64 k at CS_GRP + 8 k). 0..15 belong to one call of one link (cs_fresh clears them),
+/// 16..31 to the link for good, 32.. to the whole group and are used in the block of link 0 only.
+const LG_ECHO : u32 = 0;
+const LG_TXC : u32 = 1;
+const LG_TXQ : u32 = 2;
+const LG_BAD : u32 = 4;
+const LG_TONE_OK : u32 = 5;
+const LG_SENTVER : u32 = 6;
+const LG_LIST_LEN : u32 = 7;
+const LG_SLAVE : u32 = 16;
+const LG_IDX : u32 = 17;
+const G_ON : u32 = 32;
+const G_STARTED : u32 = 33;
+const G_NL : u32 = 34;
+const G_INIT : u32 = 35;
+const G_VER : u32 = 36;
+const G_ME_IP : u32 = 37;
+const G_ME_PORT : u32 = 38;
+const G_AUDIO_RUN : u32 = 39;
+const G_VCLK : u32 = 40;
+const G_MIXED : u32 = 41;
+const G_CLIP : u32 = 42;
+const G_MIX_PEAK : u32 = 43;
+const G_UPMAX : u32 = 44;
+const G_FULL_MS : u32 = 45;
+const G_STAT_MS : u32 = 46;
+const G_STATE : u32 = 47;
+const G_TICK_MS : u32 = 48;
+const G_T0 : u32 = 49;
+const G_LEFT : u32 = 50;
+const G_PEND : u32 = 51;
+const G_UP : u32 = 52;
+const G_GONE : u32 = 53;
+const G_FULL_TICKS : u32 = 54;
+const G_MIX_UNDER : u32 = 55;
+const G_MEM : u32 = 64;
+
 /// Set by cs_open, cleared by cs_close: the block is a live session.
 const CS_MAGIC_V : u64 = 3472328519473427298;
 /// Media plaintext: part F's packet; sealed size.
@@ -267,6 +353,33 @@ fn cs_add(s: []u8, k: u32, by: u64) -> void { cs_p(s, k, cs_g(s, k) + by); }
 
 /// The audio block's address: what the callbacks get as `user`.
 fn cs_aud(s: []u8) -> u64 { return sys_addr(s[CS_AUD..CS_LEN], s[CS_AUD..CS_LEN], 0); }
+
+fn cg(s: []const u8, k: u32) -> u64 { return get_u64(s, CS_GRP + @as(usize, k) * 8); }
+fn cgp(s: []u8, k: u32, v: u64) -> void { put_u64(s, CS_GRP + @as(usize, k) * 8, v); }
+fn cga(s: []u8, k: u32, by: u64) -> void { cgp(s, k, cg(s, k) + by); }
+
+/// How many link blocks a slice holds: 1 for a plain one to one session, up to GR_PEERS for a window's group block.
+fn cs_links(s: []const u8) -> usize {
+    var n : usize = s.len / CS_LEN;
+    if (n > GR_PEERS) { n = GR_PEERS; }
+    if (n == 0) { n = 1; }
+    return n;
+}
+
+/// The call state of link k (byte 1 of its endpoint), of a slice that holds the links side by side.
+fn cs_lstate(s: []const u8, k: usize) -> u32 { return @as(u32, s[k * CS_LEN + 1]); }
+
+/// Links of a window slice in the ACTIVE state.
+fn cs_n_active(s: []const u8) -> u32 {
+    var n : u32 = 0;
+    var k : usize = 0;
+    const nl : usize = cs_links(s);
+    while (k < nl) {
+        if (cs_lstate(s, k) == CK_ACTIVE) { n = n + 1; }
+        k = k + 1;
+    }
+    return n;
+}
 
 // ---------------------------------------------------------------- pure rules (tested below)
 
@@ -394,11 +507,11 @@ fn cs_sync(s: []u8) -> void {
         const now : u64 = ckh_ms();
         cs_p(s, CS_SEEN, @as(u64, st));
         cs_p(s, CS_T_STATE, now);
-        if (was == CK_ACTIVE) { cs_audio_stop(s); }
+        if (was == CK_ACTIVE) { cs_audio_leave(s); }
         if (st == CK_ACTIVE) {
             cs_p(s, CS_ST_MS_TO_ACTIVE, now - cs_g(s, CS_T_DIAL));
             cs_p(s, CS_T_RX, now);
-            if (!cs_audio_start(s)) {
+            if (!cs_audio_enter(s)) {
                 cs_p(s, CS_REASON, @as(u64, CS_R_AUDIO));
                 ckh_go(s[0..EP_LEN], CK_EV_ERROR);
                 cs_push(s, CS_EV_ACTIVE);
@@ -457,7 +570,7 @@ fn cs_send_sealed_bye(s: []u8) -> void {
 /// fingerprint is not 10 bytes, the mode is unknown or the OS refuses.
 pub fn cs_open(s: []u8, me_fp: []const u8, bind_ip: u64, port: u64, audio: u32) -> bool {
     if (s.len < CS_LEN or me_fp.len != 10 or bind_ip > 4294967295 or port > 65535) { return false; }
-    if (audio != CS_AUDIO_DEV and audio != CS_AUDIO_TEST) { return false; }
+    if (audio != CS_AUDIO_DEV and audio != CS_AUDIO_TEST and audio != CS_AUDIO_TONE) { return false; }
     ck_wipe(s[0..CS_LEN]);
     ck_put(s, EP_ME, me_fp);
     s[1] = @as(u8, @intCast(CK_IDLE));
@@ -484,7 +597,44 @@ pub fn cs_open(s: []u8, me_fp: []const u8, bind_ip: u64, port: u64, audio: u32) 
     cs_p(s, CS_K_SILENT_MS, 5000);
     cs_p(s, CS_K_JB_TARGET, CBP_F_PRE);
     cs_p(s, CS_K_JB_MAX, CBP_F_PREMAX);
+    cs_p(s, CS_K_TONE_AMP, 6000);
+    cgp(s, G_ME_IP, bind_ip);
+    cgp(s, G_ME_PORT, port);
+    cs_links_open(s, me_fp);
     return true;
+}
+
+/// A window slice of several blocks: link 0 (this one) owns the socket and the devices; the others are opened as
+/// further links of the same identity on the same socket, and are used only by a group call.
+fn cs_links_open(s: []u8, me_fp: []const u8) -> void {
+    const nl : usize = cs_links(s);
+    cgp(s, G_NL, @as(u64, nl));
+    cgp(s, LG_IDX, 0);
+    cgp(s, LG_SLAVE, 0);
+    var k : usize = 1;
+    while (k < nl) {
+        const a : usize = k * CS_LEN;
+        ck_wipe(s[a..a + CS_LEN]);
+        ck_put(s[a..a + CS_LEN], EP_ME, me_fp);
+        s[a + 1] = @as(u8, @intCast(CK_IDLE));
+        cs_link_copy(s, a);
+        put_u64(s, a + CS_SLOTS + @as(usize, CS_SEEN) * 8, @as(u64, CK_IDLE));
+        put_u64(s, a + CS_SLOTS + @as(usize, CS_MAGIC) * 8, CS_MAGIC_V);
+        put_u64(s, a + CS_GRP + @as(usize, LG_SLAVE) * 8, 1);
+        put_u64(s, a + CS_GRP + @as(usize, LG_IDX) * 8, @as(u64, k));
+        k = k + 1;
+    }
+}
+
+/// Link at offset a takes the socket, the audio mode and the tunables of link 0.
+fn cs_link_copy(s: []u8, a: usize) -> void {
+    var j : u32 = CS_FD;
+    while (j <= CS_K_TONE_AMP) {
+        if (j == CS_FD or j == CS_MODE or (j >= CS_K_CALLING_MS and j <= CS_K_JB_MAX) or j == CS_K_TONE_AMP) {
+            put_u64(s, a + CS_SLOTS + @as(usize, j) * 8, cs_g(s, j));
+        }
+        j = j + 1;
+    }
 }
 
 fn cs_live(s: []const u8) -> bool { return s.len >= CS_LEN and cs_g(s, CS_MAGIC) == CS_MAGIC_V; }
@@ -493,29 +643,38 @@ fn cs_live(s: []const u8) -> bool { return s.len >= CS_LEN and cs_g(s, CS_MAGIC)
 /// target / max in frames (target >= 1, target < max, max + 8 < 64). Not while a call is ACTIVE.
 pub fn cs_set(s: []u8, k: u32, v: u64) -> bool {
     if (!cs_live(s) or ckh_state(s[0..EP_LEN]) == CK_ACTIVE) { return false; }
+    var ok : bool = false;
     if (k >= CS_K_CALLING_MS and k <= CS_K_SILENT_MS) {
-        if (v < 1000 or v > 600000) { return false; }
-        cs_p(s, k, v);
-        return true;
+        if (v >= 1000 and v <= 600000) { ok = true; }
+    } else if (k == CS_K_JB_TARGET) {
+        if (v != 0 and v < cs_g(s, CS_K_JB_MAX)) { ok = true; }
+    } else if (k == CS_K_JB_MAX) {
+        if (v > cs_g(s, CS_K_JB_TARGET) and v + CBP_F_TX < CBP_F_JB) { ok = true; }
+    } else if (k == CS_K_GSTATS or k == CS_K_GAUTO) {
+        if (v <= 1) { ok = true; }
+    } else if (k == CS_K_GLEAVE_S) {
+        if (v <= 3600) { ok = true; }
+    } else if (k == CS_K_TONE_AMP) {
+        if (v >= 100 and v <= 32767) { ok = true; }
     }
-    if (k == CS_K_JB_TARGET) {
-        if (v == 0 or v >= cs_g(s, CS_K_JB_MAX)) { return false; }
-        cs_p(s, k, v);
-        return true;
+    if (!ok) { return false; }
+    cs_p(s, k, v);
+    var j : usize = 1;
+    const nl : usize = cs_links(s);
+    while (j < nl) {
+        put_u64(s, j * CS_LEN + CS_SLOTS + @as(usize, k) * 8, v);
+        j = j + 1;
     }
-    if (k == CS_K_JB_MAX) {
-        if (v <= cs_g(s, CS_K_JB_TARGET) or v + CBP_F_TX >= CBP_F_JB) { return false; }
-        cs_p(s, k, v);
-        return true;
-    }
-    return false;
+    return true;
 }
 
 /// Counters of a new call (the audio block too: its queues were disposed when the last call left ACTIVE); the
 /// slots from CS_FD on (socket, mode, tunables) stay.
 fn cs_fresh(s: []u8) -> void {
     ck_wipe(s[CS_SLOTS..CS_SLOTS + 20 * 8]);
-    ck_wipe(s[CS_AUD..CS_LEN]);
+    ck_wipe(s[CS_AUD..CS_GRP]);
+    ck_wipe(s[CS_GRP..CS_GRP + 16 * 8]);
+    ck_wipe(s[CS_GRP + CS_GBODY..CS_GRP + CS_GRP_LEN]);
     cs_p(s, CS_CODE_SAID, 0);
     cs_p(s, CS_REASON, 0);
     cs_p(s, CS_N1, 0);
@@ -641,6 +800,12 @@ pub fn cs_close(s: []u8) -> void {
     cs_audio_stop(s);
     sys_close(cs_fd(s));
     cs_p(s, CS_MAGIC, 0);
+    var j : usize = 1;
+    const nl : usize = cs_links(s);
+    while (j < nl) {
+        put_u64(s, j * CS_LEN + CS_SLOTS + @as(usize, CS_MAGIC) * 8, 0);
+        j = j + 1;
+    }
 }
 
 // ---------------------------------------------------------------- audio
@@ -648,7 +813,7 @@ pub fn cs_close(s: []u8) -> void {
 /// The part F block for a new call: magic, warm-up, mins, redundancy on, two-host accounting (no storm, no
 /// capture-age from the other clock), the jitter sizes.
 fn cs_audio_reset(s: []u8) -> void {
-    ck_wipe(s[CS_AUD..CS_LEN]);
+    ck_wipe(s[CS_AUD..CS_GRP]);
     const p : u64 = cs_aud(s);
     cbp_put(p + 72, CBP_D_MAGIC);
     cbp_put(p + 112, 1);
@@ -661,20 +826,32 @@ fn cs_audio_reset(s: []u8) -> void {
     cbp_put(p + CBP_F_EXT + 128, 1);
     cbp_put(p + CBP_F_EXT + 136, cs_g(s, CS_K_JB_TARGET));
     cs_p(s, CS_NEXT_TONE, ckh_ms());
+    cgp(s, G_VCLK, 0);
     if (ckh_caller(s[0..EP_LEN])) { cs_p(s, CS_TAGME, 65); } else { cs_p(s, CS_TAGME, 66); }
+    // the TONE test names its sender by the first byte of the fingerprint
+    if (cs_g(s, CS_MODE) == @as(u64, CS_AUDIO_TONE)) { cs_p(s, CS_TAGME, @as(u64, s[EP_ME])); }
 }
 
 /// Microphone and speakers on this thread's run loop (output volume 0.05, against feedback while there is no echo
 /// canceller), output first, as part F. TEST mode only resets the block.
 fn cs_audio_start(s: []u8) -> bool {
     cs_audio_reset(s);
+    cgp(s, G_AUDIO_RUN, 2);
     if (cs_g(s, CS_MODE) != @as(u64, CS_AUDIO_DEV)) {
         cs_p(s, CS_ST_AUDIO_ON, 1);
+        cgp(s, G_AUDIO_RUN, 1);
         return true;
     }
     const p : u64 = cs_aud(s);
     const fin : u64 = cbp_dlsym(CBP_RTLD_DEFAULT, "cbp_fin");
-    const fout : u64 = cbp_dlsym(CBP_RTLD_DEFAULT, "cbp_fout");
+    // a window slice that holds several links plays through csg_fout, which mixes the members (and, with no group,
+    // is cbp_fout); a one block session keeps cbp_fout
+    var fout : u64 = cbp_dlsym(CBP_RTLD_DEFAULT, "cbp_fout");
+    var fuser : u64 = p;
+    if (cs_links(s) > 1) {
+        fout = cbp_dlsym(CBP_RTLD_DEFAULT, "csg_fout");
+        fuser = p - @as(u64, CS_AUD);
+    }
     const mode : u64 = cbp_konst("kCFRunLoopDefaultMode");
     if (fin == 0 or fout == 0 or mode == 0) { return false; }
     var fmt : [40]u8 = undefined;
@@ -684,7 +861,7 @@ fn cs_audio_start(s: []u8) -> bool {
     put_u64(aqi[0..8], 0, 0);
     put_u64(aqo[0..8], 0, 0);
     const si : i32 = cbp_aq_new_input(fmt[0..40], fin, p, cbp_rl_current(), mode, 0, aqi[0..8]);
-    const so : i32 = cbp_aq_new_output(fmt[0..40], fout, p, cbp_rl_current(), mode, 0, aqo[0..8]);
+    const so : i32 = cbp_aq_new_output(fmt[0..40], fout, fuser, cbp_rl_current(), mode, 0, aqo[0..8]);
     cs_p(s, CS_QIN, get_u64(aqi[0..8], 0));
     cs_p(s, CS_QOUT, get_u64(aqo[0..8], 0));
     if (si != 0 or so != 0 or cs_g(s, CS_QIN) == 0 or cs_g(s, CS_QOUT) == 0) {
@@ -712,7 +889,11 @@ fn cs_audio_start(s: []u8) -> bool {
         var b : [8]u8 = undefined;
         put_u64(b[0..8], 0, 0);
         if (cbp_aq_alloc(qo, 960, b[0..8]) == 0) {
-            if (cbp_fpull(p, qo, get_u64(b[0..8], 0)) == 0) { ok = ok + 1; }
+            if (cs_links(s) > 1) {
+                if (csg_pull(fuser, qo, get_u64(b[0..8], 0)) == 0) { ok = ok + 1; }
+            } else {
+                if (cbp_fpull(p, qo, get_u64(b[0..8], 0)) == 0) { ok = ok + 1; }
+            }
         }
         k = k + 1;
     }
@@ -725,6 +906,7 @@ fn cs_audio_start(s: []u8) -> bool {
         return false;
     }
     cs_p(s, CS_ST_AUDIO_ON, 1);
+    cgp(s, G_AUDIO_RUN, 1);
     return true;
 }
 
@@ -736,6 +918,37 @@ fn cs_audio_stop(s: []u8) -> void {
     if (cs_g(s, CS_QIN) != 0) { cbp_aq_dispose(cs_g(s, CS_QIN), true); }
     cs_p(s, CS_QIN, 0);
     cs_p(s, CS_QOUT, 0);
+    cgp(s, G_AUDIO_RUN, 0);
+}
+
+/// A call enters ACTIVE on this link. A group link beyond the first only resets its own jitter buffer and takes its
+/// place in the microphone ring; the first link starts the devices unless a group already runs them.
+fn cs_audio_enter(s: []u8) -> bool {
+    if (cg(s, LG_SLAVE) != 0) {
+        cs_audio_reset(s);
+        const pm : u64 = cs_aud(s) - cg(s, LG_IDX) * CS_LEN;
+        cgp(s, LG_TXC, cbp_get(pm + 16));
+        cgp(s, LG_TXQ, 0);
+        cs_p(s, CS_ST_AUDIO_ON, 1);
+        return true;
+    }
+    if (cg(s, G_AUDIO_RUN) == 1) {
+        cs_audio_reset(s);
+        return true;
+    }
+    return cs_audio_start(s);
+}
+
+/// A call leaves ACTIVE on this link. The devices stop with the last link that carries media.
+fn cs_audio_leave(s: []u8) -> void {
+    if (cg(s, LG_SLAVE) != 0) { return; }
+    var k : usize = 1;
+    const nl : usize = cs_links(s);
+    while (k < nl) {
+        if (cs_lstate(s, k) == CK_ACTIVE) { return; }
+        k = k + 1;
+    }
+    cs_audio_stop(s);
 }
 
 /// TEST mode: put a test frame into the capture ring every 10 ms, as cbp_fin puts a captured one.
@@ -749,7 +962,11 @@ fn cs_tone_tick(s: []u8) -> void {
             cbp_inc(p + 56, 1);
         } else {
             var pcm : [960]u8 = undefined;
-            cs_tone(pcm[0..960], w, @as(u8, @intCast(cs_g(s, CS_TAGME))));
+            if (cs_g(s, CS_MODE) == @as(u64, CS_AUDIO_TONE)) {
+                cs_sine_make(pcm[0..960], @as(u8, @intCast(cs_g(s, CS_TAGME))), cs_g(s, CS_K_TONE_AMP));
+            } else {
+                cs_tone(pcm[0..960], w, @as(u8, @intCast(cs_g(s, CS_TAGME))));
+            }
             cbp_poke(p + CBP_F_TXD + (w % CBP_F_TX) * 960, pcm[0..960], 960);
             cbp_put(p + 16, w + 1);
             cbp_inc(p, 1);
@@ -759,39 +976,60 @@ fn cs_tone_tick(s: []u8) -> void {
     }
 }
 
-/// Seal and send every captured frame not sent yet, each with the previous one as its redundant copy.
-fn cs_send_media(s: []u8) -> void {
-    const p : u64 = cs_aud(s);
-    var k : u64 = cbp_get(p + 24);
-    const w : u64 = cbp_get(p + 16);
+/// Seal and send, on this link, every captured frame of the microphone ring (the ring of link 0) from this link's
+/// cursor up to w, each with the previous one as its redundant copy. Link 0 numbers its frames by the ring index, the
+/// others by their own count from 0, as the receiver's jitter buffer starts at 0 on every link. The cursor of link 0
+/// is the ring's (header slot 3), so a one to one call sends exactly as before. Returns the new cursor.
+fn cs_send_media(s: []u8, pm: u64, w: u64) -> u64 {
+    var k : u64 = cbp_get(pm + 24);
+    var q : u64 = 0;
+    const slave : bool = cg(s, LG_SLAVE) != 0;
+    if (slave) {
+        k = cg(s, LG_TXC);
+        if (k > w) { k = w; }
+        if (w - k > CBP_F_TX - 2) { k = w - (CBP_F_TX - 2); }
+        q = cg(s, LG_TXQ);
+    }
     while (k < w) {
-        const slot : u64 = p + CBP_F_TXD + (k % CBP_F_TX) * 960;
+        const slot : u64 = pm + CBP_F_TXD + (k % CBP_F_TX) * 960;
         if (cs_g(s, CS_MUTED) != 0) {
             cbp_zero(slot, 960);
             cs_add(s, CS_ST_MUTED_SENT, 1);
         }
+        if (!slave) { q = k; }
         var pkt : [1928]u8 = undefined;
-        const n : usize = cs_pkt_head(pkt[0..1928], k, k >= 1);
+        const n : usize = cs_pkt_head(pkt[0..1928], q, q >= 1 and k >= 1);
         sys_peek(pkt[8..968], slot, 960);
-        if (k >= 1) { sys_peek(pkt[968..1928], p + CBP_F_TXD + ((k - 1) % CBP_F_TX) * 960, 960); }
+        if (q >= 1 and k >= 1) { sys_peek(pkt[968..1928], pm + CBP_F_TXD + ((k - 1) % CBP_F_TX) * 960, 960); }
         var f : [1996]u8 = undefined;
         const m : usize = ckh_seal(s[0..EP_LEN], CK_T_MEDIA, pkt[0..n], f[0..1996]);
         if (m > 0) {
             if (cs_send(s, f[0..m])) {
                 cs_add(s, CS_ST_SENT, 1);
-                cbp_inc(p + 128, 1);
+                if (!slave) { cbp_inc(pm + 128, 1); }
             }
         } else {
             cs_add(s, CS_ST_SEND_ERR, 1);
         }
         k = k + 1;
+        q = q + 1;
     }
-    cbp_put(p + 24, k);
+    if (slave) {
+        cgp(s, LG_TXC, k);
+        cgp(s, LG_TXQ, q);
+    }
+    return k;
 }
 
 /// An opened media plaintext: count it, check it in TEST mode, feed the jitter buffer in DEV mode (primary, then
 /// the redundant copy of the frame before), with part F's counters.
 fn cs_take_media(s: []u8, pt: []const u8) -> void {
+    if (gr_list_ok(pt) and pt.len <= GR_LIST_MAX) {
+        // the other member's list of the group, kept for the group manager (csg_tick), which owns the table
+        ck_put(s[CS_GRP + CS_GBODY..CS_GRP + CS_GRP_LEN], 0, pt);
+        cgp(s, LG_LIST_LEN, @as(u64, pt.len));
+        return;
+    }
     if (pt.len < 968 or pt[4] != 192 or pt[5] != 3) {
         cs_add(s, CS_ST_REJ_OTHER, 1);
         return;
@@ -824,6 +1062,12 @@ fn cs_take_media(s: []u8, pt: []const u8) -> void {
         if (cs_g(s, CS_TAGME) == 65) { peer_tag = 66; }
         if (!cs_silent(pt[8..968]) and !cs_tone_ok(pt[8..968], q, peer_tag)) { cs_add(s, CS_ST_BAD_CONTENT, 1); }
         return;
+    }
+    if (cs_g(s, CS_MODE) == @as(u64, CS_AUDIO_TONE) and !cs_silent(pt[8..968])) {
+        // a TONE frame names its sender: it must be the peer's, never my own voice sent back
+        const who : u64 = cs_sine_tag(pt[8..968]);
+        if (who == cs_g(s, CS_TAGME) and who != @as(u64, s[EP_PEER])) { cga(s, LG_ECHO, 1); }
+        if (cs_sine_ok(pt[8..968], s[EP_PEER])) { cga(s, LG_TONE_OK, 1); } else { cs_add(s, CS_ST_BAD_CONTENT, 1); cga(s, LG_BAD, 1); }
     }
     const hi : u64 = cbp_get(p + 104);
     if (q + 1 < hi) { cbp_inc(p + 200, 1); }
@@ -932,24 +1176,632 @@ fn cs_on_packet(s: []u8, m: []const u8, from: []const u8) -> void {
     cs_add(s, CS_ST_REJ_OTHER, 1);
 }
 
+// ---------------------------------------------------------------- the TONE test waveform
+
+/// The period of a sender's triangle wave: a divisor of 480, so every 10 ms frame of one sender is the same bytes.
+pub fn cs_sine_period(tag: u8) -> usize {
+    const m : u8 = tag % 7;
+    if (m == 0) { return 48; }
+    if (m == 1) { return 60; }
+    if (m == 2) { return 80; }
+    if (m == 3) { return 96; }
+    if (m == 4) { return 120; }
+    if (m == 5) { return 160; }
+    return 240;
+}
+
+/// One frame of the TONE test: 480 samples of a triangle wave of amplitude `amp`, its sender's tag in sample 0
+/// (100 + tag) and the amplitude in sample 1, so a receiver can check the frame and name who made it.
+pub fn cs_sine_make(pcm: []u8, tag: u8, amp: u64) -> void {
+    var a : i64 = @as(i64, @intCast(amp));
+    if (a > 32767) { a = 32767; }
+    const per : usize = cs_sine_period(tag);
+    const half : usize = per / 2;
+    var i : usize = 0;
+    while (i < 480) {
+        const ph : usize = i % per;
+        var v : i64 = 0;
+        if (ph < half) {
+            v = 0 - a + (2 * a * @as(i64, @intCast(ph))) / @as(i64, @intCast(half));
+        } else {
+            v = a - (2 * a * @as(i64, @intCast(ph - half))) / @as(i64, @intCast(half));
+        }
+        gr_put16(pcm, 2 * i, v);
+        i = i + 1;
+    }
+    gr_put16(pcm, 0, 100 + @as(i64, tag));
+    gr_put16(pcm, 2, a);
+}
+
+/// The tag a TONE frame names, 9999 when sample 0 names none.
+pub fn cs_sine_tag(pcm: []const u8) -> u64 {
+    if (pcm.len < 960) { return 9999; }
+    const v : i64 = gr_s16(pcm[0], pcm[1]);
+    if (v < 100 or v > 355) { return 9999; }
+    return @as(u64, @intCast(v - 100));
+}
+
+/// Is pcm exactly the TONE frame of `tag` at the amplitude it carries.
+pub fn cs_sine_ok(pcm: []const u8, tag: u8) -> bool {
+    if (pcm.len < 960) { return false; }
+    const amp : i64 = gr_s16(pcm[2], pcm[3]);
+    if (amp < 100 or amp > 32767) { return false; }
+    var e : [960]u8 = undefined;
+    cs_sine_make(e[0..960], tag, @as(u64, @intCast(amp)));
+    return ck_same(e[0..960], pcm[0..960]);
+}
+
+// ---------------------------------------------------------------- group call: members, links, the mix
+
+fn gm_slot(m: usize) -> u32 { return G_MEM + @as(u32, @intCast(m)) * 3; }
+
+fn gm_used(s: []const u8, m: usize) -> bool { return (cg(s, gm_slot(m) + 2) & 4) != 0; }
+
+/// The fingerprint of member m (10 bytes).
+fn gm_fp(s: []const u8, m: usize, out: []u8) -> void {
+    var a : u64 = cg(s, gm_slot(m));
+    const b : u64 = cg(s, gm_slot(m) + 1);
+    var i : usize = 0;
+    while (i < 8) {
+        out[i] = @as(u8, @intCast(a & 255));
+        a = a >> 8;
+        i = i + 1;
+    }
+    out[8] = @as(u8, @intCast(b & 255));
+    out[9] = @as(u8, @intCast((b >> 8) & 255));
+}
+
+fn gm_ip(s: []const u8, m: usize) -> u64 { return (cg(s, gm_slot(m) + 1) >> 16) & 4294967295; }
+
+fn gm_port(s: []const u8, m: usize) -> u64 { return cg(s, gm_slot(m) + 1) >> 48; }
+
+fn gm_put(s: []u8, m: usize, fp: []const u8, ip: u64, port: u64) -> void {
+    var a : u64 = 0;
+    var i : usize = 8;
+    while (i > 0) {
+        i = i - 1;
+        a = (a << 8) | @as(u64, fp[i]);
+    }
+    cgp(s, gm_slot(m), a);
+    cgp(s, gm_slot(m) + 1, @as(u64, fp[8]) | (@as(u64, fp[9]) << 8) | (ip << 16) | (port << 48));
+}
+
+/// The index of the member with this fingerprint, GR_PEERS when there is none.
+fn gm_find(s: []const u8, fp: []const u8) -> usize {
+    var m : usize = 0;
+    var t : [10]u8 = undefined;
+    while (m < GR_PEERS) {
+        if (gm_used(s, m)) {
+            gm_fp(s, m, t[0..10]);
+            if (ck_same(t[0..10], fp)) { return m; }
+        }
+        m = m + 1;
+    }
+    return GR_PEERS;
+}
+
+/// The first link that can take a new call (IDLE first, then one whose call ended), nl when there is none.
+fn csg_free_link(s: []const u8, nl: usize) -> usize {
+    var k : usize = 0;
+    while (k < nl) {
+        if (cs_lstate(s, k) == CK_IDLE) { return k; }
+        k = k + 1;
+    }
+    k = 0;
+    while (k < nl) {
+        if (cs_lstate(s, k) == CK_ENDED or cs_lstate(s, k) == CK_FAILED) { return k; }
+        k = k + 1;
+    }
+    return nl;
+}
+
+/// Forget a finished group: the member table and the group counters (not the link or audio bookkeeping).
+fn csg_reset(s: []u8) -> void {
+    var k : u32 = G_ON;
+    while (k < 96) {
+        if (k != G_NL and k != G_ME_IP and k != G_ME_PORT and k != G_AUDIO_RUN and k != G_VCLK) { cgp(s, k, 0); }
+        k = k + 1;
+    }
+}
+
+/// Take a member into the table: a new one (the first opens the group here), or the address of a known one when it
+/// had none. `picked` is a person I chose myself. False when the table is full.
+fn csg_member(s: []u8, fp: []const u8, ip: u64, port: u64, picked: bool, now: u64) -> bool {
+    var m : usize = gm_find(s, fp);
+    if (m < GR_PEERS) {
+        if (ip != 0 and gm_ip(s, m) == 0) {
+            gm_put(s, m, fp, ip, port);
+            cga(s, G_VER, 1);
+        }
+        return true;
+    }
+    if (cg(s, G_STARTED) != 0 and cg(s, G_STATE) == GR_ENDED and picked) { csg_reset(s); }
+    m = 0;
+    while (m < GR_PEERS and gm_used(s, m)) { m = m + 1; }
+    if (m >= GR_PEERS or m + 1 >= cs_links(s) + 1) { return false; }
+    gm_put(s, m, fp, ip, port);
+    var c : u64 = 4 | (now << 16);
+    if (picked) { c = c | 1; }
+    cgp(s, gm_slot(m) + 2, c);
+    if (cg(s, G_STARTED) == 0) {
+        cgp(s, G_STARTED, 1);
+        cgp(s, G_ON, 1);
+        cgp(s, G_T0, now);
+        if (picked) { cgp(s, G_INIT, 1); }
+        cgp(s, G_VER, 1);
+    }
+    cga(s, G_VER, 1);
+    return true;
+}
+
+/// The person picked a friend for the group (its fingerprint, and where it answers): the first pick opens the group
+/// here. The call goes out at once, one link per pick, on the next poll. False for a one block session, for myself
+/// or when the table is full.
+pub fn csg_add(s: []u8, fp: []const u8, ip: u64, port: u64) -> bool {
+    if (!cs_live(s) or cs_links(s) < 2 or fp.len != 10 or ck_same(fp, s[EP_ME..EP_ME + 10])) { return false; }
+    return csg_member(s, fp, ip, port, true, ckh_ms());
+}
+
+/// This member leaves: its links end with a sealed BYE (or a cancel / decline) and only they end; the others go on.
+pub fn csg_leave(s: []u8) -> bool {
+    if (!cs_live(s) or cg(s, G_STARTED) == 0) { return false; }
+    const nl : usize = cs_links(s);
+    var k : usize = 0;
+    while (k < nl) {
+        const st : u32 = cs_lstate(s, k);
+        if (k == 0) {
+            if (st == CK_RINGING) { cs_decline(s); } else { cs_hangup(s); }
+        } else {
+            if (st == CK_RINGING) { cs_decline(s[k * CS_LEN..(k + 1) * CS_LEN]); } else { cs_hangup(s[k * CS_LEN..(k + 1) * CS_LEN]); }
+        }
+        k = k + 1;
+    }
+    cgp(s, G_LEFT, 1);
+    cgp(s, G_ON, 0);
+    cgp(s, G_STATE, GR_ENDED);
+    return true;
+}
+
+/// The group's state as the window shows it (GR_*).
+pub fn csg_state(s: []const u8) -> u32 {
+    if (cg(s, G_STARTED) == 0) { return GR_NONE; }
+    return @as(u32, @intCast(cg(s, G_STATE)));
+}
+
+/// Counters of the group: 0 members up now, 1 most up at once, 2 frames mixed, 3 samples clipped by the clamp, 4 peak
+/// |sample| of the mix, 5 underruns of all links, 6 pending, 7 gone, 8 milliseconds since the group was whole (0 =
+/// not yet), 9 ticks with the group whole.
+pub fn csg_stat(s: []u8, k: u32) -> u64 {
+    if (k == 0) { return cg(s, G_UP); }
+    if (k == 1) { return cg(s, G_UPMAX); }
+    if (k == 2) { return cg(s, G_MIXED); }
+    if (k == 3) { return cg(s, G_CLIP); }
+    if (k == 4) { return cg(s, G_MIX_PEAK); }
+    if (k == 5) { return csg_under(s); }
+    if (k == 6) { return cg(s, G_PEND); }
+    if (k == 7) { return cg(s, G_GONE); }
+    if (k == 8) { return cg(s, G_FULL_MS); }
+    if (k == 9) { return cg(s, G_FULL_TICKS); }
+    return 0;
+}
+
+/// A counter of link j of the window slice: 0 tone frames that came back as my own voice, 1 tone frames that matched
+/// the peer's, 2 frames sent to it, 3 frames accepted from it, 4 its underruns, 5 the peak |sample| it brought,
+/// 6 its call state, 7 the first four bytes of the peer's fingerprint (as a number), 8 frames it brought that were
+/// not the peer's tone.
+pub fn csg_link(s: []u8, j: usize, k: u32) -> u64 {
+    if (j >= cs_links(s)) { return 0; }
+    const a : usize = j * CS_LEN;
+    const base : u64 = cs_aud(s) - @as(u64, CS_AUD);
+    if (k == 0) { return get_u64(s, a + CS_GRP + @as(usize, LG_ECHO) * 8); }
+    if (k == 1) { return get_u64(s, a + CS_GRP + @as(usize, LG_TONE_OK) * 8); }
+    if (k == 2) { return get_u64(s, a + CS_SLOTS + @as(usize, CS_ST_SENT) * 8); }
+    if (k == 3) { return get_u64(s, a + CS_SLOTS + @as(usize, CS_ST_ACCEPTED) * 8); }
+    if (k == 4) { return cbp_get(base + @as(u64, a) + @as(u64, CS_AUD) + 32); }
+    if (k == 5) { return get_u64(s, a + CS_SLOTS + @as(usize, CS_ST_ABS_PEAK) * 8); }
+    if (k == 6) { return @as(u64, cs_lstate(s, j)); }
+    if (k == 7) { return (@as(u64, s[a + EP_PEER]) << 24) | (@as(u64, s[a + EP_PEER + 1]) << 16) | (@as(u64, s[a + EP_PEER + 2]) << 8) | @as(u64, s[a + EP_PEER + 3]); }
+    if (k == 8) { return get_u64(s, a + CS_SLOTS + @as(usize, CS_ST_BAD_CONTENT) * 8); }
+    return 0;
+}
+
+/// Underruns summed over every link of the window slice.
+fn csg_under(s: []u8) -> u64 {
+    const base : u64 = cs_aud(s) - @as(u64, CS_AUD);
+    var n : u64 = 0;
+    var k : usize = 0;
+    while (k < cs_links(s)) {
+        n = n + cbp_get(base + @as(u64, k) * @as(u64, CS_LEN) + @as(u64, CS_AUD) + 32);
+        k = k + 1;
+    }
+    return n;
+}
+
+/// Pull one frame from every link that carries media, add them sample by sample and hold the sum inside 16 bits
+/// (call_core gr_clamp16): the memory at `data` gets 960 bytes. Nobody's own voice is in it: a link only ever brings
+/// the other side's. The group counters (frames, clipped samples, peak) are kept in the block of link 0.
+fn csg_mix(base: u64, data: u64) -> void {
+    const nl : u64 = cbp_get(base + @as(u64, CS_GRP) + @as(u64, G_NL) * 8);
+    var fr : [2880]u8 = undefined;
+    var on : [3]u8 = undefined;
+    var l : usize = 0;
+    while (l < 3) {
+        on[l] = 0;
+        if (@as(u64, l) < nl) {
+            var sb : [1]u8 = undefined;
+            sb[0] = 0;
+            sys_peek(sb[0..1], base + @as(u64, l) * @as(u64, CS_LEN) + 1, 1);
+            if (@as(u32, sb[0]) == CK_ACTIVE) {
+                on[l] = 1;
+                const pk : u64 = base + @as(u64, l) * @as(u64, CS_LEN) + @as(u64, CS_AUD);
+                if (l > 0) { cbp_inc(pk + 8, 1); }
+                cbp_fmix(pk, sys_addr(fr[l * 960..l * 960 + 960], fr[l * 960..l * 960 + 960], 0));
+            }
+        }
+        l = l + 1;
+    }
+    var out : [960]u8 = undefined;
+    var clips : u64 = 0;
+    var peak : u64 = 0;
+    var i : usize = 0;
+    while (i < 480) {
+        var acc : i64 = 0;
+        l = 0;
+        while (l < 3) {
+            if (on[l] != 0) { acc = acc + gr_s16(fr[l * 960 + 2 * i], fr[l * 960 + 2 * i + 1]); }
+            l = l + 1;
+        }
+        const c : i64 = gr_clamp16(acc);
+        if (c != acc) { clips = clips + 1; }
+        const a : u64 = gr_abs16(c);
+        if (a > peak) { peak = a; }
+        gr_put16(out[0..960], 2 * i, c);
+        i = i + 1;
+    }
+    cbp_poke(data, out[0..960], 960);
+    const g : u64 = base + @as(u64, CS_GRP);
+    cbp_inc(g + @as(u64, G_MIXED) * 8, 1);
+    cbp_inc(g + @as(u64, G_CLIP) * 8, clips);
+    if (peak > cbp_get(g + @as(u64, G_MIX_PEAK) * 8)) { cbp_put(g + @as(u64, G_MIX_PEAK) * 8, peak); }
+}
+
+/// An output buffer from the members of the window slice whose link-0 block is at `base`; with no group open it is
+/// the one to one path unchanged.
+pub fn csg_pull(base: u64, aq: u64, buf: u64) -> i32 {
+    if (cbp_get(base + @as(u64, CS_GRP) + @as(u64, G_ON) * 8) == 0) { return cbp_fpull(base + @as(u64, CS_AUD), aq, buf); }
+    const data : u64 = cbp_get(buf + 8);
+    if (data == 0) { return -1; }
+    csg_mix(base, data);
+    var sz4 : [4]u8 = undefined;
+    sz4[0] = 192; sz4[1] = 3; sz4[2] = 0; sz4[3] = 0;
+    cbp_poke(buf + 16, sz4[0..4], 4);
+    return cbp_aq_enqueue(aq, buf, 0, 0);
+}
+
+/// The speakers' callback of a window slice: `user` is the address of its link-0 block.
+pub fn csg_fout(user: u64, aq: u64, buf: u64) -> u64 {
+    const p0 : u64 = user + @as(u64, CS_AUD);
+    if (cbp_get(user + @as(u64, CS_GRP) + @as(u64, G_ON) * 8) == 0) { return cbp_fout(p0, aq, buf); }
+    if (cbp_get(p0 + 64) != 0) { return 0; }
+    const n : u64 = cbp_get(p0 + 8) + 1;
+    cbp_put(p0 + 8, n);
+    if (csg_pull(user, aq, buf) != 0) { cbp_inc(p0 + 424, 1); }
+    return n;
+}
+
+/// TONE mode has no speakers: this software speaker takes a frame from the members every 10 ms and mixes it with the
+/// same code the device callback runs.
+fn csg_vtick(s: []u8, now: u64) -> void {
+    const base : u64 = cs_aud(s) - @as(u64, CS_AUD);
+    if (cg(s, G_VCLK) == 0) { cgp(s, G_VCLK, now); }
+    var guard : u32 = 0;
+    while (cg(s, G_VCLK) <= now and guard < 8) {
+        var out : [960]u8 = undefined;
+        cbp_inc(base + @as(u64, CS_AUD) + 8, 1);
+        csg_mix(base, sys_addr(out[0..960], out[0..960], 0));
+        cgp(s, G_VCLK, cg(s, G_VCLK) + 10);
+        guard = guard + 1;
+    }
+}
+
+/// Seal the member list over link j (it must be ACTIVE) and send it twice.
+fn csg_send_list(s: []u8, j: usize) -> void {
+    var l : [72]u8 = undefined;
+    gr_list_init(l[0..72]);
+    gr_list_add(l[0..72], s[EP_ME..EP_ME + 10], cg(s, G_ME_IP), cg(s, G_ME_PORT));
+    var m : usize = 0;
+    var t : [10]u8 = undefined;
+    while (m < GR_PEERS) {
+        if (gm_used(s, m)) {
+            gm_fp(s, m, t[0..10]);
+            gr_list_add(l[0..72], t[0..10], gm_ip(s, m), gm_port(s, m));
+        }
+        m = m + 1;
+    }
+    const n : usize = GR_LIST_HDR + gr_list_count(l[0..72]) * GR_ENTRY;
+    var f : [160]u8 = undefined;
+    var c : u32 = 0;
+    while (c < 2) {
+        var sent : usize = 0;
+        if (j == 0) {
+            sent = ckh_seal(s[0..EP_LEN], CK_T_MEDIA, l[0..n], f[0..160]);
+            if (sent > 0) { cs_send(s, f[0..sent]); }
+        } else {
+            sent = ckh_seal(s[j * CS_LEN..j * CS_LEN + EP_LEN], CK_T_MEDIA, l[0..n], f[0..160]);
+            if (sent > 0) { cs_send(s[j * CS_LEN..(j + 1) * CS_LEN], f[0..sent]); }
+        }
+        c = c + 1;
+    }
+}
+
+fn csg_hex4(line: []u8, at: usize, fp: []const u8) -> usize {
+    var n : usize = at;
+    var i : usize = 0;
+    while (i < 4) {
+        const hi : u8 = fp[i] / 16;
+        const lo : u8 = fp[i] % 16;
+        if (hi < 10) { line[n] = 48 + hi; } else { line[n] = 87 + hi; }
+        if (lo < 10) { line[n + 1] = 48 + lo; } else { line[n + 1] = 87 + lo; }
+        n = n + 2;
+        i = i + 1;
+    }
+    return n;
+}
+
+/// GROUPSTAT lines on stderr, once a second while CS_K_GSTATS is set: one per link that is not IDLE (who it carries,
+/// frames sent to it and received from it, its underruns, the peak |sample| it brought, tone frames that came back as
+/// my own voice) and one for the group (state, members up, the mix's frames, clipped samples and peak).
+fn csg_stats(s: []u8, now: u64) -> void {
+    const base : u64 = cs_aud(s) - @as(u64, CS_AUD);
+    var line : [320]u8 = undefined;
+    var k : usize = 0;
+    const nl : usize = cs_links(s);
+    while (k < nl) {
+        const a : usize = k * CS_LEN;
+        if (cs_lstate(s, k) != CK_IDLE) {
+            var n : usize = put_bytes(line[0..320], 0, "GROUPSTAT t=");
+            n = put_dec(line[0..320], n, now);
+            n = put_bytes(line[0..320], n, " me=");
+            n = csg_hex4(line[0..320], n, s[EP_ME..EP_ME + 10]);
+            n = put_bytes(line[0..320], n, " link=");
+            n = put_dec(line[0..320], n, @as(u64, k));
+            n = put_bytes(line[0..320], n, " peer=");
+            n = csg_hex4(line[0..320], n, s[a + EP_PEER..a + EP_PEER + 10]);
+            n = put_bytes(line[0..320], n, " st=");
+            n = put_dec(line[0..320], n, @as(u64, cs_lstate(s, k)));
+            n = put_bytes(line[0..320], n, " sent_to=");
+            n = put_dec(line[0..320], n, get_u64(s, a + CS_SLOTS + @as(usize, CS_ST_SENT) * 8));
+            n = put_bytes(line[0..320], n, " recv_from=");
+            n = put_dec(line[0..320], n, get_u64(s, a + CS_SLOTS + @as(usize, CS_ST_ACCEPTED) * 8));
+            n = put_bytes(line[0..320], n, " under=");
+            n = put_dec(line[0..320], n, cbp_get(base + @as(u64, a) + @as(u64, CS_AUD) + 32));
+            n = put_bytes(line[0..320], n, " peak=");
+            n = put_dec(line[0..320], n, get_u64(s, a + CS_SLOTS + @as(usize, CS_ST_ABS_PEAK) * 8));
+            n = put_bytes(line[0..320], n, " echo=");
+            n = put_dec(line[0..320], n, get_u64(s, a + CS_GRP + @as(usize, LG_ECHO) * 8));
+            n = put_bytes(line[0..320], n, " tone_ok=");
+            n = put_dec(line[0..320], n, get_u64(s, a + CS_GRP + @as(usize, LG_TONE_OK) * 8));
+            n = put_bytes(line[0..320], n, " bad=");
+            n = put_dec(line[0..320], n, get_u64(s, a + CS_SLOTS + @as(usize, CS_ST_BAD_CONTENT) * 8));
+            n = put_bytes(line[0..320], n, " aead=");
+            n = put_dec(line[0..320], n, get_u64(s, a + CS_SLOTS + @as(usize, CS_ST_REJ_AEAD) * 8));
+            n = put_bytes(line[0..320], n, "\n");
+            sys_write(2, line[0..n], @as(u64, n));
+        }
+        k = k + 1;
+    }
+    var n2 : usize = put_bytes(line[0..320], 0, "GROUP t=");
+    n2 = put_dec(line[0..320], n2, now);
+    n2 = put_bytes(line[0..320], n2, " me=");
+    n2 = csg_hex4(line[0..320], n2, s[EP_ME..EP_ME + 10]);
+    n2 = put_bytes(line[0..320], n2, " state=");
+    n2 = put_dec(line[0..320], n2, cg(s, G_STATE));
+    n2 = put_bytes(line[0..320], n2, " up=");
+    n2 = put_dec(line[0..320], n2, cg(s, G_UP));
+    n2 = put_bytes(line[0..320], n2, " pending=");
+    n2 = put_dec(line[0..320], n2, cg(s, G_PEND));
+    n2 = put_bytes(line[0..320], n2, " gone=");
+    n2 = put_dec(line[0..320], n2, cg(s, G_GONE));
+    n2 = put_bytes(line[0..320], n2, " upmax=");
+    n2 = put_dec(line[0..320], n2, cg(s, G_UPMAX));
+    n2 = put_bytes(line[0..320], n2, " mixed=");
+    n2 = put_dec(line[0..320], n2, cg(s, G_MIXED));
+    n2 = put_bytes(line[0..320], n2, " mix_peak=");
+    n2 = put_dec(line[0..320], n2, cg(s, G_MIX_PEAK));
+    n2 = put_bytes(line[0..320], n2, " clipped=");
+    n2 = put_dec(line[0..320], n2, cg(s, G_CLIP));
+    n2 = put_bytes(line[0..320], n2, " under_all=");
+    n2 = put_dec(line[0..320], n2, csg_under(s));
+    n2 = put_bytes(line[0..320], n2, " full_since=");
+    n2 = put_dec(line[0..320], n2, cg(s, G_FULL_MS));
+    n2 = put_bytes(line[0..320], n2, "\n");
+    sys_write(2, line[0..n2], @as(u64, n2));
+}
+
+/// The group manager, at most every 20 ms. It takes in the member lists that arrived, calls the members it is to call
+/// (a pick at once; a name learnt from a list when its own fingerprint is the lower one, or after GR_WAIT_MS),
+/// computes the group's state from the links, sends the list to a link that has not seen the current one, lets the
+/// further links answer by themselves under the test aid, and lets this member leave on the test aid's schedule.
+fn csg_tick(s: []u8, now: u64) -> void {
+    if (now < cg(s, G_TICK_MS) + 20) { return; }
+    cgp(s, G_TICK_MS, now);
+    const nl : usize = cs_links(s);
+    var j : usize = 0;
+    while (j < nl) {
+        const a : usize = j * CS_LEN;
+        const ln : usize = @as(usize, @intCast(get_u64(s, a + CS_GRP + @as(usize, LG_LIST_LEN) * 8)));
+        if (ln > 0) {
+            var lb : [72]u8 = undefined;
+            var q : usize = 0;
+            while (q < ln and q < 72) {
+                lb[q] = s[a + CS_GRP + CS_GBODY + q];
+                q = q + 1;
+            }
+            put_u64(s, a + CS_GRP + @as(usize, LG_LIST_LEN) * 8, 0);
+            if (gr_list_ok(lb[0..ln])) {
+                var i : usize = 0;
+                while (i < gr_list_count(lb[0..ln])) {
+                    const at : usize = GR_LIST_HDR + i * GR_ENTRY;
+                    if (!ck_same(lb[at..at + 10], s[EP_ME..EP_ME + 10])) {
+                        csg_member(s, lb[at..at + 10], gr_list_ip(lb[0..ln], i), gr_list_port(lb[0..ln], i), false, now);
+                    }
+                    i = i + 1;
+                }
+            }
+        }
+        j = j + 1;
+    }
+    if (cg(s, G_ON) == 0) { return; }
+    // the further links answer and confirm by themselves (test aid)
+    if (cs_g(s, CS_K_GAUTO) != 0) {
+        j = 1;
+        while (j < nl) {
+            const st : u32 = cs_lstate(s, j);
+            const sub_t : u64 = get_u64(s, j * CS_LEN + CS_SLOTS + @as(usize, CS_T_STATE) * 8);
+            if (now >= sub_t + 2000) {
+                if (st == CK_RINGING) { cs_answer(s[j * CS_LEN..(j + 1) * CS_LEN]); }
+                if (st == CK_VERIFY) { cs_confirm(s[j * CS_LEN..(j + 1) * CS_LEN], true); }
+            }
+            j = j + 1;
+        }
+    }
+    // the members
+    var pend : u32 = 0;
+    var up : u32 = 0;
+    var gone : u32 = 0;
+    var m : usize = 0;
+    var fp : [10]u8 = undefined;
+    while (m < GR_PEERS) {
+        if (gm_used(s, m)) {
+            gm_fp(s, m, fp[0..10]);
+            var lj : usize = nl;
+            var k : usize = 0;
+            while (k < nl) {
+                if (cs_lstate(s, k) != CK_IDLE and ck_same(s[k * CS_LEN + EP_PEER..k * CS_LEN + EP_PEER + 10], fp[0..10])) { lj = k; }
+                k = k + 1;
+            }
+            const has : bool = lj < nl;
+            var lst : u32 = CK_IDLE;
+            if (has) { lst = cs_lstate(s, lj); }
+            var c : u64 = cg(s, gm_slot(m) + 2);
+            if (has and lst == CK_ACTIVE) { c = c | 2; }
+            var stt : u32 = gm_status(has, lst, (c & 2) != 0);
+            const tries : u64 = (c >> 8) & 255;
+            const last : u64 = c >> 16;
+            if (stt == GM_KNOWN and tries > 0) { stt = GM_FAILED; }
+            if (stt == GM_KNOWN and gm_ip(s, m) != 0) {
+                var waited : u64 = 0;
+                if (now > last) { waited = now - last; }
+                if (gr_should_dial(s[EP_ME..EP_ME + 10], fp[0..10], (c & 1) != 0, waited)) {
+                    const f : usize = csg_free_link(s, nl);
+                    var ok : bool = false;
+                    if (f < nl) {
+                        if (f == 0) {
+                            ok = cs_call(s, gm_ip(s, m), gm_port(s, m), fp[0..10]);
+                        } else {
+                            ok = cs_call(s[f * CS_LEN..(f + 1) * CS_LEN], gm_ip(s, m), gm_port(s, m), fp[0..10]);
+                        }
+                    }
+                    if (ok) {
+                        c = (c & 255) | ((tries + 1) << 8) | (now << 16);
+                        stt = GM_LINKING;
+                    }
+                }
+            }
+            cgp(s, gm_slot(m) + 2, c);
+            if (gm_pending(stt)) { pend = pend + 1; } else if (stt == GM_UP) { up = up + 1; } else { gone = gone + 1; }
+        }
+        m = m + 1;
+    }
+    cgp(s, G_PEND, @as(u64, pend));
+    cgp(s, G_UP, @as(u64, up));
+    cgp(s, G_GONE, @as(u64, gone));
+    if (@as(u64, up) > cg(s, G_UPMAX)) { cgp(s, G_UPMAX, @as(u64, up)); }
+    const gs : u32 = gr_state(cg(s, G_STARTED) != 0, pend, up, gone);
+    cgp(s, G_STATE, @as(u64, gs));
+    if (gs == GR_FULL) {
+        if (cg(s, G_FULL_MS) == 0) { cgp(s, G_FULL_MS, now); }
+        cga(s, G_FULL_TICKS, 1);
+    }
+    // the list, to every link that has not seen the current one
+    j = 0;
+    while (j < nl) {
+        if (cs_lstate(s, j) == CK_ACTIVE and get_u64(s, j * CS_LEN + CS_GRP + @as(usize, LG_SENTVER) * 8) != cg(s, G_VER)) {
+            csg_send_list(s, j);
+            put_u64(s, j * CS_LEN + CS_GRP + @as(usize, LG_SENTVER) * 8, cg(s, G_VER));
+        }
+        j = j + 1;
+    }
+    // a finished call on a further link is cleared a little later, so its link can take the next member
+    j = 1;
+    while (j < nl) {
+        const st2 : u32 = cs_lstate(s, j);
+        if ((st2 == CK_ENDED or st2 == CK_FAILED) and now >= get_u64(s, j * CS_LEN + CS_SLOTS + @as(usize, CS_T_STATE) * 8) + 1500) {
+            cs_dismiss(s[j * CS_LEN..(j + 1) * CS_LEN]);
+        }
+        j = j + 1;
+    }
+    const ls : u64 = cs_g(s, CS_K_GLEAVE_S);
+    if (ls != 0 and cg(s, G_FULL_MS) != 0 and now >= cg(s, G_FULL_MS) + ls * 1000 and cg(s, G_LEFT) == 0) { csg_leave(s); return; }
+    if (cs_g(s, CS_K_GSTATS) != 0 and now >= cg(s, G_STAT_MS) + 1000) {
+        cgp(s, G_STAT_MS, now);
+        csg_stats(s, now);
+    }
+}
+
+/// Once per poll: the devices follow the links, the microphone ring goes to every link that carries media, TONE mode
+/// plays its software speaker, then the group manager runs.
+fn csg_pump(s: []u8, now: u64) -> void {
+    const nl : usize = cs_links(s);
+    const act : u32 = cs_n_active(s);
+    if (nl > 1) {
+        if (act > 0 and cg(s, G_AUDIO_RUN) == 0) { cs_audio_start(s); }
+        if (act == 0 and cg(s, G_AUDIO_RUN) == 1) { cs_audio_stop(s); }
+    }
+    if (act > 0) {
+        const mode : u64 = cs_g(s, CS_MODE);
+        if (mode == @as(u64, CS_AUDIO_TEST) or mode == @as(u64, CS_AUDIO_TONE)) { cs_tone_tick(s); }
+        const pm : u64 = cs_aud(s);
+        const w : u64 = cbp_get(pm + 16);
+        var k : usize = 0;
+        while (k < nl) {
+            if (cs_lstate(s, k) == CK_ACTIVE) {
+                if (k == 0) { cs_send_media(s, pm, w); } else { cs_send_media(s[k * CS_LEN..(k + 1) * CS_LEN], pm, w); }
+            }
+            k = k + 1;
+        }
+        cbp_put(pm + 24, w);
+        if (mode == @as(u64, CS_AUDIO_TONE)) { csg_vtick(s, now); }
+    }
+    if (nl > 1) { csg_tick(s, now); }
+}
+
 // ---------------------------------------------------------------- the poll
 
-pub fn cs_poll(s: []u8) -> u32 {
-    if (!cs_live(s)) { return CS_EV_NONE; }
-    var rx : [2048]u8 = undefined;
-    var from : [16]u8 = undefined;
-    var fl : [4]u8 = undefined;
-    var got : u32 = 0;
-    while (got < 256) {
-        ck_wipe(from[0..16]);
-        fl[0] = 16; fl[1] = 0; fl[2] = 0; fl[3] = 0;
-        const r : i64 = ckh_recvfrom(cs_fd(s), rx[0..2048], 2048, 0, sys_addr(from[0..16], from[0..16], 0), sys_addr(fl[0..4], fl[0..4], 0));
-        if (r <= 0) { break; }
-        cs_on_packet(s, rx[0..@as(usize, @intCast(r))], from[0..16]);
-        cs_sync(s);
-        got = got + 1;
+/// Which link of a window slice a datagram belongs to. A one to one session, and any window with no group open, has
+/// one link: 0. In a group a datagram goes to the link that names its sender; an INVITE from a listed member that
+/// no link carries takes the first free link; everything else is link 0's, as before.
+fn cs_route(s: []u8, m: []const u8) -> usize {
+    const nl : usize = cs_links(s);
+    if (nl <= 1 or cg(s, G_ON) == 0 or m.len < CK_HDR) { return 0; }
+    var named : usize = nl;
+    var k : usize = 0;
+    while (k < nl) {
+        if (cs_lstate(s, k) != CK_IDLE and ck_same(s[k * CS_LEN + EP_PEER..k * CS_LEN + EP_PEER + 10], m[8..18])) {
+            if (named == nl) { named = k; }
+        }
+        k = k + 1;
     }
-    const now : u64 = ckh_ms();
+    if (named < nl) { return named; }
+    if (ck_hdr_type(m) == CK_T_INVITE and gm_find(s, m[8..18]) < GR_PEERS) {
+        const f : usize = csg_free_link(s, nl);
+        if (f < nl) { return f; }
+    }
+    return 0;
+}
+
+/// The handshake resends and the timeouts of one link.
+fn cs_link_tick(s: []u8, now: u64) -> void {
     const st : u32 = ckh_state(s[0..EP_LEN]);
     // the caller repeats its unanswered handshake message (INVITE, or REVEAL and its CONFIRM) every 200 ms
     if (ckh_caller(s[0..EP_LEN]) and (st == CK_CALLING or st == CK_VERIFY) and now - cs_g(s, CS_T_RESEND) >= 200) {
@@ -968,9 +1820,42 @@ pub fn cs_poll(s: []u8) -> u32 {
         cs_p(s, CS_REASON, @as(u64, cs_timeout_reason(st)));
         ckh_go(s[0..EP_LEN], CK_EV_TIMEOUT);
     }
-    if (ckh_state(s[0..EP_LEN]) == CK_ACTIVE) {
-        if (cs_g(s, CS_MODE) == @as(u64, CS_AUDIO_TEST)) { cs_tone_tick(s); }
-        cs_send_media(s);
+}
+
+pub fn cs_poll(s: []u8) -> u32 {
+    if (!cs_live(s)) { return CS_EV_NONE; }
+    const nl : usize = cs_links(s);
+    var rx : [2048]u8 = undefined;
+    var from : [16]u8 = undefined;
+    var fl : [4]u8 = undefined;
+    var got : u32 = 0;
+    while (got < 256) {
+        ck_wipe(from[0..16]);
+        fl[0] = 16; fl[1] = 0; fl[2] = 0; fl[3] = 0;
+        const r : i64 = ckh_recvfrom(cs_fd(s), rx[0..2048], 2048, 0, sys_addr(from[0..16], from[0..16], 0), sys_addr(fl[0..4], fl[0..4], 0));
+        if (r <= 0) { break; }
+        const k : usize = cs_route(s, rx[0..@as(usize, @intCast(r))]);
+        if (k == 0) {
+            cs_on_packet(s, rx[0..@as(usize, @intCast(r))], from[0..16]);
+            cs_sync(s);
+        } else {
+            cs_on_packet(s[k * CS_LEN..(k + 1) * CS_LEN], rx[0..@as(usize, @intCast(r))], from[0..16]);
+            cs_sync(s[k * CS_LEN..(k + 1) * CS_LEN]);
+        }
+        got = got + 1;
+    }
+    const now : u64 = ckh_ms();
+    cs_link_tick(s, now);
+    var j : usize = 1;
+    while (j < nl) {
+        cs_link_tick(s[j * CS_LEN..(j + 1) * CS_LEN], now);
+        j = j + 1;
+    }
+    csg_pump(s, now);
+    j = 1;
+    while (j < nl) {
+        cs_sync(s[j * CS_LEN..(j + 1) * CS_LEN]);
+        j = j + 1;
     }
     cs_sync(s);
     return cs_pop(s);
@@ -985,7 +1870,11 @@ test the_block_holds_its_parts_without_overlap {
     assert CS_L2 + 128 <= CS_PADDR;
     assert CS_PADDR + 16 <= CS_EVQ;
     assert CS_EVQ + 16 <= CS_AUD;
-    assert CS_AUD + CBP_F_BYTES == CS_LEN;
+    assert CS_AUD + CBP_F_BYTES == CS_GRP;
+    assert CS_GRP + CS_GRP_LEN == CS_LEN;
+    assert CS_GRP + CS_GBODY + GR_LIST_MAX <= CS_GRP + CS_GRP_LEN;
+    assert G_MEM + 3 * 3 <= 96;
+    assert 96 * 8 <= CS_GBODY;
     assert CS_K_JB_MAX < 64;
 }
 
@@ -1059,4 +1948,93 @@ test the_test_pattern_reads_back_and_is_never_silent {
     assert cs_tone_ok(a[0..960], 12345, 65) == false;
     ck_wipe(a[0..960]);
     assert cs_silent(a[0..960]);
+}
+
+test the_tone_frame_names_its_sender_and_reads_back {
+    var a : [960]u8 = undefined;
+    cs_sine_make(a[0..960], 37, 6000);
+    assert cs_sine_tag(a[0..960]) == 37;
+    assert cs_sine_ok(a[0..960], 37);
+    assert cs_sine_ok(a[0..960], 38) == false;
+    assert cs_silent(a[0..960]) == false;
+    // the amplitude it carries is the amplitude it has: the peak of |sample| is the amplitude (samples 0 and 1 hold tag and amplitude)
+    var pk : u64 = 0;
+    var i : usize = 4;
+    while (i < 960) {
+        const v : u64 = gr_abs16(gr_s16(a[i], a[i + 1]));
+        if (v > pk) { pk = v; }
+        i = i + 2;
+    }
+    assert pk == 6000;
+    a[500] = a[500] ^ 1;
+    assert cs_sine_ok(a[0..960], 37) == false;
+    // a frame made at another amplitude still reads back against its own tag
+    cs_sine_make(a[0..960], 200, 32767);
+    assert cs_sine_ok(a[0..960], 200);
+    assert cs_sine_tag(a[0..960]) == 200;
+    // not a tone frame
+    cs_tone(a[0..960], 5, 65);
+    assert cs_sine_ok(a[0..960], 65) == false;
+}
+
+test two_members_of_three_never_add_up_past_the_ceiling {
+    // two equal voices at the largest amplitude: the sum is held, never wrapped to the other sign
+    var x : [960]u8 = undefined;
+    var y : [960]u8 = undefined;
+    cs_sine_make(x[0..960], 1, 32000);
+    cs_sine_make(y[0..960], 1, 32000);
+    var i : usize = 4;
+    var held : u32 = 0;
+    var peak : u64 = 0;
+    while (i < 960) {
+        const sum : i64 = gr_s16(x[i], x[i + 1]) + gr_s16(y[i], y[i + 1]);
+        const c : i64 = gr_clamp16(sum);
+        if (c != sum) { held = held + 1; }
+        if (gr_abs16(c) > peak) { peak = gr_abs16(c); }
+        // the sign of the sum of two equal samples is the sign of the sample
+        if (gr_s16(x[i], x[i + 1]) > 0) { assert c > 0; }
+        if (gr_s16(x[i], x[i + 1]) < 0) { assert c < 0; }
+        i = i + 2;
+    }
+    assert held > 0;
+    assert peak == 32767 or peak == 32768;
+    // quiet voices (the test default) leave a wide margin
+    cs_sine_make(x[0..960], 1, 6000);
+    cs_sine_make(y[0..960], 2, 6000);
+    peak = 0;
+    i = 4;
+    while (i < 960) {
+        const c2 : i64 = gr_clamp16(gr_s16(x[i], x[i + 1]) + gr_s16(y[i], y[i + 1]));
+        if (gr_abs16(c2) > peak) { peak = gr_abs16(c2); }
+        i = i + 2;
+    }
+    assert peak <= 12000;
+}
+
+test a_window_slice_holds_one_to_three_links_and_a_member_survives_the_table {
+    var a : [10]u8 = undefined;
+    ck_fill_session(a[0..10], 3);
+    var blk : [90752]u8 = undefined;
+    ck_wipe(blk[0..CS_LEN]);
+    assert cs_links(blk[0..CS_LEN]) == 1;
+    assert cs_links(blk[0..90752]) == 1;
+    // the member table keeps fingerprint, address and port in two words
+    gm_put(blk[0..CS_LEN], 0, a[0..10], 3232239368, 47743);
+    cgp(blk[0..CS_LEN], gm_slot(0) + 2, 4);
+    var b : [10]u8 = undefined;
+    gm_fp(blk[0..CS_LEN], 0, b[0..10]);
+    assert ck_same(a[0..10], b[0..10]);
+    assert gm_ip(blk[0..CS_LEN], 0) == 3232239368 and gm_port(blk[0..CS_LEN], 0) == 47743;
+    assert gm_find(blk[0..CS_LEN], a[0..10]) == 0;
+    a[9] = a[9] ^ 1;
+    assert gm_find(blk[0..CS_LEN], a[0..10]) == GR_PEERS;
+    assert gm_used(blk[0..CS_LEN], 1) == false;
+}
+
+fn ck_fill_session(b: []u8, base: u8) -> void {
+    var i : usize = 0;
+    while (i < b.len) {
+        b[i] = base +% @as(u8, @intCast(i * 7 & 255));
+        i = i + 1;
+    }
 }

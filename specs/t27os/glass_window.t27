@@ -278,6 +278,12 @@ use t27os::call_view::cv_head_hit;
 use t27os::call_session::CS_LEN;
 use t27os::call_session::CS_AUDIO_DEV;
 use t27os::call_session::CS_AUDIO_TEST;
+use t27os::call_session::CS_AUDIO_TONE;
+use t27os::call_session::CS_K_GSTATS;
+use t27os::call_session::CS_K_GLEAVE_S;
+use t27os::call_session::CS_K_GAUTO;
+use t27os::call_session::CS_K_TONE_AMP;
+use t27os::call_session::cs_set;
 use t27os::call_session::CS_EV_NONE;
 use t27os::call_session::CS_EV_CALLING;
 use t27os::call_session::CS_EV_RINGING;
@@ -386,6 +392,7 @@ use t27os::friends_engine::fe_identity;
 use t27os::friends_engine::fe_net;
 use t27os::friends_engine::fe_tick;
 use t27os::friends_engine::fe_dial_done;
+use t27os::friends_engine::fe_group_tick;
 use t27os::friends_engine::fe_add;
 use t27os::friends_engine::fe_typed_key;
 use t27os::friends_engine::fe_call;
@@ -9106,6 +9113,8 @@ pub fn cl_boot(cl: []u8, s: []u8) -> void {
     if (cl_env("T27OS_CALL_AUTOTEST", e[0..32]) > 0) { cl[CL_AUTO] = 1; }
     n = cl_env("T27OS_CALL_AUDIO", e[0..32]);
     if (n == 4 and e[0] == 116 and e[1] == 101 and e[2] == 115 and e[3] == 116) { audio = CS_AUDIO_TEST; }
+    // test aid: T27OS_CALL_AUDIO=tone is a quiet triangle wave that names its sender, mixed by a software speaker
+    if (n == 4 and e[0] == 116 and e[1] == 111 and e[2] == 110 and e[3] == 101) { audio = CS_AUDIO_TONE; }
     // the fingerprint of this device's identity is the one the call frames name (a call is addressed to a key); a
     // damaged identity file is left as found and calls stay off
     var me : [10]u8 = undefined;
@@ -9115,6 +9124,15 @@ pub fn cl_boot(cl: []u8, s: []u8) -> void {
     }
     if (cs_open(s, me[0..10], bind, port, audio)) {
         cl[CL_UP] = 1;
+        // group call test aids (all off by default): GROUPSTAT lines with T27OS_CALL_STATS, T27OS_GROUP_LEAVE_AFTER=<s>
+        // (leave that many seconds after the group is whole), T27OS_GROUP_AUTO (the group's further links answer and
+        // confirm by themselves, like AUTOTEST does for the first), T27OS_CALL_TONE_AMP=<100..32767>
+        if (cl[CL_STATS] != 0) { cs_set(s, CS_K_GSTATS, 1); }
+        if (cl[CL_AUTO] != 0) { cs_set(s, CS_K_GAUTO, 1); }
+        n = cl_env("T27OS_GROUP_LEAVE_AFTER", e[0..32]);
+        if (n > 0) { cs_set(s, CS_K_GLEAVE_S, cl_port_of(e[0..32], n)); }
+        n = cl_env("T27OS_CALL_TONE_AMP", e[0..32]);
+        if (n > 0) { cs_set(s, CS_K_TONE_AMP, cl_port_of(e[0..32], n)); }
         rt_init(cl[FE_TONE .. FE_TONE + RT_BLOCK]);
         fe_net(cl, bind, port);
     } else {
@@ -9250,6 +9268,8 @@ pub fn cl_tick(cl: []u8, s: []u8, w: []u64) -> bool {
             fe_dial_done(cl);
         }
     }
+    // a group call named by T27OS_CALL_AUTODIAL and T27OS_CALL_AUTODIAL2 (a test aid; false at once when they are not set)
+    fe_group_tick(cl, s);
     if (cl[CL_AUTO] != 0) { cl_autotest(cl, s, w, ckh_ms()); }
     cl_ring(cl, s);
     cl_snapshot(cl, s, w, ckh_ms());
@@ -11196,7 +11216,7 @@ pub fn main() -> void {
     var clp : bool = false;
     // a call that rang during a tick after the event wait opens the panel at the top of the next pass
     var clring : bool = false;
-    var csv : [89728]u8 = undefined;
+    var csv : [272256]u8 = undefined;
     var clw : [10]u64 = undefined;
     var clz : usize = 0;
     while (clz < 74368) {
@@ -11208,7 +11228,7 @@ pub fn main() -> void {
         clw[clz] = 0;
         clz = clz + 1;
     }
-    cl_boot(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN]);
+    cl_boot(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN * 3]);
     var tgm : u32 = 0;
     while (tgm < M_COUNT) {
         tgv[TPG_Q_AFTER + tgm] = @as(u64, qb_nm());
@@ -11454,7 +11474,7 @@ pub fn main() -> void {
         var sug : u32 = shown_suggestion(suggest_for(sessions_in(ss, space), cur != SESSION_NONE, screen and ktpick != TERM_NONE, edone, space), dismissed);
         // CL. the call: every event of the session, then the snapshot draw() reads; a call that rings here opens the
         // CALL panel in the place of the other right-hand panels (it is never answered for the person)
-        if (cl_tick(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN], clw[0..10]) or clring) {
+        if (cl_tick(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN * 3], clw[0..10]) or clring) {
             clp = true;
             qp = false;
             god = false;
@@ -11633,11 +11653,11 @@ pub fn main() -> void {
                         const clv : u32 = @as(u32, tbv[TBO_CL + CL_VIEW]);
                         if (clv == CV_IDLE) {
                             // CL. the friends view: a hit is the invite, a friend's row, the add field and button, the debug part
-                            cl_front(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN], clw[0..10], fv_hit(mx, my, qp_left(sw), QP_W, WS_TOP, @as(u32, tbv[TBO_CL + FV_SHOWN]), tbv[TBO_CL + FV_DEBUG] != 0));
+                            cl_front(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN * 3], clw[0..10], fv_hit(mx, my, qp_left(sw), QP_W, WS_TOP, @as(u32, tbv[TBO_CL + FV_SHOWN]), tbv[TBO_CL + FV_DEBUG] != 0));
                         } else {
                             const cla : u32 = cv_action(clv, cv_hit(mx, my, qp_left(sw), QP_W, WS_TOP, clv));
                             if (cla != CV_A_FOCUS) { tbv[TBO_CL + CL_FOCUS] = 0; }
-                            cl_do(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN], clw[0..10], cla);
+                            cl_do(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN * 3], clw[0..10], cla);
                         }
                     }
                     tsince = 0;
@@ -12308,7 +12328,7 @@ pub fn main() -> void {
                     } else if (ck == KE_BACK) {
                         cl_back(tbv[TBO_CL .. TBO_CL + CL_CAP]);
                     } else if (ck == KE_SAVE) {
-                        cl_enter(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN], clw[0..10]);
+                        cl_enter(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN * 3], clw[0..10]);
                     } else if (ck == KE_PASTE) {
                         const cpb : u64 = msg0(cls("NSPasteboard"), sel("generalPasteboard"));
                         const cps : u64 = msg1(cpb, sel("stringForType:"), cf("public.utf8-plain-text"));
@@ -12627,7 +12647,7 @@ pub fn main() -> void {
         }
         tgv[TPG_QD_FLAGS] = qd_fl_with_keys(tgv[TPG_QD_FLAGS], qdk, sb_worst_light(sst[0..560]));
         // CL. and between the loop's slower parts, so no stretch of it keeps the call's socket waiting
-        if (cl_tick(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN], clw[0..10])) { clring = true; }
+        if (cl_tick(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN * 3], clw[0..10])) { clring = true; }
         if (oncall == false) {
             qd_tick(tgv[0..256], tbv[0..85504], dhb[0..dhn], now, sst[SST_QDASH] != 0 and screen);
             god_tick(tgv[0..256], tbv[0..65536], dhb[0..dhn], now, god, sst[SST_QRUN]);
@@ -13072,7 +13092,7 @@ pub fn main() -> void {
         if (pfp) { tbv[TBO_PF + PF_OPEN] = 1; } else { tbv[TBO_PF + PF_OPEN] = 0; }
         if (clp) { tbv[TBO_CL + CL_OPEN] = 1; } else { tbv[TBO_CL + CL_OPEN] = 0; }
         tbv[TBO_CL + FV_OPEN] = tbv[TBO_CL + CL_OPEN];
-        if (cl_tick(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN], clw[0..10])) { clring = true; }
+        if (cl_tick(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN * 3], clw[0..10])) { clring = true; }
         // U. the frame gate: fold what this frame shows into a key; an unchanged key with nothing
         // animating keeps the image already on the layer (frame_gate.t27)
         var fk : u64 = fg_mix(fg_mix(fg_mix(fg_mix(0, @as(u64, state)), @as(u64, hov)), fg_level(ma)), @as(u64, shown));
@@ -13155,7 +13175,7 @@ pub fn main() -> void {
         }
         if (fdraw) { vt_clean(tst[0..32]); }
         // CL. once more after the frame: a slow draw does not leave the call's socket and audio ring unread
-        if (cl_tick(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN], clw[0..10])) { clring = true; }
+        if (cl_tick(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN * 3], clw[0..10])) { clring = true; }
         // K. keep what the window shows: write it once a change has held still (window_keep.t27)
         const wk_fl : u64 = wk_flags(collapsed, dash, qp, god, dp, auto_open);
         const wk_k : u64 = fg_mix(wk_key(state, shown, task, space, ss, sp, cur, wk_fl, evn), @as(u64, hs));
