@@ -51,7 +51,7 @@ use t27os::call_session::csg_link;
 use t27os::call_session::csg_fout;
 use t27os::call_session::csg_pull;
 
-const GL : usize = 272256;
+const GL : usize = 496512;
 
 fn cgp_fp(f: []u8, who: u8) -> void {
     var i : usize = 0;
@@ -130,9 +130,9 @@ fn cgp_main() -> bool {
     cgp_fp(fa[0..10], 161);
     cgp_fp(fb[0..10], 177);
     cgp_fp(fc[0..10], 193);
-    var a : [272256]u8 = undefined;
-    var b : [272256]u8 = undefined;
-    var c : [272256]u8 = undefined;
+    var a : [496512]u8 = undefined;
+    var b : [496512]u8 = undefined;
+    var c : [496512]u8 = undefined;
     const oa : bool = cs_open(a[0..GL], fa[0..10], 2130706433, 47771, CS_AUDIO_TONE);
     const ob : bool = cs_open(b[0..GL], fb[0..10], 2130706433, 47772, CS_AUDIO_TONE);
     const oc : bool = cs_open(c[0..GL], fc[0..10], 2130706433, 47773, CS_AUDIO_TONE);

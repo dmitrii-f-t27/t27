@@ -1,0 +1,738 @@
+// SPDX-License-Identifier: Apache-2.0
+// specs/t27os/account_view.t27 -- what the ACCOUNT panel of the T27 OS window shows and what a click in it means. Pure
+// decisions only: no @extern, no socket, no clock. One place where a person sees themselves (picture, nickname), their
+// own key (the T27-... string a friend pastes), the state of this device (online or not, the port, the build) and the
+// friends (online or not, call, copy the key, remove after a confirmation, add by key). Owner, 2026-10-22: the person
+// copies their key, sends it to a friend by any means, the friend pastes it and calls; no address is ever typed.
+// Refs gHashTag/t27#11560.
+//
+// The panel is the IDLE view of the CALL panel's slot in a second mode (AC_ON = 1 in the CALL region of the text
+// store): the call views, the friends snapshot (friends_view), the engine (friends_engine) and the typing of the add
+// field are the ones of the CALL panel; PROFILE (profile.t27) keeps the picture. A call that rings or is up shows
+// its own view over the ACCOUNT mode and gives the panel back when it is dismissed.
+//
+// The key of a friend is made from the 10-byte fingerprint of the table row (invite_make): the same string the friend
+// copies from their own panel, check symbol included. "Online" means what friends_view says it means.
+// Flat namespace (the window build splices imported modules): every name here starts with ac_ / AC_.
+module T27osAccountView;
+
+use t27os::queen::QP_PAD;
+use t27os::call_view::CV_FIELD_H;
+use t27os::call_view::CV_BTN_H;
+use t27os::call_view::cv_field_x;
+use t27os::call_view::cv_field_w;
+use t27os::call_view::cv_btn_x;
+use t27os::call_view::cv_btn_w;
+use t27os::session_store::put_dec;
+use t27os::session_store::put_bytes;
+use t27os::keysync::fp_text;
+use t27os::keysync::FP_TEXT_LEN;
+use t27os::peer_identity::INVITE_LEN;
+use t27os::peer_identity::INV_OK;
+use t27os::peer_identity::INV_LEN;
+use t27os::peer_identity::INV_CHECK;
+use t27os::peer_identity::invite_make;
+use t27os::peer_identity::invite_parse;
+use t27os::friends_view::FV_INV;
+use t27os::friends_view::FV_COUNT;
+use t27os::friends_view::FV_SHOWN;
+use t27os::friends_view::FV_SCROLL;
+use t27os::friends_view::FV_ROWS_SNAP;
+use t27os::friends_view::FR_NICKLEN;
+use t27os::friends_view::FR_FP;
+use t27os::friends_view::FR_ONLINE;
+use t27os::friends_view::FN_BAD;
+use t27os::friends_view::FN_BAD_LEN;
+use t27os::friends_view::FN_BAD_CHECK;
+use t27os::friends_view::FR_AGO;
+use t27os::friends_view::FV_NEVER;
+use t27os::friends_view::fv_row_at;
+use t27os::friends_view::fv_find_fp;
+use t27os::friends_view::fv_get32;
+use t27os::friends_view::fv_put32;
+use t27os::friends_view::fv_in;
+use t27os::friends_view::fv_eq;
+use t27os::friends_view::fv_blank;
+use t27os::friends_view::fv_short_fp;
+use t27os::friends_view::fv_ago_text;
+
+// ---------------------------------------------------------------- 1. the state in the CALL region (below 256, folded)
+
+pub const AC_ON : usize = 170;
+pub const AC_CONF : usize = 171;
+pub const AC_CONF_FP : usize = 172;
+pub const AC_SECS : usize = 184;
+pub const AC_BOOT : usize = 188;
+pub const AC_BUILD : usize = 192;
+pub const AC_VERLEN : usize = 196;
+pub const AC_VER : usize = 197;
+pub const AC_VER_MAX : usize = 16;
+pub const AC_COPIES : usize = 216;
+pub const AC_LAST : usize = 220;
+pub const AC_END : usize = 224;
+
+/// What the last copy put on the clipboard (AC_LAST): nothing yet, this device's key, a friend's key.
+pub const AC_L_NONE : u32 = 0;
+pub const AC_L_MINE : u32 = 1;
+pub const AC_L_FRIEND : u32 = 2;
+
+pub fn ac_is_on(cl: []const u8) -> bool { return cl[AC_ON] != 0; }
+
+pub fn ac_copies(cl: []const u8) -> u64 { return fv_get32(cl, AC_COPIES); }
+
+/// Launch: the version text (at most AC_VER_MAX bytes), the build number and the second the app started.
+pub fn ac_boot(cl: []u8, ver: []const u8, vn: usize, build: u64, now: u64) -> void {
+    var n : usize = vn;
+    if (n > AC_VER_MAX) { n = AC_VER_MAX; }
+    var i : usize = 0;
+    while (i < n) {
+        cl[AC_VER + i] = ver[i];
+        i = i + 1;
+    }
+    cl[AC_VERLEN] = @as(u8, @intCast(n));
+    fv_put32(cl, AC_BUILD, build);
+    fv_put32(cl, AC_BOOT, now);
+}
+
+/// Every pass while the panel is open: the seconds the app has been up (the frame redraws when the number changes).
+pub fn ac_tick(cl: []u8, now: u64) -> void {
+    const b : u64 = fv_get32(cl, AC_BOOT);
+    if (b == 0 or now < b) { return; }
+    fv_put32(cl, AC_SECS, now - b);
+}
+
+/// One copy to the clipboard happened: counted, and which kind (the window writes the bytes with pb_copy).
+pub fn ac_note_copy(cl: []u8, kind: u32) -> void {
+    fv_put32(cl, AC_COPIES, fv_get32(cl, AC_COPIES) + 1);
+    cl[AC_LAST] = @as(u8, @intCast(kind));
+}
+
+// ---------------------------------------------------------------- 2. the key and the friends' keys (copy, pure part)
+
+/// This device's key as shown in the CALL region (FV_INV, filled by the engine): copied into out when it is a valid
+/// invite, the bytes written (INVITE_LEN), else 0. A panel without an identity copies nothing.
+pub fn ac_my_key(cl: []const u8, out: []u8) -> usize {
+    if (out.len < INVITE_LEN) { return 0; }
+    var fp : [10]u8 = undefined;
+    if (invite_parse(cl[FV_INV .. FV_INV + INVITE_LEN], fp[0..10]) != INV_OK) { return 0; }
+    var i : usize = 0;
+    while (i < INVITE_LEN) {
+        out[i] = cl[FV_INV + i];
+        i = i + 1;
+    }
+    return INVITE_LEN;
+}
+
+/// The key of the friend in shown row i, made from the row's fingerprint; 0 when there is no such row.
+pub fn ac_friend_key(cl: []const u8, i: usize, out: []u8) -> usize {
+    if (i >= @as(usize, cl[FV_SHOWN]) or i >= FV_ROWS_SNAP or out.len < INVITE_LEN) { return 0; }
+    const r : usize = fv_row_at(i);
+    return invite_make(cl[r + FR_FP .. r + FR_FP + 10], out);
+}
+
+/// Why the typed text is not a key, as the note code: wrong length, a wrong check symbol, or another fault. Called
+/// when the engine refused the add as FN_BAD.
+pub fn ac_bad_reason(typed: []const u8, n: usize) -> u32 {
+    if (n == 0) { return FN_BAD; }
+    var fp : [10]u8 = undefined;
+    const r : u32 = invite_parse(typed[0..n], fp[0..10]);
+    if (r == INV_LEN) { return FN_BAD_LEN; }
+    if (r == INV_CHECK) { return FN_BAD_CHECK; }
+    return FN_BAD;
+}
+
+// ---------------------------------------------------------------- 3. text
+
+/// "ONLINE  port 47735  discovery on", "ONLINE  port 47735  discovery OFF" or "OFFLINE  calls are off".
+pub fn ac_state_line(up: bool, net_up: bool, port: u64, out: []u8) -> usize {
+    if (up == false) { return put_bytes(out, 0, "OFFLINE  calls are off"); }
+    var n : usize = put_bytes(out, 0, "ONLINE  port ");
+    n = put_dec(out, n, port);
+    if (net_up) { return put_bytes(out, n, "  discovery on"); }
+    return put_bytes(out, n, "  discovery OFF");
+}
+
+/// "up 45 s", "up 3 min", "up 2 h 05 min", "up 3 d 4 h".
+pub fn ac_up_text(secs: u64, out: []u8) -> usize {
+    var n : usize = put_bytes(out, 0, "up ");
+    if (secs < 60) {
+        n = put_dec(out, n, secs);
+        return put_bytes(out, n, " s");
+    }
+    if (secs < 3600) {
+        n = put_dec(out, n, secs / 60);
+        return put_bytes(out, n, " min");
+    }
+    if (secs < 86400) {
+        const m : u64 = secs % 3600 / 60;
+        n = put_dec(out, n, secs / 3600);
+        n = put_bytes(out, n, " h ");
+        if (m < 10) { n = put_bytes(out, n, "0"); }
+        n = put_dec(out, n, m);
+        return put_bytes(out, n, " min");
+    }
+    n = put_dec(out, n, secs / 86400);
+    n = put_bytes(out, n, " d ");
+    n = put_dec(out, n, secs % 86400 / 3600);
+    return put_bytes(out, n, " h");
+}
+
+/// "v0.1.3  build 7037  up 3 min" from the region.
+pub fn ac_build_line(cl: []const u8, out: []u8) -> usize {
+    var n : usize = 0;
+    const vn : usize = @as(usize, cl[AC_VERLEN]);
+    if (vn > 0) {
+        n = put_bytes(out, n, "v");
+        var i : usize = 0;
+        while (i < vn and i < AC_VER_MAX) {
+            out[n + i] = cl[AC_VER + i];
+            i = i + 1;
+        }
+        n = n + i;
+        n = put_bytes(out, n, "  ");
+    }
+    n = put_bytes(out, n, "build ");
+    n = put_dec(out, n, fv_get32(cl, AC_BUILD));
+    n = put_bytes(out, n, "  ");
+    const u : usize = ac_up_text(fv_get32(cl, AC_SECS), out[n..out.len]);
+    return n + u;
+}
+
+/// "fp a944-ca2d-cee5-9d8e-6235": the short fingerprint of this device (keysync fp_text), 3 + FP_TEXT_LEN bytes.
+pub fn ac_fp_line(fp: []const u8, out: []u8) -> usize {
+    var n : usize = put_bytes(out, 0, "fp ");
+    const k : usize = fp_text(fp, out[n..out.len]);
+    if (k == 0) { return 0; }
+    return n + k;
+}
+
+/// The second line of a friend's row: "abcd-1234  online", "abcd-1234  offline, seen 10 min ago" or "abcd-1234  offline,
+/// never seen" (the short key of the friend, and when the friend was last met).
+pub fn ac_row_line(cl: []const u8, i: usize, out: []u8) -> usize {
+    const r : usize = fv_row_at(i);
+    var n : usize = fv_short_fp(cl[r + FR_FP .. r + FR_FP + 10], out);
+    if (cl[r + FR_ONLINE] != 0) { return put_bytes(out, n, "  online"); }
+    n = put_bytes(out, n, "  offline, ");
+    const ago : u64 = fv_get32(cl, r + FR_AGO);
+    if (ago == FV_NEVER) { return put_bytes(out, n, "never seen"); }
+    n = put_bytes(out, n, "seen ");
+    return n + fv_ago_text(ago, out[n..out.len]);
+}
+
+/// Where a key starts in pasted text: the first "T27-" (any case), so "my key: T27-AAAA-..." pastes as the key; 0 when
+/// the text has none (it is then taken from its start).
+pub fn ac_paste_find(src: []const u8, n: usize) -> usize {
+    var i : usize = 0;
+    while (i + 4 <= n) {
+        if ((src[i] == 84 or src[i] == 116) and src[i + 1] == 50 and src[i + 2] == 55 and src[i + 3] == 45) { return i; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// "1-5 of 12" for the friends window: the first and last friend in view among all.
+pub fn ac_range_text(scroll: usize, drawn: usize, count: usize, out: []u8) -> usize {
+    if (count == 0 or drawn == 0) { return 0; }
+    var n : usize = put_dec(out, 0, @as(u64, scroll) + 1);
+    n = put_bytes(out, n, "-");
+    n = put_dec(out, n, @as(u64, scroll) + @as(u64, drawn));
+    n = put_bytes(out, n, " of ");
+    return put_dec(out, n, @as(u64, count));
+}
+
+// ---------------------------------------------------------------- 4. the long list: how many rows fit, where the window sits
+
+pub const AC_ROWS_MAX : usize = 5;
+
+/// The most rows the friends part shows: as many as fit in the panel's height h, at least 1, at most AC_ROWS_MAX.
+pub fn ac_rows_vis(h: f64) -> usize {
+    const room : f64 = h - AC_ROWS_END_FROM_BOTTOM - AC_ROWS_Y;
+    if (room < AC_ROW_H) { return 1; }
+    var n : usize = @as(usize, @intFromFloat(room / AC_ROW_H));
+    if (n > AC_ROWS_MAX) { n = AC_ROWS_MAX; }
+    if (n < 1) { n = 1; }
+    return n;
+}
+
+/// The highest first-row index: the last friend is the last row in view.
+pub fn ac_max_scroll(count: usize, vis: usize) -> usize {
+    if (count > vis) { return count - vis; }
+    return 0;
+}
+
+pub fn ac_clamp_scroll(sc: usize, count: usize, vis: usize) -> usize {
+    const m : usize = ac_max_scroll(count, vis);
+    if (sc > m) { return m; }
+    return sc;
+}
+
+/// A wheel step or an arrow: move the window by `up` rows up (up = true) or down, kept inside the list.
+pub fn ac_scroll_by(sc: usize, step: usize, up: bool, count: usize, vis: usize) -> usize {
+    if (up) {
+        if (sc > step) { return ac_clamp_scroll(sc - step, count, vis); }
+        return 0;
+    }
+    return ac_clamp_scroll(sc + step, count, vis);
+}
+
+/// How many rows the window draws: the rows the engine's snapshot holds from the first one in view, at most vis.
+pub fn ac_rows_drawn(shown: usize, vis: usize) -> usize {
+    if (shown > vis) { return vis; }
+    return shown;
+}
+
+// ---------------------------------------------------------------- 5. the confirmation to remove a friend
+
+pub fn ac_conf_set(cl: []u8, fp: []const u8) -> void {
+    var i : usize = 0;
+    while (i < 10) {
+        cl[AC_CONF_FP + i] = fp[i];
+        i = i + 1;
+    }
+    cl[AC_CONF] = 1;
+}
+
+pub fn ac_conf_clear(cl: []u8) -> void {
+    cl[AC_CONF] = 0;
+    var i : usize = 0;
+    while (i < 10) {
+        cl[AC_CONF_FP + i] = 0;
+        i = i + 1;
+    }
+}
+
+/// The shown row waiting for its YES or NO; FV_ROWS_SNAP when none (or when that friend is no longer in view).
+pub fn ac_conf_row(cl: []const u8) -> usize {
+    if (cl[AC_CONF] == 0) { return FV_ROWS_SNAP; }
+    return fv_find_fp(cl, cl[AC_CONF_FP .. AC_CONF_FP + 10]);
+}
+
+// ---------------------------------------------------------------- 6. boxes (t = panel top, l = its left, w = QP_W, h = panel height)
+
+pub const AC_AV_R : f64 = 22.0;
+pub const AC_AV_CY : f64 = 64.0;
+pub const AC_NICK_Y : f64 = 46.0;
+pub const AC_NICK_H : f64 = 26.0;
+pub const AC_SAVE_W : f64 = 56.0;
+pub const AC_NICK_GAP : f64 = 6.0;
+pub const AC_PIC_Y : f64 = 78.0;
+pub const AC_PIC_H : f64 = 16.0;
+pub const AC_PIC_W : f64 = 120.0;
+pub const AC_KEY_LABEL_Y : f64 = 118.0;
+pub const AC_KEY_Y : f64 = 124.0;
+pub const AC_KEY_H : f64 = 26.0;
+pub const AC_KEY_BASE : f64 = 141.5;
+pub const AC_FP_BASE : f64 = 173.0;
+pub const AC_COPY_Y : f64 = 156.0;
+pub const AC_COPY_W : f64 = 84.0;
+pub const AC_STATE_Y : f64 = 202.0;
+pub const AC_BUILD_Y : f64 = 216.0;
+pub const AC_FR_LABEL_Y : f64 = 236.0;
+pub const AC_ROWS_Y : f64 = 242.0;
+pub const AC_ROW_H : f64 = 28.0;
+pub const AC_ARROW_W : f64 = 20.0;
+pub const AC_ARROW_H : f64 = 16.0;
+/// The room the add part takes from the panel's bottom up to the end of the friends rows.
+pub const AC_ROWS_END_FROM_BOTTOM : f64 = 138.0;
+pub const AC_ADD_LABEL_FROM_BOTTOM : f64 = 114.0;
+pub const AC_IFIELD_FROM_BOTTOM : f64 = 108.0;
+pub const AC_BTN_FROM_BOTTOM : f64 = 76.0;
+pub const AC_NOTE_FROM_BOTTOM : f64 = 32.0;
+
+pub const AC_ZONE_COPY_W : f64 = 32.0;
+pub const AC_ZONE_DEL_W : f64 = 18.0;
+pub const AC_ZONE_GAP : f64 = 4.0;
+pub const AC_ZONE_YES_W : f64 = 34.0;
+
+pub const AC_H_NONE : u32 = 0;
+pub const AC_H_NICK : u32 = 1;
+pub const AC_H_SAVE : u32 = 2;
+pub const AC_H_PICTURE : u32 = 3;
+pub const AC_H_KEY : u32 = 4;
+pub const AC_H_COPYKEY : u32 = 5;
+pub const AC_H_UP : u32 = 6;
+pub const AC_H_DOWN : u32 = 7;
+pub const AC_H_IFIELD : u32 = 8;
+pub const AC_H_PASTE : u32 = 9;
+pub const AC_H_ADD : u32 = 10;
+/// Per row i (0..15): the row (a click calls), copy that friend's key, remove (asks), YES, NO.
+pub const AC_H_ROW : u32 = 16;
+pub const AC_H_FCOPY : u32 = 32;
+pub const AC_H_DEL : u32 = 48;
+pub const AC_H_YES : u32 = 64;
+pub const AC_H_NO : u32 = 80;
+
+pub fn ac_av_cx(l: f64) -> f64 { return l + QP_PAD + AC_AV_R; }
+pub fn ac_av_cy(t: f64) -> f64 { return t + AC_AV_CY; }
+pub fn ac_nick_x(l: f64) -> f64 { return l + QP_PAD + 2.0 * AC_AV_R + 12.0; }
+pub fn ac_nick_w(w: f64) -> f64 { return w - 2.0 * QP_PAD - 2.0 * AC_AV_R - 12.0 - AC_NICK_GAP - AC_SAVE_W; }
+pub fn ac_save_x(l: f64, w: f64) -> f64 { return l + w - QP_PAD - AC_SAVE_W; }
+pub fn ac_row_y(t: f64, i: usize) -> f64 { return t + AC_ROWS_Y + AC_ROW_H * @as(f64, @floatFromInt(i)); }
+pub fn ac_up_x(l: f64, w: f64) -> f64 { return l + w - QP_PAD - 2.0 * AC_ARROW_W - 4.0; }
+pub fn ac_down_x(l: f64, w: f64) -> f64 { return l + w - QP_PAD - AC_ARROW_W; }
+pub fn ac_arrow_y(t: f64) -> f64 { return t + AC_FR_LABEL_Y - 12.0; }
+pub fn ac_add_label_y(t: f64, h: f64) -> f64 { return t + h - AC_ADD_LABEL_FROM_BOTTOM; }
+pub fn ac_ifield_y(t: f64, h: f64) -> f64 { return t + h - AC_IFIELD_FROM_BOTTOM; }
+pub fn ac_btn_y(t: f64, h: f64) -> f64 { return t + h - AC_BTN_FROM_BOTTOM; }
+pub fn ac_note_y(t: f64, h: f64) -> f64 { return t + h - AC_NOTE_FROM_BOTTOM; }
+pub fn ac_copy_x(l: f64, w: f64) -> f64 { return l + w - QP_PAD - AC_COPY_W; }
+
+/// The zones at the right end of a row: remove, copy-key; and while the row asks for its confirmation, YES and NO.
+pub fn ac_del_x(l: f64, w: f64) -> f64 { return l + w - QP_PAD - AC_ZONE_DEL_W; }
+pub fn ac_fcopy_x(l: f64, w: f64) -> f64 { return ac_del_x(l, w) - AC_ZONE_GAP - AC_ZONE_COPY_W; }
+pub fn ac_no_x(l: f64, w: f64) -> f64 { return l + w - QP_PAD - AC_ZONE_YES_W; }
+pub fn ac_yes_x(l: f64, w: f64) -> f64 { return ac_no_x(l, w) - AC_ZONE_GAP - AC_ZONE_YES_W; }
+
+/// What a point means. `drawn` rows are in view (ac_rows_drawn), `count` friends in all, `vis` rows fit, `conf` is the
+/// row waiting for its confirmation (FV_ROWS_SNAP when none).
+pub fn ac_hit(x: f64, y: f64, l: f64, w: f64, t: f64, h: f64, drawn: usize, count: usize, vis: usize, conf: usize) -> u32 {
+    if (fv_in(x, y, l + QP_PAD, t + AC_KEY_Y, w - 2.0 * QP_PAD, AC_KEY_H)) { return AC_H_KEY; }
+    if (fv_in(x, y, ac_copy_x(l, w), t + AC_COPY_Y, AC_COPY_W, CV_BTN_H)) { return AC_H_COPYKEY; }
+    if (fv_in(x, y, ac_nick_x(l), t + AC_NICK_Y, ac_nick_w(w), AC_NICK_H)) { return AC_H_NICK; }
+    if (fv_in(x, y, ac_save_x(l, w), t + AC_NICK_Y, AC_SAVE_W, AC_NICK_H)) { return AC_H_SAVE; }
+    if (fv_in(x, y, ac_nick_x(l), t + AC_PIC_Y, AC_PIC_W, AC_PIC_H)) { return AC_H_PICTURE; }
+    if (count > vis) {
+        if (fv_in(x, y, ac_up_x(l, w), ac_arrow_y(t), AC_ARROW_W, AC_ARROW_H)) { return AC_H_UP; }
+        if (fv_in(x, y, ac_down_x(l, w), ac_arrow_y(t), AC_ARROW_W, AC_ARROW_H)) { return AC_H_DOWN; }
+    }
+    var i : usize = 0;
+    while (i < drawn and i < AC_ROWS_MAX) {
+        const ry : f64 = ac_row_y(t, i);
+        const k : u32 = @as(u32, @intCast(i));
+        if (fv_in(x, y, l + QP_PAD, ry, w - 2.0 * QP_PAD, AC_ROW_H - 2.0)) {
+            if (conf == i) {
+                if (fv_in(x, y, ac_yes_x(l, w), ry, AC_ZONE_YES_W, AC_ROW_H - 2.0)) { return AC_H_YES + k; }
+                return AC_H_NO + k;
+            }
+            if (fv_in(x, y, ac_del_x(l, w), ry, AC_ZONE_DEL_W, AC_ROW_H - 2.0)) { return AC_H_DEL + k; }
+            if (fv_in(x, y, ac_fcopy_x(l, w), ry, AC_ZONE_COPY_W, AC_ROW_H - 2.0)) { return AC_H_FCOPY + k; }
+            return AC_H_ROW + k;
+        }
+        i = i + 1;
+    }
+    if (fv_in(x, y, cv_field_x(l), ac_ifield_y(t, h), cv_field_w(w), CV_FIELD_H)) { return AC_H_IFIELD; }
+    if (fv_in(x, y, cv_btn_x(l, w, 0), ac_btn_y(t, h), cv_btn_w(w), CV_BTN_H)) { return AC_H_PASTE; }
+    if (fv_in(x, y, cv_btn_x(l, w, 1), ac_btn_y(t, h), cv_btn_w(w), CV_BTN_H)) { return AC_H_ADD; }
+    return AC_H_NONE;
+}
+
+/// The panel (the area under the title) takes a wheel step at this point: the friends rows and the label above them.
+pub fn ac_wheel_area(x: f64, y: f64, l: f64, w: f64, t: f64, vis: usize) -> bool {
+    return fv_in(x, y, l, t + AC_FR_LABEL_Y - 14.0, w, AC_ROW_H * @as(f64, @floatFromInt(vis)) + 16.0);
+}
+
+// ---------------------------------------------------------------- tests
+
+test ac_the_state_stands_below_the_friends_snapshot_and_in_the_folded_bytes {
+    assert AC_ON > 164 and AC_END <= 256;
+    assert AC_ON < AC_CONF and AC_CONF + 1 <= AC_CONF_FP and AC_CONF_FP + 10 <= AC_SECS;
+    assert AC_SECS + 4 <= AC_BOOT and AC_BOOT + 4 <= AC_BUILD and AC_BUILD + 4 <= AC_VERLEN;
+    assert AC_VER == AC_VERLEN + 1 and AC_VER + AC_VER_MAX <= AC_COPIES;
+    assert AC_COPIES + 4 <= AC_LAST and AC_LAST < AC_END;
+    assert FV_SCROLL > FV_INV + INVITE_LEN - 1 and FV_SCROLL < 296;
+}
+
+test ac_the_launch_values_and_the_clock_read_back {
+    var cl : [256]u8 = undefined;
+    fv_blank(cl[0..256]);
+    ac_boot(cl[0..256], "0.1.3", 5, 7037, 1000);
+    var o : [96]u8 = undefined;
+    ac_tick(cl[0..256], 1000 + 125);
+    assert fv_eq(o[0..96], ac_build_line(cl[0..256], o[0..96]), "v0.1.3  build 7037  up 2 min");
+    ac_tick(cl[0..256], 1000 + 45);
+    assert fv_eq(o[0..96], ac_build_line(cl[0..256], o[0..96]), "v0.1.3  build 7037  up 45 s");
+    // a clock that went back keeps the last seconds
+    ac_tick(cl[0..256], 500);
+    assert fv_eq(o[0..96], ac_build_line(cl[0..256], o[0..96]), "v0.1.3  build 7037  up 45 s");
+    // a version longer than the room is cut, never overrun
+    ac_boot(cl[0..256], "123456789012345678901234", 24, 9, 10);
+    assert cl[AC_VERLEN] == 16;
+    assert cl[AC_VER + 16] == 0;
+}
+
+test ac_uptime_and_state_read_as_people_say_them {
+    var o : [96]u8 = undefined;
+    assert fv_eq(o[0..96], ac_up_text(0, o[0..96]), "up 0 s");
+    assert fv_eq(o[0..96], ac_up_text(59, o[0..96]), "up 59 s");
+    assert fv_eq(o[0..96], ac_up_text(60, o[0..96]), "up 1 min");
+    assert fv_eq(o[0..96], ac_up_text(3600 * 2 + 300, o[0..96]), "up 2 h 05 min");
+    assert fv_eq(o[0..96], ac_up_text(86400 * 3 + 3600 * 4 + 60, o[0..96]), "up 3 d 4 h");
+    assert fv_eq(o[0..96], ac_state_line(true, true, 47735, o[0..96]), "ONLINE  port 47735  discovery on");
+    assert fv_eq(o[0..96], ac_state_line(true, false, 47735, o[0..96]), "ONLINE  port 47735  discovery OFF");
+    assert fv_eq(o[0..96], ac_state_line(false, false, 47735, o[0..96]), "OFFLINE  calls are off");
+}
+
+test ac_the_short_fingerprint_is_the_form_a_person_compares {
+    var o : [64]u8 = undefined;
+    const fp : [10]u8 = [169, 68, 202, 45, 206, 229, 157, 142, 98, 53];
+    assert fv_eq(o[0..64], ac_fp_line(fp[0..10], o[0..64]), "fp a944-ca2d-cee5-9d8e-6235");
+    assert ac_fp_line(fp[0..9], o[0..64]) == 0;
+}
+
+test ac_my_key_is_copied_whole_and_only_when_it_is_a_valid_key {
+    var cl : [1024]u8 = undefined;
+    fv_blank(cl[0..1024]);
+    var out : [32]u8 = undefined;
+    // no identity yet: nothing to copy
+    assert ac_my_key(cl[0..1024], out[0..32]) == 0;
+    const fp : [10]u8 = [169, 68, 202, 45, 206, 229, 157, 142, 98, 53];
+    var inv : [25]u8 = undefined;
+    assert invite_make(fp[0..10], inv[0..25]) == 25;
+    var i : usize = 0;
+    while (i < 25) {
+        cl[FV_INV + i] = inv[i];
+        i = i + 1;
+    }
+    assert ac_my_key(cl[0..1024], out[0..32]) == 25;
+    // what lands on the clipboard parses back to the same 10 bytes: a friend who pastes it adds exactly this device
+    var back : [10]u8 = undefined;
+    assert invite_parse(out[0..25], back[0..10]) == INV_OK;
+    i = 0;
+    while (i < 10) {
+        assert back[i] == fp[i];
+        i = i + 1;
+    }
+    assert out[0] == 84 and out[1] == 50 and out[2] == 55 and out[3] == 45;
+    // a short out is refused; a key whose last symbol changed is never copied
+    assert ac_my_key(cl[0..1024], out[0..20]) == 0;
+    if (cl[FV_INV + 24] == 65) { cl[FV_INV + 24] = 66; } else { cl[FV_INV + 24] = 65; }
+    assert ac_my_key(cl[0..1024], out[0..32]) == 0;
+}
+
+test ac_a_friends_key_is_made_from_the_row_and_pastes_back_to_it {
+    var cl : [1024]u8 = undefined;
+    fv_blank(cl[0..1024]);
+    cl[FV_SHOWN] = 2;
+    var k : usize = 0;
+    while (k < 10) {
+        cl[fv_row_at(0) + FR_FP + k] = @as(u8, @intCast(k + 1));
+        cl[fv_row_at(1) + FR_FP + k] = @as(u8, @intCast(200 - k));
+        k = k + 1;
+    }
+    var out : [32]u8 = undefined;
+    assert ac_friend_key(cl[0..1024], 1, out[0..32]) == 25;
+    var back : [10]u8 = undefined;
+    assert invite_parse(out[0..25], back[0..10]) == INV_OK;
+    k = 0;
+    while (k < 10) {
+        assert back[k] == 200 - k;
+        k = k + 1;
+    }
+    assert ac_friend_key(cl[0..1024], 2, out[0..32]) == 0;
+    assert ac_friend_key(cl[0..1024], 9, out[0..32]) == 0;
+}
+
+test ac_a_typed_key_that_fails_says_which_way_it_failed {
+    const fp : [10]u8 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    var inv : [25]u8 = undefined;
+    assert invite_make(fp[0..10], inv[0..25]) == 25;
+    // a valid key has no fault to name; so has nothing typed
+    assert ac_bad_reason(inv[0..25], 25) == FN_BAD;
+    assert ac_bad_reason(inv[0..24], 24) == FN_BAD_LEN;
+    assert ac_bad_reason(inv[0..25], 0) == FN_BAD;
+    // the last symbol changed: the check symbol no longer matches
+    var bad : [25]u8 = undefined;
+    var i : usize = 0;
+    while (i < 25) {
+        bad[i] = inv[i];
+        i = i + 1;
+    }
+    if (bad[24] == 65) { bad[24] = 66; } else { bad[24] = 65; }
+    assert ac_bad_reason(bad[0..25], 25) == FN_BAD_CHECK;
+}
+
+test ac_the_long_list_scrolls_inside_its_bounds {
+    // 12 friends, 5 rows in view: the window sits at 0..7
+    assert ac_max_scroll(12, 5) == 7;
+    assert ac_max_scroll(5, 5) == 0 and ac_max_scroll(3, 5) == 0 and ac_max_scroll(0, 5) == 0;
+    assert ac_clamp_scroll(99, 12, 5) == 7;
+    assert ac_clamp_scroll(3, 12, 5) == 3;
+    assert ac_clamp_scroll(3, 4, 5) == 0;
+    assert ac_scroll_by(0, 1, true, 12, 5) == 0;
+    assert ac_scroll_by(0, 1, false, 12, 5) == 1;
+    assert ac_scroll_by(6, 3, false, 12, 5) == 7;
+    assert ac_scroll_by(7, 1, false, 12, 5) == 7;
+    assert ac_scroll_by(2, 5, true, 12, 5) == 0;
+    // the list got shorter while scrolled down (a friend removed): the window comes back inside
+    assert ac_scroll_by(7, 1, true, 8, 5) == 3;
+    assert ac_clamp_scroll(7, 8, 5) == 3;
+    // rows in view are what the snapshot has from the first row, never more than fit
+    assert ac_rows_drawn(8, 5) == 5 and ac_rows_drawn(3, 5) == 3 and ac_rows_drawn(0, 5) == 0;
+    var o : [32]u8 = undefined;
+    assert fv_eq(o[0..32], ac_range_text(0, 5, 12, o[0..32]), "1-5 of 12");
+    assert fv_eq(o[0..32], ac_range_text(7, 5, 12, o[0..32]), "8-12 of 12");
+    assert ac_range_text(0, 0, 0, o[0..32]) == 0;
+}
+
+test ac_the_rows_that_fit_follow_the_height_of_the_panel {
+    assert ac_rows_vis(0.0) == 1;
+    assert ac_rows_vis(100.0) == 1;
+    // the default window: 540 tall, the panel from 35 down is 505
+    assert ac_rows_vis(505.0) == 4;
+    assert ac_rows_vis(560.0) == 5;
+    assert ac_rows_vis(2000.0) == AC_ROWS_MAX;
+    // every count of rows ends above the add part
+    var h : f64 = 300.0;
+    while (h < 900.0) {
+        const v : usize = ac_rows_vis(h);
+        assert AC_ROWS_Y + AC_ROW_H * @as(f64, @floatFromInt(v)) <= h - AC_ROWS_END_FROM_BOTTOM + AC_ROW_H or v == 1;
+        h = h + 7.0;
+    }
+}
+
+test ac_the_boxes_hit_their_own_target {
+    const l : f64 = 660.0;
+    const w : f64 = 300.0;
+    const t : f64 = 35.0;
+    const h : f64 = 600.0;
+    const none : usize = FV_ROWS_SNAP;
+    // top: the key box, its COPY button, the nickname field, SAVE, the picture link
+    assert ac_hit(l + 40.0, t + AC_KEY_Y + 6.0, l, w, t, h, 3, 3, 5, none) == AC_H_KEY;
+    assert ac_hit(ac_copy_x(l, w) + 4.0, t + AC_COPY_Y + 4.0, l, w, t, h, 3, 3, 5, none) == AC_H_COPYKEY;
+    assert ac_hit(ac_nick_x(l) + 6.0, t + AC_NICK_Y + 6.0, l, w, t, h, 3, 3, 5, none) == AC_H_NICK;
+    assert ac_hit(ac_save_x(l, w) + 6.0, t + AC_NICK_Y + 6.0, l, w, t, h, 3, 3, 5, none) == AC_H_SAVE;
+    assert ac_hit(ac_nick_x(l) + 6.0, t + AC_PIC_Y + 4.0, l, w, t, h, 3, 3, 5, none) == AC_H_PICTURE;
+    // the rows: body (call), copy a friend's key, remove
+    assert ac_hit(l + 40.0, ac_row_y(t, 0) + 4.0, l, w, t, h, 3, 3, 5, none) == AC_H_ROW;
+    assert ac_hit(l + 40.0, ac_row_y(t, 2) + 4.0, l, w, t, h, 3, 3, 5, none) == AC_H_ROW + 2;
+    assert ac_hit(l + 40.0, ac_row_y(t, 3) + 4.0, l, w, t, h, 3, 3, 5, none) == AC_H_NONE;
+    assert ac_hit(ac_fcopy_x(l, w) + 4.0, ac_row_y(t, 1) + 4.0, l, w, t, h, 3, 3, 5, none) == AC_H_FCOPY + 1;
+    assert ac_hit(ac_del_x(l, w) + 4.0, ac_row_y(t, 1) + 4.0, l, w, t, h, 3, 3, 5, none) == AC_H_DEL + 1;
+    // the zone between COPY and the remove mark belongs to no button but the row (a call)
+    assert ac_hit(ac_del_x(l, w) - 2.0, ac_row_y(t, 1) + 4.0, l, w, t, h, 3, 3, 5, none) == AC_H_ROW + 1;
+    // the add part
+    assert ac_hit(cv_field_x(l) + 4.0, ac_ifield_y(t, h) + 4.0, l, w, t, h, 3, 3, 5, none) == AC_H_IFIELD;
+    assert ac_hit(cv_btn_x(l, w, 0) + 4.0, ac_btn_y(t, h) + 4.0, l, w, t, h, 3, 3, 5, none) == AC_H_PASTE;
+    assert ac_hit(cv_btn_x(l, w, 1) + 4.0, ac_btn_y(t, h) + 4.0, l, w, t, h, 3, 3, 5, none) == AC_H_ADD;
+    assert ac_hit(l + 5.0, t + 5.0, l, w, t, h, 3, 3, 5, none) == AC_H_NONE;
+}
+
+test ac_a_row_that_asks_to_remove_answers_yes_no_and_nothing_else {
+    const l : f64 = 660.0;
+    const w : f64 = 300.0;
+    const t : f64 = 35.0;
+    const h : f64 = 600.0;
+    assert ac_hit(ac_yes_x(l, w) + 4.0, ac_row_y(t, 1) + 4.0, l, w, t, h, 3, 3, 5, 1) == AC_H_YES + 1;
+    assert ac_hit(ac_no_x(l, w) + 4.0, ac_row_y(t, 1) + 4.0, l, w, t, h, 3, 3, 5, 1) == AC_H_NO + 1;
+    // a click on the body of the row that asks means NO; the copy and remove marks are gone from it
+    assert ac_hit(l + 40.0, ac_row_y(t, 1) + 4.0, l, w, t, h, 3, 3, 5, 1) == AC_H_NO + 1;
+    assert ac_hit(ac_del_x(l, w) + 4.0, ac_row_y(t, 1) + 4.0, l, w, t, h, 3, 3, 5, 1) == AC_H_NO + 1;
+    // the other rows keep their buttons
+    assert ac_hit(ac_del_x(l, w) + 4.0, ac_row_y(t, 0) + 4.0, l, w, t, h, 3, 3, 5, 1) == AC_H_DEL;
+    assert ac_yes_x(l, w) + AC_ZONE_YES_W + AC_ZONE_GAP == ac_no_x(l, w);
+    assert ac_no_x(l, w) + AC_ZONE_YES_W == l + w - QP_PAD;
+}
+
+test ac_the_arrows_exist_only_for_a_list_longer_than_the_window {
+    const l : f64 = 660.0;
+    const w : f64 = 300.0;
+    const t : f64 = 35.0;
+    const h : f64 = 600.0;
+    const none : usize = FV_ROWS_SNAP;
+    assert ac_hit(ac_up_x(l, w) + 4.0, ac_arrow_y(t) + 4.0, l, w, t, h, 5, 12, 5, none) == AC_H_UP;
+    assert ac_hit(ac_down_x(l, w) + 4.0, ac_arrow_y(t) + 4.0, l, w, t, h, 5, 12, 5, none) == AC_H_DOWN;
+    assert ac_hit(ac_up_x(l, w) + 4.0, ac_arrow_y(t) + 4.0, l, w, t, h, 5, 5, 5, none) == AC_H_NONE;
+    assert ac_wheel_area(l + 50.0, ac_row_y(t, 2), l, w, t, 5);
+    assert ac_wheel_area(l + 50.0, t + AC_KEY_Y, l, w, t, 5) == false;
+}
+
+test ac_the_boxes_keep_their_order_down_the_panel_and_do_not_overlap {
+    const t : f64 = 35.0;
+    var h : f64 = 505.0;
+    while (h < 900.0) {
+        assert AC_NICK_Y + AC_NICK_H <= AC_PIC_Y;
+        assert AC_AV_CY + AC_AV_R <= AC_KEY_LABEL_Y;
+        assert AC_PIC_Y + AC_PIC_H < AC_KEY_LABEL_Y;
+        assert AC_KEY_Y + AC_KEY_H <= AC_COPY_Y;
+        assert AC_COPY_Y + CV_BTN_H < AC_STATE_Y - 8.0;
+        assert AC_STATE_Y < AC_BUILD_Y and AC_BUILD_Y < AC_FR_LABEL_Y - 8.0;
+        assert AC_FR_LABEL_Y < AC_ROWS_Y;
+        // the add part is anchored to the bottom and starts below the last row that fits
+        const v : usize = ac_rows_vis(h);
+        assert ac_row_y(t, v) - 2.0 <= ac_add_label_y(t, h) - 10.0 + AC_ROW_H or v == 1;
+        assert ac_add_label_y(t, h) < ac_ifield_y(t, h);
+        assert ac_ifield_y(t, h) + CV_FIELD_H < ac_btn_y(t, h);
+        assert ac_btn_y(t, h) + CV_BTN_H < ac_note_y(t, h) - 8.0;
+        h = h + 9.0;
+    }
+    // the nickname field, SAVE and the avatar side by side
+    assert ac_nick_x(0.0) + ac_nick_w(300.0) + AC_NICK_GAP == ac_save_x(0.0, 300.0);
+    assert ac_save_x(0.0, 300.0) + AC_SAVE_W == 300.0 - QP_PAD;
+    assert ac_nick_w(300.0) > 120.0;
+}
+
+test ac_the_confirmation_names_one_friend_by_key_not_by_place {
+    var cl : [1024]u8 = undefined;
+    fv_blank(cl[0..1024]);
+    cl[FV_SHOWN] = 3;
+    var k : usize = 0;
+    while (k < 10) {
+        cl[fv_row_at(0) + FR_FP + k] = @as(u8, @intCast(k + 1));
+        cl[fv_row_at(1) + FR_FP + k] = @as(u8, @intCast(k + 21));
+        cl[fv_row_at(2) + FR_FP + k] = @as(u8, @intCast(k + 41));
+        k = k + 1;
+    }
+    assert ac_conf_row(cl[0..1024]) == FV_ROWS_SNAP;
+    const fp1 : [10]u8 = [21, 22, 23, 24, 25, 26, 27, 28, 29, 30];
+    ac_conf_set(cl[0..1024], fp1[0..10]);
+    assert ac_conf_row(cl[0..1024]) == 1;
+    // the list moved (a friend above was removed): the same friend now stands in row 0, still the one asked about
+    var m : usize = 0;
+    while (m < 10) {
+        cl[fv_row_at(0) + FR_FP + m] = cl[fv_row_at(1) + FR_FP + m];
+        cl[fv_row_at(1) + FR_FP + m] = cl[fv_row_at(2) + FR_FP + m];
+        m = m + 1;
+    }
+    cl[FV_SHOWN] = 2;
+    assert ac_conf_row(cl[0..1024]) == 0;
+    // the friend left the view altogether: no row asks any more
+    cl[FV_SHOWN] = 0;
+    assert ac_conf_row(cl[0..1024]) == FV_ROWS_SNAP;
+    ac_conf_clear(cl[0..1024]);
+    cl[FV_SHOWN] = 2;
+    assert ac_conf_row(cl[0..1024]) == FV_ROWS_SNAP;
+    assert cl[AC_CONF_FP] == 0 and cl[AC_CONF_FP + 9] == 0;
+}
+
+test ac_a_copy_is_counted_and_remembers_what_it_was {
+    var cl : [256]u8 = undefined;
+    fv_blank(cl[0..256]);
+    assert ac_copies(cl[0..256]) == 0;
+    ac_note_copy(cl[0..256], AC_L_MINE);
+    ac_note_copy(cl[0..256], AC_L_FRIEND);
+    assert ac_copies(cl[0..256]) == 2 and cl[AC_LAST] == 2;
+    assert ac_is_on(cl[0..256]) == false;
+    cl[AC_ON] = 1;
+    assert ac_is_on(cl[0..256]);
+}
+
+test ac_a_row_line_names_the_short_key_and_when_the_friend_was_met {
+    var cl : [1024]u8 = undefined;
+    fv_blank(cl[0..1024]);
+    var o : [96]u8 = undefined;
+    const r : usize = fv_row_at(0);
+    var k : usize = 0;
+    while (k < 4) {
+        cl[r + FR_FP + k] = @as(u8, @intCast(16 * (k + 1) + k + 1));
+        k = k + 1;
+    }
+    cl[r + FR_ONLINE] = 1;
+    assert fv_eq(o[0..96], ac_row_line(cl[0..1024], 0, o[0..96]), "1122-3344  online");
+    cl[r + FR_ONLINE] = 0;
+    cl[r + FR_AGO] = 130;
+    assert fv_eq(o[0..96], ac_row_line(cl[0..1024], 0, o[0..96]), "1122-3344  offline, seen 2 min ago");
+    cl[r + FR_AGO] = 255;
+    cl[r + FR_AGO + 1] = 255;
+    cl[r + FR_AGO + 2] = 255;
+    cl[r + FR_AGO + 3] = 255;
+    assert fv_eq(o[0..96], ac_row_line(cl[0..1024], 0, o[0..96]), "1122-3344  offline, never seen");
+}
+
+test ac_a_pasted_message_with_a_key_inside_pastes_as_the_key {
+    assert ac_paste_find("T27-ABCD", 8) == 0;
+    assert ac_paste_find("my key: T27-ABCD", 16) == 8;
+    assert ac_paste_find("key t27-abcd", 12) == 4;
+    assert ac_paste_find("no key here", 11) == 0;
+    assert ac_paste_find("T27", 3) == 0;
+    assert ac_paste_find("T2", 2) == 0;
+}

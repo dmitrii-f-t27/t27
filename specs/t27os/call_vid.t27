@@ -1,0 +1,302 @@
+// SPDX-License-Identifier: Apache-2.0
+// specs/t27os/call_vid.t27 -- the video of a T27 OS call: a test source and the picture decoder (owner, 2026-10-22).
+// The camera is not allowed yet (the system has not been asked), so the source of a call's video is a generator, as
+// TONE is for sound: a 320x240 picture made pixel by pixel in .t27 -- a gradient that slides with the frame number, a
+// bright bar that sweeps across, and the frame number itself in large digits -- encoded to JPEG by ImageIO
+// (quality 0.5, 3-6 KB). When the camera is allowed, call_session takes its JPEG instead (vc_source in call_core:
+// the camera while its frame is fresh, the generator otherwise); nothing here changes.
+// vid_make(frame, out) -> n          the JPEG of frame `frame` into out (n bytes, 0 on failure).
+// vid_decode(jpeg) -> CGImage        the picture of a JPEG (ImageIO), 0 when it does not decode; release it with
+//                                     vid_release. The window draws it in the CALL panel.
+// vid_size(img) -> w << 16 | h       the size of a decoded picture.
+// Host code (@extern): test with t27b, not t27c. Refs gHashTag/t27#11560.
+module T27osCallVid;
+
+use t27os::pty_sys::sys_peek;
+use t27os::pty_proto::put_u64;
+
+const VID_W : u64 = 320;
+const VID_H : u64 = 240;
+/// kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little (BGRA in memory).
+const VID_BITMAP_INFO : u32 = 8194;
+const VID_RTLD_DEFAULT : u64 = 18446744073709551614;
+/// Digits: 5x7 cells of 8x8 pixels, up to 5 digits.
+const VID_CELL : u64 = 8;
+const VID_DIGITS : u64 = 5;
+
+fn vid_dlsym(h: u64, name: []const u8) -> u64 { return @extern("dlsym"); }
+fn vid_poke(dst: u64, src: []const u8, n: u64) -> u64 { return @extern("memmove"); }
+fn vid_calloc(n: u64, size: u64) -> u64 { return @extern("calloc"); }
+fn vid_free(p: u64) -> void { @extern("free"); }
+fn vid_release(x: u64) -> void { @extern("CFRelease"); }
+fn vid_cf_str(alloc: u64, bytes: []const u8, n: usize, enc: u32, ext: bool) -> u64 { return @extern("CFStringCreateWithBytes"); }
+fn vid_cf_num(alloc: u64, kind: u64, p: []const u8) -> u64 { return @extern("CFNumberCreate"); }
+fn vid_cf_dict(alloc: u64, keys: []const u8, vals: []const u8, n: u64, kcb: u64, vcb: u64) -> u64 { return @extern("CFDictionaryCreate"); }
+fn vid_cf_data(alloc: u64, bytes: []const u8, n: u64) -> u64 { return @extern("CFDataCreate"); }
+fn vid_cf_mdata(alloc: u64, cap: u64) -> u64 { return @extern("CFDataCreateMutable"); }
+fn vid_cf_len(d: u64) -> i64 { return @extern("CFDataGetLength"); }
+fn vid_cf_ptr(d: u64) -> u64 { return @extern("CFDataGetBytePtr"); }
+fn vid_cg_rgb() -> u64 { return @extern("CGColorSpaceCreateDeviceRGB"); }
+fn vid_cg_bitmap(data: u64, w: usize, h: usize, bits: usize, row: usize, space: u64, info: u32) -> u64 { return @extern("CGBitmapContextCreate"); }
+fn vid_cg_image(c: u64) -> u64 { return @extern("CGBitmapContextCreateImage"); }
+fn vid_cg_ctx_release(c: u64) -> void { @extern("CGContextRelease"); }
+fn vid_cg_image_release(i: u64) -> void { @extern("CGImageRelease"); }
+fn vid_cg_space_release(s: u64) -> void { @extern("CGColorSpaceRelease"); }
+fn vid_cg_w(i: u64) -> u64 { return @extern("CGImageGetWidth"); }
+fn vid_cg_h(i: u64) -> u64 { return @extern("CGImageGetHeight"); }
+fn vid_dest_data(d: u64, kind: u64, count: u64, opts: u64) -> u64 { return @extern("CGImageDestinationCreateWithData"); }
+fn vid_dest_add(d: u64, img: u64, props: u64) -> void { @extern("CGImageDestinationAddImage"); }
+fn vid_dest_end(d: u64) -> bool { return @extern("CGImageDestinationFinalize"); }
+fn vid_src_data(d: u64, opts: u64) -> u64 { return @extern("CGImageSourceCreateWithData"); }
+fn vid_src_image(s: u64, idx: u64, opts: u64) -> u64 { return @extern("CGImageSourceCreateImageAtIndex"); }
+
+fn vid_cf(s: []const u8) -> u64 { return vid_cf_str(0, s, s.len, 134217984, false); }
+
+fn vid_konst(name: []const u8) -> u64 {
+    const a : u64 = vid_dlsym(VID_RTLD_DEFAULT, name);
+    if (a == 0) { return 0; }
+    var b : [8]u8 = undefined;
+    sys_peek(b[0..8], a, 8);
+    return @as(u64, b[0]) | (@as(u64, b[1]) << 8) | (@as(u64, b[2]) << 16) | (@as(u64, b[3]) << 24) | (@as(u64, b[4]) << 32) | (@as(u64, b[5]) << 40) | (@as(u64, b[6]) << 48) | (@as(u64, b[7]) << 56);
+}
+
+/// A 5x7 digit as 7 rows of 5 bits, packed row 0 first in the top bits (35 bits).
+pub fn vid_glyph(d: u32) -> u64 {
+    if (d == 0) { return 15623448110; }
+    if (d == 1) { return 4701950094; }
+    if (d == 2) { return 15603929375; }
+    if (d == 3) { return 33357366830; }
+    if (d == 4) { return 2359917634; }
+    if (d == 5) { return 33854359086; }
+    if (d == 6) { return 6728664622; }
+    if (d == 7) { return 33321787656; }
+    if (d == 8) { return 15621113390; }
+    if (d == 9) { return 15621129292; }
+    return 0;
+}
+
+/// Is the pixel (cx, cy) of a digit's cell grid lit: row 0..6, column 0..4.
+pub fn vid_lit(d: u32, row: u64, col: u64) -> bool {
+    if (row > 6 or col > 4) { return false; }
+    const g : u64 = vid_glyph(d);
+    return ((g >> (5 * (6 - row))) >> (4 - col) & 1) == 1;
+}
+
+/// How many decimal digits the frame number shows (1 .. VID_DIGITS; larger numbers show their last digits).
+pub fn vid_ndigits(frame: u64) -> u64 {
+    var n : u64 = 1;
+    var v : u64 = frame / 10;
+    while (v > 0 and n < VID_DIGITS) {
+        n = n + 1;
+        v = v / 10;
+    }
+    return n;
+}
+
+/// The digit that stands at slot `slot` (0 = leftmost) of the frame number shown with `nd` digits.
+pub fn vid_digit_at(frame: u64, nd: u64, slot: u64) -> u32 {
+    var v : u64 = frame;
+    var k : u64 = nd - 1 - slot;
+    while (k > 0) {
+        v = v / 10;
+        k = k - 1;
+    }
+    return @as(u32, @intCast(v % 10));
+}
+
+/// One pixel of frame `frame` at (x, y) as B, G, R (alpha is always 255): a gradient that slides with the frame, a
+/// white sweep bar, and the number in white on a dark plate in the middle.
+pub fn vid_px(x: u64, y: u64, frame: u64) -> u32 {
+    const nd : u64 = vid_ndigits(frame);
+    const pw : u64 = nd * 6 * VID_CELL + VID_CELL;
+    const ph : u64 = 9 * VID_CELL;
+    const px0 : u64 = (VID_W - pw) / 2;
+    const py0 : u64 = (VID_H - ph) / 2;
+    if (x >= px0 and x < px0 + pw and y >= py0 and y < py0 + ph) {
+        const cx : u64 = x - px0;
+        const cy : u64 = y - py0;
+        if (cx >= VID_CELL and cy >= VID_CELL and cy < 8 * VID_CELL) {
+            const gx : u64 = cx / VID_CELL - 1;
+            const gy : u64 = cy / VID_CELL - 1;
+            const slot : u64 = gx / 6;
+            const col : u64 = gx % 6;
+            if (slot < nd and col < 5 and gy < 7 and vid_lit(vid_digit_at(frame, nd, slot), gy, col)) { return 16777215; }
+        }
+        return 1315860;
+    }
+    const bar : u64 = (frame * 8) % VID_W;
+    var dx : u64 = 0;
+    if (x >= bar) { dx = x - bar; } else { dx = bar - x; }
+    if (dx < 4) { return 16777215; }
+    // blue grows with the column shifted by the frame, green with the row, red with the diagonal
+    const b : u64 = ((x + frame * 3) * 255 / VID_W) % 256;
+    const g : u64 = y * 255 / VID_H;
+    const r : u64 = ((x + y + frame * 5) / 2) % 256;
+    return @as(u32, @intCast((r << 16) | (g << 8) | b));
+}
+
+/// Row y of frame `frame` as BGRA (1280 bytes) into row: the same pixels as vid_px, with the work that does not depend
+/// on the pixel (the plate's place, the blue ramp) done once per row, not once per pixel. The main loop that polls the
+/// call's audio calls this 240 times per frame, so it has to be cheap.
+pub fn vid_row(row: []u8, y: u64, frame: u64) -> void {
+    const nd : u64 = vid_ndigits(frame);
+    const pw : u64 = nd * 6 * VID_CELL + VID_CELL;
+    const ph : u64 = 9 * VID_CELL;
+    const px0 : u64 = (VID_W - pw) / 2;
+    const py0 : u64 = (VID_H - ph) / 2;
+    const in_rows : bool = y >= py0 and y < py0 + ph;
+    const bar : u64 = (frame * 8) % VID_W;
+    const g : u64 = y * 255 / VID_H;
+    const shift : u64 = frame * 3;
+    var x : u64 = 0;
+    while (x < VID_W) {
+        var v : u32 = 0;
+        if (in_rows and x >= px0 and x < px0 + pw) {
+            v = vid_px(x, y, frame);
+        } else {
+            var dx : u64 = 0;
+            if (x >= bar) { dx = x - bar; } else { dx = bar - x; }
+            if (dx < 4) {
+                v = 16777215;
+            } else {
+                const b : u64 = ((x + shift) * 255 / VID_W) % 256;
+                const r : u64 = ((x + y + frame * 5) / 2) % 256;
+                v = @as(u32, @intCast((r << 16) | (g << 8) | b));
+            }
+        }
+        const o : usize = @as(usize, @intCast(x * 4));
+        row[o] = @as(u8, @intCast(v & 255));
+        row[o + 1] = @as(u8, @intCast((v >> 8) & 255));
+        row[o + 2] = @as(u8, @intCast((v >> 16) & 255));
+        row[o + 3] = 255;
+        x = x + 1;
+    }
+}
+
+/// The JPEG of frame `frame` into out. Its length, 0 when ImageIO fails or out is too small.
+pub fn vid_make(frame: u64, out: []u8) -> usize {
+    const mem : u64 = vid_calloc(VID_W * VID_H, 4);
+    if (mem == 0) { return 0; }
+    var row : [1280]u8 = undefined;
+    var y : u64 = 0;
+    while (y < VID_H) {
+        vid_row(row[0..1280], y, frame);
+        vid_poke(mem + y * VID_W * 4, row[0..1280], 1280);
+        y = y + 1;
+    }
+    var n : usize = 0;
+    const space : u64 = vid_cg_rgb();
+    const ctx : u64 = vid_cg_bitmap(mem, @as(usize, @intCast(VID_W)), @as(usize, @intCast(VID_H)), 8, @as(usize, @intCast(VID_W * 4)), space, VID_BITMAP_INFO);
+    if (ctx != 0) {
+        const img : u64 = vid_cg_image(ctx);
+        if (img != 0) {
+            const data : u64 = vid_cf_mdata(0, 0);
+            const kind : u64 = vid_cf("public.jpeg");
+            const dest : u64 = vid_dest_data(data, kind, 1, 0);
+            if (dest != 0) {
+                var kb : [8]u8 = undefined;
+                var vb : [8]u8 = undefined;
+                var qb : [8]u8 = undefined;
+                put_u64(kb[0..8], 0, vid_konst("kCGImageDestinationLossyCompressionQuality"));
+                // 0.5 as IEEE-754 binary64
+                put_u64(qb[0..8], 0, 4602678819172646912);
+                const qn : u64 = vid_cf_num(0, 6, qb[0..8]);
+                put_u64(vb[0..8], 0, qn);
+                const props : u64 = vid_cf_dict(0, kb[0..8], vb[0..8], 1, vid_dlsym(VID_RTLD_DEFAULT, "kCFTypeDictionaryKeyCallBacks"), vid_dlsym(VID_RTLD_DEFAULT, "kCFTypeDictionaryValueCallBacks"));
+                vid_dest_add(dest, img, props);
+                if (vid_dest_end(dest)) {
+                    const len : i64 = vid_cf_len(data);
+                    if (len > 0 and @as(usize, @intCast(len)) <= out.len) {
+                        sys_peek(out[0..@as(usize, @intCast(len))], vid_cf_ptr(data), @as(u64, @intCast(len)));
+                        n = @as(usize, @intCast(len));
+                    }
+                }
+                if (props != 0) { vid_release(props); }
+                if (qn != 0) { vid_release(qn); }
+                vid_release(dest);
+            }
+            vid_release(kind);
+            vid_release(data);
+            vid_cg_image_release(img);
+        }
+        vid_cg_ctx_release(ctx);
+    }
+    vid_cg_space_release(space);
+    vid_free(mem);
+    return n;
+}
+
+/// The picture of a JPEG as a CGImage (the caller releases it with vid_release_image); 0 when it does not decode.
+pub fn vid_decode(jpeg: []const u8) -> u64 {
+    if (jpeg.len < 4) { return 0; }
+    const data : u64 = vid_cf_data(0, jpeg, @as(u64, jpeg.len));
+    if (data == 0) { return 0; }
+    const src : u64 = vid_src_data(data, 0);
+    var img : u64 = 0;
+    if (src != 0) {
+        img = vid_src_image(src, 0, 0);
+        vid_release(src);
+    }
+    vid_release(data);
+    return img;
+}
+
+pub fn vid_release_image(img: u64) -> void {
+    if (img != 0) { vid_cg_image_release(img); }
+}
+
+/// width << 16 | height of a decoded picture.
+pub fn vid_size(img: u64) -> u64 {
+    if (img == 0) { return 0; }
+    return (vid_cg_w(img) << 16) | vid_cg_h(img);
+}
+
+test the_digits_are_5_by_7_and_the_number_reads_back_from_its_slots {
+    assert vid_lit(8, 0, 1) and vid_lit(8, 0, 0) == false;
+    assert vid_lit(1, 6, 1) and vid_lit(1, 6, 3) and vid_lit(1, 6, 0) == false and vid_lit(1, 0, 0) == false;
+    assert vid_lit(0, 3, 0) and vid_lit(0, 3, 2) and vid_lit(0, 3, 1) == false;
+    assert vid_lit(7, 0, 4) and vid_lit(7, 7, 0) == false;
+    assert vid_ndigits(0) == 1 and vid_ndigits(9) == 1 and vid_ndigits(10) == 2 and vid_ndigits(200) == 3;
+    assert vid_ndigits(123456789) == 5;
+    assert vid_digit_at(205, 3, 0) == 2 and vid_digit_at(205, 3, 1) == 0 and vid_digit_at(205, 3, 2) == 5;
+    assert vid_digit_at(7, 1, 0) == 7;
+}
+
+test two_frames_differ_and_a_frame_repeats {
+    var a : u64 = 0;
+    var b : u64 = 0;
+    var c : u64 = 0;
+    var x : u64 = 0;
+    while (x < 320) {
+        a = a + @as(u64, vid_px(x, 20, 1)) * (x + 1);
+        b = b + @as(u64, vid_px(x, 20, 2)) * (x + 1);
+        c = c + @as(u64, vid_px(x, 20, 1)) * (x + 1);
+        x = x + 1;
+    }
+    assert a != b;
+    assert a == c;
+    // the middle plate is dark where no digit is lit and white where one is
+    assert vid_px(160, 120, 1) == 16777215 or vid_px(160, 120, 1) == 1315860;
+}
+
+test the_fast_row_gives_the_same_pixels_as_the_pixel_function {
+    var row : [1280]u8 = undefined;
+    var f : u64 = 1;
+    var bad : u64 = 0;
+    while (f < 3000) {
+        var y : u64 = 0;
+        while (y < 240) {
+            vid_row(row[0..1280], y, f);
+            var x : u64 = 0;
+            while (x < 320) {
+                const v : u32 = vid_px(x, y, f);
+                const o : usize = @as(usize, @intCast(x * 4));
+                if (row[o] != @as(u8, @intCast(v & 255)) or row[o + 1] != @as(u8, @intCast((v >> 8) & 255)) or row[o + 2] != @as(u8, @intCast((v >> 16) & 255)) or row[o + 3] != 255) { bad = bad + 1; }
+                x = x + 1;
+            }
+            y = y + 97;
+        }
+        f = f + 211;
+    }
+    assert bad == 0;
+}

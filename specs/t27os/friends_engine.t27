@@ -65,6 +65,8 @@ use t27os::peer_identity::txt_get;
 use t27os::peer_identity::ft_add;
 use t27os::peer_identity::ft_count;
 use t27os::peer_identity::ft_find;
+use t27os::peer_identity::ft_remove;
+use t27os::peer_identity::ft_fp_at;
 use t27os::peer_identity::ft_set_nick;
 use t27os::peer_identity::ft_init;
 use t27os::peer_identity_host::IH_CREATED;
@@ -109,6 +111,7 @@ use t27os::friends_view::FV_NET;
 use t27os::friends_view::FV_INV;
 use t27os::friends_view::FV_MYNICK;
 use t27os::friends_view::FV_TYPED;
+use t27os::friends_view::FV_SCROLL;
 use t27os::friends_view::FV_ROWS_SNAP;
 use t27os::friends_view::FV_NET_OFF;
 use t27os::friends_view::FV_NET_UP;
@@ -128,6 +131,8 @@ use t27os::friends_view::FN_FULL;
 use t27os::friends_view::FN_DAMAGED;
 use t27os::friends_view::FN_EMPTY;
 use t27os::friends_view::FN_NOSAVE;
+use t27os::friends_view::FN_REMOVED;
+use t27os::friends_view::FN_RM_NOSAVE;
 use t27os::friends_view::FN_OFF;
 use t27os::friends_view::FR_NICKLEN;
 use t27os::friends_view::FR_NICK;
@@ -554,7 +559,8 @@ fn fe_match(cl: []u8, now: u64) -> void {
         } else if (get_u64(cl, sa) != 0) {
             reason = FV_R_GONE;
         }
-        if (i < FV_ROWS_SNAP) { cl[fv_row_at(i) + FR_REASON] = @as(u8, @intCast(reason)); }
+        const sc : usize = @as(usize, cl[FV_SCROLL]);
+        if (i >= sc and i < sc + FV_ROWS_SNAP) { cl[fv_row_at(i - sc) + FR_REASON] = @as(u8, @intCast(reason)); }
         i = i + 1;
     }
 }
@@ -576,7 +582,9 @@ fn fe_learn_nick(cl: []u8, fp: []const u8, tb: []const u8, tl: usize) -> void {
 
 fn fe_row_copy(cl: []u8, i: usize, now: u64) -> void {
     const r : usize = fv_row_at(i);
-    const t : usize = FE_FT + FT_HDR + i * FT_ROW;
+    // snapshot row i shows table row i + scroll (the ACCOUNT panel scrolls a long list; the CALL panel stays at 0)
+    const ti : usize = i + @as(usize, cl[FV_SCROLL]);
+    const t : usize = FE_FT + FT_HDR + ti * FT_ROW;
     var k : usize = 0;
     while (k < 10) {
         cl[r + FR_FP + k] = cl[t + k];
@@ -593,7 +601,7 @@ fn fe_row_copy(cl: []u8, i: usize, now: u64) -> void {
         z = z + 1;
     }
     cl[r + FR_NICKLEN] = @as(u8, @intCast(nl));
-    const sa : usize = FE_SEEN + i * FE_SEEN_LEN;
+    const sa : usize = FE_SEEN + ti * FE_SEEN_LEN;
     const last : u64 = get_u64(cl, sa);
     const reason : u32 = @as(u32, cl[r + FR_REASON]);
     if (reason == FV_R_ONLINE and last != 0) {
@@ -628,7 +636,11 @@ fn fe_row_copy(cl: []u8, i: usize, now: u64) -> void {
 pub fn fe_snapshot(cl: []u8, now: u64) -> void {
     const n : usize = @as(usize, ft_count(cl[FE_FT..FE_FT + FT_LEN]));
     cl[FV_COUNT] = @as(u8, @intCast(n));
-    var shown : usize = n;
+    // the first friend in view stays inside the list: at most the last friend's place, 0 for an empty list
+    if (@as(usize, cl[FV_SCROLL]) >= n) {
+        if (n > 0) { cl[FV_SCROLL] = @as(u8, @intCast(n - 1)); } else { cl[FV_SCROLL] = 0; }
+    }
+    var shown : usize = n - @as(usize, cl[FV_SCROLL]);
     if (shown > FV_ROWS_SNAP) { shown = FV_ROWS_SNAP; }
     cl[FV_SHOWN] = @as(u8, @intCast(shown));
     var i : usize = 0;
@@ -783,6 +795,43 @@ pub fn fe_typed_key(cl: []const u8, fp: []u8) -> bool {
     return invite_parse(cl[FV_TYPED..FV_TYPED + n], fp) == INV_OK;
 }
 
+/// Move the first friend in view to table row `sc` (kept inside the list) and rebuild the rows from it: the matches are
+/// made again first, so a row that comes into view shows its own state, not the one of the friend that stood there.
+pub fn fe_scroll(cl: []u8, sc: usize, now: u64) -> void {
+    const n : usize = @as(usize, ft_count(cl[FE_FT..FE_FT + FT_LEN]));
+    var v : usize = sc;
+    if (n == 0) { v = 0; } else if (v >= n) { v = n - 1; }
+    cl[FV_SCROLL] = @as(u8, @intCast(v));
+    fe_match(cl, now);
+    fe_snapshot(cl, now);
+}
+
+/// Remove the friend of shown row `i` (the person confirmed): the table row goes, the seen records of the rows after it
+/// move up with them, the file is written, the snapshot is rebuilt. The note code to show (FN_REMOVED, FN_RM_NOSAVE);
+/// 0 when `i` is not a shown row.
+pub fn fe_remove(cl: []u8, i: usize, now: u64) -> u32 {
+    if (i >= @as(usize, cl[FV_SHOWN]) or i >= FV_ROWS_SNAP) { return 0; }
+    const ti : usize = i + @as(usize, cl[FV_SCROLL]);
+    var fp : [10]u8 = undefined;
+    if (!ft_fp_at(cl[FE_FT..FE_FT + FT_LEN], ti, fp[0..10])) { return 0; }
+    const n : usize = @as(usize, ft_count(cl[FE_FT..FE_FT + FT_LEN]));
+    if (!ft_remove(cl[FE_FT..FE_FT + FT_LEN], fp[0..10])) { return 0; }
+    var j : usize = ti;
+    while (j + 1 < n) {
+        var b : usize = 0;
+        while (b < FE_SEEN_LEN) {
+            cl[FE_SEEN + j * FE_SEEN_LEN + b] = cl[FE_SEEN + (j + 1) * FE_SEEN_LEN + b];
+            b = b + 1;
+        }
+        j = j + 1;
+    }
+    fe_zero(cl, FE_SEEN + (n - 1) * FE_SEEN_LEN, FE_SEEN_LEN);
+    var note : u32 = FN_REMOVED;
+    if (!fe_ss_file(cl) or !ih_friends_save(cl[FE_FT..FE_FT + FT_LEN])) { note = FN_RM_NOSAVE; }
+    fe_snapshot(cl, now);
+    return note;
+}
+
 /// A click on friend `i`: online -> the address of the resolve, the fingerprint of the table, cs_call; the result is
 /// a note code (0 when the call started). Offline -> the note that says why. This is the only way a friend is called.
 pub fn fe_call(cl: []u8, s: []u8, i: usize) -> u32 {
@@ -913,4 +962,88 @@ test fe_a_friend_is_online_only_with_an_allowed_address_and_a_click_on_one_that_
     assert fe_call(cl[0..8000], s[0..16], 0) == CV_N_REFUSED;
     assert fe_call(cl[0..8000], s[0..16], 1) == FN_OFF + FV_R_GONE;
     assert fe_call(cl[0..8000], s[0..16], 5) == 0;
+}
+
+/// A table of `n` friends in memory: friend k has the fingerprint [k + 1, 2, 3, ..., 10] and the nickname "f<k>" is not
+/// set (the rows tell them apart by the first byte).
+fn fe_t_friends(cl: []u8, n: usize) -> void {
+    fe_t_blank(cl);
+    assert ft_init(cl[FE_FT..FE_FT + FT_LEN]);
+    var k : usize = 0;
+    while (k < n) {
+        var fp : [10]u8 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        fp[0] = @as(u8, @intCast(k + 1));
+        var inv : [25]u8 = undefined;
+        assert invite_make(fp[0..10], inv[0..25]) == 25;
+        assert ft_add(cl[FE_FT..FE_FT + FT_LEN], inv[0..25], cl[FE_FP..FE_FP + 10]) == FA_OK;
+        k = k + 1;
+    }
+}
+
+test fe_a_long_list_shows_the_window_the_scroll_names {
+    var cl : [8000]u8 = undefined;
+    fe_t_friends(cl[0..8000], 12);
+    fe_snapshot(cl[0..8000], 1000);
+    assert cl[FV_COUNT] == 12 and cl[FV_SHOWN] == 8 and cl[FV_SCROLL] == 0;
+    assert cl[fv_row_at(0) + FR_FP] == 1 and cl[fv_row_at(7) + FR_FP] == 8;
+    // the window moves down: row 0 is now friend 6, and only 7 friends are left from there
+    cl[FV_SCROLL] = 5;
+    fe_snapshot(cl[0..8000], 1000);
+    assert cl[FV_SHOWN] == 7;
+    assert cl[fv_row_at(0) + FR_FP] == 6 and cl[fv_row_at(6) + FR_FP] == 12;
+    // the rows past the end are blank, not the old ones
+    assert cl[fv_row_at(7) + FR_FP] == 0 and cl[fv_row_at(7) + FR_NICKLEN] == 0;
+    // a scroll past the end comes back to the last friend
+    cl[FV_SCROLL] = 200;
+    fe_snapshot(cl[0..8000], 1000);
+    assert cl[FV_SCROLL] == 11 and cl[FV_SHOWN] == 1 and cl[fv_row_at(0) + FR_FP] == 12;
+    // an empty list has no window
+    fe_t_friends(cl[0..8000], 0);
+    cl[FV_SCROLL] = 3;
+    fe_snapshot(cl[0..8000], 1000);
+    assert cl[FV_COUNT] == 0 and cl[FV_SHOWN] == 0 and cl[FV_SCROLL] == 0;
+}
+
+test fe_a_friend_seen_before_keeps_its_time_under_the_scroll {
+    var cl : [8000]u8 = undefined;
+    fe_t_friends(cl[0..8000], 10);
+    // friend 9 (table row 8) was last seen at 4000 ms
+    put_u64(cl[0..8000], FE_SEEN + 8 * FE_SEEN_LEN, 4000);
+    cl[FV_SCROLL] = 4;
+    fe_snapshot(cl[0..8000], 10000);
+    // table row 8 is snapshot row 4
+    assert cl[fv_row_at(4) + FR_FP] == 9;
+    assert fv_get32(cl[0..8000], fv_row_at(4) + FR_AGO) == 6;
+    assert fv_get32(cl[0..8000], fv_row_at(3) + FR_AGO) == FV_NEVER;
+}
+
+test fe_removing_a_friend_closes_the_list_and_moves_the_seen_records_with_it {
+    var cl : [8000]u8 = undefined;
+    fe_t_friends(cl[0..8000], 4);
+    put_u64(cl[0..8000], FE_SEEN + 0 * FE_SEEN_LEN, 1000);
+    put_u64(cl[0..8000], FE_SEEN + 1 * FE_SEEN_LEN, 2000);
+    put_u64(cl[0..8000], FE_SEEN + 2 * FE_SEEN_LEN, 3000);
+    put_u64(cl[0..8000], FE_SEEN + 3 * FE_SEEN_LEN, 4000);
+    fe_snapshot(cl[0..8000], 10000);
+    assert cl[FV_COUNT] == 4;
+    // not a shown row: nothing happens
+    assert fe_remove(cl[0..8000], 4, 10000) == 0;
+    assert cl[FV_COUNT] == 4;
+    // remove friend 2 (row 1); the file is not there, so the note says it was removed in memory only
+    assert fe_remove(cl[0..8000], 1, 10000) == FN_RM_NOSAVE;
+    assert cl[FV_COUNT] == 3 and cl[FV_SHOWN] == 3;
+    assert cl[fv_row_at(0) + FR_FP] == 1 and cl[fv_row_at(1) + FR_FP] == 3 and cl[fv_row_at(2) + FR_FP] == 4;
+    // friend 3 and 4 keep the times they had (3000 and 4000), friend 1 keeps 1000
+    assert fv_get32(cl[0..8000], fv_row_at(0) + FR_AGO) == 9;
+    assert fv_get32(cl[0..8000], fv_row_at(1) + FR_AGO) == 7;
+    assert fv_get32(cl[0..8000], fv_row_at(2) + FR_AGO) == 6;
+    // the record of the freed place is cleared
+    assert get_u64(cl[0..8000], FE_SEEN + 3 * FE_SEEN_LEN) == 0;
+    // removing the last friend in view while scrolled to it keeps the window inside the list
+    cl[FV_SCROLL] = 2;
+    fe_snapshot(cl[0..8000], 10000);
+    assert cl[FV_SHOWN] == 1;
+    assert fe_remove(cl[0..8000], 0, 10000) == FN_RM_NOSAVE;
+    assert cl[FV_COUNT] == 2 and cl[FV_SCROLL] == 1 and cl[FV_SHOWN] == 1;
+    assert cl[fv_row_at(0) + FR_FP] == 3;
 }
