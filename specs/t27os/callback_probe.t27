@@ -47,6 +47,17 @@
 // and 51 of every 100 are sent swapped, and every 2 s the socket is not read for 40 ms. 20 s, volume 0.05.
 // CBP_ONLY_F=1 runs only F; the exit code is 0 only for a run with no underrun, no concealed frame, balanced
 // counters and no latency growth.
+// Part G (two hosts): F between two Macs on one LAN. CBP_PEER=a.b.c.d turns it on; CBP_BIND (default 0.0.0.0) and
+// CBP_PORT (default 47727) set the local address. One socket bound to CBP_BIND:CBP_PORT both sends to
+// CBP_PEER:CBP_PORT and receives, so the peer's packets answer our own flow. No storm (the LAN is the storm).
+// CBP_SECONDS (default 25) is the run; CBP_START_AT (unix seconds) makes both sides start the output together.
+// CBP_JB_TARGET / CBP_JB_MAX (default 6 / 12 frames) size the jitter buffer for Wi-Fi bursts. A sendto that answers
+// EAGAIN keeps its frame in the tx ring and is tried again on the next pass (a full ring is a counted tx overrun).
+// The run ends early when the peer has been silent for 300 ms after sending, and underruns are counted only up to
+// the last packet the peer sent, so a peer that stops first does not count as an underrun. Clocks are not shared,
+// so one-way latency is not measured; the report gives the jitter-buffer depth and a software latency estimate.
+// It counts nonzero samples in received frames (the other side's microphone). CBP_ONLY_F=1 is still required.
+// Verdict: received >= 2000, lost <= 10 %, underruns <= 5, nonzero received samples > 0.
 
 module T27osCallbackProbe;
 
@@ -57,6 +68,7 @@ use t27os::pty_sys::sys_addr;
 use t27os::pty_proto::put_u64;
 use t27os::pty_proto::get_u64;
 use t27os::pty_sys::sys_getenv;
+use t27os::pty_sys::sys_strlen;
 
 const CBP_RTLD_DEFAULT : u64 = 18446744073709551614;
 /// kAudioFormatLinearPCM, 'lpcm'.
@@ -403,9 +415,17 @@ const CBP_F_KIND : u64 = 8704;
 const CBP_F_CAPT : u64 = 9216;
 const CBP_F_RXD : u64 = 9728;
 const CBP_F_LAST : u64 = 71168;
-const CBP_F_BYTES : usize = 72128;
+/// Extension (part G), 16 u64 slots after the last frame: 0 two hosts, 1 peer IPv4 (a<<24|b<<16|c<<8|d), 2 port,
+/// 3 nonzero samples in received primary frames, 4 received frames with a nonzero sample, 5 run us,
+/// 6 first seq received + 1, 7 underruns at the last packet received, 8 last packet received us,
+/// 9 ended because the peer went silent, 10 max gap between received packets us, 11 bind IPv4,
+/// 12 jitter target frames, 13 jitter max frames, 14 sendto EAGAIN retries (the frame stays queued),
+/// 15 discard captured frames (the queues run before the shared start time).
+const CBP_F_EXT : u64 = 72128;
+const CBP_F_BYTES : usize = 72256;
+const CBP_LOOPBACK : u64 = 2130706433;
 
-fn cbp_f_size() -> u64 { return CBP_F_LAST + 960; }
+fn cbp_f_size() -> u64 { return CBP_F_EXT + 128; }
 
 /// What the storm does with packet seq: 0 send, 1 drop (every 20th), 2 send seq+1 first, then seq (every 100).
 pub fn cbp_storm(seq: u64) -> u64 {
@@ -414,16 +434,90 @@ pub fn cbp_storm(seq: u64) -> u64 {
     return 0;
 }
 
-/// struct sockaddr_in for 127.0.0.1:port (BSD layout: length, family, port big-endian, address).
-fn cbp_inaddr(out: []u8, port: u64) -> void {
+/// struct sockaddr_in for ip:port, ip as a<<24|b<<16|c<<8|d (BSD layout: length, family, port and address big-endian).
+fn cbp_sockaddr(out: []u8, ip: u64, port: u64) -> void {
     var i : usize = 0;
     while (i < 16) { out[i] = 0; i = i + 1; }
     out[0] = 16;
     out[1] = 2;
     out[2] = @as(u8, @intCast((port >> 8) & 255));
     out[3] = @as(u8, @intCast(port & 255));
-    out[4] = 127;
-    out[7] = 1;
+    out[4] = @as(u8, @intCast((ip >> 24) & 255));
+    out[5] = @as(u8, @intCast((ip >> 16) & 255));
+    out[6] = @as(u8, @intCast((ip >> 8) & 255));
+    out[7] = @as(u8, @intCast(ip & 255));
+}
+
+/// struct sockaddr_in for 127.0.0.1:port.
+fn cbp_inaddr(out: []u8, port: u64) -> void { cbp_sockaddr(out, CBP_LOOPBACK, port); }
+
+/// Dotted quad in the first n bytes of s, as a<<24|b<<16|c<<8|d; 2^32 when it is not four numbers 0..255.
+fn cbp_parse_ip(s: []const u8, n: usize) -> u64 {
+    var ip : u64 = 0;
+    var part : u64 = 0;
+    var digits : u64 = 0;
+    var dots : u64 = 0;
+    var i : usize = 0;
+    while (i < n) {
+        const c : u8 = s[i];
+        if (c >= 48 and c <= 57) {
+            part = part * 10 + @as(u64, @intCast(c - 48));
+            digits = digits + 1;
+            if (part > 255 or digits > 3) { return 4294967296; }
+        } else if (c == 46) {
+            if (digits == 0 or dots == 3) { return 4294967296; }
+            ip = (ip << 8) | part;
+            part = 0;
+            digits = 0;
+            dots = dots + 1;
+        } else {
+            return 4294967296;
+        }
+        i = i + 1;
+    }
+    if (digits == 0 or dots != 3) { return 4294967296; }
+    return (ip << 8) | part;
+}
+
+/// Decimal number in the first n bytes of s; 2^32 when empty, not a number or above 2^32 - 1.
+fn cbp_parse_u(s: []const u8, n: usize) -> u64 {
+    if (n == 0 or n > 10) { return 4294967296; }
+    var v : u64 = 0;
+    var i : usize = 0;
+    while (i < n) {
+        const c : u8 = s[i];
+        if (c < 48 or c > 57) { return 4294967296; }
+        v = v * 10 + @as(u64, @intCast(c - 48));
+        i = i + 1;
+    }
+    if (v > 4294967295) { return 4294967296; }
+    return v;
+}
+
+/// Environment variable `name` copied into out (at most 32 bytes); its length, or 0 when it is unset.
+fn cbp_env(name: []const u8, out: []u8) -> usize {
+    const a : u64 = sys_getenv(name);
+    if (a == 0) { return 0; }
+    var n : u64 = sys_strlen(a);
+    if (n > 32) { n = 32; }
+    sys_peek(out[0..32], a, n);
+    return @as(usize, @intCast(n));
+}
+
+/// IPv4 from the environment: dflt when unset, 2^32 when malformed.
+fn cbp_env_ip(name: []const u8, dflt: u64) -> u64 {
+    var b : [32]u8 = undefined;
+    const n : usize = cbp_env(name, b[0..32]);
+    if (n == 0) { return dflt; }
+    return cbp_parse_ip(b[0..32], n);
+}
+
+/// Number from the environment: dflt when unset, 2^32 when malformed.
+fn cbp_env_u(name: []const u8, dflt: u64) -> u64 {
+    var b : [32]u8 = undefined;
+    const n : usize = cbp_env(name, b[0..32]);
+    if (n == 0) { return dflt; }
+    return cbp_parse_u(b[0..32], n);
 }
 
 fn cbp_errno() -> u64 {
@@ -453,6 +547,10 @@ fn cbp_half(addr: u64) -> void {
 /// redundant copy), or a tx overrun.
 pub fn cbp_fin(user: u64, aq: u64, buf: u64, ts: u64, npk: u32, pd: u64) -> u64 {
     if (cbp_get(user + 64) != 0) { return 0; }
+    if (cbp_get(user + CBP_F_EXT + 120) != 0) {
+        if (cbp_aq_enqueue(aq, buf, 0, 0) != 0) { cbp_inc(user + 416, 1); }
+        return 0;
+    }
     const n : u64 = cbp_get(user) + 1;
     cbp_put(user, n);
     const t : u64 = cbp_us();
@@ -479,10 +577,11 @@ pub fn cbp_fin(user: u64, aq: u64, buf: u64, ts: u64, npk: u32, pd: u64) -> u64 
 }
 
 /// Send frame k from the tx ring as one packet, with frame k-1 as a redundant copy when redundancy is on.
-fn cbp_fsend1(p: u64, k: u64) -> void {
+/// 0 sent, 1 EAGAIN (send buffer full: try the same frame again later), 2 any other error.
+fn cbp_fsend1(p: u64, k: u64) -> u64 {
     var pkt : [1928]u8 = undefined;
     var to : [16]u8 = undefined;
-    cbp_inaddr(to[0..16], CBP_F_PORT);
+    cbp_sockaddr(to[0..16], cbp_get(p + CBP_F_EXT + 8), cbp_get(p + CBP_F_EXT + 16));
     pkt[0] = @as(u8, @intCast(k & 255));
     pkt[1] = @as(u8, @intCast((k >> 8) & 255));
     pkt[2] = @as(u8, @intCast((k >> 16) & 255));
@@ -504,29 +603,40 @@ fn cbp_fsend1(p: u64, k: u64) -> void {
         cbp_inc(p + 128, 1);
         cbp_inc(p + 472, n);
         cbp_inc(p + 304, cbp_sum(src, 960));
-    } else {
-        cbp_inc(p + 152, 1);
-        cbp_put(p + 160, cbp_errno());
+        return 0;
     }
+    const e : u64 = cbp_errno();
+    if (e == CBP_EAGAIN) {
+        cbp_inc(p + CBP_F_EXT + 112, 1);
+        return 1;
+    }
+    cbp_inc(p + 152, 1);
+    cbp_put(p + 160, e);
+    return 2;
 }
 
 /// Sender: every captured frame not yet handled goes out, through the storm.
 fn cbp_fsend(p: u64) -> void {
     var s : u64 = cbp_get(p + 24);
     const w : u64 = cbp_get(p + 16);
+    const two : bool = cbp_get(p + CBP_F_EXT) != 0;
     while (s < w) {
-        const what : u64 = cbp_storm(s);
+        var what : u64 = 0;
+        if (!two) { what = cbp_storm(s); }
         if (what == 1) {
             cbp_inc(p + 136, 1);
             s = s + 1;
         } else if (what == 2) {
             if (s + 1 >= w) { break; }
-            cbp_fsend1(p, s + 1);
-            cbp_fsend1(p, s);
+            const r1 : u64 = cbp_fsend1(p, s + 1);
+            const r2 : u64 = cbp_fsend1(p, s);
+            // A swapped pair is not retried: an EAGAIN there counts as a send error (storm runs on loopback only).
+            if (r1 == 1) { cbp_inc(p + 152, 1); cbp_put(p + 160, CBP_EAGAIN); }
+            if (r2 == 1) { cbp_inc(p + 152, 1); cbp_put(p + 160, CBP_EAGAIN); }
             cbp_inc(p + 144, 1);
             s = s + 2;
         } else {
-            cbp_fsend1(p, s);
+            if (cbp_fsend1(p, s) == 1) { break; }
             s = s + 1;
         }
     }
@@ -550,7 +660,8 @@ fn cbp_fstore(p: u64, q: u64, src: []const u8, kind: u64) -> u64 {
 /// Receiver: read the socket until EAGAIN (at most 64 packets), unless a storm stall is on; `force` ignores it.
 fn cbp_frecv(p: u64, force: bool) -> void {
     const now : u64 = cbp_us();
-    if (!force) {
+    const ext : u64 = p + CBP_F_EXT;
+    if (!force and cbp_get(ext) == 0) {
         if (now < cbp_get(p + 280)) { return; }
         if (now >= cbp_get(p + 288)) {
             cbp_put(p + 280, now + 40000);
@@ -576,6 +687,13 @@ fn cbp_frecv(p: u64, force: bool) -> void {
         if (len != 960 or r < 968) {
             cbp_inc(p + 240, 1);
         } else {
+            const t : u64 = cbp_us();
+            if (cbp_get(ext + 48) == 0) { cbp_put(ext + 48, q + 1); } else { cbp_emax(ext + 80, t - cbp_get(ext + 64)); }
+            cbp_put(ext + 64, t);
+            if (!force) { cbp_put(ext + 56, cbp_get(p + 32)); }
+            const nz : u64 = cbp_nz(sys_addr(pkt[8..968], pkt[8..968], 0), 960);
+            cbp_inc(ext + 24, nz);
+            if (nz > 0) { cbp_inc(ext + 32, 1); }
             const hi : u64 = cbp_get(p + 104);
             if (q + 1 < hi) { cbp_inc(p + 200, 1); }
             if (q + 1 > hi) { cbp_put(p + 104, q + 1); }
@@ -603,7 +721,9 @@ fn cbp_fpull(p: u64, aq: u64, buf: u64) -> i32 {
     var depth : u64 = 0;
     if (hi > play) { depth = hi - play; }
     const now : u64 = cbp_us();
-    if (cbp_get(p + 112) != 0 and depth >= CBP_F_TARGET) {
+    const target : u64 = cbp_get(p + CBP_F_EXT + 96);
+    const most : u64 = cbp_get(p + CBP_F_EXT + 104);
+    if (cbp_get(p + 112) != 0 and depth >= target) {
         cbp_put(p + 112, 0);
         cbp_put(p + 448, now);
     }
@@ -611,11 +731,11 @@ fn cbp_fpull(p: u64, aq: u64, buf: u64) -> i32 {
         cbp_zero(data, 960);
         cbp_inc(p + 120, 1);
     } else {
-        if (depth > CBP_F_MAX) {
+        if (depth > most) {
             cbp_inc(p + 40, 1);
-            cbp_inc(p + 48, depth - CBP_F_TARGET);
-            play = hi - CBP_F_TARGET;
-            depth = CBP_F_TARGET;
+            cbp_inc(p + 48, depth - target);
+            play = hi - target;
+            depth = target;
         }
         cbp_inc(p + 384, depth);
         cbp_emax(p + 392, depth);
@@ -629,12 +749,15 @@ fn cbp_fpull(p: u64, aq: u64, buf: u64) -> i32 {
             if (cbp_get(p + CBP_F_RXS + slot * 8) == play + 1) {
                 cbp_copy(last, p + CBP_F_RXD + slot * 960, 960);
                 if (cbp_get(p + CBP_F_KIND + slot * 8) == 1) { cbp_inc(p + 216, 1); } else { cbp_inc(p + 224, 1); }
-                const age : u64 = now - cbp_get(p + CBP_F_CAPT + slot * 8);
-                cbp_inc(p + 320, age);
-                cbp_emax(p + 328, age);
-                cbp_emin(p + 336, age);
-                cbp_inc(p + 344, 1);
-                if (now - cbp_get(p + 432) < 10000000) { cbp_inc(p + 352, age); cbp_inc(p + 360, 1); } else { cbp_inc(p + 368, age); cbp_inc(p + 376, 1); }
+                // The capture time of seq is this host's; with two hosts it belongs to the other clock, so no age.
+                if (cbp_get(p + CBP_F_EXT) == 0) {
+                    const age : u64 = now - cbp_get(p + CBP_F_CAPT + slot * 8);
+                    cbp_inc(p + 320, age);
+                    cbp_emax(p + 328, age);
+                    cbp_emin(p + 336, age);
+                    cbp_inc(p + 344, 1);
+                    if (now - cbp_get(p + 432) < 10000000) { cbp_inc(p + 352, age); cbp_inc(p + 360, 1); } else { cbp_inc(p + 368, age); cbp_inc(p + 376, 1); }
+                }
                 cbp_put(p + CBP_F_RXS + slot * 8, 0);
             } else {
                 cbp_half(last);
@@ -665,36 +788,77 @@ pub fn cbp_fout(user: u64, aq: u64, buf: u64) -> u64 {
 }
 
 /// Part F: microphone -> tx ring -> UDP 127.0.0.1:47727 under the storm -> jitter buffer -> speakers, 20 s.
+/// Part G (CBP_PEER set): the same loop between two hosts, one socket, no storm, CBP_SECONDS (default 25).
 fn cbp_part_f(mode: u64, fmt: []const u8) -> bool {
-    var blk : [72128]u8 = undefined;
+    var blk : [72256]u8 = undefined;
     var z : usize = 0;
     while (z < CBP_F_BYTES) { blk[z] = 0; z = z + 1; }
-    const p : u64 = sys_addr(blk[0..72128], blk[0..72128], 0);
+    const p : u64 = sys_addr(blk[0..72256], blk[0..72256], 0);
+    const ext : u64 = p + CBP_F_EXT;
     cbp_put(p + 72, CBP_D_MAGIC);
     cbp_put(p + 112, 1);
     cbp_put(p + 336, 18446744073709551615);
     cbp_put(p + 400, 18446744073709551615);
     if (sys_getenv("CBP_NO_FEC") == 0) { cbp_put(p + 440, 1); }
     say_u("F redundant copy of the previous frame (0 = CBP_NO_FEC): ", cbp_get(p + 440));
-    // Sockets: rx bound to 127.0.0.1:47727, tx bound to 127.0.0.1 on any port, both non-blocking.
+    const two : bool = sys_getenv("CBP_PEER") != 0;
+    var peer : u64 = CBP_LOOPBACK;
+    var bind_ip : u64 = CBP_LOOPBACK;
+    var port : u64 = CBP_F_PORT;
+    var secs : u64 = 20;
+    var start_at : u64 = 0;
+    var target : u64 = CBP_F_TARGET;
+    var most : u64 = CBP_F_MAX;
+    if (two) {
+        peer = cbp_env_ip("CBP_PEER", 0);
+        bind_ip = cbp_env_ip("CBP_BIND", 0);
+        port = cbp_env_u("CBP_PORT", CBP_F_PORT);
+        secs = cbp_env_u("CBP_SECONDS", 25);
+        start_at = cbp_env_u("CBP_START_AT", 0);
+        target = cbp_env_u("CBP_JB_TARGET", CBP_F_TARGET);
+        most = cbp_env_u("CBP_JB_MAX", CBP_F_MAX);
+        say_u("G jitter target frames: ", target);
+        say_u("G jitter max frames: ", most);
+        say_u("G two hosts: peer IPv4 (a<<24|b<<16|c<<8|d): ", peer);
+        say_u("G bind IPv4: ", bind_ip);
+        say_u("G port: ", port);
+        say_u("G seconds: ", secs);
+        say_u("G start at (unix s, 0 = now): ", start_at);
+        if (peer == 0 or peer > 4294967295 or bind_ip > 4294967295 or port == 0 or port > 65535 or secs == 0 or secs > 600 or start_at > 4294967295 or target == 0 or target >= most or most + CBP_F_TX >= CBP_F_JB) {
+            say_line("G NOT RUN: CBP_PEER, CBP_BIND, CBP_PORT, CBP_SECONDS, CBP_START_AT or CBP_JB_* is malformed\n");
+            return false;
+        }
+    }
+    cbp_put(ext, 0);
+    if (two) { cbp_put(ext, 1); }
+    cbp_put(ext + 8, peer);
+    cbp_put(ext + 16, port);
+    cbp_put(ext + 88, bind_ip);
+    cbp_put(ext + 96, target);
+    cbp_put(ext + 104, most);
+    // Sockets, both non-blocking. F: rx bound to 127.0.0.1:47727, tx bound to 127.0.0.1 on any port.
+    // G: one socket bound to CBP_BIND:CBP_PORT sends and receives.
     var rxa : [16]u8 = undefined;
     var txa : [16]u8 = undefined;
-    cbp_inaddr(rxa[0..16], CBP_F_PORT);
+    cbp_sockaddr(rxa[0..16], bind_ip, port);
     cbp_inaddr(txa[0..16], 0);
     const frx : i32 = cbp_socket(2, 2, 0);
-    const ftx : i32 = cbp_socket(2, 2, 0);
+    var ftx : i32 = frx;
+    if (!two) { ftx = cbp_socket(2, 2, 0); }
     say_num("F socket(AF_INET, SOCK_DGRAM) rx fd: ", @as(i64, frx));
     say_num("F socket(AF_INET, SOCK_DGRAM) tx fd: ", @as(i64, ftx));
     if (frx < 0 or ftx < 0) { say_line("F NET NOT RUN: socket failed\n"); return false; }
     const b_rx : i32 = cbp_bind(frx, rxa[0..16], 16);
-    say_num("F bind rx 127.0.0.1:47727 status: ", @as(i64, b_rx));
+    say_num("F bind rx status: ", @as(i64, b_rx));
     if (b_rx != 0) { say_u("F bind errno: ", cbp_errno()); }
-    const b_tx : i32 = cbp_bind(ftx, txa[0..16], 16);
-    say_num("F bind tx 127.0.0.1:0 status: ", @as(i64, b_tx));
+    var b_tx : i32 = 0;
+    if (!two) { b_tx = cbp_bind(ftx, txa[0..16], 16); }
+    say_num("F bind tx 127.0.0.1:0 status (G: same socket, 0): ", @as(i64, b_tx));
     var rcv : [4]u8 = undefined;
     rcv[0] = 0; rcv[1] = 0; rcv[2] = 1; rcv[3] = 0;
     const so : i32 = cbp_setsockopt(frx, 65535, 4098, rcv[0..4], 4);
     say_num("F setsockopt(SOL_SOCKET, SO_RCVBUF, 65536) status: ", @as(i64, so));
+    if (two) { say_num("G setsockopt(SOL_SOCKET, SO_SNDBUF, 65536) status: ", @as(i64, cbp_setsockopt(frx, 65535, 4097, rcv[0..4], 4))); }
     var nb_ok : bool = true;
     var fds : [2]i32 = undefined;
     fds[0] = frx;
@@ -776,6 +940,7 @@ fn cbp_part_f(mode: u64, fmt: []const u8) -> bool {
             k = k + 1;
         }
         say_num("F output buffers primed (warm-up silence): ", @as(i64, @intCast(out_q)));
+        if (two) { cbp_put(ext + 120, 1); }
         cbp_put(p + 432, cbp_us());
         cbp_put(p + 288, cbp_us() + 2000000);
         const s_so : i32 = cbp_aq_start(qo, 0);
@@ -788,12 +953,32 @@ fn cbp_part_f(mode: u64, fmt: []const u8) -> bool {
         say_u("F input AudioQueueStart returned +us (from output start): ", cbp_us() - cbp_get(p + 432));
         started_in = s_si == 0;
     }
+    // G: both queues already run (a microphone start took 3.46 s on the M1, with the socket unread); captured
+    // frames are discarded and the run loop keeps reading until the shared wall-clock second (CFAbsoluteTime
+    // counts from 2001). Then seq 0 is captured on both sides at about the same moment.
+    if (started_in and two) {
+        if (start_at > 978307200) {
+            const at : f64 = @as(f64, @floatFromInt(start_at - 978307200));
+            const late_us : f64 = (cbp_now() - at) * 1000000.0;
+            if (late_us > 0.0) { say_u("G start was already past by us: ", @as(u64, @intFromFloat(late_us))); }
+            while (cbp_now() < at) { cbp_run(mode, 0.002, false); cbp_frecv(p, false); }
+        }
+        say_u("G captured frames before the start (discarded, not sent): ", cbp_get(p));
+        cbp_put(ext + 120, 0);
+        cbp_put(p + 432, cbp_us());
+        say_line("G start time reached\n");
+    }
     if (started_in) {
         var sec : u64 = 1;
-        while (cbp_us() - cbp_get(p + 432) < 20000000) {
+        while (cbp_us() - cbp_get(p + 432) < secs * 1000000) {
             cbp_run(mode, 0.002, false);
             cbp_fsend(p);
             cbp_frecv(p, false);
+            // G: the peer has stopped (silent 300 ms after the warm-up ended): end now, do not count the silence.
+            if (two and cbp_get(p + 112) == 0 and cbp_get(ext + 64) != 0 and cbp_us() - cbp_get(ext + 64) > 300000) {
+                cbp_put(ext + 72, 1);
+                break;
+            }
             if (cbp_us() - cbp_get(p + 432) >= sec * 1000000) {
                 sys_write(1, "F t+", 4);
                 say_num("s ", @as(i64, @intCast(sec)));
@@ -804,7 +989,10 @@ fn cbp_part_f(mode: u64, fmt: []const u8) -> bool {
                 say_u("  under/over/concealed/depth: ", cbp_get(p + 32));
                 say_u("                              ", cbp_get(p + 40));
                 say_u("                              ", cbp_get(p + 232));
-                say_u("                              ", cbp_get(p + 104) - cbp_get(p + 96));
+                var dep : u64 = 0;
+                if (cbp_get(p + 104) > cbp_get(p + 96)) { dep = cbp_get(p + 104) - cbp_get(p + 96); }
+                say_u("                              ", dep);
+                if (two) { say_u("  nonzero samples received: ", cbp_get(ext + 24)); }
                 sec = sec + 1;
             }
         }
@@ -821,7 +1009,7 @@ fn cbp_part_f(mode: u64, fmt: []const u8) -> bool {
     say_num("F output AudioQueueDispose status: ", @as(i64, d_out));
     say_num("F input AudioQueueDispose status: ", @as(i64, d_in));
     say_num("F close rx status: ", @as(i64, cbp_close(frx)));
-    say_num("F close tx status: ", @as(i64, cbp_close(ftx)));
+    if (ftx != frx) { say_num("F close tx status: ", @as(i64, cbp_close(ftx))); }
     if (!started_in) { say_line("F NET NOT RUN: a status above is nonzero or the volume did not read back\n"); return false; }
     const cap : u64 = cbp_get(p + 16);
     const handled : u64 = cbp_get(p + 24);
@@ -847,6 +1035,7 @@ fn cbp_part_f(mode: u64, fmt: []const u8) -> bool {
     say_u("F bytes sent: ", cbp_get(p + 472));
     say_u("F packets received: ", recv);
     say_u("F bytes received: ", cbp_get(p + 480));
+    if (two) { return cbp_part_g_report(p, net_ok and d_out == 0 and d_in == 0, t_end); }
     say_u("F lost on the wire (sent - received): ", sent - recv);
     say_u("F unique frames received in time: ", cbp_get(p + 176));
     say_u("F reordered (arrived after a higher seq): ", cbp_get(p + 200));
@@ -912,6 +1101,76 @@ fn cbp_part_f(mode: u64, fmt: []const u8) -> bool {
         say_line("NET NOT CLEAN: see the counters above\n");
     }
     return clean;
+}
+
+/// Part G report: what this host received from the peer. Lost = frames the peer numbered from its first packet
+/// seen here to its highest, minus the distinct primaries that arrived (in time or late).
+fn cbp_part_g_report(p: u64, sys_ok: bool, t_end: u64) -> bool {
+    const ext : u64 = p + CBP_F_EXT;
+    const recv : u64 = cbp_get(p + 168);
+    const hi : u64 = cbp_get(p + 104);
+    var first : u64 = 0;
+    if (cbp_get(ext + 48) > 0) { first = cbp_get(ext + 48) - 1; }
+    var expected : u64 = 0;
+    if (hi > first) { expected = hi - first; }
+    const got : u64 = cbp_get(p + 176) + cbp_get(p + 192);
+    var lost : u64 = 0;
+    if (expected > got) { lost = expected - got; }
+    const under_live : u64 = cbp_get(ext + 56);
+    say_u("G ended because the peer went silent for 300 ms (1 yes): ", cbp_get(ext + 72));
+    if (cbp_get(ext + 64) > 0) { say_u("G last packet received +us (from output start): ", cbp_get(ext + 64) - cbp_get(p + 432)); }
+    say_u("G peer first seq seen: ", first);
+    say_u("G peer highest seq + 1: ", hi);
+    say_u("G peer frames expected (highest + 1 - first): ", expected);
+    say_u("G distinct primaries received (in time + late): ", got);
+    say_u("G in time: ", cbp_get(p + 176));
+    say_u("G late or too far ahead: ", cbp_get(p + 192));
+    say_u("G duplicates: ", cbp_get(p + 184));
+    say_u("G reordered: ", cbp_get(p + 200));
+    say_u("G bad packets: ", cbp_get(p + 240));
+    say_u("G lost frames (expected - received): ", lost);
+    var lost_pm : u64 = 0;
+    if (expected > 0) { lost_pm = lost * 1000 / expected; }
+    say_u("G lost per mille: ", lost_pm);
+    say_u("G missing frames filled from the redundant copy: ", cbp_get(p + 208));
+    say_u("G played: primary frames: ", cbp_get(p + 216));
+    say_u("G played: recovered from the redundant copy: ", cbp_get(p + 224));
+    say_u("G played: concealed: ", cbp_get(p + 232));
+    say_u("G underruns while the peer was sending: ", under_live);
+    say_u("G underruns in total (incl. after the peer stopped): ", cbp_get(p + 32));
+    say_u("G overruns (more than 12 frames ahead): ", cbp_get(p + 40));
+    say_u("G frames skipped by overruns: ", cbp_get(p + 48));
+    say_u("G tx ring overruns: ", cbp_get(p + 56));
+    say_u("G sendto EAGAIN retries (frame kept, sent later): ", cbp_get(ext + 112));
+    say_u("G sendto errors: ", cbp_get(p + 152));
+    if (cbp_get(p + 152) > 0) { say_u("G last sendto errno: ", cbp_get(p + 160)); }
+    say_u("G recvfrom errors other than EAGAIN: ", cbp_get(p + 248));
+    if (cbp_get(p + 248) > 0) { say_u("G last recvfrom errno: ", cbp_get(p + 256)); }
+    say_u("G max gap between received packets us: ", cbp_get(ext + 80));
+    say_u("G max packets in one read: ", cbp_get(p + 296));
+    say_u("G nonzero samples in received frames (peer microphone): ", cbp_get(ext + 24));
+    say_u("G received frames with a nonzero sample: ", cbp_get(ext + 32));
+    say_u("G nonzero samples played: ", cbp_get(p + 408));
+    const n_out : u64 = cbp_get(p + 8) - cbp_get(p + 120);
+    var dmean : u64 = 0;
+    if (n_out > 0) { dmean = cbp_get(p + 384) * 100 / n_out; }
+    say_u("G jitter depth frames: mean x100 ", dmean);
+    say_u("G jitter depth frames: min ", cbp_get(p + 400));
+    say_u("G jitter depth frames: max ", cbp_get(p + 392));
+    say_u("G jitter target / max frames: ", cbp_get(ext + 96));
+    say_u("                              ", cbp_get(ext + 104));
+    const lat : u64 = 10000 + dmean * 100 + @as(u64, @intCast(CBP_E_OUTBUFS - 1)) * 10000;
+    say_u("G estimated software latency us (10 ms in + mean depth x 10 ms + 20 ms out, no network or device): ", lat);
+    say_u("G run us: ", t_end - cbp_get(p + 432));
+    const ok : bool = sys_ok and recv >= 2000 and lost * 10 <= expected and under_live <= 5 and cbp_get(ext + 24) > 0 and cbp_get(p + 152) == 0;
+    say("G received >= 2000, lost <= 10 %, underruns <= 5, sendto clean", sys_ok and recv >= 2000 and lost * 10 <= expected and under_live <= 5 and cbp_get(p + 152) == 0);
+    say("G received frames carry nonzero samples (the peer microphone)", cbp_get(ext + 24) > 0);
+    if (ok) {
+        say_line("CALL OK: this side hears the peer\n");
+    } else {
+        say_line("CALL NOT OK: see the counters above\n");
+    }
+    return ok;
 }
 
 fn say_line(s: []const u8) -> void { sys_write(1, s, @as(u64, s.len)); }
@@ -1434,8 +1693,9 @@ test the_duplex_ring_fits_its_block {
 }
 
 test the_network_block_and_packet_fit {
-    assert cbp_f_size() == 72128;
+    assert cbp_f_size() == 72256;
     assert @as(u64, CBP_F_BYTES) == cbp_f_size();
+    assert CBP_F_EXT == CBP_F_LAST + 960;
     assert CBP_F_TXD == 64 * 8 and CBP_F_RXS == CBP_F_TXD + CBP_F_TX * 960;
     assert CBP_F_KIND == CBP_F_RXS + CBP_F_JB * 8 and CBP_F_CAPT == CBP_F_KIND + CBP_F_JB * 8;
     assert CBP_F_RXD == CBP_F_CAPT + CBP_F_JB * 8 and CBP_F_LAST == CBP_F_RXD + CBP_F_JB * 960;
@@ -1464,4 +1724,29 @@ test the_socket_address_is_127_0_0_1_port_47727 {
     cbp_inaddr(a[0..16], CBP_F_PORT);
     assert a[0] == 16 and a[1] == 2 and a[2] == 186 and a[3] == 111;
     assert a[4] == 127 and a[5] == 0 and a[6] == 0 and a[7] == 1 and a[15] == 0;
+}
+
+test the_peer_address_parses_and_lands_in_sockaddr {
+    assert cbp_parse_ip("192.168.15.4", 12) == 3232239364;
+    assert cbp_parse_ip("192.168.15.8", 12) == 3232239368;
+    assert cbp_parse_ip("0.0.0.0", 7) == 0;
+    assert cbp_parse_ip("127.0.0.1", 9) == CBP_LOOPBACK;
+    assert cbp_parse_ip("256.0.0.1", 9) == 4294967296;
+    assert cbp_parse_ip("1.2.3", 5) == 4294967296;
+    assert cbp_parse_ip("1.2.3.4.5", 9) == 4294967296;
+    assert cbp_parse_ip("1..3.4", 6) == 4294967296;
+    assert cbp_parse_ip("1.2.3.x", 7) == 4294967296;
+    var a : [16]u8 = undefined;
+    cbp_sockaddr(a[0..16], 3232239364, 47727);
+    assert a[0] == 16 and a[1] == 2 and a[2] == 186 and a[3] == 111;
+    assert a[4] == 192 and a[5] == 168 and a[6] == 15 and a[7] == 4 and a[8] == 0 and a[15] == 0;
+}
+
+test the_port_and_seconds_parse_as_decimal {
+    assert cbp_parse_u("47727", 5) == 47727;
+    assert cbp_parse_u("25", 2) == 25;
+    assert cbp_parse_u("1792680078", 10) == 1792680078;
+    assert cbp_parse_u("", 0) == 4294967296;
+    assert cbp_parse_u("4x", 2) == 4294967296;
+    assert cbp_parse_u("9999999999", 10) == 4294967296;
 }
