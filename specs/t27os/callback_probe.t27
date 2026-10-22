@@ -22,6 +22,11 @@
 // decides the exit code of the full run. On macOS a microphone denied by TCC usually does not fail NewInput or
 // Start: the queue runs and delivers zero samples, so the verdict comes from the samples, not the statuses.
 // CBP_ONLY_C=1 skips A and B (no 60 s tone); then the exit code is 0 only when C ran with callbacks.
+// Part D (foreign thread): an AudioQueue OUTPUT queue created with inCallbackRunLoop = NULL, so the system calls
+// cbp_outd on a thread of its own while main sleeps. Same 440 Hz format and buffers, 10 s. The state block holds a
+// magic and its own address; every call checks both, counts calls and integrity errors, and compares pthread_self
+// with the main thread's. CBP_ONLY_D=1 runs only D, and then the exit code is 0 only when D ran clean on another
+// thread. This is the precondition for VoiceProcessingIO, whose render callback runs on a realtime thread.
 
 module T27osCallbackProbe;
 
@@ -57,6 +62,12 @@ fn cbp_aq_enqueue(aq: u64, buf: u64, n: u32, descs: u64) -> i32 { return @extern
 fn cbp_aq_start(aq: u64, at: u64) -> i32 { return @extern("AudioQueueStart"); }
 fn cbp_sin(x: f64) -> f64 { return @extern("sin"); }
 fn cbp_aq_dispose(aq: u64, now: bool) -> i32 { return @extern("AudioQueueDispose"); }
+fn cbp_thread() -> u64 { return @extern("pthread_self"); }
+fn cbp_is_main() -> i32 { return @extern("pthread_main_np"); }
+fn cbp_usleep(us: u32) -> i32 { return @extern("usleep"); }
+
+/// Part D magic, 0x5432374400000D27 ("T27D" over 0x0D27).
+const CBP_D_MAGIC : u64 = 6066972413218786599;
 
 fn cbp_get(at: u64) -> u64 {
     var c : [8]u8 = undefined;
@@ -122,6 +133,27 @@ pub fn cbp_out(user: u64, aq: u64, buf: u64) -> u64 {
     if (n == 1) { cbp_put(user + 24, t); }
     cbp_put(user + 32, t);
     cbp_fill(user, aq, buf);
+    return n;
+}
+
+/// Part D state block (u64 slots): 0 calls, 1 own address, 2 magic, 3 first us, 4 last us, 5 sample index,
+/// 6 integrity errors, 7 main pthread, 8 first callback pthread, 9 calls on the main pthread,
+/// 10 calls where pthread_main_np != 0, 11 failed enqueues.
+/// AudioQueue output callback for a queue with no run loop: runs on a system thread.
+pub fn cbp_outd(user: u64, aq: u64, buf: u64) -> u64 {
+    if (cbp_get(user + 16) != CBP_D_MAGIC or cbp_get(user + 8) != user) {
+        cbp_put(user + 48, cbp_get(user + 48) + 1);
+        return 0;
+    }
+    const n : u64 = cbp_get(user) + 1;
+    cbp_put(user, n);
+    const t : u64 = cbp_us();
+    const th : u64 = cbp_thread();
+    if (n == 1) { cbp_put(user + 24, t); cbp_put(user + 64, th); }
+    cbp_put(user + 32, t);
+    if (th == cbp_get(user + 56)) { cbp_put(user + 72, cbp_get(user + 72) + 1); }
+    if (cbp_is_main() != 0) { cbp_put(user + 80, cbp_get(user + 80) + 1); }
+    if (cbp_fill(user, aq, buf) != 0) { cbp_put(user + 88, cbp_get(user + 88) + 1); }
     return n;
 }
 
@@ -230,8 +262,9 @@ pub fn main() -> void {
     cbp_put(ps + 16, 1511506142);
     cbp_tick(0, ps);
     // Never true (count is 1): only makes sure cbp_out is emitted and so exported.
-    if (cbp_get(ps) == 99) { cbp_out(ps, 0, 0); cbp_in(ps, 0, 0, 0, 0, 0); }
-    const only_c : bool = sys_getenv("CBP_ONLY_C") != 0;
+    if (cbp_get(ps) == 99) { cbp_out(ps, 0, 0); cbp_in(ps, 0, 0, 0, 0, 0); cbp_outd(ps, 0, 0); }
+    const only_d : bool = sys_getenv("CBP_ONLY_D") != 0;
+    const only_c : bool = sys_getenv("CBP_ONLY_C") != 0 or only_d;
     const direct : bool = say("direct call: tick counts 1", cbp_get(ps) == 1);
     cbp_put(ps, 0);
     cbp_put(ps + 24, 0);
@@ -323,7 +356,7 @@ pub fn main() -> void {
     var aqi : [8]u8 = undefined;
     put_u64(aqi[0..8], 0, 0);
     var s3 : i32 = -1;
-    if (fin != 0 and mode != 0) { s3 = cbp_aq_new_input(fmt[0..40], fin, pc, cbp_rl_current(), mode, 0, aqi[0..8]); }
+    if (!only_d and fin != 0 and mode != 0) { s3 =cbp_aq_new_input(fmt[0..40], fin, pc, cbp_rl_current(), mode, 0, aqi[0..8]); }
     say_num("AudioQueueNewInput status: ", @as(i64, s3));
     const qi : u64 = get_u64(aqi[0..8], 0);
     var c_queued : u32 = 0;
@@ -377,7 +410,9 @@ pub fn main() -> void {
         say("C disposed", c_disposed);
     }
     const c_ran : bool = s3 == 0 and s4 == 0 and c_queued == 4 and c_calls > 0 and c_disposed;
-    if (s3 != 0 or s4 != 0) {
+    if (only_d) {
+        sys_write(1, "C skipped (CBP_ONLY_D)\n", 23);
+    } else if (s3 != 0 or s4 != 0) {
         sys_write(1, "CAPTURE REFUSED: a status above is nonzero\n", 43);
     } else if (c_calls == 0) {
         sys_write(1, "CAPTURE UNVERIFIED: queue started, no input callback\n", 53);
@@ -385,6 +420,83 @@ pub fn main() -> void {
         sys_write(1, "CAPTURE SILENT: callbacks arrive, every sample is zero (TCC denial or muted input)\n", 83);
     } else {
         sys_write(1, "CAPTURE LIVE: callbacks arrive with nonzero samples\n", 52);
+    }
+
+    // D. Output queue with no run loop: the system calls cbp_outd on its own thread while main sleeps 10 s.
+    var dst : [96]u8 = undefined;
+    var dz : usize = 0;
+    while (dz < 96) { dst[dz] = 0; dz = dz + 1; }
+    const pd : u64 = sys_addr(dst[0..96], dst[0..96], 0);
+    cbp_put(pd + 8, pd);
+    cbp_put(pd + 16, CBP_D_MAGIC);
+    const main_th : u64 = cbp_thread();
+    cbp_put(pd + 56, main_th);
+    const fd : u64 = cbp_dlsym(CBP_RTLD_DEFAULT, "cbp_outd");
+    say("dlsym finds cbp_outd", fd != 0);
+    say("D main thread: pthread_main_np != 0", cbp_is_main() != 0);
+    var aqd : [8]u8 = undefined;
+    put_u64(aqd[0..8], 0, 0);
+    var s5 : i32 = -1;
+    if (fd != 0) { s5 = cbp_aq_new_output(fmt[0..40], fd, pd, 0, 0, 0, aqd[0..8]); }
+    say_num("D AudioQueueNewOutput status (run loop NULL): ", @as(i64, s5));
+    const qd : u64 = get_u64(aqd[0..8], 0);
+    var d_queued : u32 = 0;
+    var s6 : i32 = -1;
+    var d_calls : u64 = 0;
+    var d_disposed : bool = false;
+    var d_live_fail : u64 = 1;
+    if (s5 == 0 and qd != 0) {
+        var j : u32 = 0;
+        while (j < 4) {
+            var db : [8]u8 = undefined;
+            put_u64(db[0..8], 0, 0);
+            if (cbp_aq_alloc(qd, 960, db[0..8]) == 0) {
+                if (cbp_fill(pd, qd, get_u64(db[0..8], 0)) == 0) { d_queued = d_queued + 1; }
+            }
+            j = j + 1;
+        }
+        say_num("D buffers enqueued: ", @as(i64, @intCast(d_queued)));
+        const td : u64 = cbp_us();
+        s6 = cbp_aq_start(qd, 0);
+        say_num("D AudioQueueStart status: ", @as(i64, s6));
+        if (s6 == 0) {
+            var sec : u32 = 0;
+            while (sec < 10) {
+                cbp_usleep(1000000);
+                say_num("D callbacks so far: ", @as(i64, @intCast(cbp_get(pd))));
+                sec = sec + 1;
+            }
+        }
+        d_live_fail = cbp_get(pd + 88);
+        say_num("D failed enqueues before Dispose: ", @as(i64, @intCast(d_live_fail)));
+        d_disposed = cbp_aq_dispose(qd, true) == 0;
+        d_calls = cbp_get(pd);
+        say_num("D callbacks in 10 s: ", @as(i64, @intCast(d_calls)));
+        say_num("D integrity errors (magic or own address): ", @as(i64, @intCast(cbp_get(pd + 48))));
+        say("D magic and own address intact after run", cbp_get(pd + 16) == CBP_D_MAGIC and cbp_get(pd + 8) == pd);
+        say_num("D failed enqueues in total (buffers handed back by Dispose fail to re-enqueue): ",@as(i64, @intCast(cbp_get(pd + 88))));
+        say_num("D calls on the main pthread: ", @as(i64, @intCast(cbp_get(pd + 72))));
+        say_num("D calls with pthread_main_np != 0: ", @as(i64, @intCast(cbp_get(pd + 80))));
+        if (d_calls > 0) {
+            if (cbp_get(pd + 64) == main_th) {
+                sys_write(1, "D callback thread: SAME as main\n", 32);
+            } else {
+                sys_write(1, "D callback thread: OTHER than main\n", 35);
+            }
+            say_num("D first callback +us (from start): ", @as(i64, @intCast(cbp_get(pd + 24) - td)));
+            say_num("D last us - first us: ", @as(i64, @intCast(cbp_get(pd + 32) - cbp_get(pd + 24))));
+        }
+        say("D disposed", d_disposed);
+    }
+    const d_ok : bool = s5 == 0 and s6 == 0 and d_queued == 4 and d_calls >= 900 and d_disposed and cbp_get(pd + 48) == 0 and d_live_fail == 0 and cbp_get(pd + 72) == 0 and cbp_get(pd + 80) == 0;
+    say("D: foreign-thread callbacks >= 900, no integrity errors, never on main, disposed", d_ok);
+    if (only_d) {
+        if (direct and d_ok) {
+            sys_write(1, "abi-probe: D ran clean on a system thread\n", 42);
+            sys_exit(0);
+        }
+        sys_write(1, "abi-probe: FAILED\n", 18);
+        sys_exit(1);
     }
     if (only_c) {
         if (direct and c_ran) {
