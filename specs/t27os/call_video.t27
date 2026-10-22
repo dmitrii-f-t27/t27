@@ -254,6 +254,7 @@ pub fn cv_frame(me: u64, cmd: u64, output: u64, sbuf: u64, conn: u64) -> u64 {
     const st : u64 = cv_ivar_get(me, iv);
     if (st == 0) { return 0; }
     if (cbp_get(st + 64) != CV_MAGIC) { return 0; }
+    if (cbp_get(st + CVL_MODE * 8) == 1) { return cvl_frame(st, sbuf); }
     const t : u64 = cv_us();
     const pb : u64 = cv_sample_image(sbuf);
     if (pb == 0) { cv_put(st + 96, cbp_get(st + 96) + 1); return 0; }
@@ -519,6 +520,294 @@ pub fn cv_probe_run() -> i32 {
     return 1;
 }
 
+
+// ---------------------------------------------------------------- the camera in a call (owner, 2026-10-22)
+
+// The live camera: the same delegate class, in "live" mode (slot CVL_MODE = 1). While a call is ACTIVE the window starts
+// the session (cvl_start); the camera thread (cvl_frame) takes at most one frame in 90 ms, cuts it to 320x240 (aspect
+// fill), encodes it as JPEG in memory and publishes it under a sequence number (odd = being written); the polling thread
+// (cvl_take) copies the newest JPEG that it has not taken yet and hands it to cs_video_feed. So the encoding never runs
+// in the audio poll. When the call ends the session is stopped (cvl_stop) and the camera is free again.
+// Slots of the live block (u64 at st + 8 k); the JPEG buffer stands at st + CVL_BUF.
+const CVL_MODE : u64 = 200;
+const CVL_SEQ : u64 = 201;
+const CVL_LEN : u64 = 202;
+const CVL_LAST_US : u64 = 203;
+const CVL_FED : u64 = 204;
+const CVL_CB : u64 = 205;
+const CVL_ENC : u64 = 206;
+const CVL_FAIL : u64 = 207;
+const CVL_BIG : u64 = 208;
+const CVL_STATS : u64 = 216;
+const CVL_N : u64 = 220;
+const CVL_SUM : u64 = 221;
+const CVL_MEAN_MIN : u64 = 222;
+const CVL_MEAN_MAX : u64 = 223;
+const CVL_AUTH : u64 = 224;
+const CVL_BLK : u64 = 226;
+const CVL_SESS : u64 = 227;
+const CVL_OUT : u64 = 228;
+const CVL_DEL : u64 = 229;
+const CVL_RUN : u64 = 230;
+const CVL_DUMP : u64 = 231;
+const CVL_DUMPED : u64 = 232;
+const CVL_W : u64 = 233;
+const CVL_H : u64 = 234;
+const CVL_STARTS : u64 = 235;
+const CVL_BUF : u64 = 4096;
+const CVL_BUF_MAX : u64 = 24000;
+const CVL_PERIOD_US : u64 = 90000;
+
+/// Hand-made global block for requestAccessForMediaType:completionHandler: (answer in slot +40 of the block).
+fn cvl_block() -> u64 {
+    const blk : u64 = cv_calloc(1, 64);
+    if (blk == 0) { return 0; }
+    if (cbp_get(blk + 100) == 99) { cv_granted(0, 0); }
+    cv_put(blk, cv_dlsym(CV_RTLD_DEFAULT, "_NSConcreteGlobalBlock"));
+    cv_put(blk + 8, 268435456);
+    cv_put(blk + 16, cv_dlsym(CV_RTLD_DEFAULT, "cv_granted"));
+    cv_put(blk + 24, blk + 48);
+    cv_put(blk + 56, 48);
+    return blk;
+}
+
+/// The locked BGRA frame (w x h, row bytes) as a 320x240 JPEG (aspect fill, quality 0.5) into the live buffer;
+/// the stats of the 320x240 picture go to slots CVL_STATS..+3. Its length, 0 on failure.
+fn cvl_encode(st: u64, base: u64, w: u64, h: u64, row: u64) -> u64 {
+    var n : u64 = 0;
+    const space : u64 = cv_cg_rgb();
+    const sctx : u64 = cv_cg_bitmap(base, @as(usize, w), @as(usize, h), 8, @as(usize, row), space, CV_BITMAP_INFO);
+    const mem : u64 = cv_calloc(CV_W * CV_H, 4);
+    if (sctx != 0 and mem != 0) {
+        const simg : u64 = cv_cg_image(sctx);
+        const dctx : u64 = cv_cg_bitmap(mem, @as(usize, CV_W), @as(usize, CV_H), 8, @as(usize, CV_W * 4), space, CV_BITMAP_INFO);
+        if (simg != 0 and dctx != 0) {
+            var dx : f64 = 0.0;
+            var dy : f64 = 0.0;
+            var dw : f64 = 320.0;
+            var dh : f64 = 240.0;
+            if (w * CV_H >= h * CV_W) {
+                dw = @as(f64, @floatFromInt(w * CV_H)) / @as(f64, @floatFromInt(h));
+                dx = (320.0 - dw) / 2.0;
+            } else {
+                dh = @as(f64, @floatFromInt(h * CV_W)) / @as(f64, @floatFromInt(w));
+                dy = (240.0 - dh) / 2.0;
+            }
+            cv_cg_draw(dctx, dx, dy, dw, dh, simg);
+            cv_stats(mem, CV_W * 4, CV_W, CV_H, 4, 4, st, CVL_STATS);
+            const dimg : u64 = cv_cg_image(dctx);
+            if (dimg != 0) {
+                const data : u64 = cv_cf_mdata(0, 0);
+                const kind : u64 = cv_cf("public.jpeg");
+                const dest : u64 = cv_dest_data(data, kind, 1, 0);
+                if (dest != 0) {
+                    var kb : [8]u8 = undefined;
+                    var vb : [8]u8 = undefined;
+                    var qb : [8]u8 = undefined;
+                    put_u64(kb[0..8], 0, cv_konst("kCGImageDestinationLossyCompressionQuality"));
+                    put_u64(qb[0..8], 0, 4602678819172646912);
+                    const qn : u64 = cv_cf_num(0, 6, qb[0..8]);
+                    put_u64(vb[0..8], 0, qn);
+                    const props : u64 = cv_cf_dict(0, kb[0..8], vb[0..8], 1, cv_dlsym(CV_RTLD_DEFAULT, "kCFTypeDictionaryKeyCallBacks"), cv_dlsym(CV_RTLD_DEFAULT, "kCFTypeDictionaryValueCallBacks"));
+                    cv_dest_add(dest, dimg, props);
+                    if (cv_dest_end(dest)) {
+                        const len : i64 = cv_cf_len(data);
+                        if (len > 0 and @as(u64, @intCast(len)) <= CVL_BUF_MAX) {
+                            // odd sequence = being written; the reader refuses an odd or a changed one
+                            cv_put(st + CVL_SEQ * 8, cbp_get(st + CVL_SEQ * 8) + 1);
+                            cv_copy(st + CVL_BUF, cv_cf_ptr(data), @as(u64, @intCast(len)));
+                            cv_put(st + CVL_LEN * 8, @as(u64, @intCast(len)));
+                            cv_put(st + CVL_SEQ * 8, cbp_get(st + CVL_SEQ * 8) + 1);
+                            n = @as(u64, @intCast(len));
+                            if (cbp_get(st + CVL_DUMP * 8) != 0 and cbp_get(st + CVL_DUMPED * 8) == 0 and cbp_get(st + CVL_ENC * 8) >= 40) {
+                                const fd : i32 = cv_open("/tmp/camcall/cam40.jpg", 1537, 420);
+                                if (fd >= 0) { cv_write_at(fd, cv_cf_ptr(data), @as(u64, @intCast(len))); cv_close(fd); cv_put(st + CVL_DUMPED * 8, 1); }
+                            }
+                        } else if (len > 0) {
+                            cv_put(st + CVL_BIG * 8, cbp_get(st + CVL_BIG * 8) + 1);
+                        }
+                    }
+                    if (props != 0) { cv_release(props); }
+                    if (qn != 0) { cv_release(qn); }
+                    cv_release(dest);
+                }
+                cv_release(kind);
+                cv_release(data);
+                cv_cg_image_release(dimg);
+            }
+        }
+        if (dctx != 0) { cv_cg_ctx_release(dctx); }
+        if (simg != 0) { cv_cg_image_release(simg); }
+    }
+    if (mem != 0) { cv_free(mem); }
+    if (sctx != 0) { cv_cg_ctx_release(sctx); }
+    cv_cg_space_release(space);
+    return n;
+}
+
+/// The delegate method in live mode (see cv_frame). Camera thread.
+fn cvl_frame(st: u64, sbuf: u64) -> u64 {
+    cv_put(st + CVL_CB * 8, cbp_get(st + CVL_CB * 8) + 1);
+    const t : u64 = cv_us();
+    const last : u64 = cbp_get(st + CVL_LAST_US * 8);
+    if (last != 0 and t - last < CVL_PERIOD_US) { return 0; }
+    const pb : u64 = cv_sample_image(sbuf);
+    if (pb == 0) { return 0; }
+    cv_put(st + CVL_LAST_US * 8, t);
+    cv_pb_lock(pb, 1);
+    const base : u64 = cv_pb_base(pb);
+    const w : u64 = cv_pb_w(pb);
+    const h : u64 = cv_pb_h(pb);
+    cv_put(st + CVL_W * 8, w);
+    cv_put(st + CVL_H * 8, h);
+    if (base != 0 and w > 0 and h > 0 and cv_pb_fmt(pb) == CV_BGRA) {
+        const n : u64 = cvl_encode(st, base, w, h, cv_pb_row(pb));
+        if (n > 0) {
+            const k : u64 = cbp_get(st + CVL_ENC * 8) + 1;
+            cv_put(st + CVL_ENC * 8, k);
+            const mean : u64 = cbp_get(st + (CVL_STATS + 2) * 8);
+            cv_put(st + CVL_N * 8, cbp_get(st + CVL_N * 8) + 1);
+            cv_put(st + CVL_SUM * 8, cbp_get(st + CVL_SUM * 8) + mean);
+            if (k == 1 or mean < cbp_get(st + CVL_MEAN_MIN * 8)) { cv_put(st + CVL_MEAN_MIN * 8, mean); }
+            if (mean > cbp_get(st + CVL_MEAN_MAX * 8)) { cv_put(st + CVL_MEAN_MAX * 8, mean); }
+        } else {
+            cv_put(st + CVL_FAIL * 8, cbp_get(st + CVL_FAIL * 8) + 1);
+        }
+    }
+    cv_pb_unlock(pb, 1);
+    return 0;
+}
+
+/// A new live-camera block (not yet running); `dump` 1 writes the 40th JPEG to /tmp/camcall/cam40.jpg (a test aid).
+/// 0 when AVFoundation or memory is missing.
+pub fn cvl_new(dump: u64) -> u64 {
+    const st : u64 = cv_calloc(1, CVL_BUF + CVL_BUF_MAX + 64);
+    if (st == 0) { return 0; }
+    cv_put(st + 64, CV_MAGIC);
+    cv_put(st + CVL_MODE * 8, 1);
+    cv_put(st + CVL_DUMP * 8, dump);
+    // Never true: makes sure cv_frame and cv_granted are emitted and exported for dlsym.
+    if (cbp_get(st + 72) == 99) { cv_frame(0, 0, 0, 0, 0); cv_granted(0, 0); }
+    if (dump != 0) { cv_mkdir("/tmp/camcall", 493); }
+    return st;
+}
+
+/// Start the camera for a call: 0 running (frames come once the system lets them), 1 restricted, 2 denied, 3 no camera
+/// or setup failed. Authorization status 0 makes the system ask (requestAccess + startRunning); nothing is bypassed.
+pub fn cvl_start(st: u64) -> u32 {
+    if (st == 0 or cbp_get(st + 64) != CV_MAGIC) { return 3; }
+    if (cbp_get(st + CVL_RUN * 8) == 1) { return 0; }
+    const media : u64 = cv_konst("AVMediaTypeVideo");
+    const dev_cls : u64 = cv_objc_class("AVCaptureDevice");
+    if (dev_cls == 0 or media == 0) { return 3; }
+    const auth : u64 = msg1(dev_cls, cv_sel("authorizationStatusForMediaType:"), media);
+    cv_put(st + CVL_AUTH * 8, auth);
+    if (auth == 1) { return 1; }
+    if (auth == 2) { return 2; }
+    if (auth == 0) {
+        var blk : u64 = cbp_get(st + CVL_BLK * 8);
+        if (blk == 0) { blk = cvl_block(); cv_put(st + CVL_BLK * 8, blk); }
+        if (blk != 0) { msg2(dev_cls, cv_sel("requestAccessForMediaType:completionHandler:"), media, blk); }
+    }
+    var sess : u64 = cbp_get(st + CVL_SESS * 8);
+    if (sess == 0) {
+        const dev : u64 = msg1(dev_cls, cv_sel("defaultDeviceWithMediaType:"), media);
+        if (dev == 0) { return 3; }
+        const inp : u64 = msg2(cv_objc_class("AVCaptureDeviceInput"), cv_sel("deviceInputWithDevice:error:"), dev, 0);
+        sess = msg0(msg0(cv_objc_class("AVCaptureSession"), cv_sel("alloc")), cv_sel("init"));
+        if (inp == 0 or sess == 0) { return 3; }
+        const preset : u64 = cv_konst("AVCaptureSessionPreset320x240");
+        if (preset != 0 and msg_test1(sess, cv_sel("canSetSessionPreset:"), preset)) { msg1(sess, cv_sel("setSessionPreset:"), preset); }
+        if (!msg_test1(sess, cv_sel("canAddInput:"), inp)) { return 3; }
+        msg1(sess, cv_sel("addInput:"), inp);
+        const out : u64 = msg0(msg0(cv_objc_class("AVCaptureVideoDataOutput"), cv_sel("alloc")), cv_sel("init"));
+        var kb : [8]u8 = undefined;
+        var vb : [8]u8 = undefined;
+        var fb : [4]u8 = undefined;
+        fb[0] = 65; fb[1] = 82; fb[2] = 71; fb[3] = 66;
+        const fnum : u64 = cv_cf_num(0, 3, fb[0..4]);
+        put_u64(kb[0..8], 0, cv_konst("kCVPixelBufferPixelFormatTypeKey"));
+        put_u64(vb[0..8], 0, fnum);
+        const vs : u64 = cv_cf_dict(0, kb[0..8], vb[0..8], 1, cv_dlsym(CV_RTLD_DEFAULT, "kCFTypeDictionaryKeyCallBacks"), cv_dlsym(CV_RTLD_DEFAULT, "kCFTypeDictionaryValueCallBacks"));
+        msg1(out, cv_sel("setVideoSettings:"), vs);
+        msg_flag(out, cv_sel("setAlwaysDiscardsLateVideoFrames:"), true);
+        var del : u64 = cv_make_delegate(st);
+        if (del == 0) { return 3; }
+        msg2(out, cv_sel("setSampleBufferDelegate:queue:"), del, cv_queue("t27.callvideo.live", 0));
+        if (!msg_test1(sess, cv_sel("canAddOutput:"), out)) { return 3; }
+        msg1(sess, cv_sel("addOutput:"), out);
+        cv_put(st + CVL_SESS * 8, sess);
+        cv_put(st + CVL_OUT * 8, out);
+        cv_put(st + CVL_DEL * 8, del);
+    }
+    msg0(sess, cv_sel("startRunning"));
+    cv_put(st + CVL_RUN * 8, 1);
+    cv_put(st + CVL_STARTS * 8, cbp_get(st + CVL_STARTS * 8) + 1);
+    return 0;
+}
+
+/// Stop the session (the camera is free again). The block stays for the next call.
+pub fn cvl_stop(st: u64) -> void {
+    if (st == 0 or cbp_get(st + 64) != CV_MAGIC) { return; }
+    if (cbp_get(st + CVL_RUN * 8) != 1) { return; }
+    msg0(cbp_get(st + CVL_SESS * 8), cv_sel("stopRunning"));
+    cv_put(st + CVL_RUN * 8, 0);
+}
+
+/// Copy the newest JPEG not yet taken into out; its length, 0 when there is none (or the writer was busy).
+pub fn cvl_take(st: u64, out: []u8) -> usize {
+    if (st == 0 or cbp_get(st + 64) != CV_MAGIC) { return 0; }
+    const seq : u64 = cbp_get(st + CVL_SEQ * 8);
+    if (seq == 0 or seq % 2 == 1 or seq == cbp_get(st + CVL_FED * 8)) { return 0; }
+    const n : u64 = cbp_get(st + CVL_LEN * 8);
+    if (n < 4 or n > CVL_BUF_MAX or n > @as(u64, out.len)) { return 0; }
+    sys_peek(out[0..@as(usize, @intCast(n))], st + CVL_BUF, n);
+    if (cbp_get(st + CVL_SEQ * 8) != seq) { return 0; }
+    cv_put(st + CVL_FED * 8, seq);
+    return @as(usize, @intCast(n));
+}
+
+/// Counters of the live block: 0 callbacks, 1 JPEG encoded, 2 encode failures, 3 too big, 4 authorization (0..3),
+/// 5 running, 6 frame mean brightness x100 (last), 7 mean of the means x100, 8 smallest mean x100, 9 largest, 10 width,
+/// 11 height, 12 starts, 13 answer of the prompt (1 allow, 2 refuse, 0 none).
+pub fn cvl_stat(st: u64, k: u32) -> u64 {
+    if (st == 0 or cbp_get(st + 64) != CV_MAGIC) { return 0; }
+    if (k == 0) { return cbp_get(st + CVL_CB * 8); }
+    if (k == 1) { return cbp_get(st + CVL_ENC * 8); }
+    if (k == 2) { return cbp_get(st + CVL_FAIL * 8); }
+    if (k == 3) { return cbp_get(st + CVL_BIG * 8); }
+    if (k == 4) {
+        const dev_cls : u64 = cv_objc_class("AVCaptureDevice");
+        const media : u64 = cv_konst("AVMediaTypeVideo");
+        if (dev_cls == 0 or media == 0) { return 0; }
+        return msg1(dev_cls, cv_sel("authorizationStatusForMediaType:"), media);
+    }
+    if (k == 5) { return cbp_get(st + CVL_RUN * 8); }
+    if (k == 6) { return cbp_get(st + (CVL_STATS + 2) * 8); }
+    if (k == 7) {
+        const c : u64 = cbp_get(st + CVL_N * 8);
+        if (c == 0) { return 0; }
+        return cbp_get(st + CVL_SUM * 8) / c;
+    }
+    if (k == 8) { return cbp_get(st + CVL_MEAN_MIN * 8); }
+    if (k == 9) { return cbp_get(st + CVL_MEAN_MAX * 8); }
+    if (k == 10) { return cbp_get(st + CVL_W * 8); }
+    if (k == 11) { return cbp_get(st + CVL_H * 8); }
+    if (k == 12) { return cbp_get(st + CVL_STARTS * 8); }
+    if (k == 13) {
+        const blk : u64 = cbp_get(st + CVL_BLK * 8);
+        if (blk == 0) { return 0; }
+        return cbp_get(blk + 40);
+    }
+    return 0;
+}
+
+fn cv_copy(dst: u64, src: u64, n: u64) -> u64 { return @extern("memmove"); }
+fn cv_cf_mdata(alloc: u64, cap: u64) -> u64 { return @extern("CFDataCreateMutable"); }
+fn cv_cf_len(d: u64) -> i64 { return @extern("CFDataGetLength"); }
+fn cv_cf_ptr(d: u64) -> u64 { return @extern("CFDataGetBytePtr"); }
+fn cv_dest_data(d: u64, kind: u64, count: u64, opts: u64) -> u64 { return @extern("CGImageDestinationCreateWithData"); }
+
 test the_path_of_frame_7_is_tmp_vid_live_07_jpg {
     var b : [24]u8 = undefined;
     const n : usize = cv_path(7, b[0..24]);
@@ -545,4 +834,15 @@ test the_keep_count_and_frame_size_are_the_spec {
     assert(CV_W == 320 and CV_H == 240);
     assert(CV_WARM == 30 and CV_EVERY == 6);
     assert(CV_BGRA == 1111970369);
+}
+
+test the_live_block_has_distinct_slots_and_a_buffer_past_them {
+    assert CVL_STATS + 4 <= CVL_N and CVL_STARTS < 256 and CVL_STARTS * 8 + 8 <= CVL_BUF;
+    assert CVL_BUF_MAX == 24000 and CVL_PERIOD_US == 90000;
+}
+
+test the_live_take_refuses_an_empty_block {
+    var b : [64]u8 = undefined;
+    assert(cvl_take(0, b[0..64]) == 0);
+    assert(cvl_stat(0, 1) == 0);
 }

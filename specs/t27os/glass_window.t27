@@ -289,6 +289,9 @@ use t27os::call_session::CS_K_VIDEO;
 use t27os::call_session::CS_V_SERIAL;
 use t27os::call_session::CS_V_SHOWN;
 use t27os::call_session::CS_V_SKIPPED;
+use t27os::call_session::CS_V_CAM;
+use t27os::call_session::CS_V_GEN;
+use t27os::call_session::CS_V_TXFRAMES;
 use t27os::call_session::cs_vstat;
 use t27os::call_session::cs_vlen;
 use t27os::call_session::cs_vlive;
@@ -408,6 +411,12 @@ use t27os::friends_engine::fe_typed_key;
 use t27os::friends_engine::fe_call;
 use t27os::friends_engine::fe_stop;
 use t27os::call_video::cv_probe_run;
+use t27os::call_video::cvl_new;
+use t27os::call_video::cvl_start;
+use t27os::call_video::cvl_stop;
+use t27os::call_video::cvl_take;
+use t27os::call_video::cvl_stat;
+use t27os::call_session::cs_video_feed;
 use t27os::pty_sys::sys_exit;
 use t27os::ringtone::RT_BLOCK;
 use t27os::ringtone::RT_S_CB;
@@ -9005,11 +9014,19 @@ pub const CL_AUTO : usize = 121;
 /// Not drawn: 1 when T27OS_CALL_VIDEO is set, the session sends the test video of call_vid.t27 (off by default).
 pub const CL_VLIVE : usize = 124;
 pub const CL_VSEND : usize = 125;
+/// Not drawn: 1 when T27OS_CALL_CAMERA=0 (the camera stays off, the test generator is the source), the status of the
+/// last camera start (0 running, 1 restricted, 2 denied, 3 no camera), and 1 once this call's start was tried.
+pub const CL_CAMOFF : usize = 126;
+pub const CL_CAMST : usize = 127;
 pub const CL_VSER : usize = 128;
 pub const CL_VSHOWN : usize = 132;
 pub const CL_VSKIP : usize = 136;
 pub const CL_VIMG : usize = 144;
 pub const CL_VIMG_END : usize = 152;
+/// Not drawn: the address of the live camera block (call_video.t27 cvl_new), two u32, low then high; 0 = none yet.
+/// CL_CAMTRY is 1 once this call's start was tried (cleared when the call is over).
+pub const CL_CAMP : usize = 152;
+pub const CL_CAMTRY : usize = 160;
 pub const CLW_AUTO_T : usize = 9;
 /// The window's own call clock (main's [10]u64): when ACTIVE began, when the last poll returned, the longest gap from
 /// the end of one poll to the start of the next while ACTIVE, the state the last snapshot saw, the system activity
@@ -9134,6 +9151,9 @@ pub fn cl_boot(cl: []u8, s: []u8) -> void {
     if (cl_env("T27OS_CALL_AUTOTEST", e[0..32]) > 0) { cl[CL_AUTO] = 1; }
     // video: the test generator (call_vid.t27) until the camera is allowed; off unless the variable is set
     if (cl_env("T27OS_CALL_VIDEO", e[0..32]) > 0) { cl[CL_VSEND] = 1; }
+    // the camera is the source of a call's video unless T27OS_CALL_CAMERA=0
+    n = cl_env("T27OS_CALL_CAMERA", e[0..32]);
+    if (n == 1 and e[0] == 48) { cl[CL_CAMOFF] = 1; }
     n = cl_env("T27OS_CALL_AUDIO", e[0..32]);
     if (n == 4 and e[0] == 116 and e[1] == 101 and e[2] == 115 and e[3] == 116) { audio = CS_AUDIO_TEST; }
     // test aid: T27OS_CALL_AUDIO=tone is a quiet triangle wave that names its sender, mixed by a software speaker
@@ -9205,7 +9225,61 @@ fn cl_stats_line(cl: []u8, s: []u8, secs: u64) -> void {
     cl_stat_num(" vlive=", @as(u64, cl[CL_VLIVE]));
     cl_stat_num(" vshown=", cl_get32(cl, CL_VSHOWN));
     cl_stat_num(" vskip=", cl_get32(cl, CL_VSKIP));
+    cl_stat_num(" txcam=", cs_vstat(s, CS_V_CAM));
+    cl_stat_num(" txgen=", cs_vstat(s, CS_V_GEN));
+    cl_stat_num(" txframes=", cs_vstat(s, CS_V_TXFRAMES));
+    cl_stat_num(" camst=", @as(u64, cl[CL_CAMST]));
+    const cp : u64 = cl_camp(cl);
+    cl_stat_num(" camauth=", cvl_stat(cp, 4));
+    cl_stat_num(" camans=", cvl_stat(cp, 13));
+    cl_stat_num(" camrun=", cvl_stat(cp, 5));
+    cl_stat_num(" camcb=", cvl_stat(cp, 0));
+    cl_stat_num(" camenc=", cvl_stat(cp, 1));
+    cl_stat_num(" camfail=", cvl_stat(cp, 2));
+    cl_stat_num(" cambig=", cvl_stat(cp, 3));
+    cl_stat_num(" cammean100=", cvl_stat(cp, 6));
+    cl_stat_num(" cammeanavg100=", cvl_stat(cp, 7));
+    cl_stat_num(" cammin100=", cvl_stat(cp, 8));
+    cl_stat_num(" cammax100=", cvl_stat(cp, 9));
+    cl_stat_num(" camw=", cvl_stat(cp, 10));
+    cl_stat_num(" camh=", cvl_stat(cp, 11));
     sys_write(2, "\n", 1);
+}
+
+/// The live camera block, 0 when none.
+pub fn cl_camp(cl: []const u8) -> u64 {
+    return cl_get32(cl, CL_CAMP) | (cl_get32(cl, CL_CAMP + 4) << 32);
+}
+
+/// The camera in a call (call_video.t27): while the call is ACTIVE with video on, the session is started once (the system
+/// asks for permission the first time; until frames come, or when it is refused, the test generator is the source), and
+/// every new camera JPEG is handed to cs_video_feed. When the call is over the session is stopped, the camera is free.
+pub fn cl_camera(cl: []u8, s: []u8) -> void {
+    if (cl[CL_VSEND] == 0 or cl[CL_CAMOFF] != 0) { return; }
+    const st : u32 = cs_state(s);
+    var cp : u64 = cl_camp(cl);
+    if (st != CK_ACTIVE) {
+        if (cp != 0 and cl[CL_CAMTRY] != 0) { cvl_stop(cp); }
+        cl[CL_CAMTRY] = 0;
+        return;
+    }
+    if (cl[CL_CAMTRY] == 0) {
+        cl[CL_CAMTRY] = 1;
+        if (cp == 0) {
+            var dump : u64 = 0;
+            if (cl[CL_STATS] != 0) { dump = 1; }
+            cp = cvl_new(dump);
+            cl_put32(cl, CL_CAMP, cp & 4294967295);
+            cl_put32(cl, CL_CAMP + 4, cp >> 32);
+        }
+        if (cp == 0) { cl[CL_CAMST] = 3; return; }
+        cl[CL_CAMST] = @as(u8, @intCast(cvl_start(cp)));
+        return;
+    }
+    if (cp == 0 or cl[CL_CAMST] != 0) { return; }
+    var jpeg : [24000]u8 = undefined;
+    const n : usize = cvl_take(cp, jpeg[0..24000]);
+    if (n > 0) { cs_video_feed(s, jpeg[0..n]); }
 }
 
 /// The decoded picture held in the snapshot, 0 when none.
@@ -9345,6 +9419,7 @@ pub fn cl_tick(cl: []u8, s: []u8, w: []u64) -> bool {
     if (cl[CL_AUTO] != 0) { cl_autotest(cl, s, w, ckh_ms()); }
     cl_ring(cl, s);
     cl_video(cl, s, ckh_ms());
+    cl_camera(cl, s);
     cl_snapshot(cl, s, w, ckh_ms());
     // the gap is measured from here: the time inside cs_poll (opening the audio queues once) is the poll's own work
     w[CLW_LAST] = ckh_ms();
@@ -14681,6 +14756,7 @@ test the_call_region_ends_the_text_store_and_draw_reads_only_folded_bytes {
     // the video slots stand between the call counters and the friends snapshot, and are folded into the frame key
     assert CL_AUTO < CL_VLIVE and CL_VSEND < CL_VSER and CL_VSER + 4 <= CL_VSHOWN and CL_VSHOWN + 4 <= CL_VSKIP;
     assert CL_VSKIP + 4 <= CL_VIMG and CL_VIMG + 8 == CL_VIMG_END and CL_VIMG_END <= 256 and CL_VIMG_END <= CL_KEY_N;
+    assert CL_VSEND < CL_CAMOFF and CL_CAMST < CL_VSER and CL_CAMP == CL_VIMG_END and CL_CAMP + 8 <= CL_CAMTRY and CL_CAMTRY < FV_COUNT;
 }
 
 test the_call_pill_stands_between_the_header_cluster_and_the_profile_circle {
