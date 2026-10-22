@@ -1,0 +1,861 @@
+// SPDX-License-Identifier: Apache-2.0
+// specs/t27os/update_core.t27 -- self-update over the local network, the decisions (Refs gHashTag/t27#11560).
+// Pure decisions, no @extern, no crypto: the host (update_host.t27) hashes the bundle, signs and verifies with the
+// identity key; every rule it follows is a tested fn here. The release path through GitHub (release.t27) is not touched:
+// this is the second road, a build that spreads from a device that has it to the devices next to it, with no server.
+// Trust sits on what already exists (peer_identity.t27): the P-256 identity key and its 10-byte fingerprint; an update
+// is offered only when its author is a friend (or this device). ASCII only (L3), English only (LANG-EN).
+//
+// MANIFEST  216 bytes, fixed, little endian:
+//   0   magic "T27OSUP\n" (8) | 8 format u32 (1) | 12 major u32 | 16 minor u32 | 20 patch u32 | 24 build u32
+//   | 28 bundle size u64 | 36 SHA-256 of the bundle (32) | 68 author fingerprint (10) | 78 author public key (65, 0x04..)
+//   | 143 signature length u8 (8..72) | 144 signature, X9.62 DER (72, zero padded).
+//   The first 143 bytes are the BODY. The author signs "t27os-update-v1" 0x00 || BODY (ECDSA over SHA-256; the domain
+//   prefix stops a signature made for another purpose from being replayed as an update). The key rides in the manifest
+//   because the friends table keeps fingerprints only; the host checks that the fingerprint of that key is the
+//   fingerprint field, and the fingerprint is what the friends table knows. A version part is 0..99, the build is
+//   1..999999 (so both always fit the mDNS TXT record: "ver=a.b.c" and "build=N").
+// OFFER RULE  see um_offer: stranger, rollback, older version and a size out of range are refused here; whether the
+//   hash and the signature are TRUE is checked by the host (this level only checks their shape).
+// DOWNLOAD STATE  idle -> fetching -> verifying -> ready -> installing -> done / failed; one update at a time.
+// mDNS  two more TXT strings next to fp/port/nick: ver=<major>.<minor>.<patch>, build=<build>.
+
+module T27osUpdateCore;
+
+use t27os::peer_identity::FT_MAX;
+use t27os::peer_identity::ft_find;
+use t27os::peer_identity::TXT_MAX;
+use t27os::peer_identity::txt_get;
+use t27os::peer_identity::txt_build;
+use t27os::peer_identity::txt_fp;
+use t27os::peer_identity::txt_port;
+use t27os::peer_identity::invite_make;
+use t27os::peer_identity::ft_init;
+use t27os::peer_identity::ft_add;
+use t27os::peer_identity::FA_OK;
+
+// ---------------------------------------------------------------- limits and layout
+
+pub const UM_LEN : usize = 216;
+pub const UM_BODY_LEN : usize = 143;
+pub const UM_SIGIN_LEN : usize = 159;
+pub const UM_OFF_FMT : usize = 8;
+pub const UM_OFF_MAJOR : usize = 12;
+pub const UM_OFF_MINOR : usize = 16;
+pub const UM_OFF_PATCH : usize = 20;
+pub const UM_OFF_BUILD : usize = 24;
+pub const UM_OFF_SIZE : usize = 28;
+pub const UM_OFF_SHA : usize = 36;
+pub const UM_OFF_FP : usize = 68;
+pub const UM_OFF_PUB : usize = 78;
+pub const UM_OFF_SIGLEN : usize = 143;
+pub const UM_OFF_SIG : usize = 144;
+pub const UM_SIG_MAX : usize = 72;
+pub const UM_SIG_MIN : usize = 8;
+
+pub const UM_PART_MAX : u32 = 99;
+pub const UM_BUILD_MAX : u32 = 999999;
+pub const UM_SIZE_MIN : u64 = 1048576;
+pub const UM_SIZE_MAX : u64 = 209715200;
+
+pub const NO_VERSION : u64 = 18446744073709551615;
+
+// parse status
+pub const UM_OK : u32 = 0;
+pub const UM_SHORT : u32 = 1;
+pub const UM_LONG : u32 = 2;
+pub const UM_MAGIC : u32 = 3;
+pub const UM_FORMAT : u32 = 4;
+pub const UM_VERSION : u32 = 5;
+pub const UM_BUILD : u32 = 6;
+pub const UM_PUB : u32 = 7;
+pub const UM_SIGLEN : u32 = 8;
+pub const UM_PAD : u32 = 9;
+pub const UM_DER : u32 = 10;
+
+fn um_put32(b: []u8, at: usize, v: u32) -> void {
+    b[at] = @as(u8, @intCast(v & 255));
+    b[at + 1] = @as(u8, @intCast((v >> 8) & 255));
+    b[at + 2] = @as(u8, @intCast((v >> 16) & 255));
+    b[at + 3] = @as(u8, @intCast((v >> 24) & 255));
+}
+
+fn um_get32(b: []const u8, at: usize) -> u32 {
+    return @as(u32, b[at]) | (@as(u32, b[at + 1]) << 8) | (@as(u32, b[at + 2]) << 16) | (@as(u32, b[at + 3]) << 24);
+}
+
+fn um_put64(b: []u8, at: usize, v: u64) -> void {
+    um_put32(b, at, @as(u32, @intCast(v & 4294967295)));
+    um_put32(b, at + 4, @as(u32, @intCast(v >> 32)));
+}
+
+fn um_get64(b: []const u8, at: usize) -> u64 {
+    return @as(u64, um_get32(b, at)) | (@as(u64, um_get32(b, at + 4)) << 32);
+}
+
+fn um_copy(dst: []u8, at: usize, src: []const u8, n: usize) -> void {
+    var i : usize = 0;
+    while (i < n) {
+        dst[at + i] = src[i];
+        i = i + 1;
+    }
+}
+
+/// The packed version: major in bits 40.., minor in 20..39, patch in 0..19 (the same packing release.t27 uses), so a
+/// packed value compares as a semver does.
+pub fn um_pack(major: u32, minor: u32, patch: u32) -> u64 {
+    return (@as(u64, major) << 40) | (@as(u64, minor) << 20) | @as(u64, patch);
+}
+
+// ---------------------------------------------------------------- build, sign input, seal
+
+/// The 143 canonical bytes the author signs (after the domain prefix). 0 on a bad argument: a version part above 99,
+/// a build of 0 or above 999999, a key that is not 65 bytes starting 0x04, a hash or fingerprint of the wrong size,
+/// or an output that is too small. The size is NOT judged here (um_offer judges it).
+pub fn um_body(major: u32, minor: u32, patch: u32, build: u32, size: u64, sha: []const u8, fp: []const u8, pubk: []const u8, out: []u8) -> usize {
+    if (out.len < UM_BODY_LEN or sha.len != 32 or fp.len != 10 or pubk.len != 65) { return 0; }
+    if (major > UM_PART_MAX or minor > UM_PART_MAX or patch > UM_PART_MAX) { return 0; }
+    if (build == 0 or build > UM_BUILD_MAX or pubk[0] != 4) { return 0; }
+    const magic : [8]u8 = [84, 50, 55, 79, 83, 85, 80, 10];
+    um_copy(out, 0, magic[0..8], 8);
+    um_put32(out, UM_OFF_FMT, 1);
+    um_put32(out, UM_OFF_MAJOR, major);
+    um_put32(out, UM_OFF_MINOR, minor);
+    um_put32(out, UM_OFF_PATCH, patch);
+    um_put32(out, UM_OFF_BUILD, build);
+    um_put64(out, UM_OFF_SIZE, size);
+    um_copy(out, UM_OFF_SHA, sha, 32);
+    um_copy(out, UM_OFF_FP, fp, 10);
+    um_copy(out, UM_OFF_PUB, pubk, 65);
+    return UM_BODY_LEN;
+}
+
+/// What the host signs and verifies: "t27os-update-v1" 0x00 then the 143-byte body. 159 bytes; 0 on a bad size.
+pub fn um_sign_input(body: []const u8, out: []u8) -> usize {
+    if (body.len != UM_BODY_LEN or out.len < UM_SIGIN_LEN) { return 0; }
+    const p : [16]u8 = [116, 50, 55, 111, 115, 45, 117, 112, 100, 97, 116, 101, 45, 118, 49, 0];
+    um_copy(out, 0, p[0..16], 16);
+    um_copy(out, 16, body, UM_BODY_LEN);
+    return UM_SIGIN_LEN;
+}
+
+/// body + signature -> the 216 manifest bytes. 0 when the signature is not 8..72 bytes of DER shape.
+pub fn um_seal(body: []const u8, sig: []const u8, out: []u8) -> usize {
+    if (body.len != UM_BODY_LEN or out.len < UM_LEN) { return 0; }
+    if (sig.len < UM_SIG_MIN or sig.len > UM_SIG_MAX) { return 0; }
+    if (sig[0] != 48 or @as(usize, sig[1]) + 2 != sig.len) { return 0; }
+    var i : usize = 0;
+    while (i < UM_LEN) {
+        out[i] = 0;
+        i = i + 1;
+    }
+    um_copy(out, 0, body, UM_BODY_LEN);
+    out[UM_OFF_SIGLEN] = @as(u8, @intCast(sig.len));
+    um_copy(out, UM_OFF_SIG, sig, sig.len);
+    return UM_LEN;
+}
+
+// ---------------------------------------------------------------- parse
+
+/// Is this a whole manifest? UM_OK or the first reason it is not. Shape only: it says nothing about the hash or the
+/// signature being true, and nothing about whether the size is acceptable (um_offer).
+pub fn um_parse(m: []const u8) -> u32 {
+    if (m.len < UM_LEN) { return UM_SHORT; }
+    if (m.len > UM_LEN) { return UM_LONG; }
+    const magic : [8]u8 = [84, 50, 55, 79, 83, 85, 80, 10];
+    var i : usize = 0;
+    while (i < 8) {
+        if (m[i] != magic[i]) { return UM_MAGIC; }
+        i = i + 1;
+    }
+    if (um_get32(m, UM_OFF_FMT) != 1) { return UM_FORMAT; }
+    if (um_get32(m, UM_OFF_MAJOR) > UM_PART_MAX or um_get32(m, UM_OFF_MINOR) > UM_PART_MAX or um_get32(m, UM_OFF_PATCH) > UM_PART_MAX) { return UM_VERSION; }
+    const b : u32 = um_get32(m, UM_OFF_BUILD);
+    if (b == 0 or b > UM_BUILD_MAX) { return UM_BUILD; }
+    if (m[UM_OFF_PUB] != 4) { return UM_PUB; }
+    const sl : usize = @as(usize, m[UM_OFF_SIGLEN]);
+    if (sl < UM_SIG_MIN or sl > UM_SIG_MAX) { return UM_SIGLEN; }
+    if (m[UM_OFF_SIG] != 48 or @as(usize, m[UM_OFF_SIG + 1]) + 2 != sl) { return UM_DER; }
+    i = sl;
+    while (i < UM_SIG_MAX) {
+        if (m[UM_OFF_SIG + i] != 0) { return UM_PAD; }
+        i = i + 1;
+    }
+    return UM_OK;
+}
+
+pub fn um_version(m: []const u8) -> u64 {
+    return um_pack(um_get32(m, UM_OFF_MAJOR), um_get32(m, UM_OFF_MINOR), um_get32(m, UM_OFF_PATCH));
+}
+pub fn um_build_of(m: []const u8) -> u32 { return um_get32(m, UM_OFF_BUILD); }
+pub fn um_size_of(m: []const u8) -> u64 { return um_get64(m, UM_OFF_SIZE); }
+pub fn um_sig_len(m: []const u8) -> usize { return @as(usize, m[UM_OFF_SIGLEN]); }
+
+// ---------------------------------------------------------------- the offer rule
+
+pub const OF_OK : u32 = 0;
+pub const OF_BAD : u32 = 1;
+pub const OF_FP : u32 = 2;
+pub const OF_STRANGER : u32 = 3;
+pub const OF_ROLLBACK : u32 = 4;
+pub const OF_OLDVER : u32 = 5;
+pub const OF_SIZE : u32 = 6;
+
+/// Is the author a friend or this device? own_fp is this device's fingerprint (10 bytes), ft the friends table.
+pub fn um_author_known(ft: []const u8, own_fp: []const u8, fp: []const u8) -> bool {
+    if (fp.len != 10 or own_fp.len != 10) { return false; }
+    var same : bool = true;
+    var i : usize = 0;
+    while (i < 10) {
+        if (own_fp[i] != fp[i]) { same = false; }
+        i = i + 1;
+    }
+    if (same) { return true; }
+    return ft_find(ft, fp) != FT_MAX;
+}
+
+/// Offer this update? Refused, in this order: a manifest that does not parse (OF_BAD); a fingerprint field that is not
+/// the fingerprint of the key in it (OF_FP; fp_matches is what the host computed); an author that is neither a friend
+/// nor this device (OF_STRANGER, known from um_author_known); a build that is not strictly greater than the running
+/// one (OF_ROLLBACK, equal included: the same build is not an update); a version below the running one (OF_OLDVER);
+/// a bundle outside 1 MiB..200 MiB (OF_SIZE). The hash and the signature are NOT judged here: the host checks that
+/// they are true, after this says the manifest is worth fetching. cur_ver is a packed version (um_pack).
+pub fn um_offer(m: []const u8, known: bool, fp_matches: bool, cur_ver: u64, cur_build: u32) -> u32 {
+    if (um_parse(m) != UM_OK or cur_ver == NO_VERSION) { return OF_BAD; }
+    if (fp_matches == false) { return OF_FP; }
+    if (known == false) { return OF_STRANGER; }
+    if (um_build_of(m) <= cur_build) { return OF_ROLLBACK; }
+    if (um_version(m) < cur_ver) { return OF_OLDVER; }
+    const s : u64 = um_size_of(m);
+    if (s < UM_SIZE_MIN or s > UM_SIZE_MAX) { return OF_SIZE; }
+    return OF_OK;
+}
+
+// ---------------------------------------------------------------- download state
+
+pub const ST_IDLE : u32 = 0;
+pub const ST_FETCHING : u32 = 1;
+pub const ST_VERIFYING : u32 = 2;
+pub const ST_READY : u32 = 3;
+pub const ST_INSTALLING : u32 = 4;
+pub const ST_DONE : u32 = 5;
+pub const ST_FAILED : u32 = 6;
+pub const ST_REJECT : u32 = 255;
+
+pub const EV_START : u32 = 1;
+pub const EV_FETCHED : u32 = 2;
+pub const EV_VERIFIED : u32 = 3;
+pub const EV_INSTALL : u32 = 4;
+pub const EV_INSTALLED : u32 = 5;
+pub const EV_FAIL : u32 = 6;
+pub const EV_RESET : u32 = 7;
+
+/// The next state, or ST_REJECT when the event is not allowed now. A new start is refused while one is under way
+/// (fetching, verifying, ready, installing): one update at a time.
+pub fn st_next(state: u32, ev: u32) -> u32 {
+    if (ev == EV_START) {
+        if (state == ST_IDLE or state == ST_DONE or state == ST_FAILED) { return ST_FETCHING; }
+        return ST_REJECT;
+    }
+    if (ev == EV_FETCHED and state == ST_FETCHING) { return ST_VERIFYING; }
+    if (ev == EV_VERIFIED and state == ST_VERIFYING) { return ST_READY; }
+    if (ev == EV_INSTALL and state == ST_READY) { return ST_INSTALLING; }
+    if (ev == EV_INSTALLED and state == ST_INSTALLING) { return ST_DONE; }
+    if (ev == EV_FAIL and state >= ST_FETCHING and state <= ST_INSTALLING) { return ST_FAILED; }
+    if (ev == EV_RESET and (state == ST_DONE or state == ST_FAILED)) { return ST_IDLE; }
+    return ST_REJECT;
+}
+
+/// An update is under way: no second one may start.
+pub fn st_busy(state: u32) -> bool { return state >= ST_FETCHING and state <= ST_INSTALLING; }
+
+// ---------------------------------------------------------------- mDNS TXT: ver and build
+
+fn um_put_dec(out: []u8, at: usize, v: u32) -> usize {
+    var tmp : [10]u8 = undefined;
+    var n : usize = 0;
+    var x : u32 = v;
+    if (x == 0) {
+        out[at] = 48;
+        return at + 1;
+    }
+    while (x > 0) {
+        tmp[n] = @as(u8, @intCast(48 + x % 10));
+        x = x / 10;
+        n = n + 1;
+    }
+    var p : usize = at;
+    while (n > 0) {
+        n = n - 1;
+        out[p] = tmp[n];
+        p = p + 1;
+    }
+    return p;
+}
+
+/// txt (n bytes, from txt_build) plus "ver=a.b.c" and "build=N" in out. The new length, or 0 when a part is above 99,
+/// the build is 0 or above 999999, ver/build are already there, or the result would pass TXT_MAX (96).
+pub fn upd_txt_add(txt: []const u8, n: usize, major: u32, minor: u32, patch: u32, build: u32, out: []u8) -> usize {
+    if (n > txt.len or n > TXT_MAX or out.len < TXT_MAX) { return 0; }
+    if (major > UM_PART_MAX or minor > UM_PART_MAX or patch > UM_PART_MAX) { return 0; }
+    if (build == 0 or build > UM_BUILD_MAX) { return 0; }
+    const kv : [3]u8 = [118, 101, 114];
+    const kb : [5]u8 = [98, 117, 105, 108, 100];
+    var probe : [16]u8 = undefined;
+    if (txt_get(txt, n, kv[0..3], probe[0..16]) != 0 or txt_get(txt, n, kb[0..5], probe[0..16]) != 0) { return 0; }
+    var vt : [16]u8 = undefined;
+    var p : usize = um_put_dec(vt[0..16], 0, major);
+    vt[p] = 46;
+    p = um_put_dec(vt[0..16], p + 1, minor);
+    vt[p] = 46;
+    p = um_put_dec(vt[0..16], p + 1, patch);
+    var bt : [16]u8 = undefined;
+    const bn : usize = um_put_dec(bt[0..16], 0, build);
+    // "ver=" + text, "build=" + text, each with a length byte
+    const need : usize = n + 1 + 4 + p + 1 + 6 + bn;
+    if (need > TXT_MAX) { return 0; }
+    um_copy(out, 0, txt, n);
+    var w : usize = n;
+    out[w] = @as(u8, @intCast(4 + p));
+    out[w + 1] = 118;
+    out[w + 2] = 101;
+    out[w + 3] = 114;
+    out[w + 4] = 61;
+    um_copy(out, w + 5, vt[0..p], p);
+    w = w + 5 + p;
+    out[w] = @as(u8, @intCast(6 + bn));
+    out[w + 1] = 98;
+    out[w + 2] = 117;
+    out[w + 3] = 105;
+    out[w + 4] = 108;
+    out[w + 5] = 100;
+    out[w + 6] = 61;
+    um_copy(out, w + 7, bt[0..bn], bn);
+    return w + 7 + bn;
+}
+
+fn um_dec_part(t: []const u8, from: usize, to: usize) -> u32 {
+    // 1..2 digits, no leading zero unless the part is "0"; 100 on any fault
+    const len : usize = to - from;
+    if (len == 0 or len > 2) { return 100; }
+    var v : u32 = 0;
+    var i : usize = from;
+    while (i < to) {
+        if (t[i] < 48 or t[i] > 57) { return 100; }
+        v = v * 10 + @as(u32, t[i]) - 48;
+        i = i + 1;
+    }
+    if (len == 2 and t[from] == 48) { return 100; }
+    return v;
+}
+
+/// The neighbour's announced version as a packed value (um_pack); NO_VERSION for a missing, cut or malformed "ver".
+pub fn upd_txt_version(txt: []const u8, n: usize) -> u64 {
+    var v : [16]u8 = undefined;
+    const key : [3]u8 = [118, 101, 114];
+    const vn : usize = txt_get(txt, n, key[0..3], v[0..16]);
+    if (vn == 0) { return NO_VERSION; }
+    var dots : [2]usize = undefined;
+    var d : usize = 0;
+    var i : usize = 0;
+    while (i < vn) {
+        if (v[i] == 46) {
+            if (d >= 2) { return NO_VERSION; }
+            dots[d] = i;
+            d = d + 1;
+        }
+        i = i + 1;
+    }
+    if (d != 2) { return NO_VERSION; }
+    const a : u32 = um_dec_part(v[0..16], 0, dots[0]);
+    const b : u32 = um_dec_part(v[0..16], dots[0] + 1, dots[1]);
+    const c : u32 = um_dec_part(v[0..16], dots[1] + 1, vn);
+    if (a > UM_PART_MAX or b > UM_PART_MAX or c > UM_PART_MAX) { return NO_VERSION; }
+    return um_pack(a, b, c);
+}
+
+/// The neighbour's announced build; 0 for a missing, non-numeric, zero, leading-zero or above-999999 value.
+pub fn upd_txt_build(txt: []const u8, n: usize) -> u32 {
+    var v : [16]u8 = undefined;
+    const key : [5]u8 = [98, 117, 105, 108, 100];
+    const vn : usize = txt_get(txt, n, key[0..5], v[0..16]);
+    if (vn == 0 or vn > 6) { return 0; }
+    if (v[0] == 48) { return 0; }
+    var x : u32 = 0;
+    var i : usize = 0;
+    while (i < vn) {
+        if (v[i] < 48 or v[i] > 57) { return 0; }
+        x = x * 10 + @as(u32, v[i]) - 48;
+        i = i + 1;
+    }
+    return x;
+}
+
+/// Does a neighbour's announcement say it runs a newer build than ours? A hint to go and read its manifest, nothing more.
+pub fn upd_neighbour_newer(txt: []const u8, n: usize, cur_ver: u64, cur_build: u32) -> bool {
+    const b : u32 = upd_txt_build(txt, n);
+    const v : u64 = upd_txt_version(txt, n);
+    if (b == 0 or v == NO_VERSION) { return false; }
+    return b > cur_build and v >= cur_ver;
+}
+
+// ---------------------------------------------------------------- tests
+
+const UT_SHA : [32]u8 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32];
+const UT_FP : [10]u8 = [1, 35, 69, 103, 137, 171, 205, 239, 254, 220];
+const UT_OTHER_FP : [10]u8 = [9, 35, 69, 103, 137, 171, 205, 239, 254, 220];
+
+fn ut_pub(out: []u8) -> void {
+    var i : usize = 0;
+    while (i < 65) {
+        out[i] = @as(u8, @intCast(i + 3));
+        i = i + 1;
+    }
+    out[0] = 4;
+}
+
+fn ut_sig(out: []u8) -> usize {
+    // a DER-shaped fake: 30 L ..., 70 bytes in all
+    var i : usize = 0;
+    while (i < 70) {
+        out[i] = @as(u8, @intCast(100 + i));
+        i = i + 1;
+    }
+    out[0] = 48;
+    out[1] = 68;
+    return 70;
+}
+
+fn ut_manifest(major: u32, minor: u32, patch: u32, build: u32, size: u64, out: []u8) -> usize {
+    var pubk : [65]u8 = undefined;
+    ut_pub(pubk[0..65]);
+    var body : [143]u8 = undefined;
+    if (um_body(major, minor, patch, build, size, UT_SHA[0..32], UT_FP[0..10], pubk[0..65], body[0..143]) != 143) { return 0; }
+    var sig : [72]u8 = undefined;
+    const sn : usize = ut_sig(sig[0..72]);
+    return um_seal(body[0..143], sig[0..sn], out);
+}
+
+const UT_SIZE : u64 = 52428800;
+
+test the_manifest_has_the_fixed_shape {
+    var m : [216]u8 = undefined;
+    assert ut_manifest(0, 1, 3, 4321, UT_SIZE, m[0..216]) == 216;
+    assert um_parse(m[0..216]) == UM_OK;
+    assert m[0] == 84 and m[6] == 80 and m[7] == 10;
+    assert um_get32(m[0..216], 8) == 1;
+    assert um_version(m[0..216]) == um_pack(0, 1, 3);
+    assert um_build_of(m[0..216]) == 4321;
+    assert um_size_of(m[0..216]) == UT_SIZE;
+    assert m[68] == 1 and m[77] == 220;
+    assert m[78] == 4;
+    assert um_sig_len(m[0..216]) == 70;
+    assert m[143] == 70 and m[144] == 48 and m[145] == 68;
+    // the two spare signature bytes are zero
+    assert m[214] == 0 and m[215] == 0;
+}
+
+test the_sign_input_is_a_domain_prefix_then_the_body {
+    var m : [216]u8 = undefined;
+    ut_manifest(0, 1, 3, 4321, UT_SIZE, m[0..216]);
+    var si : [159]u8 = undefined;
+    assert um_sign_input(m[0..143], si[0..159]) == 159;
+    assert si[0] == 116 and si[14] == 49 and si[15] == 0;
+    assert si[16] == 84 and si[158] == m[142];
+    assert um_sign_input(m[0..142], si[0..159]) == 0;
+}
+
+test the_builder_refuses_what_the_parser_would_refuse {
+    var pubk : [65]u8 = undefined;
+    ut_pub(pubk[0..65]);
+    var body : [143]u8 = undefined;
+    assert um_body(100, 0, 0, 5, UT_SIZE, UT_SHA[0..32], UT_FP[0..10], pubk[0..65], body[0..143]) == 0;
+    assert um_body(0, 100, 0, 5, UT_SIZE, UT_SHA[0..32], UT_FP[0..10], pubk[0..65], body[0..143]) == 0;
+    assert um_body(0, 0, 100, 5, UT_SIZE, UT_SHA[0..32], UT_FP[0..10], pubk[0..65], body[0..143]) == 0;
+    assert um_body(0, 1, 3, 0, UT_SIZE, UT_SHA[0..32], UT_FP[0..10], pubk[0..65], body[0..143]) == 0;
+    assert um_body(0, 1, 3, 1000000, UT_SIZE, UT_SHA[0..32], UT_FP[0..10], pubk[0..65], body[0..143]) == 0;
+    assert um_body(0, 1, 3, 5, UT_SIZE, UT_SHA[0..31], UT_FP[0..10], pubk[0..65], body[0..143]) == 0;
+    assert um_body(0, 1, 3, 5, UT_SIZE, UT_SHA[0..32], UT_FP[0..9], pubk[0..65], body[0..143]) == 0;
+    assert um_body(0, 1, 3, 5, UT_SIZE, UT_SHA[0..32], UT_FP[0..10], pubk[0..64], body[0..143]) == 0;
+    pubk[0] = 2;
+    assert um_body(0, 1, 3, 5, UT_SIZE, UT_SHA[0..32], UT_FP[0..10], pubk[0..65], body[0..143]) == 0;
+    var sig : [72]u8 = undefined;
+    const sn : usize = ut_sig(sig[0..72]);
+    ut_pub(pubk[0..65]);
+    assert um_body(0, 1, 3, 5, UT_SIZE, UT_SHA[0..32], UT_FP[0..10], pubk[0..65], body[0..143]) == 143;
+    var out : [216]u8 = undefined;
+    assert um_seal(body[0..143], sig[0..7], out[0..216]) == 0;
+    assert um_seal(body[0..143], sig[0..sn], out[0..215]) == 0;
+    sig[1] = 66;
+    assert um_seal(body[0..143], sig[0..sn], out[0..216]) == 0;
+    sig[1] = 68;
+    sig[0] = 49;
+    assert um_seal(body[0..143], sig[0..sn], out[0..216]) == 0;
+}
+
+test a_truncated_or_padded_manifest_is_refused {
+    var m : [216]u8 = undefined;
+    ut_manifest(0, 1, 3, 4321, UT_SIZE, m[0..216]);
+    assert um_parse(m[0..215]) == UM_SHORT;
+    assert um_parse(m[0..143]) == UM_SHORT;
+    assert um_parse(m[0..0]) == UM_SHORT;
+    var big : [217]u8 = undefined;
+    var i : usize = 0;
+    while (i < 216) {
+        big[i] = m[i];
+        i = i + 1;
+    }
+    big[216] = 0;
+    assert um_parse(big[0..217]) == UM_LONG;
+}
+
+test a_typo_in_a_fixed_field_is_refused {
+    var m : [216]u8 = undefined;
+    ut_manifest(0, 1, 3, 4321, UT_SIZE, m[0..216]);
+    // magic
+    m[3] = 78;
+    assert um_parse(m[0..216]) == UM_MAGIC;
+    m[3] = 79;
+    // format
+    m[8] = 2;
+    assert um_parse(m[0..216]) == UM_FORMAT;
+    m[8] = 1;
+    // version part 100
+    m[12] = 100;
+    assert um_parse(m[0..216]) == UM_VERSION;
+    m[12] = 0;
+    m[17] = 1;
+    assert um_parse(m[0..216]) == UM_VERSION;
+    m[17] = 0;
+    // build 0 and build 1000000 (0x0F4240)
+    var save : [4]u8 = undefined;
+    save[0] = m[24];
+    save[1] = m[25];
+    save[2] = m[26];
+    save[3] = m[27];
+    m[24] = 0;
+    m[25] = 0;
+    m[26] = 0;
+    m[27] = 0;
+    assert um_parse(m[0..216]) == UM_BUILD;
+    m[24] = 64;
+    m[25] = 66;
+    m[26] = 15;
+    assert um_parse(m[0..216]) == UM_BUILD;
+    m[24] = save[0];
+    m[25] = save[1];
+    m[26] = save[2];
+    m[27] = save[3];
+    assert um_parse(m[0..216]) == UM_OK;
+    // public key prefix
+    m[78] = 3;
+    assert um_parse(m[0..216]) == UM_PUB;
+    m[78] = 4;
+    // signature length 7 and 73
+    m[143] = 7;
+    assert um_parse(m[0..216]) == UM_SIGLEN;
+    m[143] = 73;
+    assert um_parse(m[0..216]) == UM_SIGLEN;
+    // DER length byte that disagrees with the signature length
+    m[143] = 70;
+    m[145] = 67;
+    assert um_parse(m[0..216]) == UM_DER;
+    m[145] = 68;
+    m[144] = 49;
+    assert um_parse(m[0..216]) == UM_DER;
+    m[144] = 48;
+    // a non-zero byte in the padding
+    m[215] = 1;
+    assert um_parse(m[0..216]) == UM_PAD;
+    m[215] = 0;
+    assert um_parse(m[0..216]) == UM_OK;
+}
+
+test the_offer_is_made_only_for_a_known_author_and_a_strictly_newer_build {
+    var m : [216]u8 = undefined;
+    ut_manifest(0, 1, 3, 4321, UT_SIZE, m[0..216]);
+    const cur : u64 = um_pack(0, 1, 3);
+    assert um_offer(m[0..216], true, true, cur, 4320) == OF_OK;
+    // a stranger
+    assert um_offer(m[0..216], false, true, cur, 4320) == OF_STRANGER;
+    // the fingerprint field does not belong to the key in the manifest
+    assert um_offer(m[0..216], true, false, cur, 4320) == OF_FP;
+    // the same build is no update; neither is an older one (rollback)
+    assert um_offer(m[0..216], true, true, cur, 4321) == OF_ROLLBACK;
+    assert um_offer(m[0..216], true, true, cur, 4322) == OF_ROLLBACK;
+    assert um_offer(m[0..216], true, true, cur, 999999) == OF_ROLLBACK;
+    // a manifest that does not parse
+    assert um_offer(m[0..215], true, true, cur, 4320) == OF_BAD;
+    assert um_offer(m[0..216], true, true, NO_VERSION, 4320) == OF_BAD;
+}
+
+test a_build_one_below_is_a_rollback_whatever_the_version_says {
+    // build 4320 offered to a device on 4321, although the offered version is higher
+    var m : [216]u8 = undefined;
+    ut_manifest(0, 2, 0, 4320, UT_SIZE, m[0..216]);
+    assert um_offer(m[0..216], true, true, um_pack(0, 1, 3), 4321) == OF_ROLLBACK;
+}
+
+test a_version_below_the_running_one_is_refused_even_with_a_higher_build {
+    var m : [216]u8 = undefined;
+    ut_manifest(0, 1, 2, 9000, UT_SIZE, m[0..216]);
+    assert um_offer(m[0..216], true, true, um_pack(0, 1, 3), 4321) == OF_OLDVER;
+    ut_manifest(0, 0, 99, 9000, UT_SIZE, m[0..216]);
+    assert um_offer(m[0..216], true, true, um_pack(0, 1, 0), 4321) == OF_OLDVER;
+    // the same version with a newer build is fine
+    ut_manifest(0, 1, 3, 9000, UT_SIZE, m[0..216]);
+    assert um_offer(m[0..216], true, true, um_pack(0, 1, 3), 4321) == OF_OK;
+    // a higher version with a newer build is fine
+    ut_manifest(1, 0, 0, 9000, UT_SIZE, m[0..216]);
+    assert um_offer(m[0..216], true, true, um_pack(0, 99, 99), 4321) == OF_OK;
+}
+
+test the_size_must_be_between_one_and_two_hundred_mebibytes {
+    var m : [216]u8 = undefined;
+    const cur : u64 = um_pack(0, 1, 3);
+    ut_manifest(0, 1, 3, 4400, 1048575, m[0..216]);
+    assert um_offer(m[0..216], true, true, cur, 4321) == OF_SIZE;
+    ut_manifest(0, 1, 3, 4400, 1048576, m[0..216]);
+    assert um_offer(m[0..216], true, true, cur, 4321) == OF_OK;
+    ut_manifest(0, 1, 3, 4400, 209715200, m[0..216]);
+    assert um_offer(m[0..216], true, true, cur, 4321) == OF_OK;
+    ut_manifest(0, 1, 3, 4400, 209715201, m[0..216]);
+    assert um_offer(m[0..216], true, true, cur, 4321) == OF_SIZE;
+    ut_manifest(0, 1, 3, 4400, 0, m[0..216]);
+    assert um_offer(m[0..216], true, true, cur, 4321) == OF_SIZE;
+    // a size that wraps a 32-bit count
+    ut_manifest(0, 1, 3, 4400, 4294967296 + 52428800, m[0..216]);
+    assert um_offer(m[0..216], true, true, cur, 4321) == OF_SIZE;
+}
+
+test the_author_is_known_when_it_is_a_friend_or_this_device {
+    var own : [10]u8 = undefined;
+    var i : usize = 0;
+    while (i < 10) {
+        own[i] = @as(u8, @intCast(200 + i));
+        i = i + 1;
+    }
+    var ft : [1108]u8 = undefined;
+    assert ft_init(ft[0..1108]);
+    var inv : [25]u8 = undefined;
+    invite_make(UT_FP[0..10], inv[0..25]);
+    assert ft_add(ft[0..1108], inv[0..25], own[0..10]) == FA_OK;
+    assert um_author_known(ft[0..1108], own[0..10], UT_FP[0..10]);
+    assert um_author_known(ft[0..1108], own[0..10], own[0..10]);
+    assert um_author_known(ft[0..1108], own[0..10], UT_OTHER_FP[0..10]) == false;
+    assert um_author_known(ft[0..1108], own[0..10], UT_FP[0..9]) == false;
+    // a one-digit typo in the fingerprint is a stranger
+    var typo : [10]u8 = undefined;
+    i = 0;
+    while (i < 10) {
+        typo[i] = UT_FP[i];
+        i = i + 1;
+    }
+    typo[9] = typo[9] ^ 1;
+    assert um_author_known(ft[0..1108], own[0..10], typo[0..10]) == false;
+}
+
+test only_one_update_runs_at_a_time {
+    var s : u32 = ST_IDLE;
+    s = st_next(s, EV_START);
+    assert s == ST_FETCHING;
+    assert st_busy(s);
+    // a second start while it fetches, verifies, is ready or installs is refused
+    assert st_next(ST_FETCHING, EV_START) == ST_REJECT;
+    assert st_next(ST_VERIFYING, EV_START) == ST_REJECT;
+    assert st_next(ST_READY, EV_START) == ST_REJECT;
+    assert st_next(ST_INSTALLING, EV_START) == ST_REJECT;
+    assert st_busy(ST_VERIFYING) and st_busy(ST_READY) and st_busy(ST_INSTALLING);
+    assert st_busy(ST_IDLE) == false and st_busy(ST_DONE) == false and st_busy(ST_FAILED) == false;
+}
+
+test the_download_goes_forward_in_order_and_nowhere_else {
+    var s : u32 = ST_IDLE;
+    s = st_next(s, EV_START);
+    s = st_next(s, EV_FETCHED);
+    assert s == ST_VERIFYING;
+    s = st_next(s, EV_VERIFIED);
+    assert s == ST_READY;
+    s = st_next(s, EV_INSTALL);
+    assert s == ST_INSTALLING;
+    s = st_next(s, EV_INSTALLED);
+    assert s == ST_DONE;
+    // steps cannot be skipped: no install before the check, no verified before fetched
+    assert st_next(ST_IDLE, EV_INSTALL) == ST_REJECT;
+    assert st_next(ST_FETCHING, EV_INSTALL) == ST_REJECT;
+    assert st_next(ST_FETCHING, EV_VERIFIED) == ST_REJECT;
+    assert st_next(ST_VERIFYING, EV_INSTALL) == ST_REJECT;
+    assert st_next(ST_READY, EV_INSTALLED) == ST_REJECT;
+    assert st_next(ST_IDLE, EV_FETCHED) == ST_REJECT;
+    assert st_next(ST_DONE, EV_INSTALL) == ST_REJECT;
+    // an event number that does not exist
+    assert st_next(ST_IDLE, 0) == ST_REJECT;
+    assert st_next(ST_IDLE, 99) == ST_REJECT;
+}
+
+test a_failure_ends_the_run_and_a_new_one_may_follow {
+    assert st_next(ST_FETCHING, EV_FAIL) == ST_FAILED;
+    assert st_next(ST_VERIFYING, EV_FAIL) == ST_FAILED;
+    assert st_next(ST_READY, EV_FAIL) == ST_FAILED;
+    assert st_next(ST_INSTALLING, EV_FAIL) == ST_FAILED;
+    assert st_next(ST_IDLE, EV_FAIL) == ST_REJECT;
+    assert st_next(ST_DONE, EV_FAIL) == ST_REJECT;
+    assert st_next(ST_FAILED, EV_START) == ST_FETCHING;
+    assert st_next(ST_DONE, EV_START) == ST_FETCHING;
+    assert st_next(ST_FAILED, EV_RESET) == ST_IDLE;
+    assert st_next(ST_DONE, EV_RESET) == ST_IDLE;
+    assert st_next(ST_FETCHING, EV_RESET) == ST_REJECT;
+    assert st_next(ST_IDLE, EV_RESET) == ST_REJECT;
+}
+
+fn ut_inv_txt(out: []u8, nick: []const u8, nn: usize) -> usize {
+    var inv : [25]u8 = undefined;
+    invite_make(UT_FP[0..10], inv[0..25]);
+    return txt_build(inv[0..25], 47741, nick, nn, out);
+}
+
+test the_announcement_carries_ver_and_build_and_keeps_the_rest {
+    var t : [96]u8 = undefined;
+    const nick : [5]u8 = [116, 50, 55, 111, 115];
+    const n : usize = ut_inv_txt(t[0..96], nick[0..5], 5);
+    assert n > 0;
+    var o : [96]u8 = undefined;
+    const k : usize = upd_txt_add(t[0..96], n, 0, 1, 3, 4321, o[0..96]);
+    assert k == n + 10 + 11;
+    assert upd_txt_version(o[0..96], k) == um_pack(0, 1, 3);
+    assert upd_txt_build(o[0..96], k) == 4321;
+    // fp, port and nick still read
+    var fp : [10]u8 = undefined;
+    assert txt_fp(o[0..96], k, fp[0..10]) == 0;
+    assert fp[0] == 1 and fp[9] == 220;
+    assert txt_port(o[0..96], k) == 47741;
+    // an announcement made before this change has no ver and no build
+    assert upd_txt_version(t[0..96], n) == NO_VERSION;
+    assert upd_txt_build(t[0..96], n) == 0;
+    // the neighbour is newer only when its build is greater and its version not lower
+    assert upd_neighbour_newer(o[0..96], k, um_pack(0, 1, 3), 4320);
+    assert upd_neighbour_newer(o[0..96], k, um_pack(0, 1, 3), 4321) == false;
+    assert upd_neighbour_newer(o[0..96], k, um_pack(0, 1, 4), 4320) == false;
+    assert upd_neighbour_newer(t[0..96], n, um_pack(0, 1, 3), 1) == false;
+}
+
+test the_announcement_never_overflows_the_txt_record {
+    // the longest allowed nick (24) and the longest ver/build still fit
+    var t : [96]u8 = undefined;
+    var nick : [24]u8 = undefined;
+    var i : usize = 0;
+    while (i < 24) {
+        nick[i] = 97;
+        i = i + 1;
+    }
+    const n : usize = ut_inv_txt(t[0..96], nick[0..24], 24);
+    assert n > 0;
+    var o : [96]u8 = undefined;
+    assert upd_txt_add(t[0..96], n, 99, 99, 99, 999999, o[0..96]) > 0;
+    // a record that is already full gets nothing added, and the output is untouched in size terms
+    var full : [96]u8 = undefined;
+    i = 0;
+    while (i < 96) {
+        full[i] = 0;
+        i = i + 1;
+    }
+    assert upd_txt_add(full[0..96], 90, 0, 1, 3, 4321, o[0..96]) == 0;
+    assert upd_txt_add(t[0..96], n, 0, 1, 3, 4321, o[0..95]) == 0;
+    assert upd_txt_add(t[0..96], 97, 0, 1, 3, 4321, o[0..96]) == 0;
+}
+
+test ver_and_build_are_not_added_twice_and_bad_numbers_are_refused {
+    var t : [96]u8 = undefined;
+    const nick : [3]u8 = [97, 98, 99];
+    const n : usize = ut_inv_txt(t[0..96], nick[0..3], 3);
+    var o : [96]u8 = undefined;
+    var o2 : [96]u8 = undefined;
+    const k : usize = upd_txt_add(t[0..96], n, 0, 1, 3, 4321, o[0..96]);
+    assert k > 0;
+    assert upd_txt_add(o[0..96], k, 0, 1, 4, 4322, o2[0..96]) == 0;
+    assert upd_txt_add(t[0..96], n, 100, 0, 0, 5, o2[0..96]) == 0;
+    assert upd_txt_add(t[0..96], n, 0, 100, 0, 5, o2[0..96]) == 0;
+    assert upd_txt_add(t[0..96], n, 0, 0, 100, 5, o2[0..96]) == 0;
+    assert upd_txt_add(t[0..96], n, 0, 1, 3, 0, o2[0..96]) == 0;
+    assert upd_txt_add(t[0..96], n, 0, 1, 3, 1000000, o2[0..96]) == 0;
+}
+
+fn ut_raw_txt(ver: []const u8, vn: usize, bld: []const u8, bn: usize, out: []u8) -> usize {
+    // "ver=<ver>" "build=<bld>" by hand, as a hostile neighbour could send them
+    var w : usize = 0;
+    out[w] = @as(u8, @intCast(4 + vn));
+    out[w + 1] = 118;
+    out[w + 2] = 101;
+    out[w + 3] = 114;
+    out[w + 4] = 61;
+    w = w + 5;
+    var i : usize = 0;
+    while (i < vn) {
+        out[w + i] = ver[i];
+        i = i + 1;
+    }
+    w = w + vn;
+    out[w] = @as(u8, @intCast(6 + bn));
+    out[w + 1] = 98;
+    out[w + 2] = 117;
+    out[w + 3] = 105;
+    out[w + 4] = 108;
+    out[w + 5] = 100;
+    out[w + 6] = 61;
+    w = w + 7;
+    i = 0;
+    while (i < bn) {
+        out[w + i] = bld[i];
+        i = i + 1;
+    }
+    return w + bn;
+}
+
+test a_malformed_neighbour_announcement_reads_as_no_version {
+    var t : [64]u8 = undefined;
+    // good: "1.22.3" / "77"
+    const good : [6]u8 = [49, 46, 50, 50, 46, 51];
+    const b77 : [2]u8 = [55, 55];
+    var n : usize = ut_raw_txt(good[0..6], 6, b77[0..2], 2, t[0..64]);
+    assert upd_txt_version(t[0..64], n) == um_pack(1, 22, 3);
+    assert upd_txt_build(t[0..64], n) == 77;
+    // two parts, four parts, empty part, letters, leading zero, 100
+    const two : [3]u8 = [49, 46, 50];
+    n = ut_raw_txt(two[0..3], 3, b77[0..2], 2, t[0..64]);
+    assert upd_txt_version(t[0..64], n) == NO_VERSION;
+    const four : [7]u8 = [49, 46, 50, 46, 51, 46, 52];
+    n = ut_raw_txt(four[0..7], 7, b77[0..2], 2, t[0..64]);
+    assert upd_txt_version(t[0..64], n) == NO_VERSION;
+    const hole : [4]u8 = [49, 46, 46, 51];
+    n = ut_raw_txt(hole[0..4], 4, b77[0..2], 2, t[0..64]);
+    assert upd_txt_version(t[0..64], n) == NO_VERSION;
+    const letters : [5]u8 = [49, 46, 120, 46, 51];
+    n = ut_raw_txt(letters[0..5], 5, b77[0..2], 2, t[0..64]);
+    assert upd_txt_version(t[0..64], n) == NO_VERSION;
+    const lead : [5]u8 = [49, 46, 48, 49, 46];
+    n = ut_raw_txt(lead[0..5], 5, b77[0..2], 2, t[0..64]);
+    assert upd_txt_version(t[0..64], n) == NO_VERSION;
+    const lead2 : [6]u8 = [49, 46, 48, 49, 46, 49];
+    n = ut_raw_txt(lead2[0..6], 6, b77[0..2], 2, t[0..64]);
+    assert upd_txt_version(t[0..64], n) == NO_VERSION;
+    const big : [6]u8 = [49, 48, 48, 46, 48, 46];
+    n = ut_raw_txt(big[0..6], 6, b77[0..2], 2, t[0..64]);
+    assert upd_txt_version(t[0..64], n) == NO_VERSION;
+    // builds: zero, leading zero, letters, seven digits
+    const z : [1]u8 = [48];
+    n = ut_raw_txt(good[0..6], 6, z[0..1], 1, t[0..64]);
+    assert upd_txt_build(t[0..64], n) == 0;
+    const lz : [2]u8 = [48, 55];
+    n = ut_raw_txt(good[0..6], 6, lz[0..2], 2, t[0..64]);
+    assert upd_txt_build(t[0..64], n) == 0;
+    const lt : [2]u8 = [55, 120];
+    n = ut_raw_txt(good[0..6], 6, lt[0..2], 2, t[0..64]);
+    assert upd_txt_build(t[0..64], n) == 0;
+    const seven : [7]u8 = [49, 50, 51, 52, 53, 54, 55];
+    n = ut_raw_txt(good[0..6], 6, seven[0..7], 7, t[0..64]);
+    assert upd_txt_build(t[0..64], n) == 0;
+    // a record cut short (a length byte past the end) reads as nothing
+    n = ut_raw_txt(good[0..6], 6, b77[0..2], 2, t[0..64]);
+    assert upd_txt_version(t[0..64], n - 3) == NO_VERSION or upd_txt_build(t[0..64], n - 3) == 0;
+    assert upd_txt_build(t[0..64], n - 1) == 0;
+}

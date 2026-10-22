@@ -1,0 +1,137 @@
+// SPDX-License-Identifier: Apache-2.0
+// specs/t27os/update_host.t27 -- self-update over the local network, the host half (Refs gHashTag/t27#11560).
+// Where update_core.t27 decides, this file does what only the OS can: SHA-256 of a bundle file (CommonCrypto
+// CC_SHA256_Init/Update/Final, in libSystem, a chunk at a time so a 200 MiB bundle is never in memory), the signature
+// with the identity key and its check (Security.framework through keysync_host.ks_sign / ks_verify: ECDSA P-256 over
+// SHA-256), the fingerprint of a key (peer_identity_host.ih_fingerprint). No decision lives here that update_core.t27
+// does not name; fetching the bundle and installing it are the next step and are NOT here. ASCII only (L3).
+
+module T27osUpdateHost;
+
+use t27os::pty_sys::sys_read;
+use t27os::pty_sys::sys_close;
+use t27os::pty_sys::sys_open_ro;
+use t27os::keysync_host::ks_sign;
+use t27os::keysync_host::ks_verify;
+use t27os::peer_identity::PUB_BYTES;
+use t27os::peer_identity::PRIV_BYTES;
+use t27os::peer_identity::ID_LEN;
+use t27os::peer_identity::ID_OFF_PUB;
+use t27os::peer_identity::ID_OFF_PRIV;
+use t27os::peer_identity_host::ih_fingerprint;
+use t27os::update_core::UM_LEN;
+use t27os::update_core::UM_BODY_LEN;
+use t27os::update_core::UM_SIGIN_LEN;
+use t27os::update_core::UM_OFF_SHA;
+use t27os::update_core::UM_OFF_FP;
+use t27os::update_core::UM_OFF_PUB;
+use t27os::update_core::UM_OFF_SIG;
+use t27os::update_core::OF_OK;
+use t27os::update_core::um_body;
+use t27os::update_core::um_sign_input;
+use t27os::update_core::um_seal;
+use t27os::update_core::um_parse;
+use t27os::update_core::um_offer;
+use t27os::update_core::um_author_known;
+use t27os::update_core::um_sig_len;
+use t27os::update_core::um_size_of;
+
+// UH_* results of uh_check_manifest: 0 = good, 1..6 = the um_offer refusal (OF_*), 10 = the signature is not true.
+pub const UH_OK : u32 = 0;
+pub const UH_SIG : u32 = 10;
+
+// uh_file_sha results
+pub const UH_FILE_IO : i64 = -1;
+
+fn uh_sha_init(ctx: []u8) -> i32 { return @extern("CC_SHA256_Init"); }
+fn uh_sha_update(ctx: []u8, data: []const u8, n: u32) -> i32 { return @extern("CC_SHA256_Update"); }
+fn uh_sha_final(md: []u8, ctx: []u8) -> i32 { return @extern("CC_SHA256_Final"); }
+
+/// SHA-256 of the whole file at path (NUL-terminated) into out[0..32]; the file size in bytes, UH_FILE_IO (-1) when it
+/// cannot be opened or read. 16 KiB at a time.
+pub fn uh_file_sha(path: []const u8, out: []u8) -> i64 {
+    if (out.len < 32) { return UH_FILE_IO; }
+    const fd : i32 = sys_open_ro(path, 0);
+    if (fd < 0) { return UH_FILE_IO; }
+    var ctx : [128]u8 = undefined;
+    var i : usize = 0;
+    while (i < 128) {
+        ctx[i] = 0;
+        i = i + 1;
+    }
+    uh_sha_init(ctx[0..128]);
+    var buf : [16384]u8 = undefined;
+    var total : i64 = 0;
+    while (true) {
+        const r : i64 = sys_read(fd, buf[0..16384], 16384);
+        if (r < 0) {
+            sys_close(fd);
+            return UH_FILE_IO;
+        }
+        if (r == 0) { break; }
+        uh_sha_update(ctx[0..128], buf[0..@as(usize, @intCast(r))], @as(u32, @intCast(r)));
+        total = total + r;
+    }
+    sys_close(fd);
+    uh_sha_final(out, ctx[0..128]);
+    return total;
+}
+
+/// The manifest of a bundle, signed with the identity key. id = the 207-byte identity (peer_identity.ID_LEN) from
+/// ih_identity_open; sha and size describe the bundle. The 216 manifest bytes go to out; their count, 0 when an
+/// argument is refused (update_core.um_body) or the OS refuses to sign.
+pub fn uh_make_manifest(id: []const u8, major: u32, minor: u32, patch: u32, build: u32, size: u64, sha: []const u8, out: []u8) -> usize {
+    if (id.len < ID_LEN or out.len < UM_LEN) { return 0; }
+    var fp : [10]u8 = undefined;
+    if (ih_fingerprint(id[ID_OFF_PUB..ID_OFF_PUB + PUB_BYTES], fp[0..10]) == false) { return 0; }
+    var body : [143]u8 = undefined;
+    if (um_body(major, minor, patch, build, size, sha, fp[0..10], id[ID_OFF_PUB..ID_OFF_PUB + PUB_BYTES], body[0..143]) != UM_BODY_LEN) { return 0; }
+    var si : [159]u8 = undefined;
+    if (um_sign_input(body[0..143], si[0..159]) != UM_SIGIN_LEN) { return 0; }
+    var sig : [128]u8 = undefined;
+    const sn : usize = ks_sign(id[ID_OFF_PRIV..ID_OFF_PRIV + PRIV_BYTES], si[0..159], sig[0..128]);
+    if (sn == 0) { return 0; }
+    return um_seal(body[0..143], sig[0..sn], out);
+}
+
+/// Judge a manifest that arrived from the network. UH_OK only when: it parses, the fingerprint field is the fingerprint
+/// of the key in it, the author is a friend or this device, the build is strictly newer, the version not lower, the size
+/// in range (update_core.um_offer, whose code is returned otherwise) AND the signature is true under the key in it.
+/// UH_SIG when everything else agrees and the signature does not. ft = friends table (1108 bytes), own_fp = this device.
+pub fn uh_check_manifest(m: []const u8, ft: []const u8, own_fp: []const u8, cur_ver: u64, cur_build: u32) -> u32 {
+    if (um_parse(m) != 0) { return um_offer(m, false, false, cur_ver, cur_build); }
+    var fp : [10]u8 = undefined;
+    var fp_matches : bool = false;
+    if (ih_fingerprint(m[UM_OFF_PUB..UM_OFF_PUB + PUB_BYTES], fp[0..10])) {
+        fp_matches = true;
+        var i : usize = 0;
+        while (i < 10) {
+            if (fp[i] != m[UM_OFF_FP + i]) { fp_matches = false; }
+            i = i + 1;
+        }
+    }
+    const known : bool = um_author_known(ft, own_fp, m[UM_OFF_FP..UM_OFF_FP + 10]);
+    const o : u32 = um_offer(m, known, fp_matches, cur_ver, cur_build);
+    if (o != OF_OK) { return o; }
+    var si : [159]u8 = undefined;
+    if (um_sign_input(m[0..UM_BODY_LEN], si[0..159]) != UM_SIGIN_LEN) { return UH_SIG; }
+    const sn : usize = um_sig_len(m);
+    if (ks_verify(m[UM_OFF_PUB..UM_OFF_PUB + PUB_BYTES], si[0..159], m[UM_OFF_SIG..UM_OFF_SIG + sn]) == false) { return UH_SIG; }
+    return UH_OK;
+}
+
+/// Does the file at path (NUL-terminated) have the size and the SHA-256 the manifest names? Run after the bundle has been
+/// fetched; the manifest must already have passed uh_check_manifest.
+pub fn uh_file_matches(m: []const u8, path: []const u8) -> bool {
+    if (m.len < UM_LEN) { return false; }
+    var h : [32]u8 = undefined;
+    const n : i64 = uh_file_sha(path, h[0..32]);
+    if (n < 0 or @as(u64, @intCast(n)) != um_size_of(m)) { return false; }
+    var d : u32 = 0;
+    var i : usize = 0;
+    while (i < 32) {
+        d = d | @as(u32, h[i] ^ m[UM_OFF_SHA + i]);
+        i = i + 1;
+    }
+    return d == 0;
+}
