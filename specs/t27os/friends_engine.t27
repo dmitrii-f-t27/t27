@@ -1002,11 +1002,12 @@ test fe_the_blocks_do_not_overlap_and_end_inside_the_region {
 
 test fe_a_loopback_address_beats_a_lan_one_and_a_forbidden_one_is_never_taken {
     assert fe_better(0, 2130706433);
-    assert fe_better(0, 3232239364);
-    assert fe_better(0, 167772161) == false;
-    assert fe_better(3232239364, 2130706433);
-    assert fe_better(2130706433, 3232239364) == false;
-    assert fe_better(3232239364, 3232239365) == false;
+    assert fe_better(0, 3232235786);
+    assert fe_better(0, 134744072) == false;
+    assert fe_better(0, 167772161);
+    assert fe_better(3232235786, 2130706433);
+    assert fe_better(2130706433, 3232235786) == false;
+    assert fe_better(3232235786, 3232235788) == false;
     assert fe_better(2130706433, 2130706434) == false;
 }
 

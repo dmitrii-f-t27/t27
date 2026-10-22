@@ -37,6 +37,7 @@
 module T27osCallCryptoProbe;
 
 use t27os::pty_sys::sys_write;
+use t27os::call_view::cv_lan_ok;
 use t27os::pty_sys::sys_exit;
 use t27os::pty_sys::sys_getenv;
 use t27os::pty_sys::sys_strlen;
@@ -898,8 +899,8 @@ fn ckh_net(caller: bool) -> bool {
         ckh_line("NET NOT RUN: CK_BIND, CK_PORT, CK_PEER, CK_PEER_PORT, CK_FRAMES (1..8192) or CK_PACE_US is malformed\n");
         return false;
     }
-    if ((peer_ip >> 24) != 127 and (peer_ip >> 8) != 12625935) {
-        ckh_line("NET NOT RUN: CK_PEER must be 127.x.x.x or 192.168.15.x\n");
+    if (!cv_lan_ok(peer_ip)) {
+        ckh_line("NET NOT RUN: CK_PEER must be a private network address (10.x, 172.16-31.x, 192.168.x or 127.x)\n");
         return false;
     }
     ckh_num("role (1 caller, 0 callee): ", @as(u64, ep_flag(caller)));
@@ -1167,9 +1168,9 @@ test the_endpoint_block_fits_and_its_fields_do_not_overlap {
 
 test env_numbers_read_decimal_and_dotted_quads {
     var a : [16]u8 = undefined;
-    ckh_addr4(a[0..16], 3232239368, 47741);
+    ckh_addr4(a[0..16], 3232235787, 47741);
     assert a[0] == 16 and a[1] == 2 and a[2] == 186 and a[3] == 125;
-    assert a[4] == 192 and a[5] == 168 and a[6] == 15 and a[7] == 8;
+    assert a[4] == 192 and a[5] == 168 and a[6] == 1 and a[7] == 11;
 }
 
 test a_frame_reads_back_its_index_and_a_changed_byte_does_not {

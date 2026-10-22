@@ -2254,12 +2254,12 @@ test a_window_slice_holds_one_to_three_links_and_a_member_survives_the_table {
     assert cs_links(blk[0..CS_LEN]) == 1;
     assert cs_links(blk[0..165504]) == 1;
     // the member table keeps fingerprint, address and port in two words
-    gm_put(blk[0..CS_LEN], 0, a[0..10], 3232239368, 47743);
+    gm_put(blk[0..CS_LEN], 0, a[0..10], 3232235787, 47743);
     cgp(blk[0..CS_LEN], gm_slot(0) + 2, 4);
     var b : [10]u8 = undefined;
     gm_fp(blk[0..CS_LEN], 0, b[0..10]);
     assert ck_same(a[0..10], b[0..10]);
-    assert gm_ip(blk[0..CS_LEN], 0) == 3232239368 and gm_port(blk[0..CS_LEN], 0) == 47743;
+    assert gm_ip(blk[0..CS_LEN], 0) == 3232235787 and gm_port(blk[0..CS_LEN], 0) == 47743;
     assert gm_find(blk[0..CS_LEN], a[0..10]) == 0;
     a[9] = a[9] ^ 1;
     assert gm_find(blk[0..CS_LEN], a[0..10]) == GR_PEERS;

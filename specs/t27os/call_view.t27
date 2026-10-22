@@ -18,7 +18,8 @@
 // carried by the handshake (call_core INVITE has no field for it), so the RINGING view names the address and the
 // fingerprint only.
 //
-// Addresses: 127.x.x.x or 192.168.15.x only (cv_lan_ok), the port 47727 when none is typed (CV_PORT).
+// Addresses: a private IPv4 network (10.x, 172.16-31.x, 192.168.x) or this machine (127.x) only (cv_lan_ok), the
+// port 47727 when none is typed (CV_PORT).
 // Flat namespace (the window build splices imported modules): every name here starts with cv_ / CV_.
 module T27osCallView;
 
@@ -170,10 +171,10 @@ pub const CV_N_REFUSED : u32 = 5;
 pub const CV_N_SELF : u32 = 6;
 
 pub fn cv_note_text(note: u32) -> str {
-    if (note == CV_N_ADDR) { return "Type an address like 192.168.15.4:47727."; }
-    if (note == CV_N_LAN) { return "Calls go only to 127.x.x.x or 192.168.15.x in this version."; }
+    if (note == CV_N_ADDR) { return "Type an address like 192.168.1.10:47727."; }
+    if (note == CV_N_LAN) { return "Calls go only to a private network address (10.x, 172.16-31.x, 192.168.x or 127.x)."; }
     if (note == CV_N_SOCKET) { return "Calls are off: the call port could not be opened (is it taken?)."; }
-    if (note == CV_N_BIND) { return "Calls are off: T27OS_CALL_BIND must be 127.x.x.x or 192.168.15.x."; }
+    if (note == CV_N_BIND) { return "Calls are off: T27OS_CALL_BIND must be a private network address (10.x, 172.16-31.x, 192.168.x or 127.x)."; }
     if (note == CV_N_REFUSED) { return "The call could not be started."; }
     if (note == CV_N_SELF) { return "That is this device's own address."; }
     return "";
@@ -240,9 +241,13 @@ pub fn cv_parse_addr(t: []const u8, n: usize) -> u64 {
 pub fn cv_addr_ip(a: u64) -> u64 { return a / 65536; }
 pub fn cv_addr_port(a: u64) -> u64 { return a % 65536; }
 
-/// Only this machine (127.x.x.x) and the bench network 192.168.15.x.
+/// A private IPv4 network (RFC 1918: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) or this machine (127.0.0.0/8).
+/// The one address rule of calls: the window, the friends engine and the call probes all ask it.
 pub fn cv_lan_ok(ip: u64) -> bool {
-    return (ip >> 24) == 127 or (ip >> 8) == 12625935;
+    if (ip > 4294967295) { return false; }
+    const a : u64 = ip >> 24;
+    const b : u64 = (ip >> 16) & 255;
+    return a == 10 or a == 127 or (a == 172 and b >= 16 and b <= 31) or (a == 192 and b == 168);
 }
 
 fn cv_put1(out: []u8, at: usize, b: u8) -> usize {
@@ -451,8 +456,8 @@ test cv_each_view_has_its_buttons_and_nothing_answers_a_missing_one {
 }
 
 test cv_addresses_parse_with_and_without_a_port {
-    const a : u64 = cv_parse_addr("192.168.15.4:47728", 18);
-    assert cv_addr_ip(a) == 3232239364;
+    const a : u64 = cv_parse_addr("192.168.1.10:47728", 18);
+    assert cv_addr_ip(a) == 3232235786;
     assert cv_addr_port(a) == 47728;
     const b : u64 = cv_parse_addr("127.0.0.1", 9);
     assert cv_addr_ip(b) == 2130706433;
@@ -471,29 +476,45 @@ test cv_addresses_parse_with_and_without_a_port {
     assert cv_addr_char(32) == false and cv_addr_char(97) == false and cv_addr_char(1103) == false;
 }
 
-test cv_only_this_machine_and_the_bench_network_are_dialled {
+test cv_only_private_networks_and_this_machine_are_dialled {
+    assert cv_lan_ok(cv_addr_ip(cv_parse_addr("10.1.2.3", 8)));
+    assert cv_lan_ok(cv_addr_ip(cv_parse_addr("172.16.0.1", 10)));
+    assert cv_lan_ok(cv_addr_ip(cv_parse_addr("172.31.255.254", 14)));
+    assert cv_lan_ok(cv_addr_ip(cv_parse_addr("192.168.1.10", 12)));
+    assert cv_lan_ok(cv_addr_ip(cv_parse_addr("127.0.0.1", 9)));
     assert cv_lan_ok(2130706433);
-    assert cv_lan_ok(3232239364);
-    assert cv_lan_ok(3232239361);
-    assert cv_lan_ok(3232235777) == false;
+    assert cv_lan_ok(3232235786);
+    assert cv_lan_ok(cv_addr_ip(cv_parse_addr("8.8.8.8", 7))) == false;
+    assert cv_lan_ok(cv_addr_ip(cv_parse_addr("172.32.0.1", 10))) == false;
+    assert cv_lan_ok(cv_addr_ip(cv_parse_addr("172.15.255.255", 14))) == false;
+    assert cv_lan_ok(cv_addr_ip(cv_parse_addr("169.254.1.1", 11))) == false;
+    assert cv_lan_ok(cv_addr_ip(cv_parse_addr("0.0.0.0", 7))) == false;
+    assert cv_lan_ok(cv_addr_ip(cv_parse_addr("255.255.255.255", 15))) == false;
+    assert cv_lan_ok(cv_addr_ip(cv_parse_addr("192.169.1.1", 11))) == false;
     assert cv_lan_ok(134744072) == false;
     assert cv_lan_ok(0) == false;
+    assert cv_lan_ok(4294967296 + 2130706433) == false;
+    assert cv_parse_addr("192.168.1.10:0", 14) == 0;
+    assert cv_parse_addr("192.168.1.10:65536", 18) == 0;
+    assert cv_parse_addr("192.168.1.10:99999", 18) == 0;
+    assert cv_parse_addr("10.1.2.3:1", 10) == cv_parse_addr("10.1.2.3", 8) - CV_PORT + 1;
+    assert cv_addr_port(cv_parse_addr("172.16.0.1:65535", 16)) == 65535;
 }
 
 test cv_the_test_fingerprint_names_its_address_and_reads_back {
     var fp : [10]u8 = undefined;
-    assert cv_fp_of(3232239364, 47727, fp[0..10]) == 10;
-    assert fp[0] == 116 and fp[3] == 99 and fp[4] == 192 and fp[7] == 4 and fp[8] == 186 and fp[9] == 111;
+    assert cv_fp_of(3232235786, 47727, fp[0..10]) == 10;
+    assert fp[0] == 116 and fp[3] == 99 and fp[4] == 192 and fp[7] == 10 and fp[8] == 186 and fp[9] == 111;
     const a : u64 = cv_fp_addr(fp[0..10]);
-    assert cv_addr_ip(a) == 3232239364 and cv_addr_port(a) == 47727;
+    assert cv_addr_ip(a) == 3232235786 and cv_addr_port(a) == 47727;
     var other : [10]u8 = undefined;
-    assert cv_fp_of(3232239364, 47728, other[0..10]) == 10;
+    assert cv_fp_of(3232235786, 47728, other[0..10]) == 10;
     assert other[9] != fp[9];
     fp[0] = 0;
     assert cv_fp_addr(fp[0..10]) == 0;
     var t : [24]u8 = undefined;
-    const n : usize = cv_addr_text(3232239364, 47727, t[0..24]);
-    assert cv_eq(t[0..24], n, "192.168.15.4:47727");
+    const n : usize = cv_addr_text(3232235786, 47727, t[0..24]);
+    assert cv_eq(t[0..24], n, "192.168.1.10:47727");
     const m : usize = cv_addr_text(2130706433, 1, t[0..24]);
     assert cv_eq(t[0..24], m, "127.0.0.1:1");
     assert cv_parse_addr(t[0..24], m) == 2130706433 * 65536 + 1;

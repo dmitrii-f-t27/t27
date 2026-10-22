@@ -1792,8 +1792,8 @@ test the_socket_address_is_127_0_0_1_port_47727 {
 }
 
 test the_peer_address_parses_and_lands_in_sockaddr {
-    assert cbp_parse_ip("192.168.15.4", 12) == 3232239364;
-    assert cbp_parse_ip("192.168.15.8", 12) == 3232239368;
+    assert cbp_parse_ip("192.168.1.10", 12) == 3232235786;
+    assert cbp_parse_ip("192.168.1.11", 12) == 3232235787;
     assert cbp_parse_ip("0.0.0.0", 7) == 0;
     assert cbp_parse_ip("127.0.0.1", 9) == CBP_LOOPBACK;
     assert cbp_parse_ip("256.0.0.1", 9) == 4294967296;
@@ -1802,9 +1802,9 @@ test the_peer_address_parses_and_lands_in_sockaddr {
     assert cbp_parse_ip("1..3.4", 6) == 4294967296;
     assert cbp_parse_ip("1.2.3.x", 7) == 4294967296;
     var a : [16]u8 = undefined;
-    cbp_sockaddr(a[0..16], 3232239364, 47727);
+    cbp_sockaddr(a[0..16], 3232235786, 47727);
     assert a[0] == 16 and a[1] == 2 and a[2] == 186 and a[3] == 111;
-    assert a[4] == 192 and a[5] == 168 and a[6] == 15 and a[7] == 4 and a[8] == 0 and a[15] == 0;
+    assert a[4] == 192 and a[5] == 168 and a[6] == 1 and a[7] == 10 and a[8] == 0 and a[15] == 0;
 }
 
 test the_port_and_seconds_parse_as_decimal {

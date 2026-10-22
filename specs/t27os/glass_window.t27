@@ -9148,7 +9148,7 @@ fn draw_profile_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, 
 //   - the CALL panel (the slot of the Queen, DOCTOR, KEYS and PROFILE panels): this device's address and test
 //     fingerprint, then the view of call_view (address field and CALL; CANCEL; ANSWER / DECLINE; the 6 digits large
 //     with CODES MATCH / CODES DIFFER; the duration with MUTE / END CALL; the reason with CLOSE).
-//   - where it listens: T27OS_CALL_BIND (default 127.0.0.1, only 127.x or 192.168.15.x), T27OS_CALL_PORT (47727);
+//   - where it listens: T27OS_CALL_BIND (default 127.0.0.1, only a private network or 127.x, call_view cv_lan_ok), T27OS_CALL_PORT (47727);
 //     T27OS_CALL_AUDIO=test sends call_session's numbered test pattern instead of the microphone; T27OS_CALL_PEER
 //     fills the address field at launch.
 // The session block (CS_LEN bytes) is a local of main(): it never moves, as the audio callbacks need.
@@ -9992,7 +9992,7 @@ fn draw_cl_front(c: u64, kit: [48]u64, sh: f64, mx: f64, my: f64, l: f64, t: f64
     if (debug) {
         cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
         draw_bytes(c, kit, "DEBUG: ADDRESS, CALLED WITH THE KEY TYPED ABOVE", 46, x, t + FV_DBG_LABEL_Y, 9.0, 0.0, false);
-        draw_cl_field(c, kit, cv_field_x(l), t + FV_DFIELD_Y, cv_field_w(QP_W), cl[CL_FOCUS] == 1, hit == FV_H_DFIELD, cl[CL_ADDR .. CL_ADDR + CV_ADDR_MAX], @as(usize, cl[CL_ALEN]), "192.168.15.4:47727");
+        draw_cl_field(c, kit, cv_field_x(l), t + FV_DFIELD_Y, cv_field_w(QP_W), cl[CL_FOCUS] == 1, hit == FV_H_DFIELD, cl[CL_ADDR .. CL_ADDR + CV_ADDR_MAX], @as(usize, cl[CL_ALEN]), "192.168.1.10:47727");
         draw_cl_btn(c, kit, cv_btn_x(l, QP_W, 0), t + FV_DCALL_Y, cv_btn_w(QP_W), "CALL", hit == FV_H_DCALL);
     }
 }
@@ -15595,8 +15595,8 @@ test every_reason_a_call_ends_with_has_its_line_and_ports_parse {
     var b : [8]u8 = undefined;
     cl_put32(b[0..8], 0, 305419896);
     assert cl_get32(b[0..8], 0) == 305419896;
-    cl_put_ip(b[0..8], 4, 3232239364);
-    assert cl_ip(b[0..8], 4) == 3232239364;
+    cl_put_ip(b[0..8], 4, 3232235786);
+    assert cl_ip(b[0..8], 4) == 3232235786;
 }
 
 test the_invite_field_takes_a_pasted_invite_in_capitals_and_stops_at_25 {

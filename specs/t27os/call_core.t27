@@ -1216,13 +1216,13 @@ test the_member_list_round_trips_and_refuses_a_short_or_marked_wrong_body {
     var l : [72]u8 = undefined;
     gr_list_init(l[0..72]);
     assert gr_list_ok(l[0..72]) == false;
-    assert gr_list_add(l[0..72], a[0..10], 3232239368, 47741) == 1;
-    assert gr_list_add(l[0..72], b[0..10], 3232239368, 47742) == 2;
+    assert gr_list_add(l[0..72], a[0..10], 3232235787, 47741) == 1;
+    assert gr_list_add(l[0..72], b[0..10], 3232235787, 47742) == 2;
     assert gr_list_ok(l[0..8 + 32]);
     assert gr_list_ok(l[0..8 + 31]) == false;
     assert gr_list_count(l[0..72]) == 2;
-    assert gr_list_ip(l[0..72], 0) == 3232239368 and gr_list_port(l[0..72], 0) == 47741;
-    assert gr_list_ip(l[0..72], 1) == 3232239368 and gr_list_port(l[0..72], 1) == 47742;
+    assert gr_list_ip(l[0..72], 0) == 3232235787 and gr_list_port(l[0..72], 0) == 47741;
+    assert gr_list_ip(l[0..72], 1) == 3232235787 and gr_list_port(l[0..72], 1) == 47742;
     assert l[8] == 1 and l[8 + 16] == 2;
     // a fifth does not fit, the count stays
     assert gr_list_add(l[0..72], a[0..10], 1, 1) == 3;
