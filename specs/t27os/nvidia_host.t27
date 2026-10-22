@@ -2,7 +2,8 @@
 // T27 OS nvidia_host: where the direct NVIDIA route (nvidia_direct.t27) touches the machine. No decisions:
 //   - nv_kc_read: the key list, one Keychain item (service NV_KC_SERVICE, account NV_KC_ACCOUNT), read by
 //     /usr/bin/security like every other key (keys_host.t27 sec_run); never printed, never written to a file;
-//     the buffer is wiped by whoever asked for it.
+//     the buffer is wiped by whoever asked for it. Under a HOME that is not the user's own folder the login
+//     keychain is named (nvidia_direct.t27 nv_kc_argv); T27OS_NVIDIA_DEBUG=1 prints lengths and codes only.
 //   - the state file ~/.t27os/nvidia/state.t27 (nv_state_text: counters, dead flags, the current key, the
 //     list's hash; no key), written to a temporary file and renamed over the old one.
 //   - nv_line: the KEYS panel's NVIDIA line, read from the Keychain item and the state file.
@@ -17,10 +18,8 @@ module T27osNvidiaHost;
 use t27os::keys::NV_KC_SERVICE;
 use t27os::keys::NV_KC_ACCOUNT;
 use t27os::keys::NV_MODEL_DEFAULT;
-use t27os::keys::SEC_OP_READ;
 use t27os::keys::SEC_OK;
 use t27os::keys::SEC_TIMEOUT_MS;
-use t27os::keys::sec_argv;
 use t27os::keys_host::sec_run;
 use t27os::keys_probe::probe_nvidia;
 use t27os::nvidia_direct::NV_BAD;
@@ -32,6 +31,7 @@ use t27os::nvidia_direct::NV_A_DEAD;
 use t27os::nvidia_direct::NV_A_NEXT;
 use t27os::nvidia_direct::NV_ACTION_WORDS;
 use t27os::nvidia_direct::nv_parse;
+use t27os::nvidia_direct::nv_kc_argv;
 use t27os::nvidia_direct::nv_list_hash;
 use t27os::nvidia_direct::nv_state_init;
 use t27os::nvidia_direct::nv_state_load;
@@ -53,6 +53,7 @@ use t27os::pty_sys::sys_close;
 use t27os::pty_sys::sys_creat;
 use t27os::pty_sys::sys_rename;
 use t27os::pty_sys::sys_mkdir;
+use t27os::pty_proto::get_u64;
 
 /// The most checks one T27OS_NVIDIA_CHECK run sends.
 pub const NV_CHECK_MAX : u32 = 5;
@@ -75,6 +76,39 @@ fn nv_env(name: []const u8, out: []u8) -> usize {
     return @as(usize, @intCast(n));
 }
 
+fn nv_getuid() -> u32 { return @extern("getuid"); }
+fn nv_getpwuid(uid: u32) -> u64 { return @extern("getpwuid"); }
+
+/// The user's own home folder (getpwuid(getuid())->pw_dir, at byte 48 of the macOS struct passwd) into out,
+/// cut at out.len - 1; its length, 0 when unknown.
+fn nv_user_home(out: []u8) -> usize {
+    const pw : u64 = nv_getpwuid(nv_getuid());
+    if (pw == 0) { return 0; }
+    var b : [8]u8 = undefined;
+    sys_peek(b[0..8], pw + 48, 8);
+    const d : u64 = get_u64(b[0..8], 0);
+    if (d == 0) { return 0; }
+    var n : u64 = sys_strlen(d);
+    if (n > @as(u64, out.len - 1)) { return 0; }
+    sys_peek(out, d, n);
+    return @as(usize, @intCast(n));
+}
+
+/// T27OS_NVIDIA_DEBUG=1: one line to standard error with three numbers (lengths and codes only, never a key).
+fn nv_debug3(tag: []const u8, a: u32, b: u32, c: u32) -> void {
+    var e : [8]u8 = undefined;
+    if (nv_env("T27OS_NVIDIA_DEBUG", e[0..8]) == 0 or e[0] != 49) { return; }
+    var l : [128]u8 = undefined;
+    var n : usize = put_bytes(l[0..128], 0, tag);
+    n = put_dec(l[0..128], n, @as(u64, a));
+    n = put_bytes(l[0..128], n, " ");
+    n = put_dec(l[0..128], n, @as(u64, b));
+    n = put_bytes(l[0..128], n, " ");
+    n = put_dec(l[0..128], n, @as(u64, c));
+    l[n] = 10;
+    sys_write(2, l[0..128], @as(u64, n + 1));
+}
+
 /// The key list item into out (NV_JSON_CAP bytes); its length, 0 when it is missing, the tool failed or the
 /// bytes did not fit.
 pub fn nv_kc_read(out: []u8) -> usize {
@@ -86,12 +120,18 @@ pub fn nv_kc_read(out: []u8) -> usize {
         offs[z] = 0;
         z = z + 1;
     }
-    const argc : u32 = sec_argv(SEC_OP_READ, NV_KC_SERVICE, NV_KC_ACCOUNT, words[0..256], offs[0..8]);
+    var home : [160]u8 = undefined;
+    const hn : usize = nv_env("HOME", home[0..160]);
+    var uh : [160]u8 = undefined;
+    const un : usize = nv_user_home(uh[0..160]);
+    const argc : u32 = nv_kc_argv(home[0..hn], uh[0..un], words[0..256], offs[0..8]);
     if (argc == 0) { return 0; }
     var res : [2]u32 = undefined;
     res[0] = 0;
     res[1] = 0;
     const st : u32 = sec_run(words[0..256], offs[0..8], argc, "", out, res[0..2], @as(i32, @intCast(SEC_TIMEOUT_MS)));
+    nv_debug3("nvidia debug: security argc st bytes exit ", argc, st, res[0]);
+    nv_debug3("nvidia debug: security exit home user_home ", res[1], @as(u32, @intCast(hn)), @as(u32, @intCast(un)));
     if (st != SEC_OK) {
         nv_wipe(out);
         return 0;
@@ -124,6 +164,7 @@ pub fn nv_load(st: []u32, json: []u8, offs: []u32, lens: []u32) -> u32 {
     }
     var res : [2]u32 = undefined;
     const listed : u32 = nv_parse(json[0..n], offs, lens, res[0..2]);
+    nv_debug3("nvidia debug: parse listed repeats rejected ", listed, res[0], res[1]);
     if (listed == NV_BAD) {
         nv_wipe(json);
         nv_state_init(st, 0, 0);

@@ -30,6 +30,9 @@ use t27os::keys::NV_CHAT_URL;
 use t27os::keys::NV_MODEL_DEFAULT;
 use t27os::keys::NV_DEAD_MODELS;
 use t27os::keys::NV_KC_SERVICE;
+use t27os::keys::NV_KC_ACCOUNT;
+use t27os::keys::SEC_OP_READ;
+use t27os::keys::sec_argv;
 
 /// nv_parse's answer for bytes that are not the expected JSON object.
 pub const NV_BAD : u32 = 4294967295;
@@ -500,6 +503,28 @@ pub fn nv_state_load(text: []const u8, n: u32, hash: u32, st: []u32) -> bool {
     return true;
 }
 
+// ---- the Keychain argument list -------------------------------------------------------------------------
+
+/// The login keychain under a home folder; `security` looks for it under $HOME when no keychain is named.
+pub const NV_KC_LOGIN : str = "/Library/Keychains/login.keychain-db";
+
+/// The argument words of the key list read (keys.t27 sec_argv READ for NV_KC_SERVICE / NV_KC_ACCOUNT); the count.
+/// `security` finds the default keychain through $HOME, so a process started with another HOME (a test run
+/// with HOME=/tmp/...) is answered 44, item not found, although the item is there. When `home` is not the
+/// user's own folder `user_home` (getpwuid), word 7 names <user_home>/Library/Keychains/login.keychain-db.
+/// An unknown user folder or a path that does not fit leaves the plain 7 words.
+pub fn nv_kc_argv(home: []const u8, user_home: []const u8, words: []u8, offs: []u32) -> u32 {
+    const argc : u32 = sec_argv(SEC_OP_READ, NV_KC_SERVICE, NV_KC_ACCOUNT, words, offs);
+    if (argc != 7 or user_home.len == 0 or same_bytes(home, user_home)) { return argc; }
+    const at : usize = @as(usize, offs[6]) + 3;
+    if (at + user_home.len + NV_KC_LOGIN.len + 1 > words.len or offs.len < 8) { return argc; }
+    offs[7] = @as(u32, @intCast(at));
+    var n : usize = put_bytes(words, at, user_home);
+    n = put_bytes(words, n, NV_KC_LOGIN);
+    words[n] = 0;
+    return 8;
+}
+
 // ---- the status line -----------------------------------------------------------------------------------
 
 /// The KEYS panel line (out needs 80 bytes): "NVIDIA: 34 keys, 33 live, model nemotron-3-ultra"; `listed` is what
@@ -751,4 +776,27 @@ test the_status_line_reads_the_numbers_from_the_state {
     n = nv_status_line(st[0..260], NV_BAD, NV_MODEL_DEFAULT, o[0..96]);
     assert same_bytes(o[0..n], "NVIDIA: key list unreadable (Keychain nvidia-api-keys)");
     assert NV_CHAT_URL.len > 0;
+}
+
+test the_key_list_read_names_the_login_keychain_only_under_another_home {
+    var w : [256]u8 = undefined;
+    var o : [8]u32 = undefined;
+    var z : usize = 0;
+    while (z < 8) {
+        o[z] = 0;
+        z = z + 1;
+    }
+    var n : u32 = nv_kc_argv("/Users/a", "/Users/a", w[0..256], o[0..8]);
+    assert n == 7;
+    assert same_bytes(w[@as(usize, o[6]) .. @as(usize, o[6]) + 2], "-w");
+    n = nv_kc_argv("", "", w[0..256], o[0..8]);
+    assert n == 7;
+    n = nv_kc_argv("/tmp/nvchk/home", "/Users/a", w[0..256], o[0..8]);
+    assert n == 8;
+    const k : usize = @as(usize, o[7]);
+    assert same_bytes(w[k .. k + 44], "/Users/a/Library/Keychains/login.keychain-db");
+    assert w[k + 44] == 0;
+    assert same_bytes(w[@as(usize, o[3]) .. @as(usize, o[3]) + 15], "nvidia-api-keys");
+    n = nv_kc_argv("/tmp/h", "/Users/a", w[0..120], o[0..8]);
+    assert n == 7;
 }
