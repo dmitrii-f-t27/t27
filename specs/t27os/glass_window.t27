@@ -9150,10 +9150,13 @@ fn cl_stats_line(cl: []u8, s: []u8, secs: u64) -> void {
     cl_stat_num(" over=", cs_stat(s, 1005));
     cl_stat_num(" txo=", cs_stat(s, 1007));
     cl_stat_num(" warm=", cs_stat(s, 1015));
-    cl_stat_num(" jb=", cs_stat(s, 10028));
-    cl_stat_num(" jbmax=", cs_stat(s, 10037));
-    cl_stat_num(" grow=", cs_stat(s, 10035));
-    cl_stat_num(" shrink=", cs_stat(s, 10036));
+    cl_stat_num(" jb=", cs_stat(s, 11948));
+    cl_stat_num(" jbmax=", cs_stat(s, 11957));
+    cl_stat_num(" grow=", cs_stat(s, 11955));
+    cl_stat_num(" shrink=", cs_stat(s, 11956));
+    cl_stat_num(" gap=", cs_stat(s, 11958));
+    cl_stat_num(" pgap=", cl_get32(cl, CL_GAP));
+    cl_stat_num(" p10=", cl_get32(cl, CL_N10));
     cl_stat_num(" ring_cb=", rt_stat(cl[FE_TONE .. FE_TONE + RT_BLOCK], RT_S_CB));
     sys_write(2, "\n", 1);
 }
@@ -11187,7 +11190,7 @@ pub fn main() -> void {
     var clp : bool = false;
     // a call that rang during a tick after the event wait opens the panel at the top of the next pass
     var clring : bool = false;
-    var csv : [74368]u8 = undefined;
+    var csv : [89728]u8 = undefined;
     var clw : [10]u64 = undefined;
     var clz : usize = 0;
     while (clz < 74368) {
@@ -12563,19 +12566,27 @@ pub fn main() -> void {
             }
             tgv[TPG_Q_ROOTLEN] = @as(u64, qn_root(dk, space, tbv[0..49152]));
         }
+        // While a call is up the background jobs (page feeds, the heartbeat, update checks, lanes, the dashboard) start
+        // nothing and reap nothing: their git and du children ran beside the call and a 1.3 s stall of this loop on the
+        // second machine fell in the same second as one of them (measured, cause not proven). They resume when the call ends.
+        const oncall : bool = cv_live(@as(u32, tbv[TBO_CL + CL_VIEW]));
+        if (oncall == false) {
         bench_tick(tgv[0..256], tbv[0..49152], dhb[0..dhn], now, open2 and tpk2 == PAGE_BENCH);
         kanban_tick(tgv[0..256], tbv[0..49152], dhb[0..dhn], now, open2 and tpk2 == PAGE_KANBAN);
         queen_tick(tgv[0..256], tbv[0..49152], dhb[0..dhn], now, open2 and tpk2 == PAGE_QUEEN);
+        }
         // H. HIVE: the page's feed while it is open, and this machine's heartbeat every 5 minutes (devices.t27): the lanes
         // feed runs first, so the beat carries the lanes as they are now, then hive_publish pushes refs/swarm/alive/<host>
         const hv_up : bool = open2 and tpk2 == PAGE_HIVE;
-        if (tgv[TPG_H_WANT] == 0 and tgv[TPG_H_PUB_PID] == 0 and dv_publish_due(true, now, tgv[TPG_H_PUB_LAST])) {
+        if (oncall == false and tgv[TPG_H_WANT] == 0 and tgv[TPG_H_PUB_PID] == 0 and dv_publish_due(true, now, tgv[TPG_H_PUB_LAST])) {
             tgv[TPG_H_WANT] = now;
             tgv[TPG_H_PUB_LAST] = now;
         }
         if (hv_up or tgv[TPG_H_WANT] != 0) { tgv[TPG_Q_ROOTLEN] = @as(u64, qn_root(dk, space, tbv[0..49152])); }
-        hive_tick(tgv[0..256], tbv[0..71936], dhb[0..dhn], now, hv_up);
-        update_tick(tgv[0..256], tbv[0..49152], dhb[0..dhn], ubp[0..ubn], now, up_busy(sst[0..560]));
+        if (oncall == false) {
+            hive_tick(tgv[0..256], tbv[0..71936], dhb[0..dhn], now, hv_up);
+            update_tick(tgv[0..256], tbv[0..49152], dhb[0..dhn], ubp[0..ubn], now, up_busy(sst[0..560]));
+        }
         // the live data (hot_reload.t27): read again after every poll (and once at launch), applied on the next frame
         if (tgv[TPG_V_DIRTY] != 0) {
             tgv[TPG_V_DIRTY] = 0;
@@ -12611,14 +12622,16 @@ pub fn main() -> void {
         tgv[TPG_QD_FLAGS] = qd_fl_with_keys(tgv[TPG_QD_FLAGS], qdk, sb_worst_light(sst[0..560]));
         // CL. and between the loop's slower parts, so no stretch of it keeps the call's socket waiting
         if (cl_tick(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN], clw[0..10])) { clring = true; }
-        qd_tick(tgv[0..256], tbv[0..85504], dhb[0..dhn], now, sst[SST_QDASH] != 0 and screen);
-        god_tick(tgv[0..256], tbv[0..65536], dhb[0..dhn], now, god, sst[SST_QRUN]);
+        if (oncall == false) {
+            qd_tick(tgv[0..256], tbv[0..85504], dhb[0..dhn], now, sst[SST_QDASH] != 0 and screen);
+            god_tick(tgv[0..256], tbv[0..65536], dhb[0..dhn], now, god, sst[SST_QRUN]);
+        }
         // L. the LANES block of the chat sidebar: the feed job, the tail of a clicked lane, the table once a second
         const lvup : bool = menu_open(state) and ma >= 0.5 and shown == PETAL_CHAT and cons2 == false and ws == WS_EXPANDED and collapsed == false;
         if (lvcur != cur) { sst[SST_LVSEL] = LV_NONE; }
         lvtail = 0;
         if (lvup and sst[SST_LVSEL] != LV_NONE and sst[SST_LVKEY] == LV_SCRIPT) { lvtail = sst[SST_LVKEY + 1]; }
-        lanes_tick(tgv[0..256], tbv[0..65536], dhb[0..dhn], now, lvup or hv_up or tgv[TPG_H_WANT] != 0, lvtail);
+        if (oncall == false) { lanes_tick(tgv[0..256], tbv[0..65536], dhb[0..dhn], now, lvup or hv_up or tgv[TPG_H_WANT] != 0, lvtail); }
         sst[SST_LVTAIL] = @as(u32, @intCast(tgv[TPG_L_TLEN]));
         if ((lvup or hv_up) and now != lvat) {
             lvat = now;
@@ -12638,7 +12651,7 @@ pub fn main() -> void {
             if (msg0(msg0(cls("NSWorkspace"), sel("sharedWorkspace")), sel("accessibilityDisplayShouldReduceMotion")) % 256 != 0) { tgv[TPG_O_RMSYS] = 1; }
         }
         orbit_tick(tgv[0..256], z, sw, sh, mx, my, abs_time(), tgv[TPG_O_RMSYS] != 0);
-        if (menu_open(state) and (shown != PETAL_CHAT or cons2)) {
+        if (oncall == false and menu_open(state) and (shown != PETAL_CHAT or cons2)) {
             dash_tick(dcv[0..512], gal[0..49152], gt[0..2560], dhb[0..dhn], jpid[0..6], jwi[0..6], now);
             thumbs_load(dcv[0..512], gal[0..49152], gt[0..2560], dhb[0..dhn]);
             if (dcv[D_WEB] != 0) {
@@ -12683,7 +12696,7 @@ pub fn main() -> void {
         }
         // K. pre-flight (M12): once at start, check the stored key behind each claude profile, in the order
         // keys.t27 PROFILE_PROVIDER gives (all PROFILE_COUNT of them), so the first pane already avoids a dead key
-        if (kbusy == KY_NONE and kpre < PROFILE_COUNT) {
+        if (kbusy == KY_NONE and kpre < PROFILE_COUNT and oncall == false) {
             const kpp : u32 = PROFILE_PROVIDER[kpre];
             kpre = kpre + 1;
             if (probe_has(kpp) and kc_has(kpp)) {
@@ -12693,7 +12706,9 @@ pub fn main() -> void {
             }
         }
         // D. the walk: a slice of folders per frame; a finished pass forgets what it did not see, then rests
-        if (walking) {
+        if (oncall) {
+            // a call is up: no folder walk, no new check (the finished jobs below are still reaped)
+        } else if (walking) {
             qhead = dk_walk(dk, qhead, wpass);
             if (qhead >= dk_count(dk, dk[DK_QUEUE])) {
                 if (dk_sweep(dk, wpass) > 0) { darmed = ARMED_NONE; }
@@ -12720,7 +12735,7 @@ pub fn main() -> void {
                     msg2(dk[DK_TASKS], dk[DK_REPLACE], js, dk[DK_NULL]);
                     dnow = true;
                 }
-            } else if (jrest == 0 and dk_count(dk, dk[DK_PATHS]) > 0) {
+            } else if (oncall == false and jrest == 0 and dk_count(dk, dk[DK_PATHS]) > 0) {
                 if (jr >= dk_count(dk, dk[DK_PATHS])) {
                     jr = 0;
                     jj = 0;

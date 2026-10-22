@@ -155,20 +155,21 @@ use t27os::callback_probe::cbp_nz;
 use t27os::callback_probe::CBP_RTLD_DEFAULT;
 use t27os::callback_probe::CBP_D_MAGIC;
 use t27os::callback_probe::CBP_VOLUME;
-use t27os::callback_probe::CBP_E_OUTBUFS;
+use t27os::callback_probe::CBP_F_INQ;
+use t27os::callback_probe::CBP_F_OUTQ;
 use t27os::callback_probe::CBP_F_TX;
 use t27os::callback_probe::CBP_F_TXD;
 use t27os::callback_probe::CBP_F_EXT;
 use t27os::callback_probe::CBP_F_BYTES;
-use t27os::callback_probe::CBP_F_TARGET;
-use t27os::callback_probe::CBP_F_MAX;
+use t27os::callback_probe::CBP_F_PRE;
+use t27os::callback_probe::CBP_F_PREMAX;
 use t27os::callback_probe::CBP_F_JB;
 
 // ---------------------------------------------------------------- the block
 
 /// Endpoint of call_crypto_probe (EP_LEN = 960 bytes) at 0; then 64 u64 slots; then the last handshake message
 /// (INVITE, ANSWER or REVEAL) and the last CONFIRM, kept for resends; the peer's sockaddr; the event ring; and at
-/// CS_AUD the part F audio block of callback_probe (72320 bytes), whose address the audio callbacks receive.
+/// CS_AUD the part F audio block of callback_probe (87680 bytes), whose address the audio callbacks receive.
 pub const CS_SLOTS : usize = 960;
 pub const CS_L1 : usize = 1472;
 pub const CS_L2 : usize = 1728;
@@ -176,7 +177,7 @@ pub const CS_PADDR : usize = 1856;
 pub const CS_EVQ : usize = 1872;
 pub const CS_EVQ_N : u64 = 16;
 pub const CS_AUD : usize = 2048;
-pub const CS_LEN : usize = 74368;
+pub const CS_LEN : usize = 89728;
 
 /// Slots (u64 LE at CS_SLOTS + 8 k). The first ones are also the window's counters through cs_stat.
 pub const CS_ST_SENT : u32 = 0;
@@ -481,8 +482,8 @@ pub fn cs_open(s: []u8, me_fp: []const u8, bind_ip: u64, port: u64, audio: u32) 
     cs_p(s, CS_K_RINGING_MS, 60000);
     cs_p(s, CS_K_VERIFY_MS, 60000);
     cs_p(s, CS_K_SILENT_MS, 5000);
-    cs_p(s, CS_K_JB_TARGET, CBP_F_TARGET);
-    cs_p(s, CS_K_JB_MAX, CBP_F_MAX);
+    cs_p(s, CS_K_JB_TARGET, CBP_F_PRE);
+    cs_p(s, CS_K_JB_MAX, CBP_F_PREMAX);
     return true;
 }
 
@@ -572,7 +573,7 @@ pub fn cs_mute(s: []u8, on: bool) -> bool {
 }
 
 pub fn cs_stat(s: []u8, k: u32) -> u64 {
-    if (k >= 1000 and k < 1000 + 9040) { return cbp_get(cs_aud(s) + @as(u64, k - 1000) * 8); }
+    if (k >= 1000 and k < 1000 + 11000) { return cbp_get(cs_aud(s) + @as(u64, k - 1000) * 8); }
     if (k < 64) { return cs_g(s, k); }
     return 0;
 }
@@ -698,7 +699,7 @@ fn cs_audio_start(s: []u8) -> bool {
     }
     var k : u32 = 0;
     var ok : u32 = 0;
-    while (k < 4) {
+    while (k < CBP_F_INQ) {
         var b : [8]u8 = undefined;
         put_u64(b[0..8], 0, 0);
         if (cbp_aq_alloc(qi, 960, b[0..8]) == 0) {
@@ -707,7 +708,7 @@ fn cs_audio_start(s: []u8) -> bool {
         k = k + 1;
     }
     k = 0;
-    while (k < CBP_E_OUTBUFS) {
+    while (k < CBP_F_OUTQ) {
         var b : [8]u8 = undefined;
         put_u64(b[0..8], 0, 0);
         if (cbp_aq_alloc(qo, 960, b[0..8]) == 0) {
@@ -715,7 +716,7 @@ fn cs_audio_start(s: []u8) -> bool {
         }
         k = k + 1;
     }
-    if (ok != 4 + CBP_E_OUTBUFS) {
+    if (ok != CBP_F_INQ + CBP_F_OUTQ) {
         cs_p(s, CS_ST_AUDIO_ERR, 3);
         return false;
     }

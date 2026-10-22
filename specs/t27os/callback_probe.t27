@@ -390,16 +390,25 @@ fn cbp_close(fd: i32) -> i32 { return @extern("close"); }
 
 const CBP_F_PORT : u64 = 47727;
 const CBP_EAGAIN : u64 = 35;
-const CBP_F_TX : u64 = 8;
+const CBP_F_TX : u64 = 24;
 const CBP_F_JB : u64 = 64;
 /// Playback starts at, and is trimmed back to, this many buffered frames; more than CBP_F_MAX is an overrun.
 const CBP_F_TARGET : u64 = 6;
 const CBP_F_MAX : u64 = 12;
 const CBP_F_GROW : u64 = 2;
 const CBP_F_CAP : u64 = 30;
+/// A call starts with this many buffered frames (180 ms) and this jitter max; the probes keep CBP_F_TARGET / CBP_F_MAX.
+pub const CBP_F_PRE : u64 = 18;
+pub const CBP_F_PREMAX : u64 = 26;
+/// A call keeps this many buffers in each AudioQueue (input 4 -> CBP_F_INQ, output 3 -> CBP_F_OUTQ), so a stall of the
+/// main loop shorter than that many 10 ms frames costs the device nothing; the tx ring holds the burst that follows.
+pub const CBP_F_INQ : u32 = 16;
+pub const CBP_F_OUTQ : u32 = 8;
+/// Concealment of a refill: one silent buffer in every CBP_F_STRETCH callbacks, never the whole refill at once.
+const CBP_F_STRETCH : u64 = 4;
 const CBP_F_SLACK : u64 = 8;
 const CBP_F_QUIET : u64 = 5000000;
-/// Part F block: 64 u64 header slots (512 bytes), tx ring 8 x 960, rx seq+1 per slot, rx kind per slot
+/// Part F block: 64 u64 header slots (512 bytes), tx ring 24 x 960, rx seq+1 per slot, rx kind per slot
 /// (1 primary, 2 redundant copy), capture us per seq % 64, rx data 64 x 960, last played frame 960.
 /// Header: 0 in calls, 1 out calls, 2 frames captured, 3 frames handled by the sender, 4 underruns, 5 overruns,
 /// 6 frames skipped by overruns, 7 tx ring overruns, 8 stopping, 9 magic, 10 tx fd, 11 rx fd, 12 next seq to play,
@@ -414,11 +423,11 @@ const CBP_F_QUIET : u64 = 5000000;
 /// 57 max out interval us, 58 max in interval us, 59 bytes sent, 60 bytes received, 61 first in us, 62 last in us,
 /// 63 last out us.
 const CBP_F_TXD : u64 = 512;
-const CBP_F_RXS : u64 = 8192;
-const CBP_F_KIND : u64 = 8704;
-const CBP_F_CAPT : u64 = 9216;
-const CBP_F_RXD : u64 = 9728;
-const CBP_F_LAST : u64 = 71168;
+const CBP_F_RXS : u64 = 23552;
+const CBP_F_KIND : u64 = 24064;
+const CBP_F_CAPT : u64 = 24576;
+const CBP_F_RXD : u64 = 25088;
+const CBP_F_LAST : u64 = 86528;
 /// Extension (part G), 16 u64 slots after the last frame: 0 two hosts, 1 peer IPv4 (a<<24|b<<16|c<<8|d), 2 port,
 /// 3 nonzero samples in received primary frames, 4 received frames with a nonzero sample, 5 run us,
 /// 6 first seq received + 1, 7 underruns at the last packet received, 8 last packet received us,
@@ -427,11 +436,13 @@ const CBP_F_LAST : u64 = 71168;
 /// 15 discard captured frames (the queues run before the shared start time).
 /// Adaptive jitter buffer (calls only, 8 more u64 slots 16..23): 16 adaptive on, 17 floor target frames (the target
 /// the call started with), 18 time us of the last underrun event or shrink, 19 grow events, 20 shrink events,
-/// 21 highest target reached. An underrun event raises the target by CBP_F_GROW up to CBP_F_CAP and plays warm-up
-/// silence until that many frames are buffered again; CBP_F_QUIET us without an event lower it by one frame down to
-/// the floor. The overrun limit follows the target: target + CBP_F_SLACK, at most CBP_F_CAP + CBP_F_SLACK.
-const CBP_F_EXT : u64 = 72128;
-const CBP_F_BYTES : usize = 72320;
+/// 21 highest target reached, 22 gap buffers (silence played to conceal a missing frame or to refill, apart from
+/// underruns and from the start warm-up in slot 15 of the header), 23 refill debt in frames. A call never stops
+/// playing: an empty buffer plays one silent buffer (an underrun and a gap), the target rises by CBP_F_GROW up to
+/// CBP_F_CAP, and that many silent buffers are spread over later callbacks (one in CBP_F_STRETCH) so the buffer
+/// refills without a pause; CBP_F_QUIET us without an event lower the target by one frame down to the floor. The overrun limit follows the target: target + CBP_F_SLACK, at most CBP_F_CAP + CBP_F_SLACK.
+const CBP_F_EXT : u64 = 87488;
+const CBP_F_BYTES : usize = 87680;
 const CBP_LOOPBACK : u64 = 2130706433;
 
 fn cbp_f_size() -> u64 { return CBP_F_EXT + 192; }
@@ -770,7 +781,8 @@ fn cbp_fpull(p: u64, aq: u64, buf: u64) -> i32 {
             cbp_zero(data, 960);
             cbp_inc(p + 32, 1);
             if (adapt) {
-                // An underrun event: a longer target, and the buffer refills before the next frame is played.
+                // An underrun event: one silent buffer, a longer target, and the refill is spread over later callbacks.
+                const before : u64 = target;
                 if (target + CBP_F_GROW <= CBP_F_CAP) { target = target + CBP_F_GROW; } else { target = CBP_F_CAP; }
                 most = target + CBP_F_SLACK;
                 cbp_put(ext + 96, target);
@@ -778,8 +790,14 @@ fn cbp_fpull(p: u64, aq: u64, buf: u64) -> i32 {
                 cbp_put(ext + 144, now);
                 cbp_inc(ext + 152, 1);
                 cbp_emax(ext + 168, target);
-                cbp_put(p + 112, 1);
+                cbp_inc(ext + 176, 1);
+                cbp_inc(ext + 184, target - before);
             }
+        } else if (adapt and cbp_get(ext + 184) > 0 and cbp_get(p + 8) % CBP_F_STRETCH == 0) {
+            // Refill after an underrun: this buffer is silence and the frame stays queued.
+            cbp_zero(data, 960);
+            cbp_inc(ext + 176, 1);
+            cbp_put(ext + 184, cbp_get(ext + 184) - 1);
         } else {
             const slot : u64 = play % CBP_F_JB;
             const last : u64 = p + CBP_F_LAST;
@@ -827,10 +845,10 @@ pub fn cbp_fout(user: u64, aq: u64, buf: u64) -> u64 {
 /// Part F: microphone -> tx ring -> UDP 127.0.0.1:47727 under the storm -> jitter buffer -> speakers, 20 s.
 /// Part G (CBP_PEER set): the same loop between two hosts, one socket, no storm, CBP_SECONDS (default 25).
 fn cbp_part_f(mode: u64, fmt: []const u8) -> bool {
-    var blk : [72320]u8 = undefined;
+    var blk : [87680]u8 = undefined;
     var z : usize = 0;
     while (z < CBP_F_BYTES) { blk[z] = 0; z = z + 1; }
-    const p : u64 = sys_addr(blk[0..72320], blk[0..72320], 0);
+    const p : u64 = sys_addr(blk[0..87680], blk[0..87680], 0);
     const ext : u64 = p + CBP_F_EXT;
     cbp_put(p + 72, CBP_D_MAGIC);
     cbp_put(p + 112, 1);
@@ -1730,7 +1748,7 @@ test the_duplex_ring_fits_its_block {
 }
 
 test the_network_block_and_packet_fit {
-    assert cbp_f_size() == 72320;
+    assert cbp_f_size() == 87680;
     assert @as(u64, CBP_F_BYTES) == cbp_f_size();
     assert CBP_F_EXT == CBP_F_LAST + 960;
     assert CBP_F_TXD == 64 * 8 and CBP_F_RXS == CBP_F_TXD + CBP_F_TX * 960;
@@ -1739,6 +1757,8 @@ test the_network_block_and_packet_fit {
     // Header 8 + frame 960 + redundant frame 960 fits one UDP datagram (net.inet.udp.maxdgram 9216).
     assert 8 + 960 + 960 == 1928 and 1928 < 9216;
     assert CBP_F_TARGET < CBP_F_MAX and CBP_F_MAX + CBP_F_TX < CBP_F_JB;
+    assert CBP_F_PRE >= 15 and CBP_F_PRE <= 20 and CBP_F_PRE < CBP_F_PREMAX and CBP_F_PREMAX + CBP_F_TX < CBP_F_JB;
+    assert CBP_F_PRE + CBP_F_SLACK == CBP_F_PREMAX and CBP_F_PRE + CBP_F_GROW <= CBP_F_CAP;
     assert CBP_F_CAP + CBP_F_SLACK + CBP_F_TX < CBP_F_JB and CBP_F_CAP + CBP_F_SLACK <= 40;
 }
 
