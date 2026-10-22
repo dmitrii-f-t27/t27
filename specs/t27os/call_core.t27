@@ -1,0 +1,747 @@
+// SPDX-License-Identifier: Apache-2.0
+// specs/t27os/call_core.t27 -- the core of a T27 OS call: who may move the call where, what a call frame says
+// about itself, how both people get the same 6-digit code, which frames are replays or late, and how each
+// direction gets its own key and nonce. Pure decisions only: no @extern, no clock, no randomness, no hashing.
+// The host (specs/t27os/call_crypto_probe.t27 today) hashes, draws random bytes, runs ECDH and the AEAD from the
+// operating system and feeds the results back through these fns. Owner, 2026-10-21: calls run inside the OS and
+// the devices, explicit consent, never auto-answer. Contract: the T27 OS calls contract draft (R1, R2, R6; not in
+// this repository). Its R3/R4 name SRTP (AES-CM + HMAC-SHA1); this slice uses AES-128-GCM with the whole header
+// as associated data instead, and that choice is open for review.
+//
+// Call states. IDLE -> CALLING (I dialled) or RINGING (an invite arrived) -> VERIFY (both ephemeral keys and both
+// nonces are known, the people compare 6 digits) -> ACTIVE -> ENDED or FAILED -> IDLE. RINGING leaves for VERIFY
+// only on the local ANSWER event, and ACTIVE is entered only from VERIFY on CODE_OK: no path answers by itself and
+// no path carries media before both people said "the codes match". ENDED and FAILED take a new CALL or INVITE
+// like IDLE (R6), so a finished call never blocks the next one.
+//
+// Frame header (52 bytes, every message): magic "T27P", version 1, type, flags 0, reserved 0, sender fp (10),
+// recipient fp (10), session id (16), sequence (u64 LE). For sealed frames the whole header is the AEAD
+// associated data, so a changed byte anywhere in it fails the tag.
+//
+// Code (numeric comparison, the shape of Bluetooth LE Secure Connections): the caller I sends INVITE with its
+// ephemeral public key and C = H(tag || session || fp_I || fp_R || pub_I || N_I), keeping N_I secret; the callee R
+// answers with its ephemeral key, N_R and H(INVITE); I reveals N_I with H(ANSWER); R recomputes C and closes the
+// attempt on a mismatch. T = H(INVITE || ANSWER || REVEAL), the exact bytes; the code is the first 4 bytes of
+// H("t27os.call.v1.sas\n" || T), big-endian, mod 10^6. Someone in the middle must fix N_I before seeing N_R, so
+// one attempt gives one chance in 10^6. The rate limit caps failed attempts per peer.
+//
+// Keys: IKM = ECDH of the two ephemeral keys; PRK = HMAC-SHA256(salt = T, IKM); per direction (0 caller to
+// callee, 1 callee to caller) OKM = HMAC-SHA256(PRK, info || 0x01), info = "t27os.call.v1.aead\n" || direction ||
+// fp_caller || fp_callee || session (HKDF, RFC 5869, one block). Key = OKM[0..16] (AES-128-GCM), IV = OKM[16..28];
+// nonce = IV XOR (0^4 || seq big-endian), as TLS 1.3 does. A sender's seq starts at 1 and stops at CK_SEQ_MAX, and
+// a call never reuses its ephemeral keys, so a (key, nonce) pair is never used twice.
+//
+// These are behaviour rules with tests; they are not a security audit. Refs gHashTag/t27#11560.
+module T27osCallCore;
+
+use t27os::pty_proto::put_u64;
+use t27os::pty_proto::get_u64;
+use t27os::keysync::kfill;
+
+// ---------------------------------------------------------------- call states and events
+
+pub const CK_IDLE : u32 = 0;
+pub const CK_CALLING : u32 = 1;
+pub const CK_RINGING : u32 = 2;
+pub const CK_VERIFY : u32 = 3;
+pub const CK_ACTIVE : u32 = 4;
+pub const CK_ENDED : u32 = 5;
+pub const CK_FAILED : u32 = 6;
+pub const CK_STATES : u32 = 7;
+
+/// Local: I dial.
+pub const CK_EV_CALL : u32 = 1;
+/// Remote: an INVITE for me arrived.
+pub const CK_EV_INVITE : u32 = 2;
+/// Local: the person pressed Answer.
+pub const CK_EV_ANSWER : u32 = 3;
+/// Remote: the callee's ANSWER (its key and nonce) arrived.
+pub const CK_EV_ANSWERED : u32 = 4;
+pub const CK_EV_DECLINE : u32 = 5;
+pub const CK_EV_DECLINED : u32 = 6;
+pub const CK_EV_CANCEL : u32 = 7;
+pub const CK_EV_CANCELLED : u32 = 8;
+/// Both people said "match" and the peer's sealed CONFIRM names the same transcript.
+pub const CK_EV_CODE_OK : u32 = 9;
+/// Either person said "differ", the commitment failed, or the peer's CONFIRM names another transcript.
+pub const CK_EV_CODE_BAD : u32 = 10;
+pub const CK_EV_HANGUP : u32 = 11;
+pub const CK_EV_BYE : u32 = 12;
+pub const CK_EV_TIMEOUT : u32 = 13;
+pub const CK_EV_ERROR : u32 = 14;
+/// The end line was shown long enough or clicked away.
+pub const CK_EV_DISMISS : u32 = 15;
+pub const CK_EVENTS : u32 = 16;
+
+/// The next call state. An event that does not apply leaves the state as it is.
+pub fn ck_next(state: u32, ev: u32) -> u32 {
+    if (state == CK_IDLE or state == CK_ENDED or state == CK_FAILED) {
+        if (ev == CK_EV_CALL) { return CK_CALLING; }
+        if (ev == CK_EV_INVITE) { return CK_RINGING; }
+        if (ev == CK_EV_DISMISS and state != CK_IDLE) { return CK_IDLE; }
+        return state;
+    }
+    if (state == CK_CALLING) {
+        if (ev == CK_EV_ANSWERED) { return CK_VERIFY; }
+        if (ev == CK_EV_DECLINED or ev == CK_EV_CANCEL or ev == CK_EV_TIMEOUT) { return CK_ENDED; }
+        if (ev == CK_EV_ERROR) { return CK_FAILED; }
+        return state;
+    }
+    if (state == CK_RINGING) {
+        if (ev == CK_EV_ANSWER) { return CK_VERIFY; }
+        if (ev == CK_EV_DECLINE or ev == CK_EV_CANCELLED or ev == CK_EV_TIMEOUT) { return CK_ENDED; }
+        if (ev == CK_EV_ERROR) { return CK_FAILED; }
+        return state;
+    }
+    if (state == CK_VERIFY) {
+        if (ev == CK_EV_CODE_OK) { return CK_ACTIVE; }
+        if (ev == CK_EV_CODE_BAD or ev == CK_EV_TIMEOUT or ev == CK_EV_ERROR) { return CK_FAILED; }
+        if (ev == CK_EV_HANGUP or ev == CK_EV_BYE or ev == CK_EV_CANCEL or ev == CK_EV_CANCELLED) { return CK_ENDED; }
+        return state;
+    }
+    if (state == CK_ACTIVE) {
+        if (ev == CK_EV_HANGUP or ev == CK_EV_BYE) { return CK_ENDED; }
+        if (ev == CK_EV_TIMEOUT or ev == CK_EV_ERROR) { return CK_FAILED; }
+        return state;
+    }
+    return CK_IDLE;
+}
+
+/// Media frames are sealed, sent and accepted only in ACTIVE.
+pub fn ck_media_ok(state: u32) -> bool { return state == CK_ACTIVE; }
+
+/// Keys exist only in VERIFY (for CONFIRM) and ACTIVE; any other state wipes them.
+pub fn ck_keys_live(state: u32) -> bool { return state == CK_VERIFY or state == CK_ACTIVE; }
+
+// ---------------------------------------------------------------- the two verdicts
+
+pub const CK_SAY_NONE : u32 = 0;
+pub const CK_SAY_MATCH : u32 = 1;
+pub const CK_SAY_DIFFER : u32 = 2;
+pub const CK_V_WAIT : u32 = 0;
+pub const CK_V_OPEN : u32 = 1;
+pub const CK_V_FAIL : u32 = 2;
+
+/// What the call does with the local person's verdict and the peer's (from its sealed CONFIRM): open only when
+/// both said match; fail as soon as either said differ or sent anything else.
+pub fn ck_verdict(local: u32, peer: u32) -> u32 {
+    if (local == CK_SAY_DIFFER or peer == CK_SAY_DIFFER) { return CK_V_FAIL; }
+    if (local > CK_SAY_DIFFER or peer > CK_SAY_DIFFER) { return CK_V_FAIL; }
+    if (local == CK_SAY_MATCH and peer == CK_SAY_MATCH) { return CK_V_OPEN; }
+    return CK_V_WAIT;
+}
+
+// ---------------------------------------------------------------- frame header
+
+pub const CK_VERSION : u8 = 1;
+pub const CK_FP : usize = 10;
+pub const CK_SID : usize = 16;
+pub const CK_HDR : usize = 52;
+pub const CK_PUB : usize = 65;
+pub const CK_NONCE : usize = 16;
+pub const CK_HASH : usize = 32;
+pub const CK_TAG : usize = 16;
+pub const CK_KEY : usize = 16;
+pub const CK_IV : usize = 12;
+
+pub const CK_T_INVITE : u32 = 16;
+pub const CK_T_ANSWER : u32 = 17;
+pub const CK_T_REVEAL : u32 = 18;
+pub const CK_T_CONFIRM : u32 = 19;
+pub const CK_T_BYE : u32 = 20;
+pub const CK_T_MEDIA : u32 = 32;
+
+/// INVITE body: ephemeral public key, commitment C.
+pub const CK_INVITE_LEN : usize = 149;
+/// ANSWER body: ephemeral public key, N_R, H(INVITE).
+pub const CK_ANSWER_LEN : usize = 165;
+/// REVEAL body: N_I, H(ANSWER).
+pub const CK_REVEAL_LEN : usize = 100;
+/// The three plain messages that make the transcript.
+pub const CK_TRANSCRIPT_LEN : usize = 414;
+
+/// Write the header into out[0..52]: 52, or 0 when a part has the wrong size or the type does not fit a byte.
+pub fn ck_put_header(out: []u8, typ: u32, sender: []const u8, recipient: []const u8, session: []const u8, seq: u64) -> usize {
+    if (out.len < CK_HDR or sender.len != CK_FP or recipient.len != CK_FP or session.len != CK_SID or typ > 255) { return 0; }
+    out[0] = 84;
+    out[1] = 50;
+    out[2] = 55;
+    out[3] = 80;
+    out[4] = CK_VERSION;
+    out[5] = @as(u8, @intCast(typ));
+    out[6] = 0;
+    out[7] = 0;
+    var i : usize = 0;
+    while (i < CK_FP) {
+        out[8 + i] = sender[i];
+        out[18 + i] = recipient[i];
+        i = i + 1;
+    }
+    i = 0;
+    while (i < CK_SID) {
+        out[28 + i] = session[i];
+        i = i + 1;
+    }
+    put_u64(out, 44, seq);
+    return CK_HDR;
+}
+
+/// The type of a well-formed header (magic, version, flags and reserved zero), 0 for anything else.
+pub fn ck_hdr_type(b: []const u8) -> u32 {
+    if (b.len < CK_HDR) { return 0; }
+    if (b[0] != 84 or b[1] != 50 or b[2] != 55 or b[3] != 80) { return 0; }
+    if (b[4] != CK_VERSION or b[6] != 0 or b[7] != 0) { return 0; }
+    return @as(u32, b[5]);
+}
+
+pub fn ck_hdr_seq(b: []const u8) -> u64 {
+    if (b.len < CK_HDR) { return 0; }
+    return get_u64(b, 44);
+}
+
+/// Is this header addressed to me (fp `me`), from `peer`, in `session`. Zero-length `peer` or `session` means
+/// "not known yet" (an INVITE names the session; the callee learns it from there).
+pub fn ck_hdr_admit(b: []const u8, me: []const u8, peer: []const u8, session: []const u8) -> bool {
+    if (ck_hdr_type(b) == 0 or me.len != CK_FP) { return false; }
+    if (!ck_same(b[18..28], me)) { return false; }
+    if (peer.len != 0 and (peer.len != CK_FP or !ck_same(b[8..18], peer))) { return false; }
+    if (session.len != 0 and (session.len != CK_SID or !ck_same(b[28..44], session))) { return false; }
+    return true;
+}
+
+// ---------------------------------------------------------------- bytes
+
+/// Equal length and equal bytes; the time does not depend on where the first difference is.
+pub fn ck_same(a: []const u8, b: []const u8) -> bool {
+    if (a.len != b.len) { return false; }
+    var d : u8 = 0;
+    var i : usize = 0;
+    while (i < a.len) {
+        d = d | (a[i] ^ b[i]);
+        i = i + 1;
+    }
+    return d == 0;
+}
+
+/// Copy src into out at `at`; the next offset, or 0 when it does not fit.
+pub fn ck_put(out: []u8, at: usize, src: []const u8) -> usize {
+    if (at > out.len or src.len > out.len - at) { return 0; }
+    var i : usize = 0;
+    while (i < src.len) {
+        out[at + i] = src[i];
+        i = i + 1;
+    }
+    return at + src.len;
+}
+
+/// Zero a secret or a buffer before reuse.
+pub fn ck_wipe(b: []u8) -> void { kfill(b, 0); }
+
+// ---------------------------------------------------------------- the 6-digit code
+
+pub const CK_TAG_COMMIT : str = "t27os.call.v1.commit\n";
+pub const CK_TAG_SAS : str = "t27os.call.v1.sas\n";
+pub const CK_TAG_AEAD : str = "t27os.call.v1.aead\n";
+
+/// What the caller hashes into its commitment: tag || session || fp_I || fp_R || pub_I || N_I. Its length, 0 on a
+/// wrong size.
+pub fn ck_commit_input(session: []const u8, fp_i: []const u8, fp_r: []const u8, pub_i: []const u8, n_i: []const u8, out: []u8) -> usize {
+    if (session.len != CK_SID or fp_i.len != CK_FP or fp_r.len != CK_FP or pub_i.len != CK_PUB or n_i.len != CK_NONCE) { return 0; }
+    var at : usize = ck_put(out, 0, CK_TAG_COMMIT);
+    if (at == 0) { return 0; }
+    at = ck_put(out, at, session);
+    if (at == 0) { return 0; }
+    at = ck_put(out, at, fp_i);
+    if (at == 0) { return 0; }
+    at = ck_put(out, at, fp_r);
+    if (at == 0) { return 0; }
+    at = ck_put(out, at, pub_i);
+    if (at == 0) { return 0; }
+    return ck_put(out, at, n_i);
+}
+
+/// Append one exact message to the transcript buffer that already holds `used` bytes; the new length, 0 when it
+/// would not fit.
+pub fn ck_transcript_add(buf: []u8, used: usize, msg: []const u8) -> usize {
+    if (msg.len == 0) { return 0; }
+    return ck_put(buf, used, msg);
+}
+
+/// What is hashed for the code: tag || T (the transcript digest).
+pub fn ck_sas_input(t: []const u8, out: []u8) -> usize {
+    if (t.len != CK_HASH) { return 0; }
+    const at : usize = ck_put(out, 0, CK_TAG_SAS);
+    if (at == 0) { return 0; }
+    return ck_put(out, at, t);
+}
+
+/// The code from the digest of ck_sas_input: first 4 bytes big-endian mod 10^6, as six ASCII digits with leading
+/// zeros in out[0..6]. Returns the number, or 1000000 when the digest is short.
+pub fn ck_sas_digits(digest: []const u8, out: []u8) -> u32 {
+    if (digest.len < 4 or out.len < 6) { return 1000000; }
+    const v : u64 = (@as(u64, digest[0]) << 24) | (@as(u64, digest[1]) << 16) | (@as(u64, digest[2]) << 8) | @as(u64, digest[3]);
+    const code : u64 = v % 1000000;
+    var x : u64 = code;
+    var i : usize = 6;
+    while (i > 0) {
+        i = i - 1;
+        out[i] = @as(u8, @intCast(48 + x % 10));
+        x = x / 10;
+    }
+    return @as(u32, @intCast(code));
+}
+
+// ---------------------------------------------------------------- attempt limit
+
+/// Failed attempts kept per peer, and the window they count in.
+pub const CK_MAX_FAILS : usize = 3;
+pub const CK_FAIL_WINDOW_S : u64 = 600;
+
+/// May a new attempt with this peer start at `now` (seconds): fewer than 3 failures in the last 10 minutes.
+/// `fails` holds 8-byte LE times of the last failures, 0 for an empty slot.
+pub fn ck_rate_ok(fails: []const u8, now: u64) -> bool {
+    if (fails.len < CK_MAX_FAILS * 8) { return false; }
+    var n : usize = 0;
+    var i : usize = 0;
+    while (i < CK_MAX_FAILS) {
+        const t : u64 = get_u64(fails, i * 8);
+        if (t != 0 and t <= now and now - t < CK_FAIL_WINDOW_S) { n = n + 1; }
+        i = i + 1;
+    }
+    return n < CK_MAX_FAILS;
+}
+
+/// Record a failure at `now` over the oldest slot.
+pub fn ck_rate_note(fails: []u8, now: u64) -> void {
+    if (fails.len < CK_MAX_FAILS * 8) { return; }
+    var k : usize = 0;
+    var oldest : u64 = get_u64(fails, 0);
+    var i : usize = 1;
+    while (i < CK_MAX_FAILS) {
+        const t : u64 = get_u64(fails, i * 8);
+        if (t < oldest) {
+            oldest = t;
+            k = i;
+        }
+        i = i + 1;
+    }
+    put_u64(fails, k * 8, now);
+}
+
+// ---------------------------------------------------------------- replays and late frames
+
+/// Replay window: 8 bytes LE highest accepted seq (0 = none yet), then 64 flags by seq % 64.
+pub const CK_WIN : u64 = 64;
+pub const CK_WIN_LEN : usize = 72;
+pub const CK_RP_DUP : u32 = 0;
+pub const CK_RP_AHEAD : u32 = 1;
+pub const CK_RP_FILL : u32 = 2;
+pub const CK_RP_OLD : u32 = 3;
+
+/// What seq would be to the window, without changing it.
+pub fn ck_replay_check(st: []const u8, seq: u64) -> u32 {
+    if (st.len < CK_WIN_LEN or seq == 0) { return CK_RP_OLD; }
+    const hi : u64 = get_u64(st, 0);
+    if (seq > hi) { return CK_RP_AHEAD; }
+    if (hi - seq >= CK_WIN) { return CK_RP_OLD; }
+    if (st[8 + @as(usize, @intCast(seq % CK_WIN))] != 0) { return CK_RP_DUP; }
+    return CK_RP_FILL;
+}
+
+/// Accept seq once. Call only after the AEAD tag verified: a forged frame must not move the window.
+pub fn ck_replay_accept(st: []u8, seq: u64) -> bool {
+    const r : u32 = ck_replay_check(st, seq);
+    if (r == CK_RP_DUP or r == CK_RP_OLD) { return false; }
+    if (r == CK_RP_AHEAD) {
+        const hi : u64 = get_u64(st, 0);
+        var gap : u64 = seq - hi;
+        if (gap > CK_WIN) { gap = CK_WIN; }
+        var s : u64 = seq - gap + 1;
+        while (s <= seq) {
+            st[8 + @as(usize, @intCast(s % CK_WIN))] = 0;
+            s = s + 1;
+        }
+        put_u64(st, 0, seq);
+    }
+    st[8 + @as(usize, @intCast(seq % CK_WIN))] = 1;
+    return true;
+}
+
+/// A frame whose seq the player has already passed is late: it is dropped, never played out of order.
+pub fn ck_late(seq: u64, play_next: u64) -> bool { return seq < play_next; }
+
+// ---------------------------------------------------------------- keys and nonces
+
+/// A sender stops before this seq; the call then ends (far beyond any call: 2^32 - 1 frames of 10 ms is 497 days).
+pub const CK_SEQ_MAX : u64 = 4294967295;
+
+/// The next seq from the sender's 8-byte LE counter (which starts at 0), or 0 when the counter is spent: then the
+/// frame is not sealed at all, so no (key, nonce) pair repeats.
+pub fn ck_send_seq(ctr: []u8) -> u64 {
+    if (ctr.len < 8) { return 0; }
+    const n : u64 = get_u64(ctr, 0);
+    if (n >= CK_SEQ_MAX) { return 0; }
+    put_u64(ctr, 0, n + 1);
+    return n + 1;
+}
+
+/// HKDF-Expand input for one direction's key: info || 0x01 with info = tag || direction || fp_caller ||
+/// fp_callee || session. 0 on a wrong size or a direction other than 0 / 1.
+pub fn ck_expand_input(dir: u32, fp_caller: []const u8, fp_callee: []const u8, session: []const u8, out: []u8) -> usize {
+    if (dir > 1 or fp_caller.len != CK_FP or fp_callee.len != CK_FP or session.len != CK_SID) { return 0; }
+    var at : usize = ck_put(out, 0, CK_TAG_AEAD);
+    if (at == 0 or at + 1 > out.len) { return 0; }
+    out[at] = @as(u8, @intCast(dir));
+    at = ck_put(out, at + 1, fp_caller);
+    if (at == 0) { return 0; }
+    at = ck_put(out, at, fp_callee);
+    if (at == 0) { return 0; }
+    at = ck_put(out, at, session);
+    if (at == 0 or at + 1 > out.len) { return 0; }
+    out[at] = 1;
+    return at + 1;
+}
+
+/// My sending direction: the caller sends on 0, the callee on 1; I receive on the other.
+pub fn ck_tx_dir(caller: bool) -> u32 {
+    if (caller) { return 0; }
+    return 1;
+}
+
+/// nonce = iv XOR (0^4 || seq big-endian), 12 bytes. False on a wrong size.
+pub fn ck_nonce(iv: []const u8, seq: u64, out: []u8) -> bool {
+    if (iv.len != CK_IV or out.len < CK_IV) { return false; }
+    var i : usize = 0;
+    while (i < 4) {
+        out[i] = iv[i];
+        i = i + 1;
+    }
+    var x : u64 = seq;
+    var k : usize = 12;
+    while (k > 4) {
+        k = k - 1;
+        out[k] = iv[k] ^ @as(u8, @intCast(x & 255));
+        x = x >> 8;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------- tests
+
+fn ck_fill(b: []u8, base: u8) -> void {
+    var i : usize = 0;
+    while (i < b.len) {
+        b[i] = base +% @as(u8, @intCast(i & 255));
+        i = i + 1;
+    }
+}
+
+test a_call_goes_ring_verify_active_end_and_back_to_idle {
+    var s : u32 = ck_next(CK_IDLE, CK_EV_CALL);
+    assert s == CK_CALLING;
+    s = ck_next(s, CK_EV_ANSWERED);
+    assert s == CK_VERIFY;
+    s = ck_next(s, CK_EV_CODE_OK);
+    assert s == CK_ACTIVE;
+    assert ck_media_ok(s);
+    s = ck_next(s, CK_EV_HANGUP);
+    assert s == CK_ENDED;
+    assert ck_media_ok(s) == false;
+    assert ck_keys_live(s) == false;
+    assert ck_next(s, CK_EV_DISMISS) == CK_IDLE;
+    // the callee's side
+    var r : u32 = ck_next(CK_IDLE, CK_EV_INVITE);
+    assert r == CK_RINGING;
+    r = ck_next(r, CK_EV_ANSWER);
+    assert r == CK_VERIFY;
+    assert ck_keys_live(r);
+    assert ck_media_ok(r) == false;
+    assert ck_next(r, CK_EV_CODE_BAD) == CK_FAILED;
+}
+
+test nothing_answers_by_itself_and_nothing_skips_the_code {
+    // every (state, event): RINGING reaches VERIFY only on the local ANSWER; ACTIVE is entered only from VERIFY on
+    // CODE_OK; IDLE never jumps straight to VERIFY or ACTIVE.
+    var st : u32 = 0;
+    while (st < CK_STATES) {
+        var ev : u32 = 0;
+        while (ev < CK_EVENTS) {
+            const n : u32 = ck_next(st, ev);
+            assert n < CK_STATES;
+            if (st == CK_RINGING and n == CK_VERIFY) { assert ev == CK_EV_ANSWER; }
+            if (n == CK_ACTIVE and st != CK_ACTIVE) { assert st == CK_VERIFY and ev == CK_EV_CODE_OK; }
+            if (n == CK_VERIFY and st != CK_VERIFY) { assert (st == CK_RINGING and ev == CK_EV_ANSWER) or (st == CK_CALLING and ev == CK_EV_ANSWERED); }
+            ev = ev + 1;
+        }
+        st = st + 1;
+    }
+}
+
+test every_end_can_take_the_next_call {
+    // hang-up, decline, cancel, no answer, a bad code and a lost link each end in a state that takes a new call
+    assert ck_next(ck_next(CK_ACTIVE, CK_EV_HANGUP), CK_EV_CALL) == CK_CALLING;
+    assert ck_next(ck_next(CK_RINGING, CK_EV_DECLINE), CK_EV_INVITE) == CK_RINGING;
+    assert ck_next(ck_next(CK_CALLING, CK_EV_CANCEL), CK_EV_CALL) == CK_CALLING;
+    assert ck_next(ck_next(CK_CALLING, CK_EV_TIMEOUT), CK_EV_INVITE) == CK_RINGING;
+    assert ck_next(ck_next(CK_VERIFY, CK_EV_CODE_BAD), CK_EV_CALL) == CK_CALLING;
+    assert ck_next(ck_next(CK_ACTIVE, CK_EV_TIMEOUT), CK_EV_DISMISS) == CK_IDLE;
+    // a busy line ignores a second invite
+    assert ck_next(CK_ACTIVE, CK_EV_INVITE) == CK_ACTIVE;
+    assert ck_next(CK_VERIFY, CK_EV_INVITE) == CK_VERIFY;
+}
+
+test the_code_opens_only_when_both_say_match {
+    assert ck_verdict(CK_SAY_MATCH, CK_SAY_MATCH) == CK_V_OPEN;
+    assert ck_verdict(CK_SAY_MATCH, CK_SAY_NONE) == CK_V_WAIT;
+    assert ck_verdict(CK_SAY_NONE, CK_SAY_MATCH) == CK_V_WAIT;
+    assert ck_verdict(CK_SAY_MATCH, CK_SAY_DIFFER) == CK_V_FAIL;
+    assert ck_verdict(CK_SAY_DIFFER, CK_SAY_MATCH) == CK_V_FAIL;
+    assert ck_verdict(CK_SAY_DIFFER, CK_SAY_NONE) == CK_V_FAIL;
+    assert ck_verdict(CK_SAY_MATCH, 7) == CK_V_FAIL;
+}
+
+test the_header_round_trips_and_names_its_parties {
+    var a : [10]u8 = undefined;
+    var b : [10]u8 = undefined;
+    var sid : [16]u8 = undefined;
+    ck_fill(a[0..10], 1);
+    ck_fill(b[0..10], 101);
+    ck_fill(sid[0..16], 200);
+    var h : [52]u8 = undefined;
+    assert ck_put_header(h[0..52], CK_T_MEDIA, a[0..10], b[0..10], sid[0..16], 4660) == CK_HDR;
+    assert h[0] == 84 and h[3] == 80 and h[4] == 1 and h[5] == 32;
+    assert ck_hdr_type(h[0..52]) == CK_T_MEDIA;
+    assert ck_hdr_seq(h[0..52]) == 4660;
+    assert ck_hdr_admit(h[0..52], b[0..10], a[0..10], sid[0..16]);
+    // wrong recipient, wrong sender, wrong session, unknown peer and session (an INVITE) admitted by recipient
+    assert ck_hdr_admit(h[0..52], a[0..10], a[0..10], sid[0..16]) == false;
+    assert ck_hdr_admit(h[0..52], b[0..10], b[0..10], sid[0..16]) == false;
+    sid[3] = sid[3] ^ 1;
+    assert ck_hdr_admit(h[0..52], b[0..10], a[0..10], sid[0..16]) == false;
+    assert ck_hdr_admit(h[0..52], b[0..10], a[0..0], sid[0..0]);
+    // a broken magic, version or reserved byte is no header
+    h[4] = 2;
+    assert ck_hdr_type(h[0..52]) == 0;
+    h[4] = 1;
+    h[7] = 1;
+    assert ck_hdr_type(h[0..52]) == 0;
+    h[7] = 0;
+    h[0] = 0;
+    assert ck_hdr_type(h[0..52]) == 0;
+    assert ck_put_header(h[0..51], CK_T_MEDIA, a[0..10], b[0..10], sid[0..16], 1) == 0;
+    assert ck_put_header(h[0..52], 256, a[0..10], b[0..10], sid[0..16], 1) == 0;
+}
+
+test the_message_sizes_add_up {
+    assert CK_INVITE_LEN == CK_HDR + CK_PUB + CK_HASH;
+    assert CK_ANSWER_LEN == CK_HDR + CK_PUB + CK_NONCE + CK_HASH;
+    assert CK_REVEAL_LEN == CK_HDR + CK_NONCE + CK_HASH;
+    assert CK_TRANSCRIPT_LEN == CK_INVITE_LEN + CK_ANSWER_LEN + CK_REVEAL_LEN;
+}
+
+test the_commitment_binds_session_parties_key_and_nonce {
+    var sid : [16]u8 = undefined;
+    var fi : [10]u8 = undefined;
+    var fr : [10]u8 = undefined;
+    var pk : [65]u8 = undefined;
+    var ni : [16]u8 = undefined;
+    ck_fill(sid[0..16], 3);
+    ck_fill(fi[0..10], 30);
+    ck_fill(fr[0..10], 60);
+    ck_fill(pk[0..65], 90);
+    ck_fill(ni[0..16], 160);
+    var o : [160]u8 = undefined;
+    const n : usize = ck_commit_input(sid[0..16], fi[0..10], fr[0..10], pk[0..65], ni[0..16], o[0..160]);
+    assert n == 21 + 16 + 10 + 10 + 65 + 16;
+    assert o[0] == 116 and o[20] == 10;
+    assert o[21] == sid[0] and o[37] == fi[0] and o[47] == fr[0] and o[57] == pk[0] and o[122] == ni[0];
+    // swapping the parties changes the input
+    var p : [160]u8 = undefined;
+    assert ck_commit_input(sid[0..16], fr[0..10], fi[0..10], pk[0..65], ni[0..16], p[0..160]) == n;
+    assert ck_same(o[0..n], p[0..n]) == false;
+    // wrong sizes and a short buffer
+    assert ck_commit_input(sid[0..15], fi[0..10], fr[0..10], pk[0..65], ni[0..16], o[0..160]) == 0;
+    assert ck_commit_input(sid[0..16], fi[0..10], fr[0..10], pk[0..64], ni[0..16], o[0..160]) == 0;
+    assert ck_commit_input(sid[0..16], fi[0..10], fr[0..10], pk[0..65], ni[0..16], o[0..137]) == 0;
+}
+
+test the_transcript_is_the_three_messages_in_order {
+    var t : [414]u8 = undefined;
+    var m1 : [149]u8 = undefined;
+    var m2 : [165]u8 = undefined;
+    var m3 : [100]u8 = undefined;
+    ck_fill(m1[0..149], 1);
+    ck_fill(m2[0..165], 2);
+    ck_fill(m3[0..100], 3);
+    var u : usize = ck_transcript_add(t[0..414], 0, m1[0..149]);
+    assert u == 149;
+    u = ck_transcript_add(t[0..414], u, m2[0..165]);
+    assert u == 314;
+    u = ck_transcript_add(t[0..414], u, m3[0..100]);
+    assert u == CK_TRANSCRIPT_LEN;
+    assert t[0] == m1[0] and t[149] == m2[0] and t[314] == m3[0] and t[413] == m3[99];
+    assert ck_transcript_add(t[0..414], u, m3[0..1]) == 0;
+}
+
+test the_code_is_six_digits_from_the_first_four_bytes {
+    var d : [32]u8 = undefined;
+    ck_wipe(d[0..32]);
+    var c : [6]u8 = undefined;
+    assert ck_sas_digits(d[0..32], c[0..6]) == 0;
+    assert ck_same(c[0..6], "000000");
+    // 0xFFFFFFFF = 4294967295 -> 967295
+    d[0] = 255;
+    d[1] = 255;
+    d[2] = 255;
+    d[3] = 255;
+    assert ck_sas_digits(d[0..32], c[0..6]) == 967295;
+    assert ck_same(c[0..6], "967295");
+    // 0x00012345 = 74565 -> 074565 (leading zero kept); byte 4 is not used
+    d[0] = 0;
+    d[1] = 1;
+    d[2] = 35;
+    d[3] = 69;
+    d[4] = 99;
+    assert ck_sas_digits(d[0..32], c[0..6]) == 74565;
+    assert ck_same(c[0..6], "074565");
+    assert ck_sas_digits(d[0..3], c[0..6]) == 1000000;
+    var si : [64]u8 = undefined;
+    assert ck_sas_input(d[0..32], si[0..64]) == 18 + 32;
+    assert si[18] == d[0];
+    assert ck_sas_input(d[0..31], si[0..64]) == 0;
+}
+
+test three_failed_attempts_in_ten_minutes_stop_new_ones {
+    var f : [24]u8 = undefined;
+    ck_wipe(f[0..24]);
+    assert ck_rate_ok(f[0..24], 1000);
+    ck_rate_note(f[0..24], 1000);
+    ck_rate_note(f[0..24], 1100);
+    assert ck_rate_ok(f[0..24], 1200);
+    ck_rate_note(f[0..24], 1200);
+    assert ck_rate_ok(f[0..24], 1300) == false;
+    // the first failure leaves the window at 1600; then two remain
+    assert ck_rate_ok(f[0..24], 1599) == false;
+    assert ck_rate_ok(f[0..24], 1600);
+    // a fourth failure replaces the oldest
+    ck_rate_note(f[0..24], 1650);
+    assert get_u64(f[0..24], 0) == 1650;
+    assert ck_rate_ok(f[0..24], 1690) == false;
+    assert ck_rate_ok(f[0..24], 1700);
+    assert ck_rate_ok(f[0..23], 5000) == false;
+}
+
+test the_replay_window_takes_each_seq_once {
+    var w : [72]u8 = undefined;
+    ck_wipe(w[0..72]);
+    assert ck_replay_accept(w[0..72], 0) == false;
+    assert ck_replay_accept(w[0..72], 1);
+    assert ck_replay_accept(w[0..72], 1) == false;
+    assert ck_replay_accept(w[0..72], 3);
+    // 2 arrives late but inside the window: accepted once
+    assert ck_replay_check(w[0..72], 2) == CK_RP_FILL;
+    assert ck_replay_accept(w[0..72], 2);
+    assert ck_replay_accept(w[0..72], 2) == false;
+    assert ck_replay_check(w[0..72], 3) == CK_RP_DUP;
+    // jump far ahead: everything 64 or more behind is too old, the window is clean for what is inside
+    assert ck_replay_accept(w[0..72], 1000);
+    assert ck_replay_check(w[0..72], 936) == CK_RP_OLD;
+    assert ck_replay_check(w[0..72], 937) == CK_RP_FILL;
+    assert ck_replay_check(w[0..72], 1000) == CK_RP_DUP;
+    assert ck_replay_accept(w[0..72], 937);
+    assert ck_replay_accept(w[0..72], 937) == false;
+    // a slot reused by seq + 64 is cleared when the window moves over it
+    assert ck_replay_accept(w[0..72], 1001);
+    assert ck_replay_check(w[0..72], 1001 - 64) == CK_RP_OLD;
+    assert ck_replay_accept(w[0..72], 1065);
+    assert ck_replay_check(w[0..72], 1064) == CK_RP_FILL;
+    assert ck_replay_check(w[0..72], 1001) == CK_RP_OLD;
+    // checking does not change the window
+    assert ck_replay_check(w[0..72], 2000) == CK_RP_AHEAD;
+    assert get_u64(w[0..72], 0) == 1065;
+}
+
+test every_seq_in_order_and_out_of_order_is_taken_exactly_once {
+    var w : [72]u8 = undefined;
+    ck_wipe(w[0..72]);
+    var taken : u64 = 0;
+    var s : u64 = 1;
+    while (s <= 500) {
+        // pairs swapped: 2,1,4,3,...
+        var q : u64 = s + 1;
+        if (s % 2 == 0) { q = s - 1; }
+        if (ck_replay_accept(w[0..72], q)) { taken = taken + 1; }
+        if (ck_replay_accept(w[0..72], q)) { taken = taken + 1000; }
+        s = s + 1;
+    }
+    assert taken == 500;
+}
+
+test a_frame_the_player_has_passed_is_late {
+    assert ck_late(9, 10);
+    assert ck_late(10, 10) == false;
+    assert ck_late(11, 10) == false;
+}
+
+test the_sender_seq_starts_at_one_and_stops_before_wrapping {
+    var c : [8]u8 = undefined;
+    ck_wipe(c[0..8]);
+    assert ck_send_seq(c[0..8]) == 1;
+    assert ck_send_seq(c[0..8]) == 2;
+    put_u64(c[0..8], 0, CK_SEQ_MAX - 1);
+    assert ck_send_seq(c[0..8]) == CK_SEQ_MAX;
+    assert ck_send_seq(c[0..8]) == 0;
+    assert ck_send_seq(c[0..8]) == 0;
+}
+
+test each_direction_has_its_own_key_input {
+    var a : [10]u8 = undefined;
+    var b : [10]u8 = undefined;
+    var sid : [16]u8 = undefined;
+    ck_fill(a[0..10], 10);
+    ck_fill(b[0..10], 50);
+    ck_fill(sid[0..16], 90);
+    var e0 : [64]u8 = undefined;
+    var e1 : [64]u8 = undefined;
+    const n : usize = ck_expand_input(0, a[0..10], b[0..10], sid[0..16], e0[0..64]);
+    assert n == 19 + 1 + 10 + 10 + 16 + 1;
+    assert ck_expand_input(1, a[0..10], b[0..10], sid[0..16], e1[0..64]) == n;
+    assert e0[19] == 0 and e1[19] == 1 and e0[n - 1] == 1;
+    assert ck_same(e0[0..n], e1[0..n]) == false;
+    // another session gives another input
+    sid[15] = sid[15] ^ 128;
+    assert ck_expand_input(0, a[0..10], b[0..10], sid[0..16], e1[0..64]) == n;
+    assert ck_same(e0[0..n], e1[0..n]) == false;
+    assert ck_expand_input(2, a[0..10], b[0..10], sid[0..16], e1[0..64]) == 0;
+    assert ck_expand_input(0, a[0..10], b[0..10], sid[0..16], e1[0..56]) == 0;
+    assert ck_tx_dir(true) == 0 and ck_tx_dir(false) == 1;
+}
+
+test the_nonce_is_the_iv_xor_the_seq_and_never_repeats_for_distinct_seq {
+    var iv : [12]u8 = undefined;
+    ck_fill(iv[0..12], 7);
+    var n1 : [12]u8 = undefined;
+    var n2 : [12]u8 = undefined;
+    assert ck_nonce(iv[0..12], 0, n1[0..12]);
+    assert ck_same(n1[0..12], iv[0..12]);
+    assert ck_nonce(iv[0..12], 258, n1[0..12]);
+    assert n1[11] == iv[11] ^ 2 and n1[10] == iv[10] ^ 1 and n1[0] == iv[0] and n1[3] == iv[3];
+    // seqs that differ only in a high byte still give different nonces
+    assert ck_nonce(iv[0..12], 258 + 72057594037927936, n2[0..12]);
+    assert ck_same(n1[0..12], n2[0..12]) == false;
+    assert n2[4] == iv[4] ^ 1;
+    assert ck_nonce(iv[0..11], 1, n1[0..12]) == false;
+}
+
+test equal_compares_every_byte {
+    assert ck_same("abc", "abc");
+    assert ck_same("abc", "abd") == false;
+    assert ck_same("abc", "ab") == false;
+    var b : [4]u8 = undefined;
+    assert ck_put(b[0..4], 1, "xyz") == 4;
+    assert ck_put(b[0..4], 2, "xyz") == 0;
+    kfill(b[0..4], 7);
+    assert b[0] == 7 and b[3] == 7;
+    ck_wipe(b[1..3]);
+    assert b[0] == 7 and b[1] == 0 and b[2] == 0 and b[3] == 7;
+}

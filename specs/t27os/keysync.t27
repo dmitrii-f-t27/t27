@@ -820,7 +820,8 @@ pub fn kd_rows_fit(top: f64, sh: f64, want: u32) -> u32 {
 
 // ---------------------------------------------------------------- tests (fake bytes only)
 
-fn kfill(b: []u8, v: u8) -> void {
+/// Every byte of b set to v (also the call core's wipe).
+pub fn kfill(b: []u8, v: u8) -> void {
     var i : usize = 0;
     while (i < b.len) {
         b[i] = v;
