@@ -390,6 +390,8 @@ use t27os::friends_engine::fe_add;
 use t27os::friends_engine::fe_typed_key;
 use t27os::friends_engine::fe_call;
 use t27os::friends_engine::fe_stop;
+use t27os::call_video::cv_probe_run;
+use t27os::pty_sys::sys_exit;
 use t27os::ringtone::RT_BLOCK;
 use t27os::ringtone::RT_S_CB;
 use t27os::ringtone::RT_S_STARTS;
@@ -10760,6 +10762,10 @@ pub fn main() -> void {
     const icon : u64 = msg_image(msg0(cls("NSImage"), s_alloc), sel("initWithCGImage:size:"), cg_image(ic), ICON_SIZE, ICON_SIZE);
     msg1(app, sel("setApplicationIconImage:"), icon);
     msg_flag(app, sel("activateIgnoringOtherApps:"), true);
+    // Camera check (test aid, off by default, not product behavior): T27OS_CAMERA_PROBE=1 captures the camera inside the
+    // app (call_video.t27), prints the brightness table to stderr and exits; the camera permission is this bundle's.
+    var cam_env : [32]u8 = undefined;
+    if (cl_env("T27OS_CAMERA_PROBE", cam_env[0..32]) > 0) { sys_exit(cv_probe_run()); }
 
     // the text kit: every class, selector and string the frames need, made once.
     const s_split : u64 = sel("componentsSeparatedByString:");

@@ -14,7 +14,7 @@ PAIRS := scripts/tri:bin/tri target/release/t27c:bin/t27c target/release/tri:tar
 T27OS_OUT := target/t27os
 T27OS_BUILD ?= $(shell git rev-list --count HEAD)
 T27OS_T27B := $(or $(CARGO_TARGET_DIR),target)/release/t27b
-T27OS_FRAMEWORKS := Foundation AppKit CoreGraphics CoreText CoreFoundation QuartzCore Security WebKit ImageIO AudioToolbox
+T27OS_FRAMEWORKS := Foundation AppKit CoreGraphics CoreText CoreFoundation QuartzCore Security WebKit ImageIO AudioToolbox AVFoundation CoreMedia CoreVideo
 T27OS_MIN_MACOS := 11.0
 
 .PHONY: help install uninstall t27os verify seal-check seal warnings-baseline
