@@ -40,6 +40,8 @@ use t27os::nvidia_direct::nv_pick;
 use t27os::nvidia_direct::nv_on_status;
 use t27os::nvidia_direct::nv_model_for;
 use t27os::nvidia_direct::nv_status_line;
+use t27os::nvidia_direct::nv_live;
+use t27os::nvidia_direct::NV_S_N;
 use t27os::session_store::put_bytes;
 use t27os::session_store::put_dec;
 use t27os::session_store::csv_field;
@@ -207,12 +209,23 @@ pub fn nv_save(st: []const u32) -> bool {
 
 /// The KEYS panel's NVIDIA line into out (96 bytes); its length.
 pub fn nv_line(out: []u8) -> usize {
+    var cnt : [3]u32 = undefined;
+    return nv_line_counts(out, cnt[0..3]);
+}
+
+/// nv_line, and the numbers the line was made from (the same read, no other): cnt[0] = 1 when the key list was
+/// readable, cnt[1] = the keys, cnt[2] = the live ones (nv_live). The ACCOUNT cabinet's KEYS line shows them.
+pub fn nv_line_counts(out: []u8, cnt: []u32) -> usize {
     var st : [260]u32 = undefined;
     var json : [8192]u8 = undefined;
     var offs : [64]u32 = undefined;
     var lens : [64]u32 = undefined;
     const listed : u32 = nv_load(st[0..260], json[0..8192], offs[0..64], lens[0..64]);
     nv_wipe(json[0..8192]);
+    cnt[0] = 1;
+    if (listed == NV_BAD) { cnt[0] = 0; }
+    cnt[1] = st[NV_S_N];
+    cnt[2] = nv_live(st[0..260]);
     return nv_status_line(st[0..260], listed, NV_MODEL_DEFAULT, out);
 }
 

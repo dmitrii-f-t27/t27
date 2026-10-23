@@ -7,6 +7,18 @@
 // copies their key, sends it to a friend by any means, the friend pastes it and calls; no address is ever typed.
 // Refs gHashTag/t27#11560.
 //
+// Owner, 2026-10-22 (second pass): the cabinet opens on three things, in this order down the 300 pt panel.
+//   ME     the picture, the nickname, the account token (the first three groups of the fingerprint, large), the key
+//          a friend pastes with COPY beside it, what that key is for, and where the account lives (this device only:
+//          T27 OS has no server account).
+//   KEYS   one line a provider (OpenRouter, Z.ai, NVIDIA): how many keys, how many live, the reason of the dead ones,
+//          when the last check was. Read from the tables the window already holds (the health words of keys.t27 and
+//          the NVIDIA counts of nvidia_direct.t27); never a key value, never a request from this panel. A limit or a
+//          balance is not in any of these tables, so the line shows none.
+//   CALL   the friends, online or not, with CALL and MESSAGE on every row; CALL in the head of the panel as well
+//          while there is a friend, so a call is one click from the open cabinet.
+// A long value is cut with an ellipsis at a code point (ac_fit), never past the panel's right edge.
+//
 // The panel is the IDLE view of the CALL panel's slot in a second mode (AC_ON = 1 in the CALL region of the text
 // store): the call views, the friends snapshot (friends_view), the engine (friends_engine) and the typing of the add
 // field are the ones of the CALL panel; PROFILE (profile.t27) keeps the picture. A call that rings or is up shows
@@ -18,12 +30,27 @@
 module T27osAccountView;
 
 use t27os::queen::QP_PAD;
+use t27os::queen::QP_CLOSE;
 use t27os::call_view::CV_FIELD_H;
 use t27os::call_view::CV_BTN_H;
 use t27os::call_view::cv_field_x;
-use t27os::call_view::cv_field_w;
-use t27os::call_view::cv_btn_x;
-use t27os::call_view::cv_btn_w;
+use t27os::keys::P_OPENROUTER;
+use t27os::keys::P_ZAI;
+use t27os::keys::P_NVIDIA;
+use t27os::keys::MAX_KEYS;
+use t27os::keys::HL_OK;
+use t27os::keys::HL_DEAD;
+use t27os::keys::slot_count;
+use t27os::keys::slot_taken;
+use t27os::keys::key_index;
+use t27os::keys::key_health;
+use t27os::keys::health_at;
+use t27os::keys::health_http;
+use t27os::keys::health_pack;
+use t27os::chat_view::chv_cp_len;
+use t27os::chat_view::chv_cp_val;
+use t27os::chat_view::chv_cp_w;
+use t27os::chat_view::chv_text_w;
 use t27os::session_store::put_dec;
 use t27os::session_store::put_bytes;
 use t27os::keysync::fp_text;
@@ -150,10 +177,10 @@ pub fn ac_flash_text(kind: u32) -> str {
     return "";
 }
 
-/// Where the confirmation stands, from the panel's left text edge: on the label line above the key box (never on the
-/// key), and on the FRIENDS label line in place of the range.
-pub const AC_FLASH_MINE_DX : f64 = 60.0;
-pub const AC_FLASH_FRIEND_DX : f64 = 80.0;
+/// Where the confirmation stands, from the panel's left text edge: on the token line right of the token, in place of
+/// its word (never on the key), and on the friends label line in place of the range.
+pub const AC_FLASH_MINE_DX : f64 = 140.0;
+pub const AC_FLASH_FRIEND_DX : f64 = 124.0;
 
 // ---------------------------------------------------------------- 2. the key and the friends' keys (copy, pure part)
 
@@ -280,10 +307,18 @@ pub fn ac_paste_find(src: []const u8, n: usize) -> usize {
     return 0;
 }
 
-/// The line under FRIENDS when the list is empty (a plain invitation, not a fault); nothing when there are friends.
+/// The line under WHO YOU CAN CALL when the list is empty (what to do, not a fault); nothing when there are friends.
 pub fn ac_empty_text(count: usize) -> str {
-    if (count == 0) { return "No friends yet. Send your key to someone, or add theirs below."; }
+    if (count == 0) { return "No one to call yet. Send your key (COPY above) to a friend, or paste theirs below and press ADD."; }
     return "";
+}
+
+/// The label of the friends part: "WHO YOU CAN CALL", then the count when there is anyone ("WHO YOU CAN CALL  3").
+pub fn ac_fr_label(count: usize, out: []u8) -> usize {
+    var n : usize = put_bytes(out, 0, "WHO YOU CAN CALL");
+    if (count == 0) { return n; }
+    n = put_bytes(out, n, "  ");
+    return put_dec(out, n, @as(u64, count));
 }
 
 /// "1-5 of 12" for the friends window: the first and last friend in view among all.
@@ -364,6 +399,9 @@ pub fn ac_conf_row(cl: []const u8) -> usize {
 }
 
 // ---------------------------------------------------------------- 6. boxes (t = panel top, l = its left, w = QP_W, h = panel height)
+// Down the panel: the head (ACCOUNT, CALL while there is a friend, the close mark), ME (picture, nickname, token,
+// key and COPY, what the key is for, where the account lives, this device, UPDATE), KEYS (three lines), WHO YOU CAN
+// CALL (the rows), and at the bottom the add part (the field, PASTE and ADD on one line, the note).
 
 pub const AC_AV_R : f64 = 22.0;
 pub const AC_AV_CY : f64 = 64.0;
@@ -374,38 +412,64 @@ pub const AC_NICK_GAP : f64 = 6.0;
 pub const AC_PIC_Y : f64 = 78.0;
 pub const AC_PIC_H : f64 = 16.0;
 pub const AC_PIC_W : f64 = 120.0;
-pub const AC_KEY_LABEL_Y : f64 = 118.0;
+/// The token's line: its baseline (the token at AC_TOK_SIZE, mono), and where its word ("your account token", or
+/// "copied" for 2 s) starts right of it.
+pub const AC_KEY_LABEL_Y : f64 = 116.0;
+pub const AC_TOK_SIZE : f64 = 15.0;
+/// The key box (the whole T27-... string, a click copies it) and COPY on the same line, right of it.
 pub const AC_KEY_Y : f64 = 124.0;
-pub const AC_KEY_H : f64 = 26.0;
-pub const AC_KEY_BASE : f64 = 141.5;
-pub const AC_FP_BASE : f64 = 173.0;
-pub const AC_COPY_Y : f64 = 156.0;
-pub const AC_COPY_W : f64 = 84.0;
-pub const AC_STATE_Y : f64 = 202.0;
-pub const AC_BUILD_Y : f64 = 216.0;
+pub const AC_KEY_H : f64 = 22.0;
+pub const AC_KEY_BASE : f64 = 139.0;
+pub const AC_KEY_GAP : f64 = 6.0;
+pub const AC_COPY_Y : f64 = 124.0;
+pub const AC_COPY_W : f64 = 56.0;
+/// What the key is for, and where the account lives.
+pub const AC_GIVE_BASE : f64 = 159.0;
+pub const AC_ACCT_BASE : f64 = 171.0;
+pub const AC_STATE_Y : f64 = 189.0;
+pub const AC_BUILD_Y : f64 = 201.0;
 /// The UPDATE part (update_view.t27): its first line across the panel (the offer with the friend's nickname, or the
 /// state), the second line (progress, reason or what this device serves) and its one button at the right of the second.
-pub const AC_UPD_Y : f64 = 236.0;
-pub const AC_UPD2_Y : f64 = 253.0;
-pub const AC_UPD_BTN_Y : f64 = 241.0;
+pub const AC_UPD_Y : f64 = 217.0;
+pub const AC_UPD2_Y : f64 = 234.0;
+pub const AC_UPD_BTN_Y : f64 = 222.0;
 pub const AC_UPD_BTN_W : f64 = 64.0;
 pub const AC_UPD_BTN_H : f64 = 18.0;
-pub const AC_FR_LABEL_Y : f64 = 274.0;
-pub const AC_ROWS_Y : f64 = 280.0;
+/// KEYS: the label, then one line a provider (AC_KP_N of them), AC_KEYS_ROW_H apart; the value starts at
+/// AC_KEYS_VALUE_DX from the text edge, after the dot and the name.
+pub const AC_KEYS_LABEL_Y : f64 = 256.0;
+pub const AC_KEYS_ROW_Y : f64 = 269.0;
+pub const AC_KEYS_ROW_H : f64 = 12.0;
+pub const AC_KEYS_NAME_DX : f64 = 12.0;
+pub const AC_KEYS_VALUE_DX : f64 = 80.0;
+pub const AC_KEYS_SIZE : f64 = 9.0;
+pub const AC_FR_LABEL_Y : f64 = 310.0;
+pub const AC_ROWS_Y : f64 = 316.0;
 pub const AC_ROW_H : f64 = 28.0;
 pub const AC_ARROW_W : f64 = 20.0;
 pub const AC_ARROW_H : f64 = 16.0;
-/// The room the add part takes from the panel's bottom up to the end of the friends rows.
-pub const AC_ROWS_END_FROM_BOTTOM : f64 = 138.0;
-pub const AC_ADD_LABEL_FROM_BOTTOM : f64 = 114.0;
-pub const AC_IFIELD_FROM_BOTTOM : f64 = 108.0;
-pub const AC_BTN_FROM_BOTTOM : f64 = 76.0;
-pub const AC_NOTE_FROM_BOTTOM : f64 = 32.0;
+/// The room the add part takes from the panel's bottom up to the end of the friends rows; the field, PASTE and ADD
+/// share one line.
+pub const AC_ROWS_END_FROM_BOTTOM : f64 = 104.0;
+pub const AC_ADD_LABEL_FROM_BOTTOM : f64 = 90.0;
+pub const AC_IFIELD_FROM_BOTTOM : f64 = 82.0;
+pub const AC_BTN_FROM_BOTTOM : f64 = 82.0;
+pub const AC_NOTE_FROM_BOTTOM : f64 = 36.0;
+pub const AC_PASTE_W : f64 = 44.0;
+pub const AC_ADDB_W : f64 = 36.0;
+pub const AC_ADD_GAP : f64 = 4.0;
+/// CALL in the head of the panel, left of the close mark (shown while there is a friend).
+pub const AC_HCALL_Y : f64 = 12.0;
+pub const AC_HCALL_H : f64 = 18.0;
+pub const AC_HCALL_W : f64 = 56.0;
+pub const AC_HCALL_GAP : f64 = 10.0;
 
 pub const AC_ZONE_COPY_W : f64 = 32.0;
 pub const AC_ZONE_DEL_W : f64 = 18.0;
 pub const AC_ZONE_GAP : f64 = 4.0;
 pub const AC_ZONE_YES_W : f64 = 34.0;
+pub const AC_ZONE_CALL_W : f64 = 32.0;
+pub const AC_ZONE_MSG_W : f64 = 44.0;
 
 pub const AC_H_NONE : u32 = 0;
 pub const AC_H_NICK : u32 = 1;
@@ -420,13 +484,18 @@ pub const AC_H_PASTE : u32 = 9;
 pub const AC_H_ADD : u32 = 10;
 /// The UPDATE part's button (UPDATE, CANCEL or RESTART, update_view.upv_button).
 pub const AC_H_UPD : u32 = 11;
+/// CALL in the head: calls the first friend in view who is online, else the first friend (ac_call_target).
+pub const AC_H_HCALL : u32 = 12;
 /// Per row i (0..15): the row (a click opens the friend's card, chat_view.t27), copy that friend's key, remove (asks),
-/// YES, NO.
+/// YES, NO, CALL, MESSAGE.
 pub const AC_H_ROW : u32 = 16;
 pub const AC_H_FCOPY : u32 = 32;
 pub const AC_H_DEL : u32 = 48;
 pub const AC_H_YES : u32 = 64;
 pub const AC_H_NO : u32 = 80;
+pub const AC_H_CALL : u32 = 96;
+pub const AC_H_MSG : u32 = 112;
+pub const AC_H_END : u32 = 128;
 
 pub fn ac_av_cx(l: f64) -> f64 { return l + QP_PAD + AC_AV_R; }
 pub fn ac_av_cy(t: f64) -> f64 { return t + AC_AV_CY; }
@@ -441,21 +510,35 @@ pub fn ac_add_label_y(t: f64, h: f64) -> f64 { return t + h - AC_ADD_LABEL_FROM_
 pub fn ac_ifield_y(t: f64, h: f64) -> f64 { return t + h - AC_IFIELD_FROM_BOTTOM; }
 pub fn ac_btn_y(t: f64, h: f64) -> f64 { return t + h - AC_BTN_FROM_BOTTOM; }
 pub fn ac_note_y(t: f64, h: f64) -> f64 { return t + h - AC_NOTE_FROM_BOTTOM; }
+pub fn ac_key_w(w: f64) -> f64 { return w - 2.0 * QP_PAD - AC_COPY_W - AC_KEY_GAP; }
 pub fn ac_copy_x(l: f64, w: f64) -> f64 { return l + w - QP_PAD - AC_COPY_W; }
 pub fn ac_upd_btn_x(l: f64, w: f64) -> f64 { return l + w - QP_PAD - AC_UPD_BTN_W; }
+pub fn ac_keys_row_base(t: f64, i: usize) -> f64 { return t + AC_KEYS_ROW_Y + AC_KEYS_ROW_H * @as(f64, @floatFromInt(i)); }
+pub fn ac_hcall_x(l: f64, w: f64) -> f64 { return l + w - QP_PAD - QP_CLOSE - AC_HCALL_GAP - AC_HCALL_W; }
+/// The add part's line: the field, PASTE, ADD; ADD ends at the panel's right text edge.
+pub fn ac_ifield_w(w: f64) -> f64 { return w - 2.0 * QP_PAD - AC_PASTE_W - AC_ADDB_W - 2.0 * AC_ADD_GAP; }
+pub fn ac_paste_x(l: f64, w: f64) -> f64 { return l + QP_PAD + ac_ifield_w(w) + AC_ADD_GAP; }
+pub fn ac_addb_x(l: f64, w: f64) -> f64 { return ac_paste_x(l, w) + AC_PASTE_W + AC_ADD_GAP; }
 
-/// The zones at the right end of a row: remove, copy-key; and while the row asks for its confirmation, YES and NO.
+/// The zones at the right end of a row, right to left: remove, copy-key, MESSAGE, CALL; and while the row asks for its
+/// confirmation, YES and NO in their place.
 pub fn ac_del_x(l: f64, w: f64) -> f64 { return l + w - QP_PAD - AC_ZONE_DEL_W; }
 pub fn ac_fcopy_x(l: f64, w: f64) -> f64 { return ac_del_x(l, w) - AC_ZONE_GAP - AC_ZONE_COPY_W; }
+pub fn ac_msg_x(l: f64, w: f64) -> f64 { return ac_fcopy_x(l, w) - AC_ZONE_GAP - AC_ZONE_MSG_W; }
+pub fn ac_call_x(l: f64, w: f64) -> f64 { return ac_msg_x(l, w) - AC_ZONE_GAP - AC_ZONE_CALL_W; }
 pub fn ac_no_x(l: f64, w: f64) -> f64 { return l + w - QP_PAD - AC_ZONE_YES_W; }
 pub fn ac_yes_x(l: f64, w: f64) -> f64 { return ac_no_x(l, w) - AC_ZONE_GAP - AC_ZONE_YES_W; }
+
+/// CALL stands in the head only while there is someone to call.
+pub fn ac_hcall_shown(count: usize) -> bool { return count > 0; }
 
 /// What a point means. `drawn` rows are in view (ac_rows_drawn), `count` friends in all, `vis` rows fit, `conf` is the
 /// row waiting for its confirmation (FV_ROWS_SNAP when none), `upd` whether the UPDATE part shows its button.
 pub fn ac_hit(x: f64, y: f64, l: f64, w: f64, t: f64, h: f64, drawn: usize, count: usize, vis: usize, conf: usize, upd: bool) -> u32 {
-    if (fv_in(x, y, l + QP_PAD, t + AC_KEY_Y, w - 2.0 * QP_PAD, AC_KEY_H)) { return AC_H_KEY; }
+    if (ac_hcall_shown(count) and fv_in(x, y, ac_hcall_x(l, w), t + AC_HCALL_Y, AC_HCALL_W, AC_HCALL_H)) { return AC_H_HCALL; }
+    if (fv_in(x, y, l + QP_PAD, t + AC_KEY_Y, ac_key_w(w), AC_KEY_H)) { return AC_H_KEY; }
     if (upd and fv_in(x, y, ac_upd_btn_x(l, w), t + AC_UPD_BTN_Y, AC_UPD_BTN_W, AC_UPD_BTN_H)) { return AC_H_UPD; }
-    if (fv_in(x, y, ac_copy_x(l, w), t + AC_COPY_Y, AC_COPY_W, CV_BTN_H)) { return AC_H_COPYKEY; }
+    if (fv_in(x, y, ac_copy_x(l, w), t + AC_COPY_Y, AC_COPY_W, AC_KEY_H)) { return AC_H_COPYKEY; }
     if (fv_in(x, y, ac_nick_x(l), t + AC_NICK_Y, ac_nick_w(w), AC_NICK_H)) { return AC_H_NICK; }
     if (fv_in(x, y, ac_save_x(l, w), t + AC_NICK_Y, AC_SAVE_W, AC_NICK_H)) { return AC_H_SAVE; }
     if (fv_in(x, y, ac_nick_x(l), t + AC_PIC_Y, AC_PIC_W, AC_PIC_H)) { return AC_H_PICTURE; }
@@ -474,19 +557,300 @@ pub fn ac_hit(x: f64, y: f64, l: f64, w: f64, t: f64, h: f64, drawn: usize, coun
             }
             if (fv_in(x, y, ac_del_x(l, w), ry, AC_ZONE_DEL_W, AC_ROW_H - 2.0)) { return AC_H_DEL + k; }
             if (fv_in(x, y, ac_fcopy_x(l, w), ry, AC_ZONE_COPY_W, AC_ROW_H - 2.0)) { return AC_H_FCOPY + k; }
+            if (fv_in(x, y, ac_msg_x(l, w), ry, AC_ZONE_MSG_W, AC_ROW_H - 2.0)) { return AC_H_MSG + k; }
+            if (fv_in(x, y, ac_call_x(l, w), ry, AC_ZONE_CALL_W, AC_ROW_H - 2.0)) { return AC_H_CALL + k; }
             return AC_H_ROW + k;
         }
         i = i + 1;
     }
-    if (fv_in(x, y, cv_field_x(l), ac_ifield_y(t, h), cv_field_w(w), CV_FIELD_H)) { return AC_H_IFIELD; }
-    if (fv_in(x, y, cv_btn_x(l, w, 0), ac_btn_y(t, h), cv_btn_w(w), CV_BTN_H)) { return AC_H_PASTE; }
-    if (fv_in(x, y, cv_btn_x(l, w, 1), ac_btn_y(t, h), cv_btn_w(w), CV_BTN_H)) { return AC_H_ADD; }
+    if (fv_in(x, y, cv_field_x(l), ac_ifield_y(t, h), ac_ifield_w(w), CV_FIELD_H)) { return AC_H_IFIELD; }
+    if (fv_in(x, y, ac_paste_x(l, w), ac_btn_y(t, h), AC_PASTE_W, CV_BTN_H)) { return AC_H_PASTE; }
+    if (fv_in(x, y, ac_addb_x(l, w), ac_btn_y(t, h), AC_ADDB_W, CV_BTN_H)) { return AC_H_ADD; }
     return AC_H_NONE;
 }
 
 /// The panel (the area under the title) takes a wheel step at this point: the friends rows and the label above them.
 pub fn ac_wheel_area(x: f64, y: f64, l: f64, w: f64, t: f64, vis: usize) -> bool {
     return fv_in(x, y, l, t + AC_FR_LABEL_Y - 14.0, w, AC_ROW_H * @as(f64, @floatFromInt(vis)) + 16.0);
+}
+
+// ---------------------------------------------------------------- 7. CALL and MESSAGE from the cabinet
+
+pub const AC_A_NONE : u32 = 0;
+pub const AC_A_CALL : u32 = 1;
+pub const AC_A_MESSAGE : u32 = 2;
+
+/// What a hit asks for: a call (CALL in the head or on a row), a chat (MESSAGE on a row), or neither (the cabinet's
+/// own action, ac_do).
+pub fn ac_hit_action(hit: u32) -> u32 {
+    if (hit == AC_H_HCALL) { return AC_A_CALL; }
+    if (hit >= AC_H_MSG and hit < AC_H_END) { return AC_A_MESSAGE; }
+    if (hit >= AC_H_CALL and hit < AC_H_MSG) { return AC_A_CALL; }
+    return AC_A_NONE;
+}
+
+/// Whom CALL in the head calls: the first friend in view who is online, else the first friend in view (the card then
+/// says the friend is offline); FV_ROWS_SNAP when nobody is in view.
+pub fn ac_call_target(cl: []const u8) -> usize {
+    var shown : usize = @as(usize, cl[FV_SHOWN]);
+    if (shown > FV_ROWS_SNAP) { shown = FV_ROWS_SNAP; }
+    if (shown == 0) { return FV_ROWS_SNAP; }
+    var i : usize = 0;
+    while (i < shown) {
+        if (cl[fv_row_at(i) + FR_ONLINE] != 0) { return i; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// The shown row a CALL or MESSAGE hit is for; FV_ROWS_SNAP when there is no such row.
+pub fn ac_hit_row(cl: []const u8, hit: u32) -> usize {
+    if (hit == AC_H_HCALL) { return ac_call_target(cl); }
+    var r : usize = FV_ROWS_SNAP;
+    if (hit >= AC_H_MSG and hit < AC_H_END) { r = @as(usize, hit - AC_H_MSG); }
+    if (hit >= AC_H_CALL and hit < AC_H_MSG) { r = @as(usize, hit - AC_H_CALL); }
+    if (r >= @as(usize, cl[FV_SHOWN]) or r >= FV_ROWS_SNAP) { return FV_ROWS_SNAP; }
+    return r;
+}
+
+// ---------------------------------------------------------------- 8. ME: the token, what the key is for, where the account lives
+
+/// The account token: the first three groups of the fingerprint ("a944-ca2d-cee5"), the form a person reads out.
+pub const AC_TOKEN_LEN : usize = 14;
+
+pub fn ac_token_text(fp: []const u8, out: []u8) -> usize {
+    if (out.len < AC_TOKEN_LEN) { return 0; }
+    var full : [32]u8 = undefined;
+    if (fp_text(fp, full[0..32]) < AC_TOKEN_LEN) { return 0; }
+    var i : usize = 0;
+    while (i < AC_TOKEN_LEN) {
+        out[i] = full[i];
+        i = i + 1;
+    }
+    return AC_TOKEN_LEN;
+}
+
+/// The word right of the token.
+pub fn ac_token_word() -> str { return "your account token"; }
+
+/// Under the key: what it is for.
+pub fn ac_give_text() -> str { return "Give this key to people so they can message and call you."; }
+
+/// Where the account lives. T27 OS keeps the identity in a file on this device and has no server account, so the
+/// window passes false; true is the line a server account would need, kept here so the two read as a pair.
+pub fn ac_account_text(server: bool) -> str {
+    if (server) { return "Account on the server; this device holds its keys."; }
+    return "No server account: it is kept only on this device.";
+}
+
+// ---------------------------------------------------------------- 9. KEYS: one line a provider, from the tables the window holds
+
+/// The rows: OpenRouter, Z.ai, NVIDIA (keys.t27 P_*).
+pub const AC_KP_N : usize = 3;
+
+pub fn ac_kp_provider(i: usize) -> u32 {
+    if (i == 0) { return P_OPENROUTER; }
+    if (i == 1) { return P_ZAI; }
+    return P_NVIDIA;
+}
+
+pub fn ac_kp_name(i: usize) -> str {
+    if (i == 0) { return "OpenRouter"; }
+    if (i == 1) { return "Z.ai"; }
+    return "NVIDIA";
+}
+
+/// The NVIDIA counts ride in the window's 96-byte NVIDIA region (glass_window nv_mask_fill: the KEYS line's length in
+/// byte 0, its text after it, at most AC_NV_TEXT_MAX bytes): whether the list was read, how many keys, how many live.
+pub const AC_NV_TEXT_MAX : usize = 86;
+pub const AC_NV_FLAG : usize = 88;
+pub const AC_NV_KEYS : usize = 89;
+pub const AC_NV_LIVE : usize = 90;
+pub const AC_NV_REGION : usize = 96;
+pub const AC_NV_UNREAD : u8 = 0;
+pub const AC_NV_READ : u8 = 1;
+pub const AC_NV_BAD : u8 = 2;
+
+/// Write the NVIDIA counts (nvidia_direct.t27: keys and nv_live) into the region; `read` false = the list was not
+/// readable. Counts are at most NV_MAX (64), so one byte each.
+pub fn ac_nv_pack(m: []u8, read: bool, keys: u32, live: u32) -> void {
+    if (m.len < AC_NV_REGION) { return; }
+    var k : u32 = keys;
+    if (k > 255) { k = 255; }
+    var v : u32 = live;
+    if (v > k) { v = k; }
+    m[AC_NV_FLAG] = AC_NV_BAD;
+    if (read) { m[AC_NV_FLAG] = AC_NV_READ; }
+    m[AC_NV_KEYS] = @as(u8, @intCast(k));
+    m[AC_NV_LIVE] = @as(u8, @intCast(v));
+}
+
+/// What a provider row is.
+pub const AC_KS_NONE : u32 = 0;
+pub const AC_KS_UNCHECKED : u32 = 1;
+pub const AC_KS_LIVE : u32 = 2;
+pub const AC_KS_DEAD : u32 = 3;
+pub const AC_KS_STALE : u32 = 4;
+pub const AC_KS_UNREAD : u32 = 5;
+pub const AC_KS_BAD : u32 = 6;
+
+/// The facts of row i into f (7 words): keys, live, dead, the second of the last check (0 = none in this run), the
+/// HTTP code of a dead key, the code of the last check, the state (AC_KS_*). `stored[p]` is provider p's mask of
+/// numbers, `hw` the health words (one per key, keys.t27 key_index), `nv` the NVIDIA region. No key value is read.
+pub fn ac_kp_facts(i: usize, stored: []const u32, hw: []const u64, nv: []const u8, now: u64, f: []u64) -> void {
+    var j : usize = 0;
+    while (j < 7) {
+        f[j] = 0;
+        j = j + 1;
+    }
+    if (i >= 2) {
+        if (nv.len < AC_NV_REGION or nv[AC_NV_FLAG] == AC_NV_UNREAD) {
+            f[6] = @as(u64, AC_KS_UNREAD);
+            return;
+        }
+        if (nv[AC_NV_FLAG] != AC_NV_READ) {
+            f[6] = @as(u64, AC_KS_BAD);
+            return;
+        }
+        f[0] = @as(u64, nv[AC_NV_KEYS]);
+        f[1] = @as(u64, nv[AC_NV_LIVE]);
+        f[2] = f[0] - f[1];
+        if (f[0] == 0) {
+            f[6] = @as(u64, AC_KS_NONE);
+        } else if (f[1] == 0) {
+            f[6] = @as(u64, AC_KS_DEAD);
+        } else {
+            f[6] = @as(u64, AC_KS_LIVE);
+        }
+        return;
+    }
+    const p : u32 = ac_kp_provider(i);
+    var mask : u32 = 0;
+    if (@as(usize, p) < stored.len) { mask = stored[@as(usize, p)]; }
+    f[0] = @as(u64, slot_count(mask));
+    if (f[0] == 0) {
+        f[6] = @as(u64, AC_KS_NONE);
+        return;
+    }
+    var k : u32 = 0;
+    while (k < MAX_KEYS) {
+        const at : usize = key_index(p, k);
+        if (slot_taken(mask, k) and at < hw.len) {
+            const wd : u64 = hw[at];
+            const hl : u32 = key_health(wd, 0, 0, now);
+            if (hl == HL_OK) { f[1] = f[1] + 1; }
+            if (hl == HL_DEAD) {
+                f[2] = f[2] + 1;
+                f[4] = @as(u64, health_http(wd));
+            }
+            if (health_at(wd) > f[3]) {
+                f[3] = health_at(wd);
+                f[5] = @as(u64, health_http(wd));
+            }
+        }
+        k = k + 1;
+    }
+    if (f[3] == 0) {
+        f[6] = @as(u64, AC_KS_UNCHECKED);
+    } else if (f[1] > 0) {
+        f[6] = @as(u64, AC_KS_LIVE);
+    } else if (f[2] == f[0]) {
+        f[6] = @as(u64, AC_KS_DEAD);
+    } else {
+        f[6] = @as(u64, AC_KS_STALE);
+    }
+}
+
+/// A row is drawn muted when nothing in it can serve: no key, the list unread or unreadable, every key dead.
+pub fn ac_kp_dim(state: u32) -> bool {
+    return state == AC_KS_NONE or state == AC_KS_UNREAD or state == AC_KS_BAD or state == AC_KS_DEAD;
+}
+
+/// The value of row i (after the name): "1 key, 1 live, checked 5 min ago", "2 keys, 0 live, 2 dead (401), checked
+/// 3 h ago", "1 key, not checked in this run", "34 keys, 33 live, 1 dead (401/403)", "no key stored", "not read yet",
+/// "key list unreadable". NVIDIA keeps no time of its checks, so its line names none. Never a key, never a part of one.
+pub fn ac_kp_line(i: usize, f: []const u64, now: u64, out: []u8) -> usize {
+    const st : u32 = @as(u32, @intCast(f[6]));
+    if (st == AC_KS_UNREAD) { return put_bytes(out, 0, "not read yet"); }
+    if (st == AC_KS_BAD) { return put_bytes(out, 0, "key list unreadable"); }
+    if (st == AC_KS_NONE) { return put_bytes(out, 0, "no key stored"); }
+    var n : usize = put_dec(out, 0, f[0]);
+    if (f[0] == 1) { n = put_bytes(out, n, " key"); } else { n = put_bytes(out, n, " keys"); }
+    if (st == AC_KS_UNCHECKED) { return put_bytes(out, n, ", not checked in this run"); }
+    n = put_bytes(out, n, ", ");
+    n = put_dec(out, n, f[1]);
+    n = put_bytes(out, n, " live");
+    if (f[2] > 0) {
+        n = put_bytes(out, n, ", ");
+        n = put_dec(out, n, f[2]);
+        n = put_bytes(out, n, " dead (");
+        if (i >= 2) { n = put_bytes(out, n, "401/403"); } else { n = put_dec(out, n, f[4]); }
+        n = put_bytes(out, n, ")");
+    } else if (st == AC_KS_STALE) {
+        const c : u64 = f[5];
+        if (c == 0) {
+            n = put_bytes(out, n, ", no answer");
+        } else if (c == 429) {
+            n = put_bytes(out, n, ", rate limited (429)");
+        } else if (c < 200 or c >= 300) {
+            n = put_bytes(out, n, ", HTTP ");
+            n = put_dec(out, n, c);
+        }
+    }
+    if (i < 2 and f[3] > 0) {
+        var age : u64 = 0;
+        if (now > f[3]) { age = now - f[3]; }
+        n = put_bytes(out, n, ", checked ");
+        n = n + fv_ago_text(age, out[n..out.len]);
+    }
+    return n;
+}
+
+// ---------------------------------------------------------------- 10. a long value fits its room: cut at a code point, ellipsis
+
+/// The ellipsis (U+2026) as UTF-8.
+pub const AC_ELL_0 : u8 = 226;
+pub const AC_ELL_1 : u8 = 128;
+pub const AC_ELL_2 : u8 = 166;
+
+/// src[0..n] as it fits `room` points at `size` (chat_view's width estimate, on the wide side): whole when it fits,
+/// else as many whole code points as leave room for the ellipsis, then the ellipsis. out needs n + 3 bytes; 0 when
+/// not even the ellipsis fits.
+pub fn ac_fit(src: []const u8, n: usize, room: f64, size: f64, out: []u8) -> usize {
+    if (chv_text_w(src, n, size) <= room) {
+        if (out.len < n) { return 0; }
+        var c : usize = 0;
+        while (c < n) {
+            out[c] = src[c];
+            c = c + 1;
+        }
+        return n;
+    }
+    const ell : f64 = chv_cp_w(8230, size);
+    if (ell > room) { return 0; }
+    var w : f64 = 0.0;
+    var i : usize = 0;
+    while (i < n) {
+        var k : usize = chv_cp_len(src[i]);
+        if (i + k > n) { k = n - i; }
+        const cw : f64 = chv_cp_w(chv_cp_val(src, i, k), size);
+        if (w + cw + ell > room) { break; }
+        w = w + cw;
+        i = i + k;
+    }
+    // no space or comma just before the ellipsis
+    var e : usize = i;
+    while (e > 0 and (src[e - 1] == 32 or src[e - 1] == 44)) { e = e - 1; }
+    if (out.len < e + 3) { return 0; }
+    var j : usize = 0;
+    while (j < e) {
+        out[j] = src[j];
+        j = j + 1;
+    }
+    out[e] = AC_ELL_0;
+    out[e + 1] = AC_ELL_1;
+    out[e + 2] = AC_ELL_2;
+    return e + 3;
 }
 
 // ---------------------------------------------------------------- tests
@@ -670,8 +1034,10 @@ test ac_the_boxes_hit_their_own_target {
     assert ac_hit(ac_del_x(l, w) - 2.0, ac_row_y(t, 1) + 4.0, l, w, t, h, 3, 3, 5, none, false) == AC_H_ROW + 1;
     // the add part
     assert ac_hit(cv_field_x(l) + 4.0, ac_ifield_y(t, h) + 4.0, l, w, t, h, 3, 3, 5, none, false) == AC_H_IFIELD;
-    assert ac_hit(cv_btn_x(l, w, 0) + 4.0, ac_btn_y(t, h) + 4.0, l, w, t, h, 3, 3, 5, none, false) == AC_H_PASTE;
-    assert ac_hit(cv_btn_x(l, w, 1) + 4.0, ac_btn_y(t, h) + 4.0, l, w, t, h, 3, 3, 5, none, false) == AC_H_ADD;
+    assert ac_hit(ac_paste_x(l, w) + 4.0, ac_btn_y(t, h) + 4.0, l, w, t, h, 3, 3, 5, none, false) == AC_H_PASTE;
+    assert ac_hit(ac_addb_x(l, w) + 4.0, ac_btn_y(t, h) + 4.0, l, w, t, h, 3, 3, 5, none, false) == AC_H_ADD;
+    // the field ends where PASTE begins: its last point is the field, the next is PASTE
+    assert ac_hit(ac_paste_x(l, w) - AC_ADD_GAP - 1.0, ac_ifield_y(t, h) + 4.0, l, w, t, h, 3, 3, 5, none, false) == AC_H_IFIELD;
     assert ac_hit(l + 5.0, t + 5.0, l, w, t, h, 3, 3, 5, none, false) == AC_H_NONE;
 }
 
@@ -708,27 +1074,48 @@ test ac_the_boxes_keep_their_order_down_the_panel_and_do_not_overlap {
     const t : f64 = 35.0;
     var h : f64 = 505.0;
     while (h < 900.0) {
+        // ME: the picture and nickname, the token line, the key and COPY, the two lines under them, this device, UPDATE
         assert AC_NICK_Y + AC_NICK_H <= AC_PIC_Y;
-        assert AC_AV_CY + AC_AV_R <= AC_KEY_LABEL_Y;
-        assert AC_PIC_Y + AC_PIC_H < AC_KEY_LABEL_Y;
-        assert AC_KEY_Y + AC_KEY_H <= AC_COPY_Y;
-        assert AC_COPY_Y + CV_BTN_H < AC_STATE_Y - 8.0;
+        assert AC_AV_CY + AC_AV_R <= AC_KEY_LABEL_Y - 11.0;
+        assert AC_PIC_Y + AC_PIC_H + 10.0 < AC_KEY_LABEL_Y;
+        assert AC_KEY_LABEL_Y + 3.0 <= AC_KEY_Y;
+        assert AC_KEY_Y + AC_KEY_H + 9.0 <= AC_GIVE_BASE and AC_GIVE_BASE + 10.0 <= AC_ACCT_BASE;
+        assert AC_ACCT_BASE + 10.0 <= AC_STATE_Y - 8.0;
         assert AC_STATE_Y < AC_BUILD_Y and AC_BUILD_Y + 12.0 <= AC_UPD_Y and AC_UPD_Y + 3.0 <= AC_UPD_BTN_Y;
         assert AC_UPD_BTN_Y < AC_UPD2_Y - 8.0 and AC_UPD2_Y < AC_UPD_BTN_Y + AC_UPD_BTN_H;
-        assert AC_UPD_BTN_Y + AC_UPD_BTN_H < AC_FR_LABEL_Y - 12.0;
+        // KEYS after ME, its three lines above the friends' label and the arrows
+        assert AC_UPD_BTN_Y + AC_UPD_BTN_H + 10.0 <= AC_KEYS_LABEL_Y;
+        assert AC_KEYS_LABEL_Y + 10.0 <= AC_KEYS_ROW_Y;
+        assert ac_keys_row_base(t, AC_KP_N - 1) + 3.0 <= ac_arrow_y(t);
         assert AC_FR_LABEL_Y < AC_ROWS_Y;
         // the add part is anchored to the bottom and starts below the last row that fits
         const v : usize = ac_rows_vis(h);
-        assert ac_row_y(t, v) - 2.0 <= ac_add_label_y(t, h) - 10.0 + AC_ROW_H or v == 1;
+        assert ac_row_y(t, v) <= ac_add_label_y(t, h) - 10.0 + 4.0;
         assert ac_add_label_y(t, h) < ac_ifield_y(t, h);
-        assert ac_ifield_y(t, h) + CV_FIELD_H < ac_btn_y(t, h);
-        assert ac_btn_y(t, h) + CV_BTN_H < ac_note_y(t, h) - 8.0;
+        assert ac_btn_y(t, h) == ac_ifield_y(t, h);
+        assert ac_ifield_y(t, h) + CV_FIELD_H < ac_note_y(t, h) - 8.0;
         h = h + 9.0;
     }
+    // the default window keeps three friends in view under ME and KEYS
+    assert ac_rows_vis(505.0) == 3;
     // the nickname field, SAVE and the avatar side by side
     assert ac_nick_x(0.0) + ac_nick_w(300.0) + AC_NICK_GAP == ac_save_x(0.0, 300.0);
     assert ac_save_x(0.0, 300.0) + AC_SAVE_W == 300.0 - QP_PAD;
     assert ac_nick_w(300.0) > 120.0;
+    // the key box and COPY on one line, inside the panel; the key (25 mono symbols at 11 pt) fits its box
+    assert QP_PAD + ac_key_w(300.0) + AC_KEY_GAP == ac_copy_x(0.0, 300.0);
+    assert ac_copy_x(0.0, 300.0) + AC_COPY_W == 300.0 - QP_PAD;
+    assert ac_key_w(300.0) >= 25.0 * 0.6 * 11.0 + 14.0;
+    // the field, PASTE and ADD on one line, inside the panel; the field holds a whole key at 10.5 pt mono
+    assert ac_addb_x(0.0, 300.0) + AC_ADDB_W == 300.0 - QP_PAD;
+    assert ac_ifield_w(300.0) >= 25.0 * 0.6 * 10.5 + 16.0;
+    // the head: CALL ends left of the close mark, right of the title
+    assert ac_hcall_x(0.0, 300.0) + AC_HCALL_W + AC_HCALL_GAP + QP_CLOSE + QP_PAD == 300.0;
+    assert ac_hcall_x(0.0, 300.0) > QP_PAD + 90.0;
+    // a row's zones in order, right to left, and the nickname keeps room left of CALL
+    assert ac_call_x(0.0, 300.0) + AC_ZONE_CALL_W + AC_ZONE_GAP == ac_msg_x(0.0, 300.0);
+    assert ac_msg_x(0.0, 300.0) + AC_ZONE_MSG_W + AC_ZONE_GAP == ac_fcopy_x(0.0, 300.0);
+    assert ac_call_x(0.0, 300.0) - (QP_PAD + 16.0) >= 100.0;
 }
 
 test ac_the_confirmation_names_one_friend_by_key_not_by_place {
@@ -898,6 +1285,205 @@ test ac_the_copy_word_stands_above_the_key_and_takes_no_click {
 
 test ac_an_empty_list_reads_as_an_invitation {
     var o : [96]u8 = undefined;
-    assert fv_eq(o[0..96], put_bytes(o[0..96], 0, ac_empty_text(0)), "No friends yet. Send your key to someone, or add theirs below.");
+    var e : [128]u8 = undefined;
+    assert fv_eq(e[0..128], put_bytes(e[0..128], 0, ac_empty_text(0)), "No one to call yet. Send your key (COPY above) to a friend, or paste theirs below and press ADD.");
     assert ac_empty_text(1).len == 0 and ac_empty_text(32).len == 0;
+}
+
+test ac_call_stands_in_the_head_only_while_there_is_someone_to_call {
+    const l : f64 = 660.0;
+    const w : f64 = 300.0;
+    const t : f64 = 35.0;
+    const h : f64 = 505.0;
+    const none : usize = FV_ROWS_SNAP;
+    const hx : f64 = ac_hcall_x(l, w) + 10.0;
+    const hy : f64 = t + AC_HCALL_Y + 6.0;
+    // friends: one click on CALL in the head is a call
+    assert ac_hcall_shown(1) and ac_hcall_shown(32);
+    assert ac_hit(hx, hy, l, w, t, h, 1, 1, 3, none, false) == AC_H_HCALL;
+    assert ac_hit_action(AC_H_HCALL) == AC_A_CALL;
+    // nobody to call: no button, the point means nothing
+    assert ac_hcall_shown(0) == false;
+    assert ac_hit(hx, hy, l, w, t, h, 0, 0, 3, none, false) == AC_H_NONE;
+    // it stays clear of the close mark (the panel's own close test) and of the title
+    assert ac_hcall_x(l, w) + AC_HCALL_W < l + w - QP_PAD - QP_CLOSE;
+    assert ac_hit(l + w - QP_PAD - 4.0, t + 18.0, l, w, t, h, 1, 1, 3, none, false) == AC_H_NONE;
+}
+
+test ac_every_row_has_call_and_message_one_click_from_the_cabinet {
+    const l : f64 = 660.0;
+    const w : f64 = 300.0;
+    const t : f64 = 35.0;
+    const h : f64 = 505.0;
+    const none : usize = FV_ROWS_SNAP;
+    var i : usize = 0;
+    while (i < 3) {
+        const ry : f64 = ac_row_y(t, i) + 4.0;
+        const k : u32 = @as(u32, @intCast(i));
+        assert ac_hit(ac_call_x(l, w) + 4.0, ry, l, w, t, h, 3, 3, 3, none, false) == AC_H_CALL + k;
+        assert ac_hit(ac_msg_x(l, w) + 4.0, ry, l, w, t, h, 3, 3, 3, none, false) == AC_H_MSG + k;
+        assert ac_hit_action(AC_H_CALL + k) == AC_A_CALL and ac_hit_action(AC_H_MSG + k) == AC_A_MESSAGE;
+        // the rest of the row still opens the card, COPY and remove keep their places
+        assert ac_hit(l + 40.0, ry, l, w, t, h, 3, 3, 3, none, false) == AC_H_ROW + k;
+        assert ac_hit(ac_fcopy_x(l, w) + 4.0, ry, l, w, t, h, 3, 3, 3, none, false) == AC_H_FCOPY + k;
+        assert ac_hit(ac_del_x(l, w) + 4.0, ry, l, w, t, h, 3, 3, 3, none, false) == AC_H_DEL + k;
+        i = i + 1;
+    }
+    // the cabinet's own hits ask for neither
+    assert ac_hit_action(AC_H_ROW) == AC_A_NONE and ac_hit_action(AC_H_NO + 4) == AC_A_NONE;
+    assert ac_hit_action(AC_H_KEY) == AC_A_NONE and ac_hit_action(AC_H_UPD) == AC_A_NONE;
+    // a row that asks to remove shows YES and NO, not CALL: a click there is NO
+    assert ac_hit(ac_call_x(l, w) + 4.0, ac_row_y(t, 1) + 4.0, l, w, t, h, 3, 3, 3, 1, false) == AC_H_NO + 1;
+    // a row not in view has no buttons
+    assert ac_hit(ac_call_x(l, w) + 4.0, ac_row_y(t, 2) + 4.0, l, w, t, h, 2, 2, 3, none, false) != AC_H_CALL + 2;
+}
+
+test ac_call_and_message_name_the_row_and_the_head_calls_who_is_online {
+    var cl : [1024]u8 = undefined;
+    fv_blank(cl[0..1024]);
+    // nobody in view: nothing to call
+    assert ac_call_target(cl[0..1024]) == FV_ROWS_SNAP;
+    assert ac_hit_row(cl[0..1024], AC_H_HCALL) == FV_ROWS_SNAP;
+    cl[FV_SHOWN] = 3;
+    // nobody online: the first friend (the card then says offline)
+    assert ac_call_target(cl[0..1024]) == 0;
+    cl[fv_row_at(2) + FR_ONLINE] = 1;
+    assert ac_call_target(cl[0..1024]) == 2;
+    cl[fv_row_at(1) + FR_ONLINE] = 1;
+    assert ac_hit_row(cl[0..1024], AC_H_HCALL) == 1;
+    // a row's own buttons name that row; a row past the shown ones names none
+    assert ac_hit_row(cl[0..1024], AC_H_CALL + 2) == 2;
+    assert ac_hit_row(cl[0..1024], AC_H_MSG) == 0;
+    assert ac_hit_row(cl[0..1024], AC_H_CALL + 3) == FV_ROWS_SNAP;
+    assert ac_hit_row(cl[0..1024], AC_H_ROW + 1) == FV_ROWS_SNAP;
+}
+
+test ac_the_token_is_the_short_fingerprint_and_the_account_says_where_it_lives {
+    const fp : [10]u8 = [169, 68, 202, 45, 206, 229, 157, 142, 98, 53];
+    var o : [64]u8 = undefined;
+    assert fv_eq(o[0..64], ac_token_text(fp[0..10], o[0..64]), "a944-ca2d-cee5");
+    // the token is the start of the fingerprint line a friend compares
+    var f : [64]u8 = undefined;
+    const fl : usize = ac_fp_line(fp[0..10], f[0..64]);
+    assert fl == 3 + FP_TEXT_LEN;
+    var i : usize = 0;
+    while (i < AC_TOKEN_LEN) {
+        assert f[3 + i] == o[i];
+        i = i + 1;
+    }
+    assert ac_token_text(fp[0..9], o[0..64]) == 0;
+    assert ac_token_text(fp[0..10], o[0..8]) == 0;
+    var e : [96]u8 = undefined;
+    assert fv_eq(e[0..96], put_bytes(e[0..96], 0, ac_account_text(false)), "No server account: it is kept only on this device.");
+    assert fv_eq(e[0..96], put_bytes(e[0..96], 0, ac_give_text()), "Give this key to people so they can message and call you.");
+    assert ac_account_text(true).len > 0;
+    // every line of ME fits the panel's text width (the estimate is on the wide side)
+    assert chv_text_w(ac_give_text(), ac_give_text().len, 9.0) <= 300.0 - 2.0 * QP_PAD;
+    assert chv_text_w(ac_account_text(false), ac_account_text(false).len, 9.0) <= 300.0 - 2.0 * QP_PAD;
+    assert AC_TOKEN_LEN * 9 <= 140;
+}
+
+test ac_keys_lines_read_the_health_of_the_keys_never_the_keys {
+    const now : u64 = 1800000000;
+    var stored : [9]u32 = [0, 0, 0, 0, 0, 0, 0, 0, 0];
+    var hw : [72]u64 = undefined;
+    var j : usize = 0;
+    while (j < 72) {
+        hw[j] = 0;
+        j = j + 1;
+    }
+    var nv : [96]u8 = undefined;
+    j = 0;
+    while (j < 96) {
+        nv[j] = 0;
+        j = j + 1;
+    }
+    var f : [7]u64 = undefined;
+    var o : [128]u8 = undefined;
+    // nothing stored, NVIDIA not read: three muted rows that say so
+    ac_kp_facts(0, stored[0..9], hw[0..72], nv[0..96], now, f[0..7]);
+    assert fv_eq(o[0..128], ac_kp_line(0, f[0..7], now, o[0..128]), "no key stored");
+    assert ac_kp_dim(@as(u32, @intCast(f[6])));
+    ac_kp_facts(2, stored[0..9], hw[0..72], nv[0..96], now, f[0..7]);
+    assert fv_eq(o[0..128], ac_kp_line(2, f[0..7], now, o[0..128]), "not read yet");
+    // OpenRouter: one key, stored, not checked since launch
+    stored[3] = 1;
+    ac_kp_facts(0, stored[0..9], hw[0..72], nv[0..96], now, f[0..7]);
+    assert fv_eq(o[0..128], ac_kp_line(0, f[0..7], now, o[0..128]), "1 key, not checked in this run");
+    assert ac_kp_dim(@as(u32, @intCast(f[6]))) == false;
+    // checked 5 min ago with 200: live
+    hw[key_index(3, 0)] = health_pack(now - 300, 200);
+    ac_kp_facts(0, stored[0..9], hw[0..72], nv[0..96], now, f[0..7]);
+    assert fv_eq(o[0..128], ac_kp_line(0, f[0..7], now, o[0..128]), "1 key, 1 live, checked 5 min ago");
+    assert f[6] == @as(u64, AC_KS_LIVE);
+    // Z.ai: two keys, both answered 401 two hours ago: dead, muted, with the reason
+    stored[4] = 3;
+    hw[key_index(4, 0)] = health_pack(now - 7200, 401);
+    hw[key_index(4, 1)] = health_pack(now - 7300, 401);
+    ac_kp_facts(1, stored[0..9], hw[0..72], nv[0..96], now, f[0..7]);
+    assert fv_eq(o[0..128], ac_kp_line(1, f[0..7], now, o[0..128]), "2 keys, 0 live, 2 dead (401), checked 2 h ago");
+    assert ac_kp_dim(@as(u32, @intCast(f[6])));
+    // one of them answers again: live, the dead one still named
+    hw[key_index(4, 1)] = health_pack(now - 60, 200);
+    ac_kp_facts(1, stored[0..9], hw[0..72], nv[0..96], now, f[0..7]);
+    assert fv_eq(o[0..128], ac_kp_line(1, f[0..7], now, o[0..128]), "2 keys, 1 live, 1 dead (401), checked 1 min ago");
+    assert ac_kp_dim(@as(u32, @intCast(f[6]))) == false;
+    // a rate limit is not death: stale, the code named
+    hw[key_index(3, 0)] = health_pack(now - 30, 429);
+    ac_kp_facts(0, stored[0..9], hw[0..72], nv[0..96], now, f[0..7]);
+    assert fv_eq(o[0..128], ac_kp_line(0, f[0..7], now, o[0..128]), "1 key, 0 live, rate limited (429), checked 30 s ago");
+    hw[key_index(3, 0)] = health_pack(now - 30, 0);
+    ac_kp_facts(0, stored[0..9], hw[0..72], nv[0..96], now, f[0..7]);
+    assert fv_eq(o[0..128], ac_kp_line(0, f[0..7], now, o[0..128]), "1 key, 0 live, no answer, checked 30 s ago");
+    // NVIDIA from its counts: 34 keys, 33 live
+    ac_nv_pack(nv[0..96], true, 34, 33);
+    ac_kp_facts(2, stored[0..9], hw[0..72], nv[0..96], now, f[0..7]);
+    assert fv_eq(o[0..128], ac_kp_line(2, f[0..7], now, o[0..128]), "34 keys, 33 live, 1 dead (401/403)");
+    ac_nv_pack(nv[0..96], true, 2, 0);
+    ac_kp_facts(2, stored[0..9], hw[0..72], nv[0..96], now, f[0..7]);
+    assert ac_kp_dim(@as(u32, @intCast(f[6])));
+    ac_nv_pack(nv[0..96], false, 0, 0);
+    ac_kp_facts(2, stored[0..9], hw[0..72], nv[0..96], now, f[0..7]);
+    assert fv_eq(o[0..128], ac_kp_line(2, f[0..7], now, o[0..128]), "key list unreadable");
+    // live never exceeds keys; the NVIDIA text stays where it was (the counts are past its room)
+    ac_nv_pack(nv[0..96], true, 3, 9);
+    assert nv[AC_NV_LIVE] == 3 and AC_NV_TEXT_MAX + 1 <= AC_NV_FLAG;
+    assert ac_kp_provider(0) == P_OPENROUTER and ac_kp_provider(1) == P_ZAI and ac_kp_provider(2) == P_NVIDIA;
+}
+
+test ac_a_long_value_is_cut_with_an_ellipsis_at_a_code_point {
+    var o : [128]u8 = undefined;
+    // fits: copied whole
+    assert fv_eq(o[0..128], ac_fit("1 key, 1 live", 13, 188.0, 9.0, o[0..128]), "1 key, 1 live");
+    // too long: cut, no comma or space before the ellipsis, the result fits
+    const long : str = "2 keys, 0 live, 2 dead (401), checked 2 h ago, and more words here";
+    const n : usize = ac_fit(long, long.len, 120.0, 9.0, o[0..128]);
+    assert n > 3 and n < long.len;
+    assert o[n - 3] == AC_ELL_0 and o[n - 2] == AC_ELL_1 and o[n - 1] == AC_ELL_2;
+    assert o[n - 4] != 32 and o[n - 4] != 44;
+    assert chv_text_w(o[0..n], n, 9.0) <= 120.0;
+    var i : usize = 0;
+    while (i < n - 3) {
+        assert o[i] == long[i];
+        i = i + 1;
+    }
+    // a nickname in Cyrillic (2 bytes a letter) is cut between letters, never inside one
+    const cyr : [24]u8 = [208, 148, 208, 188, 208, 184, 209, 130, 209, 128, 208, 184, 208, 185, 32, 208, 164, 208, 181, 208, 180, 208, 190, 209];
+    const m : usize = ac_fit(cyr[0..23], 23, 40.0, 11.0, o[0..128]);
+    assert m > 3 and (m - 3) % 2 == 0;
+    assert o[m - 3] == AC_ELL_0;
+    // no room even for the ellipsis: nothing
+    assert ac_fit(long, long.len, 2.0, 9.0, o[0..128]) == 0;
+    // a KEYS value cut to its room fits it
+    const room : f64 = 300.0 - 2.0 * QP_PAD - AC_KEYS_VALUE_DX;
+    const kn : usize = ac_fit(long, long.len, room, AC_KEYS_SIZE, o[0..128]);
+    assert kn > 0 and chv_text_w(o[0..kn], kn, AC_KEYS_SIZE) <= room;
+}
+
+test ac_the_friends_label_says_who_can_be_called {
+    var o : [64]u8 = undefined;
+    assert fv_eq(o[0..64], ac_fr_label(0, o[0..64]), "WHO YOU CAN CALL");
+    assert fv_eq(o[0..64], ac_fr_label(3, o[0..64]), "WHO YOU CAN CALL  3");
+    // the label, then the range or the copy word right of it, then the arrows
+    assert chv_text_w(o[0..64], ac_fr_label(32, o[0..64]), 9.5) <= AC_FLASH_FRIEND_DX - 4.0;
 }
