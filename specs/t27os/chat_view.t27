@@ -891,7 +891,7 @@ fn chv_pt(x: f64) -> usize {
     return @as(usize, @intFromFloat(x + 0.5));
 }
 
-fn chv_put_item(v: []u8, k: usize, kind: u32, dir: u32, state: u32, x: f64, y: f64, w: f64, h: f64, t: []const u8) -> void {
+pub fn chv_put_item(v: []u8, k: usize, kind: u32, dir: u32, state: u32, x: f64, y: f64, w: f64, h: f64, t: []const u8) -> void {
     const o : usize = chv_item_at(k);
     v[o] = @as(u8, @intCast(kind));
     v[o + 1] = @as(u8, @intCast(dir));

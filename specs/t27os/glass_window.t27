@@ -855,6 +855,137 @@ use t27os::chat_host::CHM_E_INVITE;
 use t27os::chat_host::CHM_E_STRANGER;
 use t27os::chat_host::chm_stranger_answer;
 use t27os::chat_host::chm_end_bits;
+use t27os::group_core::gt_init;
+use t27os::friends_view::fv_blank;
+use t27os::group_view::GV_CHAT;
+use t27os::group_view::GV_H_NONE;
+use t27os::group_view::gv_hit;
+use t27os::group_view::gv_is_hit;
+use t27os::group_view::gv_name_back;
+use t27os::group_view::gv_name_unit;
+use t27os::group_view::gv_new_shown;
+use t27os::group_view::gv_part_h;
+use t27os::group_view::GV_BOX;
+use t27os::group_view::GV_CAP;
+use t27os::group_view::GV_CREATE_W;
+use t27os::group_view::GV_FOCUS;
+use t27os::group_view::GV_GSCROLL;
+use t27os::group_view::GV_G_AID;
+use t27os::group_view::GV_G_HH;
+use t27os::group_view::GV_G_LAYOUT_AT;
+use t27os::group_view::GV_G_NEXT;
+use t27os::group_view::GV_G_ON;
+use t27os::group_view::GV_G_SAVE_AT;
+use t27os::group_view::GV_H_DOWN;
+use t27os::group_view::GV_H_END;
+use t27os::group_view::GV_H_PLUS;
+use t27os::group_view::GV_H_ROW;
+use t27os::group_view::GV_H_UP;
+use t27os::group_view::GV_I_NAME;
+use t27os::group_view::GV_KEY_END;
+use t27os::group_view::GV_NAME;
+use t27os::group_view::GV_NAMES;
+use t27os::group_view::GV_NAME_LABEL_Y;
+use t27os::group_view::GV_NAME_Y;
+use t27os::group_view::GV_NLEN;
+use t27os::group_view::GV_NOTE;
+use t27os::group_view::GV_N_BAD;
+use t27os::group_view::GV_N_DUP;
+use t27os::group_view::GV_N_NOBODY;
+use t27os::group_view::GV_N_NOKEY;
+use t27os::group_view::GV_N_NONE;
+use t27os::group_view::GV_N_NOSAVE;
+use t27os::group_view::GV_N_TABLE;
+use t27os::group_view::GV_PICK_H;
+use t27os::group_view::GV_PICK_LABEL_Y;
+use t27os::group_view::GV_PLUS_H;
+use t27os::group_view::GV_PLUS_W;
+use t27os::group_view::GV_ROW_H;
+use t27os::group_view::GV_SSCROLL;
+use t27os::group_view::GV_S_BACK;
+use t27os::group_view::GV_S_CREATE;
+use t27os::group_view::GV_S_DOWN;
+use t27os::group_view::GV_S_NAME;
+use t27os::group_view::GV_S_PICK;
+use t27os::group_view::GV_S_UP;
+use t27os::group_view::GV_T;
+use t27os::group_view::GV_T_END;
+use t27os::group_view::gv_chat_back;
+use t27os::group_view::gv_chat_empty_text;
+use t27os::group_view::gv_chat_hit;
+use t27os::group_view::gv_chat_open;
+use t27os::group_view::gv_chat_shown;
+use t27os::group_view::gv_count;
+use t27os::group_view::gv_create_why;
+use t27os::group_view::gv_create_x;
+use t27os::group_view::gv_create_y;
+use t27os::group_view::gv_down_x;
+use t27os::group_view::gv_empty_row_text;
+use t27os::group_view::gv_ft_name;
+use t27os::group_view::gv_head_text;
+use t27os::group_view::gv_hint_y;
+use t27os::group_view::gv_label;
+use t27os::group_view::gv_label_y;
+use t27os::group_view::gv_layout;
+use t27os::group_view::gv_name_of;
+use t27os::group_view::gv_names;
+use t27os::group_view::gv_new_close;
+use t27os::group_view::gv_new_hit;
+use t27os::group_view::gv_new_open;
+use t27os::group_view::gv_note_text;
+use t27os::group_view::gv_people;
+use t27os::group_view::gv_pick_label;
+use t27os::group_view::gv_pick_rows;
+use t27os::group_view::gv_pick_toggle;
+use t27os::group_view::gv_pick_y;
+use t27os::group_view::gv_picked;
+use t27os::group_view::gv_picked_fps;
+use t27os::group_view::gv_picks;
+use t27os::group_view::gv_plus_x;
+use t27os::group_view::gv_plus_y;
+use t27os::group_view::gv_read_all;
+use t27os::group_view::gv_roster_line;
+use t27os::group_view::gv_row_group;
+use t27os::group_view::gv_row_y;
+use t27os::group_view::gv_rows;
+use t27os::group_view::gv_sarrow_y;
+use t27os::group_view::gv_scroll;
+use t27os::group_view::gv_sdown_x;
+use t27os::group_view::gv_sup_x;
+use t27os::group_view::gv_unr_get;
+use t27os::group_view::gv_unr_set;
+use t27os::group_view::gv_unr_total;
+use t27os::group_view::gv_up_x;
+use t27os::group_core::gt_id;
+use t27os::group_core::gt_idx;
+use t27os::group_core::gt_n;
+use t27os::group_core::gt_name;
+use t27os::group_core::gt_member;
+use t27os::group_core::gt_count;
+use t27os::group_core::GT_DUP;
+use t27os::group_core::GT_FULL;
+use t27os::group_core::GT_LEN;
+use t27os::group_core::GR_OK;
+use t27os::group_core::GR_NAME_MAX;
+use t27os::group_core::gl_pending_for;
+use t27os::chat_host::chh_load_group;
+use t27os::chat_host::chh_save_group;
+use t27os::chat_host::ghh_open;
+use t27os::chat_host::ghh_save;
+use t27os::chat_host::ghh_make;
+use t27os::chat_host::GHH_TABLE;
+use t27os::chat_host::grm_init;
+use t27os::chat_host::grm_load;
+use t27os::chat_host::grm_send;
+use t27os::chat_host::chm_tick_g;
+use t27os::chat_host::CHM_E_GNEW;
+use t27os::chat_host::CHM_E_GSTATUS;
+use t27os::chat_host::CHM_E_GDIRTY;
+use t27os::chat_host::GRM_LEN;
+use t27os::chat_core::cl_open_read;
+use t27os::peer_identity::crc32;
+use t27os::peer_identity::FT_HDR;
+use t27os::peer_identity::FT_ROW;
 use t27os::account_view::ac_wheel_area;
 use t27os::queen::QP_CLOSE;
 use t27os::account_view::AC_TOK_SIZE;
@@ -6502,7 +6633,9 @@ pub const TBO_HLANES_N : usize = 256;
 pub const TBO_IV : usize = 93696;
 /// A. the BACKUP / RESTORE panel's block (id_backup.t27 section 3): after the invitations, BK_CAP bytes.
 pub const TBO_BK : usize = 101908;
-pub const TB_SIZE : usize = 102932;
+/// GR. the groups' region (group_view.t27): after the backup panel, GV_CAP bytes.
+pub const TBO_GV : usize = 102932;
+pub const TB_SIZE : usize = 107540;
 pub const TG_KEY_RETURN : u64 = 36;
 pub const TG_KEY_BACKSPACE : u64 = 51;
 pub const TG_EV_CHAR : u32 = 99;
@@ -11083,20 +11216,45 @@ pub fn ac_hit_now(x: f64, y: f64, sw: f64, sh: f64, cl: []const u8) -> u32 {
 }
 
 /// The friends rows that fit while the invitations are shown (account_view ac_inv_dy).
-pub fn ac_vis_now(sh: f64, iv: []const u8) -> usize { return ac_rows_vis(sh - WS_TOP - ac_inv_dy(ac_inv_rows(iv_waiting(iv)))); }
+pub fn ac_vis_now(sh: f64, iv: []const u8) -> usize { return ac_vis_now_g(sh, iv, iv[0..0], iv[0..0]); }
+
+/// GR. The rows of the GROUPS part (group_view gv_rows) for the groups' region gv; 0 for an empty slice (no part).
+pub fn gw_part_rows(cl: []const u8, gv: []const u8, h: f64, dy: f64) -> usize {
+    if (gv.len < GV_CAP or cl.len < CL_CAP) { return 0; }
+    return gw_rows(cl, gv, h, dy);
+}
+
+/// The room the GROUPS part takes from the friends.
+pub fn gw_part_room(rows: usize) -> f64 {
+    if (rows == 0) { return 0.0; }
+    return gv_part_h(rows);
+}
+
+/// ac_vis_now with the GROUPS part under the friends.
+pub fn ac_vis_now_g(sh: f64, iv: []const u8, cl: []const u8, gv: []const u8) -> usize {
+    const h : f64 = sh - WS_TOP;
+    const dy : f64 = ac_inv_dy(ac_inv_rows(iv_waiting(iv)));
+    return ac_rows_vis(h - dy - gw_part_room(gw_part_rows(cl, gv, h, dy)));
+}
 
 /// ac_hit_now with the INVITATIONS part of the invitations table iv.
-pub fn ac_hit_now_iv(x: f64, y: f64, sw: f64, sh: f64, cl: []const u8, iv: []const u8) -> u32 {
+pub fn ac_hit_now_iv(x: f64, y: f64, sw: f64, sh: f64, cl: []const u8, iv: []const u8) -> u32 { return ac_hit_now_iv_g(x, y, sw, sh, cl, iv, iv[0..0]); }
+
+/// ac_hit_now_iv with the friends' rows that the GROUPS part leaves.
+pub fn ac_hit_now_iv_g(x: f64, y: f64, sw: f64, sh: f64, cl: []const u8, iv: []const u8, gv: []const u8) -> u32 {
     const h : f64 = sh - WS_TOP;
     const inv : usize = ac_inv_rows(iv_waiting(iv));
-    const vis : usize = ac_rows_vis(h - ac_inv_dy(inv));
+    const vis : usize = ac_vis_now_g(sh, iv, cl, gv);
     const raw : u32 = ac_hit_inv(x, y, qp_left(sw), QP_W, WS_TOP, h, inv, ac_rows_drawn(@as(usize, cl[FV_SHOWN]), vis), @as(usize, cl[FV_COUNT]), vis, ac_conf_row(cl), ac_upd_shown(cl));
     return ac_hit_qr(x, y, qp_left(sw), QP_W, WS_TOP, h, ac_inv_dy(inv), cl[CL_UP] != 0, ac_qr_is_big(cl), raw);
 }
 
 /// The wheel takes a step over the friends part, wherever the invitations moved it.
-pub fn ac_wheel_now(x: f64, y: f64, sw: f64, sh: f64, iv: []const u8) -> bool {
-    return ac_wheel_area(x, y, qp_left(sw), QP_W, WS_TOP + ac_inv_dy(ac_inv_rows(iv_waiting(iv))), ac_vis_now(sh, iv));
+pub fn ac_wheel_now(x: f64, y: f64, sw: f64, sh: f64, iv: []const u8) -> bool { return ac_wheel_now_g(x, y, sw, sh, iv, iv[0..0], iv[0..0]); }
+
+/// ac_wheel_now with the GROUPS part under the friends.
+pub fn ac_wheel_now_g(x: f64, y: f64, sw: f64, sh: f64, iv: []const u8, cl: []const u8, gv: []const u8) -> bool {
+    return ac_wheel_area(x, y, qp_left(sw), QP_W, WS_TOP + ac_inv_dy(ac_inv_rows(iv_waiting(iv))), ac_vis_now_g(sh, iv, cl, gv));
 }
 
 // ---------------------------------------------------------------- IV. invitations (invites.t27, owner 2026-10-22)
@@ -11340,9 +11498,21 @@ pub fn ac_call_or_message(cl: []u8, v: []u8, s: []u8, m: []u8, log: []u8, buf: [
 pub fn bk_have_id(cl: []const u8) -> bool { return id_check(cl[FE_ID .. FE_ID + ID_LEN]) == ID_OK; }
 
 /// ac_hit_now_iv with BACKUP, RESTORE and the backup panel over it.
-pub fn ac_hit_now_bk(x: f64, y: f64, sw: f64, sh: f64, cl: []const u8, iv: []const u8, bk: []const u8) -> u32 {
+pub fn ac_hit_now_bk(x: f64, y: f64, sw: f64, sh: f64, cl: []const u8, iv: []const u8, bk: []const u8) -> u32 { return ac_hit_now_bk_g(x, y, sw, sh, cl, iv, bk, bk[0..0]); }
+
+/// GR. The GROUPS part stands (the friends are shown: no backup panel, no large code in their place).
+pub fn gw_part_shown(cl: []const u8, bk: []const u8) -> bool { return bk_open_shown(bk) == false and (ac_qr_is_big(cl) == false or cl[CL_UP] == 0); }
+
+/// ac_hit_now_bk with the GROUPS part: "+", its arrows and rows answer GV_H_*, the rest of the part nothing.
+pub fn ac_hit_now_bk_g(x: f64, y: f64, sw: f64, sh: f64, cl: []const u8, iv: []const u8, bk: []const u8, gv: []const u8) -> u32 {
+    const h : f64 = sh - WS_TOP;
     const dy : f64 = ac_inv_dy(ac_inv_rows(iv_waiting(iv)));
-    return bk_hit(x, y, qp_left(sw), QP_W, WS_TOP, sh - WS_TOP, dy, bk_have_id(cl), bk_mode(bk), ac_hit_now_iv(x, y, sw, sh, cl, iv));
+    const rows : usize = gw_part_rows(cl, gv, h, dy);
+    if (rows > 0 and gw_part_shown(cl, bk)) {
+        const g : u32 = gv_hit(x, y, qp_left(sw), QP_W, WS_TOP, h, rows, gv_count(gv));
+        if (g != GV_H_NONE) { return g; }
+    }
+    return bk_hit(x, y, qp_left(sw), QP_W, WS_TOP, h, dy, bk_have_id(cl), bk_mode(bk), ac_hit_now_iv_g(x, y, sw, sh, cl, iv, gv));
 }
 
 /// After an opening: a refusal leaves its note; the identity already in use says so; else the bytes wait for YES.
@@ -11737,7 +11907,7 @@ fn draw_ac_qr(c: u64, qm: []const u8, n: usize, qx: f64, qy: f64, md: f64, over:
     }
 }
 
-fn draw_account_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, cl: []const u8, pf: []const u8, img: u64, ch: []const u8, kstored: []const u32, khl: []const u64, nvm: []const u8, kh: []const u8, now: u64, iv: []const u8, cnow: u64, bk: []const u8) -> void {
+fn draw_account_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, cl: []const u8, pf: []const u8, img: u64, ch: []const u8, kstored: []const u32, khl: []const u64, nvm: []const u8, kh: []const u8, now: u64, iv: []const u8, cnow: u64, bk: []const u8, gv: []const u8) -> void {
     const l : f64 = qp_left(sw);
     const t : f64 = WS_TOP;
     const h : f64 = sh - t;
@@ -11748,14 +11918,22 @@ fn draw_account_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, 
     const inv : usize = ac_inv_rows(ivn);
     const dy : f64 = ac_inv_dy(inv);
     const tf : f64 = t + dy;
-    const vis : usize = ac_rows_vis(h - dy);
+    // GR. the GROUPS part under the friends takes its rows from them (none while the backup panel or the large code
+    // stands in the friends' place)
+    const grows : usize = gw_part_rows(cl, gv, h, dy);
+    const gshown : bool = grows > 0 and gw_part_shown(cl, bk);
+    const vis : usize = ac_rows_vis(h - dy - gw_part_room(grows));
     const shown : usize = @as(usize, cl[FV_SHOWN]);
     const drawn : usize = ac_rows_drawn(shown, vis);
     const count : usize = @as(usize, cl[FV_COUNT]);
     const scroll : usize = @as(usize, cl[FV_SCROLL]);
     const conf : usize = ac_conf_row(cl);
     const bkhave : bool = bk_have_id(cl);
-    const hit : u32 = bk_hit(mx, my, l, QP_W, t, h, dy, bkhave, bk_mode(bk), ac_hit_qr(mx, my, l, QP_W, t, h, dy, cl[CL_UP] != 0, ac_qr_is_big(cl), ac_hit_inv(mx, my, l, QP_W, t, h, inv, drawn, count, vis, conf, ac_upd_shown(cl))));
+    var hit : u32 = bk_hit(mx, my, l, QP_W, t, h, dy, bkhave, bk_mode(bk), ac_hit_qr(mx, my, l, QP_W, t, h, dy, cl[CL_UP] != 0, ac_qr_is_big(cl), ac_hit_inv(mx, my, l, QP_W, t, h, inv, drawn, count, vis, conf, ac_upd_shown(cl))));
+    if (gshown) {
+        const ghit : u32 = gv_hit(mx, my, l, QP_W, t, h, grows, gv_count(gv));
+        if (ghit != GV_H_NONE) { hit = ghit; }
+    }
     // the key as a QR code (qr.t27): small in ME, large in place of the friends after a click on it
     var qm : [QR_CELLS_MAX]u8 = undefined;
     var qn : usize = 0;
@@ -11774,7 +11952,8 @@ fn draw_account_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, 
     cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
     draw_bytes(c, kit, "ACCOUNT", 7, x, t + 25.0, 11.5, WEIGHT_SEMIBOLD, false);
     draw_close_x(c, sw - QP_PAD - 8.0, t + 20.0, on_panel_close(mx, my, sw, t), 1.0);
-    // the number of invitations waiting, right of the title
+    // the number of invitations waiting, right of the title; then the unread lines of the groups (GR)
+    var headx : f64 = x + AC_INV_HEAD_DX;
     if (ivn > 0) {
         var hb : [32]u8 = undefined;
         const hn : usize = ac_inv_head_text(ivn, hb[0..32]);
@@ -11784,7 +11963,9 @@ fn draw_account_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, 
         cg_fill_path(c);
         cg_fill_rgba(c, 0.0, 0.0, 0.0, 0.85);
         draw_bytes(c, kit, hb[0..32], hn, x + AC_INV_HEAD_DX + 6.0, t + 24.0, 8.5, WEIGHT_SEMIBOLD, false);
+        headx = headx + hw + 6.0;
     }
+    if (gv.len >= GV_CAP) { headx = draw_gv_head(c, kit, headx, t, gv); }
     // CALL in the head while there is someone to call: the first friend in view who is online (ac_call_target)
     if (ac_hcall_shown(count)) {
         draw_ac_btn_h(c, kit, ac_hcall_x(l, QP_W), t + AC_HCALL_Y, AC_HCALL_W, AC_HCALL_H, "CALL", true, hit == AC_H_HCALL);
@@ -12055,6 +12236,8 @@ fn draw_account_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, 
             draw_fit(c, kit, line[0..96], n, x + 16.0, ry + 23.0, 9.0, 0.0, true, right);
             i = i + 1;
         }
+        // GR. the GROUPS part: under the friends, above the add part
+        if (gshown) { draw_gv_part(c, kit, l, t, h, cl, gv, grows, hit); }
     }
     // add a friend: the field takes a pasted or typed key; PASTE reads the clipboard; ADD checks the last symbol (one line)
     cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
@@ -12309,6 +12492,7 @@ pub fn ch_card(cl: []const u8, v: []u8, row: usize) -> void {
 pub fn ch_hit_now(x: f64, y: f64, sw: f64, sh: f64, v: []const u8) -> u32 {
     if (chv_mode(v) == CHV_M_CARD) { return chv_card_hit(x, y, qp_left(sw), QP_W, WS_TOP); }
     if (chv_mode(v) == CHV_M_CHAT) { return chv_chat_hit(x, y, qp_left(sw), QP_W, WS_TOP, sh - WS_TOP); }
+    if (gv_chat_shown(v)) { return gv_chat_hit(x, y, qp_left(sw), QP_W, WS_TOP, sh - WS_TOP); }
     return CHV_H_NONE;
 }
 
@@ -12433,12 +12617,13 @@ pub fn ch_do(cl: []u8, v: []u8, s: []u8, m: []u8, log: []u8, buf: []u8, w: []u64
 /// The message session is served on every pass while messages are up, whatever the panel shows and whatever the call
 /// block holds: a call that ended stays CK_ENDED until its CLOSE is clicked, and an incoming session from a friend must
 /// still be answered, its lines logged and ACKed, the unread count kept (READ goes out only once the chat is opened).
-pub fn ch_tick(cl: []u8, v: []u8, s: []u8, m: []u8, log: []u8, asm: []u8, buf: []u8, w: []u64, cs: []u8, iv: []u8, tz: u64, h: f64) -> void {
-    ch_tick_at(cl, v, s, m, log, asm, buf, w, cs, iv, tz, h, ckh_ms());
+pub fn ch_tick(cl: []u8, v: []u8, s: []u8, m: []u8, log: []u8, asm: []u8, buf: []u8, w: []u64, cs: []u8, iv: []u8, gv: []u8, gx: []u8, tz: u64, h: f64) -> void {
+    ch_tick_at(cl, v, s, m, log, asm, buf, w, cs, iv, gv, gx, tz, h, ckh_ms());
 }
 
-/// ch_tick at the time now (ms of ckh_ms).
-pub fn ch_tick_at(cl: []u8, v: []u8, s: []u8, m: []u8, log: []u8, asm: []u8, buf: []u8, w: []u64, cs: []u8, iv: []u8, tz: u64, h: f64, now: u64) -> void {
+/// ch_tick at the time now (ms of ckh_ms). gv and gx are the groups' region and the open group's buffer (GR; empty
+/// slices: no group).
+pub fn ch_tick_at(cl: []u8, v: []u8, s: []u8, m: []u8, log: []u8, asm: []u8, buf: []u8, w: []u64, cs: []u8, iv: []u8, gv: []u8, gx: []u8, tz: u64, h: f64, now: u64) -> void {
     // the call block goes back to its launch setting once a call is over (CALL turned video and the camera off for it)
     if (cl[CL_NOCAM] != 0 and cs_state(cs) == CK_IDLE) {
         cl[CL_NOCAM] = 0;
@@ -12450,12 +12635,17 @@ pub fn ch_tick_at(cl: []u8, v: []u8, s: []u8, m: []u8, log: []u8, asm: []u8, buf
         if (w[CHW_AID] == 2) { ch_message_at(cl, v, s, m, log, buf, w, now); }
         w[CHW_AID] = 0;
     }
+    // GR. the test aid T27OS_GROUP: the first group's chat, or NEW GROUP, once the cabinet is open
+    if (gv.len >= GV_CAP and gv[GV_G_AID] != 0 and cl[CL_OPEN] != 0 and cl[AC_ON] != 0) {
+        if (gv[GV_G_AID] == 1) { gv_new_open(gv); } else if (gv_count(gv) > 0) { gw_open_chat(cl, v, gv, gx, buf, 0, now); }
+        gv[GV_G_AID] = 0;
+    }
     // the test aid T27OS_CHAT_SAY: once the chat is open, one numbered line a second through the field and ch_send
-    if (w[CHW_SAY] != 0 and w[CHW_AID] == 0 and chv_mode(v) == CHV_M_CHAT and now >= w[CHW_SAY_AT]) {
+    if (w[CHW_SAY] != 0 and w[CHW_AID] == 0 and (chv_mode(v) == CHV_M_CHAT or gv_chat_shown(v)) and now >= w[CHW_SAY_AT]) {
         var st : [32]u8 = undefined;
         const sn : usize = ch_say_text(st[0..32], w[CHW_SAY_N] - w[CHW_SAY] + 1, w[CHW_SAY_N]);
         chv_type_bytes(v, st[0..32], sn);
-        ch_send(cl, v, s, m, log, buf, w);
+        if (gv_chat_shown(v)) { gw_send(cl, v, gv, gx, now); } else { ch_send(cl, v, s, m, log, buf, w); }
         w[CHW_SAY] = w[CHW_SAY] - 1;
         w[CHW_SAY_AT] = now + CH_SAY_MS;
     }
@@ -12463,7 +12653,7 @@ pub fn ch_tick_at(cl: []u8, v: []u8, s: []u8, m: []u8, log: []u8, asm: []u8, buf
     if (w[CHW_TR_N] != @as(u64, ft_count(cl[FE_FT .. FE_FT + FT_LEN])) + 1) { ch_trust_load(cl, v, w); }
     ch_trust_session(cl, v, w, cs, now);
     ch_trust_session(cl, v, w, s, now);
-    if (chv_mode(v) != CHV_M_OFF) {
+    if (chv_mode(v) == CHV_M_CARD or chv_mode(v) == CHV_M_CHAT) {
         const row : usize = fv_find_fp(cl, v[CHV_FP .. CHV_FP + 10]);
         if (row >= FV_ROWS_SNAP) {
             chv_close(v);
@@ -12472,7 +12662,11 @@ pub fn ch_tick_at(cl: []u8, v: []u8, s: []u8, m: []u8, log: []u8, asm: []u8, buf
             chv_friend(v, cl[r + FR_NICK .. r + FR_NICK + 24], @as(usize, cl[r + FR_NICKLEN]), cl[r + FR_ONLINE] != 0, fv_get32(cl, r + FR_AGO));
         }
     }
-    if (v[CHV_UP] == 0) { return; }
+    if (v[CHV_UP] == 0) {
+        gw_tick(cl, v, gv, gx, buf, 0, tz, h, now);
+        return;
+    }
+    var gev : u32 = 0;
     if (w[CHW_LOADED] == 0) {
         // no log open: read the socket; a friend whose session rings gets its log opened (answered next pass); someone
         // who is not a friend is answered for an invitation (ivw_ringing) and its end is written (ivw_take)
@@ -12503,7 +12697,14 @@ pub fn ch_tick_at(cl: []u8, v: []u8, s: []u8, m: []u8, log: []u8, asm: []u8, buf
         }
         const a : u64 = ch_friend_addr(cl, lf[0..10]);
         chm_addr(m, a / 65536, a % 65536);
-        const ev : u32 = chm_tick(m, s, log, asm, cl[FE_FT .. FE_FT + FT_LEN], cl[FE_FP .. FE_FP + 10], now);
+        // GR. the open group's payloads ride this friend's session, and its lines owed to this friend go out over it
+        var ev : u32 = 0;
+        if (gw_active(gv, gx)) {
+            ev = chm_tick_g(m, s, log, asm, cl[FE_FT .. FE_FT + FT_LEN], cl[FE_FP .. FE_FP + 10], now, gx[GX_GRM..GX_ASM], gv[GV_T..GV_T_END], gx[GX_LOG..GX_LEN], gx[GX_ASM..GX_LOG]);
+        } else {
+            ev = chm_tick(m, s, log, asm, cl[FE_FT .. FE_FT + FT_LEN], cl[FE_FP .. FE_FP + 10], now);
+        }
+        gev = ev;
         if ((ev & CHM_E_INVITE) != 0) { ivw_take(cl, s, iv, now); }
         if ((ev & CHM_E_STRANGER) != 0) { ivw_ringing(cl, s, iv, now); }
         const shown : bool = chv_mode(v) == CHV_M_CHAT and chv_is(v, lf[0..10]);
@@ -12529,6 +12730,9 @@ pub fn ch_tick_at(cl: []u8, v: []u8, s: []u8, m: []u8, log: []u8, asm: []u8, buf
             w[CHW_HH] = hu;
         }
     }
+    // GR. the fan-out to the next member owed, the open group's events, save and history
+    gw_rotate(cl, v, s, m, log, buf, w, gv, gx);
+    gw_tick(cl, v, gv, gx, buf, gev, tz, h, now);
 }
 
 /// The unread badge on a friend's row: a white pill ending at `right`, the count in dark ink.
@@ -12630,34 +12834,10 @@ fn draw_ch_card(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, cl: []
     draw_ch_note(c, kit, cl, v, x, right, t + CHV_CARD_NOTE_BASE, sh);
 }
 
-fn draw_ch_chat(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, v: []const u8) -> void {
-    const l : f64 = qp_left(sw);
-    const t : f64 = WS_TOP;
-    const h : f64 = sh - t;
+/// The history of the chat on screen (a friend's or a group's): the items chv_layout or gv_layout left, clipped to the
+/// area between the header and the field; a group's incoming bubble is headed by its sender's name (GV_I_NAME).
+fn draw_ch_history(c: u64, kit: [48]u64, l: f64, t: f64, h: f64, v: []const u8) -> void {
     const x : f64 = l + QP_PAD;
-    const right : f64 = l + QP_W - QP_PAD;
-    const hit : u32 = chv_chat_hit(mx, my, l, QP_W, t, h);
-    var line : [96]u8 = undefined;
-    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LINE_WHITE));
-    cg_fill_rect(c, l, t, HAIR, sh - t);
-    // the header: back, the friend's nickname and state, CALL and VIDEO, the panel's close mark
-    draw_ac_btn_small(c, kit, chv_back_x(l), t + CHV_BACK_Y, CHV_BACK_W, "<", hit == CHV_H_BACK);
-    const nl : usize = @as(usize, v[CHV_NICKLEN]);
-    const nx : f64 = chv_hdr_nick_x(l);
-    if (nl > 0) {
-        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
-        draw_fit(c, kit, v[CHV_NICK .. CHV_NICK + 32], nl, nx, t + CHV_HDR_NICK_BASE, 11.5, WEIGHT_SEMIBOLD, false, chv_hdr_call_x(l, QP_W) - 6.0);
-    } else {
-        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
-        draw_fit(c, kit, "(no name yet)", 13, nx, t + CHV_HDR_NICK_BASE, 11.5, 0.0, false, chv_hdr_call_x(l, QP_W) - 6.0);
-    }
-    const online : bool = v[CHV_ONLINE] != 0;
-    var n : usize = chv_status_put(line[0..96], online, fv_get32(v, CHV_AGO), 0);
-    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
-    draw_fit(c, kit, line[0..96], n, nx, t + CHV_HDR_STATE_BASE, 9.0, 0.0, false, chv_hdr_call_x(l, QP_W) - 6.0);
-    draw_ac_btn_small(c, kit, chv_hdr_call_x(l, QP_W), t + CHV_BACK_Y, CHV_CHIP_W, "CALL", hit == CHV_H_CALL);
-    draw_ac_btn_small(c, kit, chv_hdr_video_x(l, QP_W), t + CHV_BACK_Y, CHV_CHIP_W, "VIDEO", hit == CHV_H_VIDEO);
-    draw_close_x(c, sw - QP_PAD - 8.0, t + 20.0, on_panel_close(mx, my, sw, t), 1.0);
     // the history: the items chv_layout left, clipped to the area between the header and the field
     const ht : f64 = chv_hist_top(t);
     const hh : f64 = chv_hist_h(h);
@@ -12686,6 +12866,9 @@ fn draw_ch_chat(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, v: []c
         } else if (kind == CHV_I_LINE) {
             cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
             draw_fit(c, kit, v[o .. o + len], len, ix, iy + 11.0, CHV_FONT, 0.0, false, ix + iw + 4.0);
+        } else if (kind == GV_I_NAME) {
+            cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+            draw_fit(c, kit, v[o .. o + len], len, ix, iy + 9.0, CHV_META_FONT, WEIGHT_SEMIBOLD, false, ix + iw + 4.0);
         } else if (kind == CHV_I_META) {
             const st : u32 = chv_item_state(v, k);
             var ink : f64 = lv(kit, THV_MUTED_WHITE);
@@ -12698,15 +12881,10 @@ fn draw_ch_chat(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, v: []c
         k = k + 1;
     }
     cg_restore(c);
-    if (fv_get32(v, CHV_COUNT) == 0) {
-        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
-        draw_cl_wrap(c, kit, chv_empty_text(0), x, right, ht + 0.5 * hh, 10.0, 2, sh);
-    }
-    if (fv_get32(v, CHV_SCROLL) > 0) {
-        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
-        draw_bytes(c, kit, "newer below", 11, right - 52.0, ht + hh - 4.0, 8.5, 0.0, false);
-    }
-    // the field (the end of a long text, a caret while typing) and SEND
+}
+
+/// The chat's field (the end of a long text, a caret while typing) and SEND.
+fn draw_ch_field(c: u64, kit: [48]u64, l: f64, t: f64, h: f64, v: []const u8, hit: u32) -> void {
     const fx : f64 = chv_field_x(l);
     const fy : f64 = chv_field_y(t, h);
     const fw : f64 = chv_field_w(QP_W);
@@ -12737,6 +12915,48 @@ fn draw_ch_chat(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, v: []c
         draw_fit(c, kit, tb[0..2008], q, fx + 8.0, fy + 17.0, CHV_FONT, 0.0, false, fx + fw - 6.0);
     }
     draw_cl_btn(c, kit, chv_send_x(l, QP_W), fy, CHV_SEND_W, "SEND", hit == CHV_H_SEND);
+}
+
+fn draw_ch_chat(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, v: []const u8) -> void {
+    const l : f64 = qp_left(sw);
+    const t : f64 = WS_TOP;
+    const h : f64 = sh - t;
+    const x : f64 = l + QP_PAD;
+    const right : f64 = l + QP_W - QP_PAD;
+    const hit : u32 = chv_chat_hit(mx, my, l, QP_W, t, h);
+    var line : [96]u8 = undefined;
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LINE_WHITE));
+    cg_fill_rect(c, l, t, HAIR, sh - t);
+    // the header: back, the friend's nickname and state, CALL and VIDEO, the panel's close mark
+    draw_ac_btn_small(c, kit, chv_back_x(l), t + CHV_BACK_Y, CHV_BACK_W, "<", hit == CHV_H_BACK);
+    const nl : usize = @as(usize, v[CHV_NICKLEN]);
+    const nx : f64 = chv_hdr_nick_x(l);
+    if (nl > 0) {
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+        draw_fit(c, kit, v[CHV_NICK .. CHV_NICK + 32], nl, nx, t + CHV_HDR_NICK_BASE, 11.5, WEIGHT_SEMIBOLD, false, chv_hdr_call_x(l, QP_W) - 6.0);
+    } else {
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+        draw_fit(c, kit, "(no name yet)", 13, nx, t + CHV_HDR_NICK_BASE, 11.5, 0.0, false, chv_hdr_call_x(l, QP_W) - 6.0);
+    }
+    const online : bool = v[CHV_ONLINE] != 0;
+    var n : usize = chv_status_put(line[0..96], online, fv_get32(v, CHV_AGO), 0);
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+    draw_fit(c, kit, line[0..96], n, nx, t + CHV_HDR_STATE_BASE, 9.0, 0.0, false, chv_hdr_call_x(l, QP_W) - 6.0);
+    draw_ac_btn_small(c, kit, chv_hdr_call_x(l, QP_W), t + CHV_BACK_Y, CHV_CHIP_W, "CALL", hit == CHV_H_CALL);
+    draw_ac_btn_small(c, kit, chv_hdr_video_x(l, QP_W), t + CHV_BACK_Y, CHV_CHIP_W, "VIDEO", hit == CHV_H_VIDEO);
+    draw_close_x(c, sw - QP_PAD - 8.0, t + 20.0, on_panel_close(mx, my, sw, t), 1.0);
+    draw_ch_history(c, kit, l, t, h, v);
+    const ht : f64 = chv_hist_top(t);
+    const hh : f64 = chv_hist_h(h);
+    if (fv_get32(v, CHV_COUNT) == 0) {
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+        draw_cl_wrap(c, kit, chv_empty_text(0), x, right, ht + 0.5 * hh, 10.0, 2, sh);
+    }
+    if (fv_get32(v, CHV_SCROLL) > 0) {
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+        draw_bytes(c, kit, "newer below", 11, right - 52.0, ht + hh - 4.0, 8.5, 0.0, false);
+    }
+    draw_ch_field(c, kit, l, t, h, v, hit);
     // the note line: a chat note, else how many of the own lines wait for the friend
     const vc : u32 = @as(u32, v[CHV_NOTE]);
     if (vc != 0) {
@@ -12747,6 +12967,506 @@ fn draw_ch_chat(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, v: []c
         cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
         draw_fit(c, kit, line[0..96], n, x, chv_note_base(t, h), 9.0, 0.0, false, right);
     }
+}
+
+// ======================================================================================================
+// GR. GROUPS IN THE CABINET (owner, 2026-10-23; Refs gHashTag/t27#11560). group_view.t27 decides (the GROUPS part, NEW
+// GROUP, the group's chat in the chat_view region, the states, the unread badges); group_core.t27 and chat_host.t27
+// keep the table, the logs and the fan-out. This block owns:
+//   - the groups table: the GV region's copy of ~/.t27os/groups.t27, read at launch, written whole after CREATE;
+//   - the open group (one at a time, chat_host grm_*): its block, its log and the log's assembly in one buffer of main
+//     (gx: GX_GRM | GX_ASM | GX_LOG). Its group payloads ride every message session the window runs (chm_tick_g); the
+//     first group is open from launch, so its lines are taken even before the person opens it;
+//   - the fan-out: the window runs one message session at a time, so a line owed to several members goes to them one
+//     after the other: while no friend's chat is on screen and the friend log open owes nothing, the next member who
+//     is owed a line and is online gets its log opened (ch_open_log), and chm_tick_g dials it and sends;
+//   - opening the group's chat reads its lines here (the badge goes); no READ goes out: group_core has no READ frame;
+//   - T27OS_GROUP=chat or =new (a test aid, off by default): the first group's chat, or NEW GROUP, once the cabinet is
+//     open; T27OS_CHAT_SAY types into the group's chat as it does into a friend's.
+// ======================================================================================================
+pub const GX_GRM : usize = 0;
+pub const GX_ASM : usize = 256;
+pub const GX_LOG : usize = 8320;
+pub const GX_LEN : usize = 1024360;
+
+/// A u64 slot of the groups' region (little endian).
+fn gw_get64(b: []const u8, at: usize) -> u64 {
+    var v : u64 = 0;
+    var i : usize = 8;
+    while (i > 0) {
+        i = i - 1;
+        v = v * 256 + @as(u64, b[at + i]);
+    }
+    return v;
+}
+
+fn gw_put64(b: []u8, at: usize, v: u64) -> void {
+    var x : u64 = v;
+    var i : usize = 0;
+    while (i < 8) {
+        b[at + i] = @as(u8, @intCast(x % 256));
+        x = x / 256;
+        i = i + 1;
+    }
+}
+
+/// A group is open: the region and the buffer are whole and a group was read into them.
+pub fn gw_active(gv: []const u8, gx: []const u8) -> bool { return gv.len >= GV_CAP and gx.len >= GX_LEN and gv[GV_G_ON] != 0; }
+
+/// The table index of the open group.
+fn gw_gi(gv: []const u8) -> usize { return @as(usize, gv[GV_G_ON]) - 1; }
+
+/// The open group's log is written when it changed (at once or after its delay).
+fn gw_flush(gv: []u8, gx: []const u8, buf: []u8) -> bool {
+    if (gw_active(gv, gx) == false or gw_get64(gv, GV_G_SAVE_AT) == 0) { return true; }
+    gw_put64(gv, GV_G_SAVE_AT, 0);
+    return chh_save_group(gx[GX_LOG..GX_LEN], buf);
+}
+
+/// Group gi becomes the open one (the one before it is written first): its block and its log read. False when the
+/// group is not in the table, this device is not in it, or its log cannot be read.
+pub fn gw_load(cl: []const u8, gv: []u8, gx: []u8, buf: []u8, gi: usize) -> bool {
+    if (gv.len < GV_CAP or gx.len < GX_LEN or gi >= gv_count(gv)) { return false; }
+    if (@as(usize, gv[GV_G_ON]) == gi + 1) { return true; }
+    gw_flush(gv, gx, buf);
+    gv[GV_G_ON] = 0;
+    if (grm_init(gx[GX_GRM..GX_ASM], gv[GV_T..GV_T_END], gt_id(gv[GV_T..GV_T_END], gi), cl[FE_FP .. FE_FP + 10]) == false) { return false; }
+    if ((grm_load(gx[GX_GRM..GX_ASM], gv[GV_T..GV_T_END], cl[FE_FT .. FE_FT + FT_LEN], gx[GX_LOG..GX_LEN], CL_KEEP, buf) & 255) == CHH_IOERR) { return false; }
+    gv[GV_G_ON] = @as(u8, @intCast(gi + 1));
+    gv_unr_set(gv, gi, cl_unread(gx[GX_LOG..GX_LEN]));
+    fv_put32(gv, GV_G_HH, 0);
+    return true;
+}
+
+/// Launch, after ch_boot: the table, the unread count of every group from its log on disk (one after the other in the
+/// open group's log), then the first group open. The test aid T27OS_GROUP.
+pub fn gw_boot(cl: []const u8, gv: []u8, gx: []u8, buf: []u8) -> void {
+    var i : usize = 0;
+    while (i < GV_T) {
+        gv[i] = 0;
+        i = i + 1;
+    }
+    ghh_open(gv[GV_T..GV_T_END]);
+    var e : [8]u8 = undefined;
+    const en : usize = cl_env("T27OS_GROUP", e[0..8]);
+    if (en == 4 and e[0] == 99 and e[1] == 104 and e[2] == 97 and e[3] == 116) { gv[GV_G_AID] = 2; }
+    if (en == 3 and e[0] == 110 and e[1] == 101 and e[2] == 119) { gv[GV_G_AID] = 1; }
+    const n : usize = gv_count(gv);
+    i = 0;
+    while (i < n) {
+        if (chh_load_group(gt_id(gv[GV_T..GV_T_END], i), gx[GX_LOG..GX_LEN], CL_KEEP, buf) == CHH_LOADED) { gv_unr_set(gv, i, cl_unread(gx[GX_LOG..GX_LEN])); }
+        i = i + 1;
+    }
+    if (n > 0) { gw_load(cl, gv, gx, buf, 0); }
+}
+
+/// A group's row: its chat, its lines read here (written soon), the badge gone.
+pub fn gw_open_chat(cl: []const u8, v: []u8, gv: []u8, gx: []u8, buf: []u8, gi: usize, now: u64) -> void {
+    if (gi >= gv_count(gv)) { return; }
+    gv_chat_open(v, gt_id(gv[GV_T..GV_T_END], gi), gt_name(gv[GV_T..GV_T_END], gi));
+    gv[GV_NOTE] = 0;
+    if (gw_load(cl, gv, gx, buf, gi) == false) {
+        v[CHV_NOTE] = @as(u8, @intCast(CHV_N_NOSAVE));
+        return;
+    }
+    if (gv_read_all(gv, gi, gx[GX_LOG..GX_LEN])) { gw_put64(gv, GV_G_SAVE_AT, now + CH_SAVE_MS); }
+    if (v[CHV_UP] == 0) { v[CHV_NOTE] = @as(u8, @intCast(CHV_N_OFF)); }
+}
+
+/// The members of the open group that can be sent to now: friends in view with an address (by member index).
+pub fn gw_online(cl: []const u8, gv: []const u8) -> u32 {
+    const gi : usize = gw_gi(gv);
+    const n : usize = gt_n(gv[GV_T..GV_T_END], gi);
+    var m : u32 = 0;
+    var k : usize = 0;
+    while (k < n) {
+        if (ch_friend_addr(cl, gt_member(gv[GV_T..GV_T_END], gi, k)) != 0) { m = m | (@as(u32, 1) << @as(u32, @intCast(k))); }
+        k = k + 1;
+    }
+    return m;
+}
+
+/// Return or SEND in the group's chat: the text into the group's log as PENDING for every member who is a friend
+/// (written at once); the fan-out takes it to them.
+pub fn gw_send(cl: []const u8, v: []u8, gv: []u8, gx: []u8, now: u64) -> void {
+    if (gv_chat_shown(v) == false or gw_active(gv, gx) == false) { return; }
+    if (v[CHV_UP] == 0) {
+        v[CHV_NOTE] = @as(u8, @intCast(CHV_N_OFF));
+        return;
+    }
+    var t : [2000]u8 = undefined;
+    const n : usize = chv_take(v, t[0..2000]);
+    if (n == 0) { return; }
+    if (grm_send(gx[GX_GRM..GX_ASM], gv[GV_T..GV_T_END], cl[FE_FT .. FE_FT + FT_LEN], gx[GX_LOG..GX_LEN], t[0..n], now, gw_online(cl, gv)) == 0) {
+        gv[GV_NOTE] = @as(u8, @intCast(GV_N_NOBODY));
+        return;
+    }
+    gv[GV_NOTE] = 0;
+    gw_put64(gv, GV_G_SAVE_AT, now);
+    v[CHV_DIRTY] = 1;
+}
+
+/// One hit in the group's chat: back (the log written when it changed), the field, SEND.
+pub fn gw_chat_do(cl: []const u8, v: []u8, gv: []u8, gx: []u8, buf: []u8, hit: u32) -> void {
+    if (hit == CHV_H_BACK) {
+        if (gw_flush(gv, gx, buf) == false) { v[CHV_NOTE] = @as(u8, @intCast(CHV_N_NOSAVE)); }
+        gv_chat_back(v);
+        gv[GV_NOTE] = 0;
+    } else if (hit == CHV_H_FIELD or hit == CHV_H_HIST) {
+        v[CHV_FOCUS] = 1;
+    } else if (hit == CHV_H_SEND) {
+        v[CHV_FOCUS] = 1;
+        gw_send(cl, v, gv, gx, ckh_ms());
+    }
+}
+
+/// CREATE: the ticked friends and this device as a group (chat_host ghh_make), the table written; the group stands
+/// in the list at once. The GV_N_* note, GV_N_NONE when it was made.
+pub fn gw_create(cl: []const u8, gv: []u8, now: u64) -> u32 {
+    var why : u32 = gv_create_why(gv_picks(gv), gv_name_of(gv));
+    if (why == GV_N_NONE and bk_have_id(cl) == false) { why = GV_N_NOKEY; }
+    if (why != GV_N_NONE) {
+        gv[GV_NOTE] = @as(u8, @intCast(why));
+        return why;
+    }
+    var fps : [80]u8 = undefined;
+    const k : usize = gv_picked_fps(gv, cl[FE_FT .. FE_FT + FT_LEN], fps[0..80]);
+    var nm : [32]u8 = undefined;
+    const nl : usize = @as(usize, gv[GV_NLEN]);
+    var i : usize = 0;
+    while (i < nl) {
+        nm[i] = gv[GV_NAME + i];
+        i = i + 1;
+    }
+    var id : [8]u8 = undefined;
+    const r : u32 = ghh_make(gv[GV_T..GV_T_END], cl[FE_FT .. FE_FT + FT_LEN], cl[FE_FP .. FE_FP + 10], fps[0..80], k, nm[0..nl], now, id[0..8]);
+    if (r != GR_OK) {
+        why = GV_N_BAD;
+        if (r == (GHH_TABLE | (GT_DUP << 8))) { why = GV_N_DUP; }
+        if (r == (GHH_TABLE | (GT_FULL << 8))) { why = GV_N_TABLE; }
+        gv[GV_NOTE] = @as(u8, @intCast(why));
+        return why;
+    }
+    gv_new_close(gv);
+    gv[GV_NOTE] = 0;
+    if (ghh_save(gv[GV_T..GV_T_END]) == false) { gv[GV_NOTE] = @as(u8, @intCast(GV_N_NOSAVE)); }
+    // the new group comes into view at the end of the list
+    fv_put32(gv, GV_GSCROLL, 255);
+    return gv[GV_NOTE];
+}
+
+/// One hit in NEW GROUP. h is the panel's height.
+pub fn gw_new_do(cl: []const u8, gv: []u8, hit: u32, h: f64) -> void {
+    const nf : usize = @as(usize, ft_count(cl[FE_FT .. FE_FT + FT_LEN]));
+    const rows : usize = gv_pick_rows(h);
+    var sc : usize = @as(usize, fv_get32(gv, GV_SSCROLL));
+    gv[GV_FOCUS] = 0;
+    if (hit == GV_S_BACK) {
+        gv_new_close(gv);
+        gv[GV_NOTE] = 0;
+    } else if (hit == GV_S_NAME) {
+        gv[GV_FOCUS] = 1;
+    } else if (hit == GV_S_CREATE) {
+        gw_create(cl, gv, ckh_ms());
+    } else if (hit == GV_S_UP or hit == GV_S_DOWN) {
+        fv_put32(gv, GV_SSCROLL, @as(u64, gv_scroll(sc, hit == GV_S_UP, nf, rows)));
+    } else if (hit >= GV_S_PICK) {
+        gv_pick_toggle(gv, sc + @as(usize, hit - GV_S_PICK), nf);
+    }
+}
+
+/// The GROUPS part's rows now (group_view gv_rows), for a panel of height h whose friends part moved dy.
+pub fn gw_rows(cl: []const u8, gv: []const u8, h: f64, dy: f64) -> usize { return gv_rows(gv_count(gv), @as(usize, cl[FV_COUNT]), h, dy); }
+
+/// The first group in view, kept inside the list.
+fn gw_gscroll(gv: []const u8, rows: usize) -> usize {
+    const n : usize = gv_count(gv);
+    var sc : usize = @as(usize, fv_get32(gv, GV_GSCROLL));
+    if (n <= rows) { return 0; }
+    if (sc > n - rows) { sc = n - rows; }
+    return sc;
+}
+
+/// One hit in the GROUPS part: "+" opens NEW GROUP, a row the group's chat, the arrows move the list.
+pub fn gw_part_do(cl: []u8, v: []u8, gv: []u8, gx: []u8, buf: []u8, hit: u32, rows: usize) -> void {
+    cl[CL_FOCUS] = 0;
+    const n : usize = gv_count(gv);
+    const sc : usize = gw_gscroll(gv, rows);
+    if (hit == GV_H_PLUS) {
+        gv_new_open(gv);
+    } else if (hit == GV_H_UP or hit == GV_H_DOWN) {
+        fv_put32(gv, GV_GSCROLL, @as(u64, gv_scroll(sc, hit == GV_H_UP, n, rows)));
+    } else if (hit >= GV_H_ROW and hit < GV_H_END) {
+        const gi : usize = gv_row_group(sc, @as(usize, hit - GV_H_ROW), n);
+        if (gi < n) { gw_open_chat(cl, v, gv, gx, buf, gi, ckh_ms()); }
+    }
+}
+
+/// The fan-out: with no friend's chat on screen, the session idle and the friend log open owing nothing, the next
+/// member who is owed a line of the open group and is online gets its log opened; chm_tick_g dials it next pass.
+pub fn gw_rotate(cl: []const u8, v: []u8, s: []u8, m: []u8, log: []u8, buf: []u8, w: []u64, gv: []u8, gx: []u8) -> void {
+    if (gw_active(gv, gx) == false or cs_state(s) != CK_IDLE) { return; }
+    if (chv_mode(v) == CHV_M_CHAT or chv_mode(v) == CHV_M_CARD) { return; }
+    if (w[CHW_LOADED] != 0 and cl_pending(log) > 0) { return; }
+    const gi : usize = gw_gi(gv);
+    const t : []const u8 = gv[GV_T..GV_T_END];
+    const n : usize = gt_n(t, gi);
+    const me : u32 = gt_idx(t, gi, cl[FE_FP .. FE_FP + 10]);
+    var j : usize = 0;
+    while (j < n) {
+        const k : usize = (@as(usize, gv[GV_G_NEXT]) + j) % n;
+        const kk : u32 = @as(u32, @intCast(k));
+        const fp : []const u8 = gt_member(t, gi, k);
+        if (kk != me and gl_pending_for(gx[GX_LOG..GX_LEN], kk) > 0 and ch_friend_addr(cl, fp) != 0) {
+            if (w[CHW_LOADED] != 0 and ch_log_is(log, fp)) { return; }
+            ch_open_log(cl, v, s, m, log, buf, w, fp);
+            gv[GV_G_NEXT] = @as(u8, @intCast((k + 1) % n));
+            return;
+        }
+        j = j + 1;
+    }
+}
+
+/// The open group's part of a pass: the events of chm_tick_g (a line in, a state changed), the save, the history.
+pub fn gw_tick(cl: []const u8, v: []u8, gv: []u8, gx: []u8, buf: []u8, ev: u32, tz: u64, h: f64, now: u64) -> void {
+    if (gw_active(gv, gx) == false) { return; }
+    const gi : usize = gw_gi(gv);
+    const glog : []u8 = gx[GX_LOG..GX_LEN];
+    const shown : bool = gv_chat_shown(v);
+    if ((ev & CHM_E_GNEW) != 0 and shown) {
+        if (cl_open_read(glog) != 0 and gw_get64(gv, GV_G_SAVE_AT) == 0) { gw_put64(gv, GV_G_SAVE_AT, now + CH_SAVE_MS); }
+    }
+    if ((ev & (CHM_E_GNEW | CHM_E_GSTATUS | CHM_E_GDIRTY)) != 0) { v[CHV_DIRTY] = 1; }
+    if ((ev & CHM_E_GDIRTY) != 0 and gw_get64(gv, GV_G_SAVE_AT) == 0) { gw_put64(gv, GV_G_SAVE_AT, now + CH_SAVE_MS); }
+    gv_unr_set(gv, gi, cl_unread(glog));
+    const at : u64 = gw_get64(gv, GV_G_SAVE_AT);
+    if (at != 0 and now >= at) {
+        if (gw_flush(gv, gx, buf) == false) { v[CHV_NOTE] = @as(u8, @intCast(CHV_N_NOSAVE)); }
+    }
+    if (shown) {
+        const hh : f64 = chv_hist_h(h);
+        const hu : u64 = @as(u64, @intFromFloat(hh));
+        if (v[CHV_DIRTY] != 0 or hu != fv_get32(gv, GV_G_HH) or now >= gw_get64(gv, GV_G_LAYOUT_AT) + CH_RELAYOUT_MS) {
+            const t : []const u8 = gv[GV_T..GV_T_END];
+            const me : u32 = gt_idx(t, gi, cl[FE_FP .. FE_FP + 10]);
+            var names : [200]u8 = undefined;
+            gv_names(t, gi, cl[FE_FT .. FE_FT + FT_LEN], me, names[0..GV_NAMES]);
+            gv_layout(v, glog, now, tz, QP_W, hh, names[0..GV_NAMES], me, gt_n(t, gi));
+            gw_put64(gv, GV_G_LAYOUT_AT, now);
+            fv_put32(gv, GV_G_HH, hu);
+        }
+    }
+}
+
+/// The frame key's part of the groups: the folded head and the table's CRC (a group made or a name changed redraws).
+pub fn gw_key(gv: []const u8) -> u64 {
+    var k : u64 = @as(u64, crc32(gv[GV_T..GV_T_END], GT_LEN));
+    var i : usize = 0;
+    while (i < GV_KEY_END) {
+        k = k * 31 + @as(u64, gv[i]);
+        k = k % 1099511627776;
+        i = i + 1;
+    }
+    return k;
+}
+
+/// The GROUPS part of the cabinet: the label, the arrows for a long list, "+", a row a group (its name, how many
+/// people, the unread badge), or the line that says how to make one.
+fn draw_gv_part(c: u64, kit: [48]u64, l: f64, t: f64, h: f64, cl: []const u8, gv: []const u8, rows: usize, hit: u32) -> void {
+    const x : f64 = l + QP_PAD;
+    const right : f64 = l + QP_W - QP_PAD;
+    const n : usize = gv_count(gv);
+    const sc : usize = gw_gscroll(gv, rows);
+    var line : [64]u8 = undefined;
+    var k0 : usize = gv_label(n, line[0..64]);
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+    draw_fit(c, kit, line[0..64], k0, x, gv_label_y(t, h, rows), 9.5, 0.0, false, gv_up_x(l, QP_W) - 6.0);
+    if (n > rows) {
+        draw_ac_arrow(c, kit, gv_up_x(l, QP_W), gv_plus_y(t, h, rows), true, sc > 0, hit == GV_H_UP);
+        draw_ac_arrow(c, kit, gv_down_x(l, QP_W), gv_plus_y(t, h, rows), false, sc + rows < n, hit == GV_H_DOWN);
+    }
+    draw_ac_btn_h(c, kit, gv_plus_x(l, QP_W), gv_plus_y(t, h, rows), GV_PLUS_W, GV_PLUS_H, "+", false, hit == GV_H_PLUS);
+    if (n == 0) {
+        const et : []const u8 = gv_empty_row_text();
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+        draw_ac_fit(c, kit, et, et.len, x, gv_row_y(t, h, rows, 0) + 14.0, 9.5, 0.0, false, right);
+        return;
+    }
+    var k : usize = 0;
+    while (k < rows) {
+        const gi : usize = gv_row_group(sc, k, n);
+        if (gi < n) {
+            const ry : f64 = gv_row_y(t, h, rows, k);
+            if (hit == GV_H_ROW + @as(u32, @intCast(k))) {
+                round_rect(c, x - 4.0, ry, right - x + 8.0, GV_ROW_H - 2.0, 5.0);
+                cg_line_width(c, 1.0);
+                cg_stroke_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+                cg_stroke_path(c);
+            }
+            const unr : u32 = gv_unr_get(gv, gi);
+            var pr : f64 = right;
+            if (unr > 0) {
+                draw_ch_badge(c, kit, right, ry + 10.0, unr);
+                pr = right - 30.0;
+            }
+            const pn : usize = gv_people(gt_n(gv[GV_T..GV_T_END], gi), line[0..64]);
+            const pw : f64 = bytes_w(kit, line[0..64], pn, 9.0, 0.0, false);
+            cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+            draw_bytes(c, kit, line[0..64], pn, pr - pw, ry + 14.0, 9.0, 0.0, false);
+            const nm : []const u8 = gt_name(gv[GV_T..GV_T_END], gi);
+            cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+            draw_ac_fit(c, kit, nm, nm.len, x, ry + 14.0, 11.0, WEIGHT_SEMIBOLD, false, pr - pw - 8.0);
+        }
+        k = k + 1;
+    }
+}
+
+/// The head's count of unread group lines, at hx; the x where the next thing may start.
+fn draw_gv_head(c: u64, kit: [48]u64, hx: f64, t: f64, gv: []const u8) -> f64 {
+    var hb : [32]u8 = undefined;
+    const hn : usize = gv_head_text(gv_unr_total(gv), hb[0..32]);
+    if (hn == 0) { return hx; }
+    const hw : f64 = bytes_w(kit, hb[0..32], hn, 8.5, WEIGHT_SEMIBOLD, false) + 12.0;
+    round_rect(c, hx, t + 13.0, hw, 15.0, 7.5);
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+    cg_fill_path(c);
+    cg_fill_rgba(c, 0.0, 0.0, 0.0, 0.85);
+    draw_bytes(c, kit, hb[0..32], hn, hx + 6.0, t + 24.0, 8.5, WEIGHT_SEMIBOLD, false);
+    return hx + hw + 6.0;
+}
+
+/// NEW GROUP: back, the title, the name, the friends with a box each (ticked or not), CREATE (muted with its reason
+/// while it cannot be pressed), the note.
+fn draw_gv_new(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, cl: []const u8, gv: []const u8) -> void {
+    const l : f64 = qp_left(sw);
+    const t : f64 = WS_TOP;
+    const h : f64 = sh - t;
+    const x : f64 = l + QP_PAD;
+    const right : f64 = l + QP_W - QP_PAD;
+    const ft : []const u8 = cl[FE_FT .. FE_FT + FT_LEN];
+    const nf : usize = @as(usize, ft_count(ft));
+    const rows : usize = gv_pick_rows(h);
+    var sc : usize = @as(usize, fv_get32(gv, GV_SSCROLL));
+    if (nf <= rows) { sc = 0; } else if (sc > nf - rows) { sc = nf - rows; }
+    const hit : u32 = gv_new_hit(mx, my, l, QP_W, t, h, nf, sc);
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LINE_WHITE));
+    cg_fill_rect(c, l, t, HAIR, sh - t);
+    draw_ac_btn_small(c, kit, chv_back_x(l), t + CHV_BACK_Y, CHV_BACK_W, "<", hit == GV_S_BACK);
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+    draw_bytes(c, kit, "NEW GROUP", 9, x + CHV_BACK_W + 8.0, t + 25.0, 11.5, WEIGHT_SEMIBOLD, false);
+    draw_close_x(c, sw - QP_PAD - 8.0, t + 20.0, on_panel_close(mx, my, sw, t), 1.0);
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+    draw_bytes(c, kit, "NAME", 4, x, t + GV_NAME_LABEL_Y, 9.5, 0.0, false);
+    draw_cl_field(c, kit, x, t + GV_NAME_Y, QP_W - 2.0 * QP_PAD, gv[GV_FOCUS] != 0, hit == GV_S_NAME, gv[GV_NAME .. GV_NAME + GR_NAME_MAX], @as(usize, gv[GV_NLEN]), "family, work, trip");
+    var line : [64]u8 = undefined;
+    const picks : u32 = gv_picks(gv);
+    var n : usize = gv_pick_label(picks, line[0..64]);
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+    draw_fit(c, kit, line[0..64], n, x, t + GV_PICK_LABEL_Y, 9.5, 0.0, false, gv_sup_x(l, QP_W) - 6.0);
+    if (nf > rows) {
+        draw_ac_arrow(c, kit, gv_sup_x(l, QP_W), gv_sarrow_y(t), true, sc > 0, hit == GV_S_UP);
+        draw_ac_arrow(c, kit, gv_sdown_x(l, QP_W), gv_sarrow_y(t), false, sc + rows < nf, hit == GV_S_DOWN);
+    }
+    if (nf == 0) {
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+        draw_cl_wrap(c, kit, "No friends yet: add two by key in the cabinet first.", x, right, gv_pick_y(t, 0) + 14.0, 9.5, 2, sh);
+    }
+    var k : usize = 0;
+    while (k < rows and sc + k < nf) {
+        const i : usize = sc + k;
+        const ry : f64 = gv_pick_y(t, k);
+        const on : bool = gv_picked(gv, i);
+        if (hit == GV_S_PICK + @as(u32, @intCast(k))) {
+            round_rect(c, x - 4.0, ry, right - x + 8.0, GV_PICK_H - 2.0, 5.0);
+            cg_line_width(c, 1.0);
+            cg_stroke_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+            cg_stroke_path(c);
+        }
+        // the box: an outline, filled with a dark check mark when ticked
+        round_rect(c, x, ry + 5.0, GV_BOX, GV_BOX, 3.0);
+        if (on) {
+            cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+            cg_fill_path(c);
+            cg_move(c, x + 2.5, ry + 11.0);
+            cg_line(c, x + 5.0, ry + 13.5);
+            cg_line(c, x + 9.5, ry + 8.0);
+            cg_line_width(c, 1.6);
+            cg_stroke_rgba(c, 0.0, 0.0, 0.0, 0.9);
+            cg_stroke_path(c);
+        } else {
+            cg_line_width(c, 1.0);
+            cg_stroke_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+            cg_stroke_path(c);
+        }
+        var fpb : [16]u8 = undefined;
+        const fpn : usize = fv_short_fp(ft[FT_HDR + i * FT_ROW .. FT_HDR + i * FT_ROW + 10], fpb[0..16]);
+        const fpw : f64 = bytes_w(kit, fpb[0..16], fpn, 9.0, 0.0, true);
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+        draw_bytes(c, kit, fpb[0..16], fpn, right - fpw, ry + 15.0, 9.0, 0.0, true);
+        var nb : [32]u8 = undefined;
+        const nn : usize = gv_ft_name(ft, i, nb[0..32]);
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+        draw_ac_fit(c, kit, nb[0..32], nn, x + GV_BOX + 8.0, ry + 15.0, 11.0, WEIGHT_SEMIBOLD, false, right - fpw - 8.0);
+        k = k + 1;
+    }
+    // CREATE, muted while it cannot be pressed; under it the reason, or the note of the last try
+    const cx : f64 = gv_create_x(l, QP_W);
+    const cy : f64 = gv_create_y(t, h);
+    const why : u32 = gv_create_why(picks, gv_name_of(gv));
+    if (why == GV_N_NONE) { draw_cl_btn(c, kit, cx, cy, GV_CREATE_W, "CREATE", hit == GV_S_CREATE); } else { draw_ch_btn_off(c, kit, cx, cy, GV_CREATE_W, "CREATE"); }
+    var note : u32 = @as(u32, gv[GV_NOTE]);
+    if (note == GV_N_NONE) { note = why; }
+    const nt : []const u8 = gv_note_text(note);
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+    draw_cl_wrap(c, kit, nt, x, right, gv_hint_y(t, h), 9.5, 2, sh);
+}
+
+/// The group's chat: back, the group's name and its people, the history (the senders' names over their lines), the
+/// field and SEND, the note.
+fn draw_gv_chat(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, cl: []const u8, v: []const u8, gv: []const u8) -> void {
+    const l : f64 = qp_left(sw);
+    const t : f64 = WS_TOP;
+    const h : f64 = sh - t;
+    const x : f64 = l + QP_PAD;
+    const right : f64 = l + QP_W - QP_PAD;
+    const hit : u32 = gv_chat_hit(mx, my, l, QP_W, t, h);
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LINE_WHITE));
+    cg_fill_rect(c, l, t, HAIR, sh - t);
+    draw_ac_btn_small(c, kit, chv_back_x(l), t + CHV_BACK_Y, CHV_BACK_W, "<", hit == CHV_H_BACK);
+    const nx : f64 = chv_hdr_nick_x(l);
+    const nl : usize = @as(usize, v[CHV_NICKLEN]);
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+    draw_ac_fit(c, kit, v[CHV_NICK .. CHV_NICK + 32], nl, nx, t + CHV_HDR_NICK_BASE, 11.5, WEIGHT_SEMIBOLD, false, right - 22.0);
+    if (gv.len >= GV_CAP and gv[GV_G_ON] != 0) {
+        const gi : usize = @as(usize, gv[GV_G_ON]) - 1;
+        const tt : []const u8 = gv[GV_T..GV_T_END];
+        const me : u32 = gt_idx(tt, gi, cl[FE_FP .. FE_FP + 10]);
+        var names : [200]u8 = undefined;
+        gv_names(tt, gi, cl[FE_FT .. FE_FT + FT_LEN], me, names[0..GV_NAMES]);
+        var rl : [160]u8 = undefined;
+        const rn : usize = gv_roster_line(tt, gi, names[0..GV_NAMES], me, rl[0..160]);
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+        draw_ac_fit(c, kit, rl[0..160], rn, nx, t + CHV_HDR_STATE_BASE, 9.0, 0.0, false, right - 22.0);
+    }
+    draw_close_x(c, sw - QP_PAD - 8.0, t + 20.0, on_panel_close(mx, my, sw, t), 1.0);
+    draw_ch_history(c, kit, l, t, h, v);
+    const ht : f64 = chv_hist_top(t);
+    const hh : f64 = chv_hist_h(h);
+    if (fv_get32(v, CHV_COUNT) == 0) {
+        const et : []const u8 = gv_chat_empty_text();
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+        draw_cl_wrap(c, kit, et, x, right, ht + 0.5 * hh, 10.0, 2, sh);
+    }
+    if (fv_get32(v, CHV_SCROLL) > 0) {
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+        draw_bytes(c, kit, "newer below", 11, right - 52.0, ht + hh - 4.0, 8.5, 0.0, false);
+    }
+    draw_ch_field(c, kit, l, t, h, v, hit);
+    const vc : u32 = @as(u32, v[CHV_NOTE]);
+    var nt : []const u8 = "";
+    if (vc != 0) { nt = chv_note_text(vc); } else if (gv.len >= GV_CAP and gv[GV_NOTE] != 0) { nt = gv_note_text(@as(u32, gv[GV_NOTE])); }
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+    draw_fit(c, kit, nt, nt.len, x, chv_note_base(t, h), 9.0, 0.0, false, right);
 }
 
 fn draw(c: u64, kit: [48]u64, frame: u32, state: u32, hov: u32, ma: f64, shown: u32, task: u32, space: u32, sp: u32, ss: u64, cur: u32, collapsed: bool, mx: f64, my: f64, z: f64, sw: f64, sh: f64, ws: u32, full: bool, qp: bool, ring: [8]u64, n: u32, now: u64, sug: u32, god: bool, glow: f64, dk: [128]u64, dp: bool, darmed: u32, doff: u32, dgo: u32, dlive: bool, dlabel: u64, tst: []const u32, tcells: []const u32, topen: u32, tcur: bool, kyp: bool, kstored: []const u32, kmask: []const u8, kmlen: []const u32, kst: []const u32, kfail: []const u32, kopen: []const u64, kedit: u32, kbuf: []const u8, klen: u32, karm: u32, kbusy: u32, kemask: u32, kewhy: u32, ktpick: u32, hs: u32, cons: bool, dc: []u64, gal: []const u8, gt: []const u32, evd: u32, evpk: u64, pb: []const u8, sst: []const u32, tg: []const u64, tb: []const u8) -> void {
@@ -12794,8 +13514,12 @@ fn draw(c: u64, kit: [48]u64, frame: u32, state: u32, hov: u32, ma: f64, shown: 
                 draw_ch_card(c, kit, sw, sh, mx, my, tb[TBO_CL .. TBO_CL + CL_CAP], tb[TBO_CH .. TBO_CH + CHV_CAP]);
             } else if (chm0 == CHV_M_CHAT) {
                 draw_ch_chat(c, kit, sw, sh, mx, my, tb[TBO_CH .. TBO_CH + CHV_CAP]);
+            } else if (chm0 == GV_CHAT) {
+                draw_gv_chat(c, kit, sw, sh, mx, my, tb[TBO_CL .. TBO_CL + CL_CAP], tb[TBO_CH .. TBO_CH + CHV_CAP], tb[TBO_GV .. TBO_GV + GV_CAP]);
+            } else if (gv_new_shown(tb[TBO_GV .. TBO_GV + GV_CAP])) {
+                draw_gv_new(c, kit, sw, sh, mx, my, tb[TBO_CL .. TBO_CL + CL_CAP], tb[TBO_GV .. TBO_GV + GV_CAP]);
             } else {
-                draw_account_panel(c, kit, sw, sh, mx, my, tb[TBO_CL .. TBO_CL + CL_CAP], tb[TBO_PF .. TBO_PF + PF_CAP], tg[TPG_PF_IMG], tb[TBO_CH .. TBO_CH + CHV_CAP], kstored, kopen[KHL_AT .. KHL_AT + 72], kmask[544..640], kmask[640..736], now, tb[TBO_IV .. TBO_IV + IV_LEN], ckh_ms(), tb[TBO_BK .. TBO_BK + BK_CAP]);
+                draw_account_panel(c, kit, sw, sh, mx, my, tb[TBO_CL .. TBO_CL + CL_CAP], tb[TBO_PF .. TBO_PF + PF_CAP], tg[TPG_PF_IMG], tb[TBO_CH .. TBO_CH + CHV_CAP], kstored, kopen[KHL_AT .. KHL_AT + 72], kmask[544..640], kmask[640..736], now, tb[TBO_IV .. TBO_IV + IV_LEN], ckh_ms(), tb[TBO_BK .. TBO_BK + BK_CAP], tb[TBO_GV .. TBO_GV + GV_CAP]);
             }
         } else {
             draw_call_panel(c, kit, sw, sh, mx, my, tb[TBO_CL .. TBO_CL + CL_CAP], tb[TBO_CH .. TBO_CH + CHV_CAP]);
@@ -14180,7 +14904,7 @@ pub fn main() -> void {
     }
     // the tool pages (B, K, Q): their state words and text store, all zero, counters "not measured"
     var tgv : [256]u64 = undefined;
-    var tbv : [102932]u8 = undefined;
+    var tbv : [107540]u8 = undefined;
     var tgz : usize = 0;
     while (tgz < 256) {
         tgv[tgz] = 0;
@@ -14223,6 +14947,8 @@ pub fn main() -> void {
     var chm : [256]u8 = undefined;
     var chs : [166528]u8 = undefined;
     var chw : [10]u64 = undefined;
+    // GR. the open group: its block, its log's assembly and its log (GX_GRM | GX_ASM | GX_LOG)
+    var gxb : [1024360]u8 = undefined;
     clz = 0;
     while (clz < CA_LEN) {
         chasm[clz] = 0;
@@ -14259,6 +14985,7 @@ pub fn main() -> void {
     const bkopen : bool = bk_boot(tbv[TBO_BK .. TBO_BK + BK_CAP]);
     cl_boot(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN * 3]);
     ch_boot(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_CH .. TBO_CH + CHV_CAP], chs[0..CS_LEN], chlog[0..CH_LOG_LEN], chbuf[0..CH_BUF_LEN], chw[0..CHW_N]);
+    gw_boot(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_GV .. TBO_GV + GV_CAP], gxb[0..GX_LEN], chbuf[0..CH_BUF_LEN]);
     ug_serve_start(tbv[TBO_CL .. TBO_CL + CL_CAP], ugp[0..2304], tbv[TBO_CL + CL_UP] != 0 and tbv[TBO_CL + FV_NET] == @as(u8, @intCast(FV_NET_UP)));
     var tgm : u32 = 0;
     while (tgm < M_COUNT) {
@@ -14652,6 +15379,7 @@ pub fn main() -> void {
                         clp = true;
                         ac_open(tbv[TBO_CL .. TBO_CL + CL_CAP]);
                         chv_close(tbv[TBO_CH .. TBO_CH + CHV_CAP]);
+                        gv_new_close(tbv[TBO_GV .. TBO_GV + GV_CAP]);
                         qp = false;
                         god = false;
                         dp = false;
@@ -14766,35 +15494,50 @@ pub fn main() -> void {
                     if (on_panel_close(mx, my, sw, WS_TOP)) {
                         ac_leave(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_PF .. TBO_PF + PF_CAP]); bk_close(tbv[TBO_BK .. TBO_BK + BK_CAP]);
                         chv_close(tbv[TBO_CH .. TBO_CH + CHV_CAP]);
+                        gv_new_close(tbv[TBO_GV .. TBO_GV + GV_CAP]);
                         clp = false;
                         tbv[TBO_CL + CL_FOCUS] = 0;
                     } else {
                         const clv : u32 = @as(u32, tbv[TBO_CL + CL_VIEW]);
-                        if (clv == CV_IDLE and tbv[TBO_CL + AC_ON] != 0 and chv_mode(tbv[TBO_CH .. TBO_CH + CHV_CAP]) != CHV_M_OFF) {
+                        if (clv == CV_IDLE and tbv[TBO_CL + AC_ON] != 0 and gv_chat_shown(tbv[TBO_CH .. TBO_CH + CHV_CAP])) {
+                            // GR. a group's chat: back, the field, SEND
+                            gw_chat_do(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_CH .. TBO_CH + CHV_CAP], tbv[TBO_GV .. TBO_GV + GV_CAP], gxb[0..GX_LEN], chbuf[0..CH_BUF_LEN], ch_hit_now(mx, my, sw, sh, tbv[TBO_CH .. TBO_CH + CHV_CAP]));
+                        } else if (clv == CV_IDLE and tbv[TBO_CL + AC_ON] != 0 and gv_new_shown(tbv[TBO_GV .. TBO_GV + GV_CAP])) {
+                            // GR. NEW GROUP: back, the name, a friend's box, the arrows, CREATE
+                            const gvn : []u8 = tbv[TBO_GV .. TBO_GV + GV_CAP];
+                            var gsc : usize = @as(usize, fv_get32(gvn, GV_SSCROLL));
+                            const gnf : usize = @as(usize, ft_count(tbv[TBO_CL + FE_FT .. TBO_CL + FE_FT + FT_LEN]));
+                            if (gnf <= gv_pick_rows(sh - WS_TOP)) { gsc = 0; } else if (gsc > gnf - gv_pick_rows(sh - WS_TOP)) { gsc = gnf - gv_pick_rows(sh - WS_TOP); }
+                            fv_put32(gvn, GV_SSCROLL, @as(u64, gsc));
+                            gw_new_do(tbv[TBO_CL .. TBO_CL + CL_CAP], gvn, gv_new_hit(mx, my, qp_left(sw), QP_W, WS_TOP, sh - WS_TOP, gnf, gsc), sh - WS_TOP);
+                        } else if (clv == CV_IDLE and tbv[TBO_CL + AC_ON] != 0 and chv_mode(tbv[TBO_CH .. TBO_CH + CHV_CAP]) != CHV_M_OFF) {
                             // CH. a friend's card or the chat: BACK, MESSAGE, CALL, VIDEO, the field, SEND
                             ch_do(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_CH .. TBO_CH + CHV_CAP], chs[0..CS_LEN], chm[0..CHM_LEN], chlog[0..CH_LOG_LEN], chbuf[0..CH_BUF_LEN], chw[0..CHW_N], csv[0..CS_LEN * 3], clw[0..10], ch_hit_now(mx, my, sw, sh, tbv[TBO_CH .. TBO_CH + CHV_CAP]));
                         } else if (clv == CV_IDLE and tbv[TBO_CL + AC_ON] != 0) {
                             // A. the cabinet: a hit is the nickname, the key, a friend's row or one of its marks, the add part
-                            const ach : u32 = ac_hit_now_bk(mx, my, sw, sh, tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_IV .. TBO_IV + IV_LEN], tbv[TBO_BK .. TBO_BK + BK_CAP]);
+                            const ach : u32 = ac_hit_now_bk_g(mx, my, sw, sh, tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_IV .. TBO_IV + IV_LEN], tbv[TBO_BK .. TBO_BK + BK_CAP], tbv[TBO_GV .. TBO_GV + GV_CAP]);
                             if (bk_is_hit(ach) == false) { tbv[TBO_BK + BK_FOCUS] = 0; }
                             // UPD. UPDATE / CANCEL / RESTART; RESTART started the installed copy, this one quits
                             if (ach == AC_H_UPD and ug_click(tbv[TBO_CL .. TBO_CL + CL_CAP], ugp[0..2304])) { sys_exit(0); }
                             var acr : u32 = 0;
-                            if (bk_is_hit(ach)) {
+                            if (gv_is_hit(ach)) {
+                                // GR. the GROUPS part: "+", the arrows, a group's row
+                                gw_part_do(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_CH .. TBO_CH + CHV_CAP], tbv[TBO_GV .. TBO_GV + GV_CAP], gxb[0..GX_LEN], chbuf[0..CH_BUF_LEN], ach, gw_part_rows(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_GV .. TBO_GV + GV_CAP], sh - WS_TOP, ac_inv_dy(ac_inv_rows(iv_waiting(tbv[TBO_IV .. TBO_IV + IV_LEN])))));
+                            } else if (bk_is_hit(ach)) {
                                 // A. BACKUP, RESTORE and the backup panel (id_backup.t27)
                                 bk_click(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_BK .. TBO_BK + BK_CAP], ach);
                             } else if (ac_hit_invite(ach)) {
                                 // IV. ACCEPT or DECLINE of an invitation
                                 ivw_click(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_IV .. TBO_IV + IV_LEN], ach, ckh_ms());
-                            } else if (ac_call_or_message(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_CH .. TBO_CH + CHV_CAP], chs[0..CS_LEN], chm[0..CHM_LEN], chlog[0..CH_LOG_LEN], chbuf[0..CH_BUF_LEN], chw[0..CHW_N], csv[0..CS_LEN * 3], clw[0..10], tbv[TBO_PF .. TBO_PF + PF_CAP], ach, ac_vis_now(sh, tbv[TBO_IV .. TBO_IV + IV_LEN]))) {
+                            } else if (ac_call_or_message(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_CH .. TBO_CH + CHV_CAP], chs[0..CS_LEN], chm[0..CHM_LEN], chlog[0..CH_LOG_LEN], chbuf[0..CH_BUF_LEN], chw[0..CHW_N], csv[0..CS_LEN * 3], clw[0..10], tbv[TBO_PF .. TBO_PF + PF_CAP], ach, ac_vis_now_g(sh, tbv[TBO_IV .. TBO_IV + IV_LEN], tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_GV .. TBO_GV + GV_CAP]))) {
                                 // CALL in the head, CALL or MESSAGE on a row: one click from the cabinet
                                 acr = 0;
                             } else if (ach >= AC_H_ROW and ach < AC_H_FCOPY) {
                                 // CH. a friend's row opens the friend's card (a field typed in and a removal asked are dropped)
-                                ac_do(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN * 3], clw[0..10], tbv[TBO_PF .. TBO_PF + PF_CAP], AC_H_NONE, ac_vis_now(sh, tbv[TBO_IV .. TBO_IV + IV_LEN]));
+                                ac_do(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN * 3], clw[0..10], tbv[TBO_PF .. TBO_PF + PF_CAP], AC_H_NONE, ac_vis_now_g(sh, tbv[TBO_IV .. TBO_IV + IV_LEN], tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_GV .. TBO_GV + GV_CAP]));
                                 ch_card(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_CH .. TBO_CH + CHV_CAP], @as(usize, ach - AC_H_ROW));
                             } else {
-                                acr = ac_do(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN * 3], clw[0..10], tbv[TBO_PF .. TBO_PF + PF_CAP], ach, ac_vis_now(sh, tbv[TBO_IV .. TBO_IV + IV_LEN]));
+                                acr = ac_do(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN * 3], clw[0..10], tbv[TBO_PF .. TBO_PF + PF_CAP], ach, ac_vis_now_g(sh, tbv[TBO_IV .. TBO_IV + IV_LEN], tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_GV .. TBO_GV + GV_CAP]));
                             }
                             if (acr == 1) {
                                 ac_leave(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_PF .. TBO_PF + PF_CAP]); bk_close(tbv[TBO_BK .. TBO_BK + BK_CAP]);
@@ -15352,7 +16095,7 @@ pub fn main() -> void {
                 }
                 used = true;
             }
-            if (ty == EV_SCROLL and clp and ac_shown(tbv[TBO_CL .. TBO_CL + CL_CAP]) and chv_mode(tbv[TBO_CH .. TBO_CH + CHV_CAP]) == CHV_M_CHAT and ch_hit_now(mx, my, sw, sh, tbv[TBO_CH .. TBO_CH + CHV_CAP]) == CHV_H_HIST) {
+            if (ty == EV_SCROLL and clp and ac_shown(tbv[TBO_CL .. TBO_CL + CL_CAP]) and (chv_mode(tbv[TBO_CH .. TBO_CH + CHV_CAP]) == CHV_M_CHAT or gv_chat_shown(tbv[TBO_CH .. TBO_CH + CHV_CAP])) and ch_hit_now(mx, my, sw, sh, tbv[TBO_CH .. TBO_CH + CHV_CAP]) == CHV_H_HIST) {
                 // CH. the wheel over the chat's history: a notch moves CHV_WHEEL_PT, a trackpad its own points
                 const hwy : f64 = msg_real(ev, s_scroll_y);
                 var hst : f64 = hwy;
@@ -15361,7 +16104,7 @@ pub fn main() -> void {
                 if (hst >= 1.0) { chv_scroll_by(tbv[TBO_CH .. TBO_CH + CHV_CAP], @as(u64, @intFromFloat(hst)), hwy > 0.0); }
                 used = true;
             }
-            if (ty == EV_SCROLL and clp and ac_shown(tbv[TBO_CL .. TBO_CL + CL_CAP]) and chv_mode(tbv[TBO_CH .. TBO_CH + CHV_CAP]) == CHV_M_OFF and ac_wheel_now(mx, my, sw, sh, tbv[TBO_IV .. TBO_IV + IV_LEN])) {
+            if (ty == EV_SCROLL and clp and ac_shown(tbv[TBO_CL .. TBO_CL + CL_CAP]) and chv_mode(tbv[TBO_CH .. TBO_CH + CHV_CAP]) == CHV_M_OFF and ac_wheel_now_g(mx, my, sw, sh, tbv[TBO_IV .. TBO_IV + IV_LEN], tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_GV .. TBO_GV + GV_CAP])) {
                 // A. the wheel over the cabinet's friends moves the list a row; a notch is a row, a trackpad gathers travel
                 const awy : f64 = msg_real(ev, s_scroll_y);
                 var astep : bool = false;
@@ -15381,7 +16124,7 @@ pub fn main() -> void {
                     }
                 }
                 if (astep) {
-                    const avis : usize = ac_vis_now(sh, tbv[TBO_IV .. TBO_IV + IV_LEN]);
+                    const avis : usize = ac_vis_now_g(sh, tbv[TBO_IV .. TBO_IV + IV_LEN], tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_GV .. TBO_GV + GV_CAP]);
                     fe_scroll(tbv[TBO_CL .. TBO_CL + CL_CAP], ac_scroll_by(@as(usize, tbv[TBO_CL + FV_SCROLL]), 1, aup, @as(usize, tbv[TBO_CL + FV_COUNT]), avis), ckh_ms());
                 }
                 used = true;
@@ -15533,11 +16276,37 @@ pub fn main() -> void {
                     } else {
                         used = false;
                     }
-                } else if (clp and ac_shown(tbv[TBO_CL .. TBO_CL + CL_CAP]) and chv_mode(tbv[TBO_CH .. TBO_CH + CHV_CAP]) == CHV_M_CHAT and tbv[TBO_CH + CHV_FOCUS] != 0) {
+                } else if (clp and ac_shown(tbv[TBO_CL .. TBO_CL + CL_CAP]) and gv_new_shown(tbv[TBO_GV .. TBO_GV + GV_CAP]) and tbv[TBO_GV + GV_FOCUS] != 0) {
+                    // GR. NEW GROUP's name is being typed: Return presses CREATE, Esc closes, Backspace drops a code point
+                    const gk : u32 = ky_key(@as(u32, @intCast(key)), cmd);
+                    if (gk == KE_CANCEL) {
+                        gv_new_close(tbv[TBO_GV .. TBO_GV + GV_CAP]);
+                    } else if (gk == KE_BACK) {
+                        gv_name_back(tbv[TBO_GV .. TBO_GV + GV_CAP]);
+                    } else if (gk == KE_SAVE) {
+                        gw_create(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_GV .. TBO_GV + GV_CAP], ckh_ms());
+                    } else if (gk == KE_CHAR) {
+                        const gc2 : u64 = msg0(ev, s_chars);
+                        var gn2 : u64 = 0;
+                        if (gc2 != 0) { gn2 = dk_len(dk, gc2); }
+                        var gj2 : u64 = 0;
+                        while (gj2 < gn2) {
+                            gv_name_unit(tbv[TBO_GV .. TBO_GV + GV_CAP], @as(u32, @intCast(msg_char(gc2, s_char_at, gj2) & 65535)));
+                            gj2 = gj2 + 1;
+                        }
+                    } else {
+                        used = false;
+                    }
+                } else if (clp and ac_shown(tbv[TBO_CL .. TBO_CL + CL_CAP]) and (chv_mode(tbv[TBO_CH .. TBO_CH + CHV_CAP]) == CHV_M_CHAT or gv_chat_shown(tbv[TBO_CH .. TBO_CH + CHV_CAP])) and tbv[TBO_CH + CHV_FOCUS] != 0) {
                     // CH. a message is being typed: Return sends, Esc goes back to the card, Backspace drops a code point,
                     // Cmd+V pastes (UTF-8, up to the 2000 bytes of a message)
                     const hk : u32 = ky_key(@as(u32, @intCast(key)), cmd);
-                    if (hk == KE_CANCEL) {
+                    const hgrp : bool = gv_chat_shown(tbv[TBO_CH .. TBO_CH + CHV_CAP]);
+                    if (hk == KE_CANCEL and hgrp) {
+                        gw_chat_do(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_CH .. TBO_CH + CHV_CAP], tbv[TBO_GV .. TBO_GV + GV_CAP], gxb[0..GX_LEN], chbuf[0..CH_BUF_LEN], CHV_H_BACK);
+                    } else if (hk == KE_SAVE and hgrp) {
+                        gw_send(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_CH .. TBO_CH + CHV_CAP], tbv[TBO_GV .. TBO_GV + GV_CAP], gxb[0..GX_LEN], ckh_ms());
+                    } else if (hk == KE_CANCEL) {
                         ch_do(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_CH .. TBO_CH + CHV_CAP], chs[0..CS_LEN], chm[0..CHM_LEN], chlog[0..CH_LOG_LEN], chbuf[0..CH_BUF_LEN], chw[0..CHW_N], csv[0..CS_LEN * 3], clw[0..10], CHV_H_BACK);
                     } else if (hk == KE_BACK) {
                         chv_back_unit(tbv[TBO_CH .. TBO_CH + CHV_CAP]);
@@ -15607,7 +16376,7 @@ pub fn main() -> void {
                         cl_back(tbv[TBO_CL .. TBO_CL + CL_CAP]);
                     } else if (ck == KE_SAVE) {
                         if (ac_shown(tbv[TBO_CL .. TBO_CL + CL_CAP]) and tbv[TBO_CL + CL_FOCUS] == 2) {
-                            ac_add(tbv[TBO_CL .. TBO_CL + CL_CAP], ac_vis_now(sh, tbv[TBO_IV .. TBO_IV + IV_LEN]));
+                            ac_add(tbv[TBO_CL .. TBO_CL + CL_CAP], ac_vis_now_g(sh, tbv[TBO_IV .. TBO_IV + IV_LEN], tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_GV .. TBO_GV + GV_CAP]));
                         } else {
                             cl_enter(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN * 3], clw[0..10]);
                         }
@@ -16415,7 +17184,7 @@ pub fn main() -> void {
         if (clp and tbv[TBO_CL + AC_ON] != 0) { ac_flash_tick(tbv[TBO_CL .. TBO_CL + CL_CAP], cnow); }
         if (cl_tick(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN * 3], clw[0..10])) { clring = true; }
         // CH. the friend's card and the chat: the message session, the save, the history in view
-        ch_tick(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_CH .. TBO_CH + CHV_CAP], chs[0..CS_LEN], chm[0..CHM_LEN], chlog[0..CH_LOG_LEN], chasm[0..CA_LEN], chbuf[0..CH_BUF_LEN], chw[0..CHW_N], csv[0..CS_LEN * 3], tbv[TBO_IV .. TBO_IV + IV_LEN], tgv[TPG_Q_TZ] + CHV_TZ_BIAS - TG_TZ_BIAS, sh - WS_TOP);
+        ch_tick(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_CH .. TBO_CH + CHV_CAP], chs[0..CS_LEN], chm[0..CHM_LEN], chlog[0..CH_LOG_LEN], chasm[0..CA_LEN], chbuf[0..CH_BUF_LEN], chw[0..CHW_N], csv[0..CS_LEN * 3], tbv[TBO_IV .. TBO_IV + IV_LEN], tbv[TBO_GV .. TBO_GV + GV_CAP], gxb[0..GX_LEN], tgv[TPG_Q_TZ] + CHV_TZ_BIAS - TG_TZ_BIAS, sh - WS_TOP);
         // U. the frame gate: fold what this frame shows into a key; an unchanged key with nothing
         // animating keeps the image already on the layer (frame_gate.t27)
         var fk : u64 = fg_mix(fg_mix(fg_mix(fg_mix(0, @as(u64, state)), @as(u64, hov)), fg_level(ma)), @as(u64, shown));
@@ -16471,6 +17240,8 @@ pub fn main() -> void {
             fk = fg_mix(fk, @as(u64, tbv[TBO_PF + fki2]));
             fki2 = fki2 + 1;
         }
+        // GR. the groups: the folded head (mode, name, ticks, unread) and the table's CRC
+        fk = fg_mix(fk, gw_key(tbv[TBO_GV .. TBO_GV + GV_CAP]));
         // CH. the card and the chat: the region's head and unread table, the typed text, the items in view
         fkc = 0;
         while (fkc < CHV_TYPED) {
@@ -17897,7 +18668,7 @@ test the_profile_region_fits_the_text_store_and_its_words_are_free {
     assert TBO_PF == TBO_QD_HIVE + QD_HIVE_CAP;
     // the CALL region (CL) follows it and ends the store
     assert TBO_PF + PF_CAP == TBO_CL;
-    assert TBO_CL + CL_CAP == TBO_CH and TBO_CH + CHV_CAP == TBO_IV and TBO_IV + IV_LEN == TBO_BK and TBO_BK + BK_CAP == TB_SIZE;
+    assert TBO_CL + CL_CAP == TBO_CH and TBO_CH + CHV_CAP == TBO_IV and TBO_IV + IV_LEN == TBO_BK and TBO_BK + BK_CAP == TBO_GV and TBO_GV + GV_CAP == TB_SIZE;
     assert PF_TYPED + PRF_NICK_MAX_BYTES <= PF_SAVED;
     assert PF_SAVED + PRF_NICK_MAX_BYTES <= PF_CAP;
     assert PF_HOLD_HI < PF_TYPED;
@@ -17952,7 +18723,7 @@ test the_queen_control_dashboard_is_where_it_is_drawn_and_nothing_overlaps_the_f
     assert qd_open(z[0..560], false, WS_EXPANDED) == false;
     // the dashboard's words and buffers do not collide with the other feeds
     assert TPG_QD_PLANN > TPG_G_NEXT and TPG_QD_FLAGS < TPG_N and SST_QDASH < SST_SIZE and SST_QDASH != SST_DISK;
-    assert TBO_QD_PLAN >= TB_LANES_END and TBO_QD_HIVE + QD_HIVE_CAP == TBO_PF and TBO_PF + PF_CAP == TBO_CL and TBO_CL + CL_CAP == TBO_CH and TBO_CH + CHV_CAP == TBO_IV and TBO_IV + IV_LEN == TBO_BK and TBO_BK + BK_CAP == TB_SIZE;
+    assert TBO_QD_PLAN >= TB_LANES_END and TBO_QD_HIVE + QD_HIVE_CAP == TBO_PF and TBO_PF + PF_CAP == TBO_CL and TBO_CL + CL_CAP == TBO_CH and TBO_CH + CHV_CAP == TBO_IV and TBO_IV + IV_LEN == TBO_BK and TBO_BK + BK_CAP == TBO_GV and TBO_GV + GV_CAP == TB_SIZE;
     assert TBO_QD_TRIG == TBO_QD_PLAN + QD_PLAN_CAP and TBO_QD_BOARD == TBO_QD_TRIG + QD_TRIG_CAP and TBO_QD_HIVE == TBO_QD_BOARD + QD_BOARD_CAP;
     // the lanes table lists only work rows
     assert qd_lane_index(z[0..560], 0) == LV_NONE;
@@ -17968,7 +18739,7 @@ test the_queen_control_dashboard_is_where_it_is_drawn_and_nothing_overlaps_the_f
 // screen): that a call rings, shows its code and carries audio from this window is a live check, not a test here.
 test the_call_region_ends_the_text_store_and_draw_reads_only_folded_bytes {
     assert TBO_CL == TBO_PF + PF_CAP;
-    assert TBO_CL + CL_CAP == TBO_CH and TBO_CH + CHV_CAP == TBO_IV and TBO_IV + IV_LEN == TBO_BK and TBO_BK + BK_CAP == TB_SIZE;
+    assert TBO_CL + CL_CAP == TBO_CH and TBO_CH + CHV_CAP == TBO_IV and TBO_IV + IV_LEN == TBO_BK and TBO_BK + BK_CAP == TBO_GV and TBO_GV + GV_CAP == TB_SIZE;
     assert CL_ADDR + CV_ADDR_MAX + 1 <= CL_NPOLL;
     assert CL_NPOLL + 4 <= CL_CAPT and CL_TXO + 4 <= CL_STATS and CL_STATS < CL_KEY_N;
     // the friends snapshot (friends_view) follows the call core and is folded into the frame key; the engine's blocks
@@ -18464,7 +19235,7 @@ test the_footer_update_item_follows_the_friends_offer_before_the_self_updater {
 }
 
 test ch_the_chat_region_follows_the_call_region_and_mains_buffers_have_their_sizes {
-    assert TBO_CH == TBO_CL + CL_CAP and TBO_CH + CHV_CAP == TBO_IV and TBO_IV + IV_LEN == TBO_BK and TBO_BK + BK_CAP == TB_SIZE;
+    assert TBO_CH == TBO_CL + CL_CAP and TBO_CH + CHV_CAP == TBO_IV and TBO_IV + IV_LEN == TBO_BK and TBO_BK + BK_CAP == TBO_GV and TBO_GV + GV_CAP == TB_SIZE;
     assert CH_LOG_LEN == cl_bytes(CL_KEEP) and CH_BUF_LEN == CF_MAX + 1;
     assert CS_LEN == 166528 and CA_LEN == 8064 and CHM_LEN == 256 and CHW_AID < CHW_N;
     // the voice-call byte stands after the cabinet's bytes and before the friends snapshot, inside the folded bytes
@@ -18631,12 +19402,12 @@ test ch_messages_are_served_with_the_panel_shut_and_after_a_call_that_ended {
     // the pass serves the session: the unread count reaches a's row although the panel is shut; no READ yet
     var ivx : [8212]u8 = undefined;
     assert iv_init(ivx[0..IV_LEN]);
-    ch_tick_at(cl[0..8192], v[0..8192], s[0..CS_LEN], m[0..256], log[0..cl_bytes(4)], asm[0..8064], buf[0..16], w[0..CHW_N], cs[0..CS_LEN], ivx[0..IV_LEN], CHV_TZ_BIAS, 400.0, 5000);
+    ch_tick_at(cl[0..8192], v[0..8192], s[0..CS_LEN], m[0..256], log[0..cl_bytes(4)], asm[0..8064], buf[0..16], w[0..CHW_N], cs[0..CS_LEN], ivx[0..IV_LEN], ivx[0..0], ivx[0..0], CHV_TZ_BIAS, 400.0, 5000);
     assert chv_unr_get(v[0..8192], a[0..10]) == 1;
     assert chm_stat(m[0..256], 4) == 0 and cl_state(log[0..8192], 0) != CH_S_READ;
     // the same during a call that is up
     cs[1] = @as(u8, @intCast(CK_ACTIVE));
-    ch_tick_at(cl[0..8192], v[0..8192], s[0..CS_LEN], m[0..256], log[0..cl_bytes(4)], asm[0..8064], buf[0..16], w[0..CHW_N], cs[0..CS_LEN], ivx[0..IV_LEN], CHV_TZ_BIAS, 400.0, 5000);
+    ch_tick_at(cl[0..8192], v[0..8192], s[0..CS_LEN], m[0..256], log[0..cl_bytes(4)], asm[0..8064], buf[0..16], w[0..CHW_N], cs[0..CS_LEN], ivx[0..IV_LEN], ivx[0..0], ivx[0..0], CHV_TZ_BIAS, 400.0, 5000);
     assert chv_unr_get(v[0..8192], a[0..10]) == 1 and chm_stat(m[0..256], 4) == 0;
     // opening the chat is what makes the line READ (sent with the next session): unread 0, READ up to message 1
     cs[1] = @as(u8, @intCast(CK_IDLE));
@@ -18717,7 +19488,7 @@ test an_invitation_makes_no_friend_until_accept_and_accept_makes_the_one_who_wro
 
 test bk_backup_and_restore_open_the_panel_in_the_friends_place_and_close_with_their_secrets {
     // the panel's block is the last region of the tool pages
-    assert TBO_IV + IV_LEN == TBO_BK and TBO_BK + BK_CAP == TB_SIZE;
+    assert TBO_IV + IV_LEN == TBO_BK and TBO_BK + BK_CAP == TBO_GV and TBO_GV + GV_CAP == TB_SIZE;
     var cl : [8192]u8 = undefined;
     var iv : [8212]u8 = undefined;
     var bk : [1024]u8 = undefined;
@@ -18771,4 +19542,52 @@ test bk_backup_and_restore_open_the_panel_in_the_friends_place_and_close_with_th
     assert bk[BK_FOCUS] == 2;
     bk_click(cl[0..8192], bk[0..1024], BK_H_SHEET);
     assert bk[BK_FOCUS] == 0 and bk_typing(bk[0..1024]) == false;
+}
+
+test gr_the_groups_part_takes_its_rows_from_the_friends_and_plus_opens_new_group {
+    var cl : [8192]u8 = undefined;
+    fv_blank(cl[0..8192]);
+    var iv : [8212]u8 = undefined;
+    fv_blank(iv[0..8212]);
+    iv_init(iv[0..IV_LEN]);
+    var bk : [1024]u8 = undefined;
+    fv_blank(bk[0..1024]);
+    var gv : [4608]u8 = undefined;
+    fv_blank(gv[0..GV_CAP]);
+    gt_init(gv[GV_T..GV_T_END]);
+    cl[FV_COUNT] = 3;
+    const sw : f64 = 960.0;
+    const sh : f64 = 760.0;
+    const h : f64 = sh - WS_TOP;
+    const l : f64 = qp_left(sw);
+    // the part stands even with no group (its line says how to make one), and its rows come off the friends
+    const rows : usize = gw_part_rows(cl[0..8192], gv[0..GV_CAP], h, 0.0);
+    assert rows == 1;
+    // the default window (540): three friends' rows without the part, one with it; a tall one keeps all five
+    assert ac_vis_now(540.0, iv[0..IV_LEN]) == 3 and ac_vis_now_g(540.0, iv[0..IV_LEN], cl[0..8192], gv[0..GV_CAP]) == 1;
+    assert ac_vis_now_g(sh, iv[0..IV_LEN], cl[0..8192], gv[0..GV_CAP]) == AC_ROWS_MAX;
+    // no region: no part, the friends keep every row
+    assert gw_part_rows(cl[0..8192], gv[0..0], h, 0.0) == 0;
+    assert ac_vis_now_g(sh, iv[0..IV_LEN], cl[0..8192], gv[0..0]) == ac_vis_now(sh, iv[0..IV_LEN]);
+    // "+" answers in the cabinet; a click there opens NEW GROUP
+    const px : f64 = gv_plus_x(l, QP_W) + 4.0;
+    const py : f64 = gv_plus_y(WS_TOP, h, rows) + 4.0;
+    assert ac_hit_now_bk_g(px, py, sw, sh, cl[0..8192], iv[0..IV_LEN], bk[0..1024], gv[0..GV_CAP]) == GV_H_PLUS;
+    assert ac_hit_now_bk(px, py, sw, sh, cl[0..8192], iv[0..IV_LEN], bk[0..1024]) != GV_H_PLUS;
+    var v : [8192]u8 = undefined;
+    fv_blank(v[0..8192]);
+    var gx : [1]u8 = undefined;
+    var buf : [1]u8 = undefined;
+    gw_part_do(cl[0..8192], v[0..8192], gv[0..GV_CAP], gx[0..0], buf[0..0], GV_H_PLUS, rows);
+    assert gv_new_shown(gv[0..GV_CAP]);
+    // NEW GROUP's BACK closes it; with no identity CREATE says so
+    gv_pick_toggle(gv[0..GV_CAP], 0, 3);
+    gv_pick_toggle(gv[0..GV_CAP], 1, 3);
+    gv_name_unit(gv[0..GV_CAP], 120);
+    assert gw_create(cl[0..8192], gv[0..GV_CAP], 1000) == GV_N_NOKEY;
+    gw_new_do(cl[0..8192], gv[0..GV_CAP], GV_S_BACK, h);
+    assert gv_new_shown(gv[0..GV_CAP]) == false;
+    // the region sits after the backup panel and ends the text store
+    assert TBO_BK + BK_CAP == TBO_GV and TBO_GV + GV_CAP == TB_SIZE;
+    assert GX_ASM == GX_GRM + GRM_LEN and GX_LOG == GX_ASM + CA_LEN and GX_LEN == GX_LOG + CH_LOG_LEN;
 }
