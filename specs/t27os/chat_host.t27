@@ -58,6 +58,10 @@ use t27os::call_core::CK_ACTIVE;
 use t27os::call_core::CK_ENDED;
 use t27os::call_core::CK_FAILED;
 use t27os::call_session::cs_call;
+use t27os::call_session::cs_call6;
+use t27os::call_ip6::ip6_copy;
+use t27os::call_ip6::ip6_clear;
+use t27os::call_ip6::ip6_is_set;
 use t27os::call_session::cs_poll;
 use t27os::call_session::cs_state;
 use t27os::call_session::cs_peer;
@@ -442,6 +446,10 @@ pub const CHM_ACK_SAVED : u32 = 34;
 pub const CHM_ACK_FULL : u32 = 35;
 const M_OWED : usize = 36;
 pub const CHM_OWED_MAX : usize = 8;
+/// IP6 (owner, 2026-10-23; call_ip6.t27): the friend's chat endpoint over IPv6 (18 bytes at byte M_EP6, all zero =
+/// none), dialled when there is no IPv4 for it (M_IP 0). In memory only: the window gives it from the friend's last
+/// call over IPv6 (chm_addr6); nothing is written to a file.
+const M_EP6 : usize = 352;
 
 /// What the receiver does with the ACK of one TEXT result: nothing (refused, or no room), send it now (a part kept for
 /// later lives in memory only, and a new session drops it: the sender sends every part again), or hold it until the
@@ -511,6 +519,16 @@ pub fn chm_init(m: []u8, fp: []const u8, ip: u64, port: u64) -> bool {
 pub fn chm_addr(m: []u8, ip: u64, port: u64) -> void {
     mp(m, M_IP, ip);
     mp(m, M_PORT, port);
+}
+
+/// The friend's chat endpoint over IPv6 (an all-zero or short ep clears it). An IPv4 set by chm_addr comes first.
+pub fn chm_addr6(m: []u8, ep: []const u8) -> void {
+    if (m.len < CHM_LEN) { return; }
+    if (ep.len < 18 or !ip6_is_set(ep)) {
+        ip6_clear(m[M_EP6..M_EP6 + 18]);
+        return;
+    }
+    ip6_copy(m[M_EP6..M_EP6 + 18], ep);
 }
 
 /// The friend whose session rings unanswered, into fp[0..10]; false when none rings.
@@ -1041,8 +1059,14 @@ pub fn chm_tick_g(m: []u8, s: []u8, log: []u8, asm: []u8, friends: []const u8, m
         var need : bool = cl_pending(log) > 0 or mg(m, M_READ_UPTO) > mg(m, M_READ_SENT);
         if (pidx != GR_NOBODY and gl_pending_for(glog, pidx) > 0) { need = true; }
         if (ghm_owed(m, t, own, me_fp) > 0) { need = true; }
-        if (need and now >= mg(m, M_REDIAL) and mg(m, M_IP) != 0) {
-            if (cs_call(s, mg(m, M_IP), mg(m, M_PORT), m[M_FP..M_FP + 10])) { ma(m, CHM_DIALS); }
+        if (need and now >= mg(m, M_REDIAL) and (mg(m, M_IP) != 0 or ip6_is_set(m[M_EP6..M_EP6 + 18]))) {
+            var dialled : bool = false;
+            if (mg(m, M_IP) != 0) {
+                dialled = cs_call(s, mg(m, M_IP), mg(m, M_PORT), m[M_FP..M_FP + 10]);
+            } else {
+                dialled = cs_call6(s, m[M_EP6..M_EP6 + 18], m[M_FP..M_FP + 10]);
+            }
+            if (dialled) { ma(m, CHM_DIALS); }
             mp(m, M_REDIAL, now + CH_CALLING_MS + ch_redial_ms(me_fp, m[M_FP..M_FP + 10]));
         }
     }
@@ -1116,6 +1140,24 @@ test the_counter_slots_store_and_add_one_without_touching_the_neighbours {
     ma(m[0..384], CHM_SEND_ERR);
     assert chm_stat(m[0..384], CHM_SEND_ERR) == 1 and chm_stat(m[0..384], 24) == 0 and chm_stat(m[0..384], 23) == 0;
     assert m[M_FP] == 1 and m[M_FP + 9] == 10;
+}
+
+test chm_an_ipv6_chat_endpoint_is_kept_beside_the_ipv4_and_never_over_the_owed_acks {
+    var m : [384]u8 = undefined;
+    const fp : [10]u8 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    assert chm_init(m[0..384], fp[0..10], 0, 0);
+    assert ip6_is_set(m[M_EP6..M_EP6 + 18]) == false;
+    const ep : [18]u8 = [32, 1, 72, 96, 72, 96, 0, 0, 0, 0, 0, 0, 0, 0, 136, 136, 186, 112];
+    chm_addr6(m[0..384], ep[0..18]);
+    assert m[M_EP6] == 32 and m[M_EP6 + 17] == 112 and mg(m[0..384], M_IP) == 0;
+    // the held ACKs end before it, the block holds it
+    assert (M_OWED + CHM_OWED_MAX) * 8 <= M_EP6 and M_EP6 + 18 <= CHM_LEN and M_FP + 10 <= M_INFO_AT * 8;
+    // an empty or all-zero endpoint clears it; a new driver starts with none
+    chm_addr6(m[0..384], ep[0..0]);
+    assert ip6_is_set(m[M_EP6..M_EP6 + 18]) == false;
+    chm_addr6(m[0..384], ep[0..18]);
+    assert chm_init(m[0..384], fp[0..10], 1, 2) and ip6_is_set(m[M_EP6..M_EP6 + 18]) == false;
+    chm_addr6(m[0..383], ep[0..18]);
 }
 
 // a session block that holds only what chm_ringing reads: the state byte, the peer fingerprint and the peer address slot

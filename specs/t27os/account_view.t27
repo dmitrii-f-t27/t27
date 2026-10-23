@@ -40,6 +40,10 @@ use t27os::call_view::CV_BTN_H;
 use t27os::call_view::cv_field_x;
 use t27os::call_view::cv_addr_text;
 use t27os::call_nat::cn_pub_text;
+use t27os::call_ip6::ip6_text;
+use t27os::call_ip6::ip6_is_set;
+use t27os::call_ip6::ip6_mapped;
+use t27os::call_ip6::IP6_TEXT_MAX;
 use t27os::call_nat::cn_can_ask;
 use t27os::call_nat::CN_S_OK;
 use t27os::call_nat::CN_S_NONE;
@@ -310,6 +314,39 @@ pub fn ac_hit_stun(x: f64, y: f64, l: f64, w: f64, t: f64, show: bool, raw: u32)
     return raw;
 }
 
+/// The PUBLIC v6 line (owner, 2026-10-23; call_ip6.t27): this device's own global IPv6 and the call port, read from
+/// the interfaces (no STUN: there is no NAT on IPv6). It stands where the line on what the key is for stands, while
+/// calls are up and there is such an address. The whole line copies "[address]:port" (AC_H_V6), as the key box copies
+/// the key; for 2 s after a copy it says so. Its text shrinks to fit left of the small code, never below
+/// AC_V6_MIN_SIZE. out: at least 64 bytes; 0 when there is no own IPv6 (none, or an IPv4 given).
+pub const AC_V6_SIZE : f64 = 9.0;
+pub const AC_V6_MIN_SIZE : f64 = 6.5;
+pub fn ac_v6_line(own: []const u8, copied: bool, out: []u8) -> usize {
+    if (out.len < 64 or !ip6_is_set(own) or ip6_mapped(own)) { return 0; }
+    var n : usize = put_bytes(out, 0, "PUBLIC v6 ");
+    if (copied) { return put_bytes(out, n, "copied"); }
+    return n + ip6_text(own, out[n..out.len]);
+}
+
+/// The size the line is drawn at: AC_V6_SIZE when its width at that size (w9) fits room, else smaller in steps of half
+/// a point, AC_V6_MIN_SIZE at least.
+pub fn ac_v6_size(w9: f64, room: f64) -> f64 {
+    var sz : f64 = AC_V6_SIZE;
+    while (sz > AC_V6_MIN_SIZE and w9 * sz / AC_V6_SIZE > room) { sz = sz - 0.5; }
+    return sz;
+}
+
+/// The PUBLIC v6 line's box: across the text left of the small code, around the baseline AC_GIVE_BASE.
+pub fn ac_v6_in(x: f64, y: f64, l: f64, w: f64, t: f64) -> bool {
+    return fv_in(x, y, l + QP_PAD, t + AC_GIVE_BASE - 9.0, ac_qr_text_right(l, w) - l - QP_PAD, 12.0);
+}
+
+/// ac_hit with the PUBLIC v6 line over it: `show` = the line is drawn.
+pub fn ac_hit_v6(x: f64, y: f64, l: f64, w: f64, t: f64, show: bool, raw: u32) -> u32 {
+    if (show and ac_v6_in(x, y, l, w, t)) { return AC_H_V6; }
+    return raw;
+}
+
 /// "up 45 s", "up 3 min", "up 2 h 05 min", "up 3 d 4 h".
 pub fn ac_up_text(secs: u64, out: []u8) -> usize {
     var n : usize = put_bytes(out, 0, "up ");
@@ -573,6 +610,8 @@ pub const AC_H_HCALL : u32 = 12;
 pub const AC_H_QR : u32 = 13;
 /// The PUBLIC line: look up this device's public address (call_nat.t27).
 pub const AC_H_STUN : u32 = 14;
+/// The PUBLIC v6 line: copy this device's own IPv6 and call port (call_ip6.t27).
+pub const AC_H_V6 : u32 = 15;
 /// Per row i (0..15): the row (a click opens the friend's card, chat_view.t27), copy that friend's key, remove (asks),
 /// YES, NO, CALL, MESSAGE.
 pub const AC_H_ROW : u32 = 16;
@@ -1344,6 +1383,59 @@ test ac_the_public_line_stands_next_to_the_key_and_is_the_look_up_button {
     assert ac_hit_stun(l + QP_PAD + 5.0, t + AC_STATE_Y - 3.0, l, w, t, true, AC_H_NONE) == AC_H_NONE;
     assert AC_GIVE_BASE + 3.0 <= AC_ACCT_BASE - 9.0 and AC_ACCT_BASE + 3.0 <= AC_STATE_Y - 10.0;
     assert AC_H_QR < AC_H_STUN and AC_H_STUN < AC_H_ROW and ac_pub_label() == "PUBLIC";
+}
+
+test ac_the_public_v6_line_gives_the_own_address_and_copies_it {
+    var o : [128]u8 = undefined;
+    var ep : [18]u8 = undefined;
+    var i : usize = 0;
+    while (i < 18) {
+        ep[i] = 0;
+        i = i + 1;
+    }
+    // no own IPv6 (none yet, or an IPv4): no line
+    assert ac_v6_line(ep[0..18], false, o[0..128]) == 0;
+    // 2804:18:1917:f34e:14a2:3b3e:e291:ff78 on port 47727
+    const a : [18]u8 = [40, 4, 0, 24, 25, 23, 243, 78, 20, 162, 59, 62, 226, 145, 255, 120, 186, 111];
+    assert fv_eq(o[0..128], ac_v6_line(a[0..18], false, o[0..128]), "PUBLIC v6 [2804:18:1917:f34e:14a2:3b3e:e291:ff78]:47727");
+    assert fv_eq(o[0..128], ac_v6_line(a[0..18], true, o[0..128]), "PUBLIC v6 copied");
+    assert ac_v6_line(a[0..18], false, o[0..63]) == 0;
+    var m : [18]u8 = undefined;
+    i = 0;
+    while (i < 18) {
+        m[i] = 0;
+        i = i + 1;
+    }
+    m[10] = 255;
+    m[11] = 255;
+    m[12] = 203;
+    m[17] = 1;
+    assert ac_v6_line(m[0..18], false, o[0..128]) == 0;
+    // the longest line fits at a size no smaller than AC_V6_MIN_SIZE, and a short one keeps AC_V6_SIZE
+    const l : f64 = 400.0;
+    const w : f64 = QP_W;
+    const room : f64 = ac_qr_text_right(l, w) - (l + QP_PAD);
+    const big : [18]u8 = [254, 220, 186, 152, 118, 84, 50, 16, 239, 205, 171, 137, 103, 69, 35, 1, 255, 255];
+    const n : usize = ac_v6_line(big[0..18], false, o[0..128]);
+    assert n == 10 + IP6_TEXT_MAX;
+    const sz : f64 = ac_v6_size(chv_text_w(o[0..n], n, AC_V6_SIZE), room);
+    assert sz >= AC_V6_MIN_SIZE and sz < AC_V6_SIZE;
+    assert ac_v6_size(10.0, room) == AC_V6_SIZE;
+    assert ac_v6_size(100000.0, room) == AC_V6_MIN_SIZE;
+    // a real address of 37 characters fits at the size chosen
+    const rn : usize = ac_v6_line(a[0..18], false, o[0..128]);
+    const rs : f64 = ac_v6_size(chv_text_w(o[0..rn], rn, AC_V6_SIZE), room);
+    assert chv_text_w(o[0..rn], rn, rs) <= room or rs == AC_V6_MIN_SIZE;
+    assert chv_text_w(o[0..rn], rn, 7.0) <= room + 30.0;
+    // the box: the line left of the code, above the PUBLIC line; nothing when it is not drawn
+    const t : f64 = 35.0;
+    const y : f64 = t + AC_GIVE_BASE - 3.0;
+    assert ac_hit_v6(l + QP_PAD + 5.0, y, l, w, t, true, AC_H_NONE) == AC_H_V6;
+    assert ac_hit_v6(l + QP_PAD + 5.0, y, l, w, t, false, AC_H_NONE) == AC_H_NONE;
+    assert ac_hit_v6(ac_qr_small_x(l, w) + 4.0, y, l, w, t, true, AC_H_QR) == AC_H_QR;
+    assert ac_hit_v6(l + QP_PAD + 5.0, t + AC_ACCT_BASE - 3.0, l, w, t, true, AC_H_STUN) == AC_H_STUN;
+    assert ac_v6_in(l + QP_PAD + 5.0, t + AC_ACCT_BASE - 3.0, l, w, t) == false and ac_pub_in(l + QP_PAD + 5.0, y, l, w, t) == false;
+    assert AC_H_STUN < AC_H_V6 and AC_H_V6 < AC_H_ROW;
 }
 
 test ac_uptime_and_state_read_as_people_say_them {
