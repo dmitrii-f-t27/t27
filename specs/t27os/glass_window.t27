@@ -318,12 +318,69 @@ use t27os::call_view::cv_pub_hint;
 use t27os::call_view::cv_bind_parse;
 use t27os::call_view::cv_bind_class;
 use t27os::call_view::cv_bind_warn;
+use t27os::call_view::cv_lan_pick;
+use t27os::call_view::cv_listen_text;
+use t27os::call_view::cv_who;
+use t27os::call_view::cv_is_self;
+use t27os::call_view::cv_addr_class;
+use t27os::call_view::CV_AC_PUBLIC;
+use t27os::call_nat::CN_STUN_HOST;
+use t27os::call_nat::CN_STUN_PORT;
+use t27os::call_nat::CN_TXID;
+use t27os::call_nat::CN_DNS_MS;
+use t27os::call_nat::CN_S_NONE;
+use t27os::call_nat::CN_S_DNS;
+use t27os::call_nat::CN_S_ASK;
+use t27os::call_nat::CN_S_OK;
+use t27os::call_nat::CN_S_NODNS;
+use t27os::call_nat::CN_S_NOANSWER;
+use t27os::call_nat::CN_S_NOSOCK;
+use t27os::call_nat::CN_S_STALE;
+use t27os::call_nat::CN_SS_SEND;
+use t27os::call_nat::CN_SS_GIVEUP;
+use t27os::call_nat::CN_K_REFRESH;
+use t27os::call_nat::CN_K_STALE;
+use t27os::call_nat::cn_stun_step;
+use t27os::call_nat::cn_keep;
+use t27os::call_nat::cn_can_ask;
+use t27os::call_nat::cn_punch_due;
+use t27os::call_nat::cn_punch_ok;
+use t27os::call_nat::cn_same_router;
+use t27os::call_session::cs_stun_send;
+use t27os::call_session::cs_probe_send;
+use t27os::call_session::cs_nat;
+use t27os::call_session::CS_N_PUB;
+use t27os::call_session::CS_N_AT;
+use t27os::call_session::CS_N_RX;
+use t27os::call_session::CS_N_BAD;
+use t27os::call_session::CS_N_PROBES;
+use t27os::call_session::CS_N_PFROM;
+use t27os::account_view::ac_pub_line;
+use t27os::account_view::ac_hit_stun;
+use t27os::account_view::AC_H_STUN;
+use t27os::account_view::AC_ACCT_BASE;
+use t27os::peer_identity_host::ih_addrinfo;
+use t27os::peer_identity_host::ih_pump;
+use t27os::peer_identity_host::ih_free;
+use t27os::peer_identity_host::ih_addr;
+use t27os::peer_identity_host::BE_LEN;
+use t27os::peer_identity_host::BE_HOST;
+use t27os::peer_identity_host::BE_IF;
+use t27os::peer_identity_host::BE_STATE;
+use t27os::peer_identity_host::BE_IP;
+use t27os::peer_identity_host::BS_ADDRESSED;
+use t27os::update_host::uh_getsockname;
+use t27os::call_crypto_probe::ckh_rand;
+use t27os::call_crypto_probe::ckh_addr4;
+use t27os::pty_sys::sys_socket;
+use t27os::pty_sys::sys_connect;
 use t27os::call_view::CV_D_OK;
 use t27os::call_view::CV_D_ASK;
 use t27os::call_view::CV_B_NO;
 use t27os::call_view::CV_B_ANY;
 use t27os::call_view::CV_N_PUBASK;
 use t27os::call_view::CV_N_NEVER;
+use t27os::call_view::CV_N_ROUTER;
 use t27os::call_session::CS_LEN;
 use t27os::call_session::CS_AUDIO_DEV;
 use t27os::call_session::CS_AUDIO_TEST;
@@ -6898,7 +6955,12 @@ pub const TB_SIZE : usize = 107604;
 /// TR. the key mismatch warnings (trust.t27, ~/.t27os/trust.t27) past TB_SIZE, so the slices that end at TB_SIZE (the
 /// backup panel and the groups, the Queen dash) stay as they were; main's region is TB_ALL bytes.
 pub const TBO_TRU : usize = 107604;
-pub const TB_ALL : usize = 109160;
+/// CN. the resolver's block for the STUN lookup (call_nat.t27): one mDNS entry (the host name in, the IPv4 out, written
+/// by the daemon's callback, so it lives in main's region and never moves), then the lookup's DNSServiceRef.
+pub const TBO_NAT : usize = 109160;
+pub const CN_NB_REF : usize = 256;
+pub const CN_NB_LEN : usize = 272;
+pub const TB_ALL : usize = 109432;
 pub const TG_KEY_RETURN : u64 = 36;
 pub const TG_KEY_BACKSPACE : u64 = 51;
 pub const TG_EV_CHAR : u32 = 99;
@@ -10275,6 +10337,39 @@ pub const CL_GV_LIVE : usize = 254;
 pub const CL_GVIMG : usize = 768;
 pub const CL_GVSER : usize = 784;
 pub const CL_GVLINK : usize = 792;
+/// CN. Beyond the home network (owner, 2026-10-23; call_nat.t27), past the update part (update_view UPV_END). Drawn: the
+/// PUBLIC line's state (call_nat CN_S_*), the address this Mac sends from on its default route (big-endian, 0 = none;
+/// call_view cv_lan_pick), the public address (IPv4 then port, big-endian) and whole minutes since it came (at most 255).
+pub const CL_N_ST : usize = 8096;
+pub const CL_N_LAN : usize = 8100;
+pub const CL_N_PUB : usize = 8104;
+pub const CL_N_MIN : usize = 8110;
+pub const CL_N_KEY_END : usize = 8112;
+/// Not drawn: the lookup that runs (CN_RUN_*), LOOK UP pressed and not yet taken, requests sent in this round, the
+/// state last said on stderr, the round's start, the last LOOK UP, the last answer and the last route lookup (ms), the
+/// server (IPv4 then port), the transaction id of the round (12 bytes).
+pub const CL_N_RUN : usize = 8112;
+pub const CL_N_REQ : usize = 8113;
+pub const CL_N_SENT : usize = 8114;
+pub const CL_N_SAID : usize = 8115;
+pub const CL_N_T0 : usize = 8116;
+pub const CL_N_ASK : usize = 8120;
+pub const CL_N_TOK : usize = 8124;
+pub const CL_N_LANT : usize = 8128;
+pub const CL_N_SRV : usize = 8132;
+pub const CL_N_TX : usize = 8138;
+/// Not drawn: the punch (T27OS_PUNCH with T27OS_QA=1, or a dial of a public address): its target (IPv4 then port),
+/// probes sent, when it started (ms, low 32 bits; 0 = none), the probes received when last said on stderr.
+pub const CL_N_PT : usize = 8150;
+pub const CL_N_PSENT : usize = 8156;
+pub const CL_N_PT0 : usize = 8160;
+pub const CL_N_PSAID : usize = 8164;
+pub const CL_N_END : usize = 8168;
+pub const CN_RUN_IDLE : u32 = 0;
+pub const CN_RUN_DNS : u32 = 1;
+pub const CN_RUN_STUN : u32 = 2;
+/// How often the window asks the system which address it sends from (a connect on a UDP socket: nothing is sent).
+pub const CN_LAN_MS : u64 = 5000;
 
 pub fn cl_consent(cl: []const u8) -> u64 {
     return cl_ip(cl, CL_PUBOK) * 65536 + ((@as(u64, cl[CL_PUBOK + 4]) << 8) | @as(u64, cl[CL_PUBOK + 5]));
@@ -10642,11 +10737,279 @@ pub fn cl_boot(cl: []u8, s: []u8) -> void {
         rt_init(cl[FE_TONE .. FE_TONE + RT_BLOCK]);
         ug_listen(cl, bind);
         fe_net(cl, bind, port);
+        cn_boot(cl);
     } else if (cl[CL_PTRIED] > 1) {
         cl[CL_NOTE] = @as(u8, @intCast(CV_N_PORTS));
     } else {
         cl[CL_NOTE] = @as(u8, @intCast(CV_N_SOCKET));
     }
+}
+
+// ======================================================================================================
+// CN. Beyond the home network (owner, 2026-10-23; call_nat.t27 decides, this block moves the bytes; Refs
+// dmitrii-f-t27/t27#13). With no T27OS_CALL_BIND the call socket listens on every interface (call_view section 7);
+// cn_tick asks the system every CN_LAN_MS which address this Mac sends from (cl_lan_probe: connect on a UDP socket to
+// 192.0.2.1, the documentation network, which sends nothing, then getsockname) so the panels can say
+// "listening on <address>:<port>". The STUN lookup runs only when the person asks for it (LOOK UP on the PUBLIC line,
+// or T27OS_STUN=1 at launch): the system resolver for CN_STUN_HOST (DNSServiceGetAddrInfo, pumped here, never
+// blocking the loop), then the Binding request from the call socket (call_session cs_stun_send) on the schedule of
+// cn_stun_step, the answer taken by cs_poll; while shown, asked again on cn_keep's schedule. The punch: probes to a
+// target on cn_punch_due's schedule. Every change of the PUBLIC state and every new probe received is one line on
+// stderr ("NATSTAT ...", "NATPROBE ...") that names ports and counts, never an address.
+// ======================================================================================================
+
+/// The 16-bit and 32-bit words of the CN part (big-endian ports, little-endian times).
+fn cn_port_at(cl: []const u8, at: usize) -> u64 { return (@as(u64, cl[at]) << 8) | @as(u64, cl[at + 1]); }
+
+/// The public address shown (ip * 65536 + port; 0 = none).
+pub fn cl_nat_pub(cl: []const u8) -> u64 { return cl_ip(cl, CL_N_PUB) * 65536 + cn_port_at(cl, CL_N_PUB + 4); }
+
+fn cn_put_addr(cl: []u8, at: usize, a: u64) -> void {
+    cl_put_ip(cl, at, a / 65536);
+    cl_put_port(cl, at + 4, a % 65536);
+}
+
+fn cn_addr_at(cl: []const u8, at: usize) -> u64 { return cl_ip(cl, at) * 65536 + cn_port_at(cl, at + 4); }
+
+/// ms clock folded to 32 bits for the CN part, never 0 (0 means "not set").
+fn cn_ms32(now: u64) -> u64 {
+    const v : u64 = now & 4294967295;
+    if (v == 0) { return 1; }
+    return v;
+}
+
+/// ms since a 32-bit stamp taken by cn_ms32 (the clock wraps every 49 days: the difference is taken modulo 2^32).
+fn cn_ago(now: u64, at: u64) -> u64 { return ((now & 4294967295) + 4294967296 - at) & 4294967295; }
+
+/// The address this Mac sends from on its default route (call_view cv_lan_pick), 0 when there is none. A UDP connect
+/// only picks the route: no datagram leaves.
+fn cl_lan_probe() -> u64 {
+    const fd : i32 = sys_socket(2, 2, 0);
+    if (fd < 0) { return 0; }
+    var a : [16]u8 = undefined;
+    ckh_addr4(a[0..16], 3221225985, 9);
+    if (sys_connect(fd, a[0..16], 16) != 0) {
+        sys_close(fd);
+        return 0;
+    }
+    var sa : [16]u8 = undefined;
+    var ln : [4]u8 = undefined;
+    ln[0] = 16; ln[1] = 0; ln[2] = 0; ln[3] = 0;
+    const r : i32 = uh_getsockname(fd, sa[0..16], ln[0..4]);
+    sys_close(fd);
+    if (r != 0) { return 0; }
+    return cv_lan_pick((@as(u64, sa[4]) << 24) | (@as(u64, sa[5]) << 16) | (@as(u64, sa[6]) << 8) | @as(u64, sa[7]));
+}
+
+/// At launch, once the call socket is open: T27OS_STUN=1 asks for the lookup (the person's choice, said on stderr);
+/// T27OS_PUNCH=<a.b.c.d:port> (a test aid, only with T27OS_QA=1) starts a punch toward that address.
+fn cn_boot(cl: []u8) -> void {
+    var e : [32]u8 = undefined;
+    var n : usize = cl_env("T27OS_STUN", e[0..32]);
+    if (n == 1 and e[0] == 49) {
+        cl[CL_N_REQ] = 1;
+        sys_write(2, "NATSTAT T27OS_STUN=1: this device asks stun.l.google.com for its public address\n", 81);
+    }
+    n = cl_env("T27OS_PUNCH", e[0..32]);
+    if (n > 0) {
+        const a : u64 = cv_parse_addr(e[0..32], n);
+        if (qa_env() == false) {
+            sys_write(2, "QA off (T27OS_QA is not 1): ignored T27OS_PUNCH\n", 49);
+        } else if (cn_punch_ok(a)) {
+            cn_punch_start(cl, a, ckh_ms());
+        } else {
+            sys_write(2, "NATPROBE T27OS_PUNCH refused: not an address a probe may go to\n", 64);
+        }
+    }
+}
+
+/// Start (or restart) a punch toward a.
+fn cn_punch_start(cl: []u8, a: u64, now: u64) -> void {
+    cn_put_addr(cl, CL_N_PT, a);
+    cl[CL_N_PSENT] = 0;
+    cl_put32(cl, CL_N_PT0, cn_ms32(now));
+}
+
+/// LOOK UP pressed (the PUBLIC line): taken by the next cn_tick when a lookup may be asked for.
+pub fn cn_ask(cl: []u8) -> void {
+    if (cl[CL_UP] != 0 and cn_can_ask(@as(u32, cl[CL_N_ST]))) { cl[CL_N_REQ] = 1; }
+}
+
+/// One NATSTAT line: the state, the public port (never the address), whether the public IP is the one this Mac sends
+/// from (no router in between), the answers taken and refused, the probes received.
+fn cn_say(cl: []const u8, s: []const u8) -> void {
+    var line : [200]u8 = undefined;
+    var n : usize = put_bytes(line[0..200], 0, "NATSTAT st=");
+    n = put_dec(line[0..200], n, @as(u64, cl[CL_N_ST]));
+    const a : u64 = cl_nat_pub(cl);
+    n = put_bytes(line[0..200], n, " public_port=");
+    n = put_dec(line[0..200], n, a % 65536);
+    n = put_bytes(line[0..200], n, " local_port=");
+    n = put_dec(line[0..200], n, cl_me_port(cl));
+    n = put_bytes(line[0..200], n, " public_is_lan=");
+    var same : u64 = 0;
+    if (a != 0 and a / 65536 == cl_ip(cl, CL_N_LAN)) { same = 1; }
+    n = put_dec(line[0..200], n, same);
+    n = put_bytes(line[0..200], n, " lan=");
+    var hl : u64 = 0;
+    if (cl_ip(cl, CL_N_LAN) != 0) { hl = 1; }
+    n = put_dec(line[0..200], n, hl);
+    n = put_bytes(line[0..200], n, " rx=");
+    n = put_dec(line[0..200], n, cs_nat(s, CS_N_RX));
+    n = put_bytes(line[0..200], n, " refused=");
+    n = put_dec(line[0..200], n, cs_nat(s, CS_N_BAD));
+    n = put_bytes(line[0..200], n, " probes_in=");
+    n = put_dec(line[0..200], n, cs_nat(s, CS_N_PROBES));
+    n = put_bytes(line[0..200], n, " probes_out=");
+    n = put_dec(line[0..200], n, @as(u64, cl[CL_N_PSENT]));
+    n = put_bytes(line[0..200], n, "\n");
+    sys_write(2, line[0..200], @as(u64, n));
+}
+
+/// A new round of requests to the server already known: a fresh transaction id, nothing sent yet.
+fn cn_round(cl: []u8, now: u64) -> bool {
+    var t : [12]u8 = undefined;
+    if (!ckh_rand(t[0..12])) { return false; }
+    var i : usize = 0;
+    while (i < CN_TXID) {
+        cl[CL_N_TX + i] = t[i];
+        i = i + 1;
+    }
+    cl[CL_N_RUN] = @as(u8, @intCast(CN_RUN_STUN));
+    cl[CL_N_SENT] = 0;
+    cl_put32(cl, CL_N_T0, cn_ms32(now));
+    return true;
+}
+
+/// Every loop pass: the address this Mac sends from (every CN_LAN_MS), the lookup's next step, the refresh, the punch.
+pub fn cn_tick(cl: []u8, s: []u8, nb: []u8, now: u64) -> void {
+    if (nb.len < CN_NB_LEN) { return; }
+    if (cl_get32(cl, CL_N_LANT) == 0 or cn_ago(now, cl_get32(cl, CL_N_LANT)) >= CN_LAN_MS) {
+        cl_put_ip(cl, CL_N_LAN, cl_lan_probe());
+        cl_put32(cl, CL_N_LANT, cn_ms32(now));
+    }
+    if (cl[CL_UP] == 0) {
+        if (cl[CL_N_ST] != @as(u8, @intCast(CN_S_NOSOCK))) { cl[CL_N_ST] = @as(u8, @intCast(CN_S_NOSOCK)); }
+        return;
+    }
+    if (cl[CL_N_ST] == @as(u8, @intCast(CN_S_NOSOCK))) { cl[CL_N_ST] = @as(u8, @intCast(CN_S_NONE)); }
+    var st : u32 = @as(u32, cl[CL_N_ST]);
+    const run : u32 = @as(u32, cl[CL_N_RUN]);
+    // LOOK UP: the resolver first, every time the person asks (the server's address may have moved)
+    if (cl[CL_N_REQ] != 0 and run == CN_RUN_IDLE) {
+        cl[CL_N_REQ] = 0;
+        cl_put32(cl, CL_N_ASK, cn_ms32(now));
+        var k : usize = 0;
+        while (k < CN_NB_LEN) {
+            nb[k] = 0;
+            k = k + 1;
+        }
+        put_bytes(nb[0..CN_NB_LEN], BE_HOST, CN_STUN_HOST);
+        if (ih_addrinfo(nb[CN_NB_REF .. CN_NB_REF + 8], ih_addr(nb[0..BE_LEN])) == 0) {
+            cl[CL_N_RUN] = @as(u8, @intCast(CN_RUN_DNS));
+            cl_put32(cl, CL_N_T0, cn_ms32(now));
+            st = CN_S_DNS;
+        } else {
+            st = CN_S_NODNS;
+        }
+    } else if (run == CN_RUN_DNS) {
+        const ref : u64 = cl_get32(nb, CN_NB_REF) | (cl_get32(nb, CN_NB_REF + 4) << 32);
+        ih_pump(ref, 0);
+        if (nb[BE_STATE] == @as(u8, @intCast(BS_ADDRESSED))) {
+            ih_free(ref);
+            cl_put32(nb, CN_NB_REF, 0);
+            cl_put32(nb, CN_NB_REF + 4, 0);
+            const ip : u64 = (@as(u64, nb[BE_IP]) << 24) | (@as(u64, nb[BE_IP + 1]) << 16) | (@as(u64, nb[BE_IP + 2]) << 8) | @as(u64, nb[BE_IP + 3]);
+            cn_put_addr(cl, CL_N_SRV, ip * 65536 + CN_STUN_PORT);
+            if (cn_round(cl, now)) {
+                if (st != CN_S_OK) { st = CN_S_ASK; }
+            } else {
+                cl[CL_N_RUN] = @as(u8, @intCast(CN_RUN_IDLE));
+                st = CN_S_NOANSWER;
+            }
+        } else if (cn_ago(now, cl_get32(cl, CL_N_T0)) >= CN_DNS_MS) {
+            ih_free(ref);
+            cl_put32(nb, CN_NB_REF, 0);
+            cl_put32(nb, CN_NB_REF + 4, 0);
+            cl[CL_N_RUN] = @as(u8, @intCast(CN_RUN_IDLE));
+            st = CN_S_NODNS;
+        }
+    } else if (run == CN_RUN_STUN) {
+        const t0 : u64 = cl_get32(cl, CL_N_T0);
+        const at : u64 = cs_nat(s, CS_N_AT);
+        if (at != 0 and cs_nat(s, CS_N_PUB) != 0 and cn_ago(at, t0) < 2147483648) {
+            // the answer came after this round started
+            cn_put_addr(cl, CL_N_PUB, cs_nat(s, CS_N_PUB));
+            cl_put32(cl, CL_N_TOK, cn_ms32(at));
+            cl[CL_N_RUN] = @as(u8, @intCast(CN_RUN_IDLE));
+            st = CN_S_OK;
+        } else {
+            const d : u32 = cn_stun_step(cn_ago(now, t0), @as(u32, cl[CL_N_SENT]));
+            if (d == CN_SS_SEND) {
+                const srv : u64 = cn_addr_at(cl, CL_N_SRV);
+                cs_stun_send(s, cl[CL_N_TX .. CL_N_TX + CN_TXID], srv / 65536, srv % 65536);
+                cl[CL_N_SENT] = cl[CL_N_SENT] + 1;
+            } else if (d == CN_SS_GIVEUP) {
+                cl[CL_N_RUN] = @as(u8, @intCast(CN_RUN_IDLE));
+                // a refresh that got no answer: the shown address may have changed
+                if (st == CN_S_OK) { st = CN_S_STALE; } else { st = CN_S_NOANSWER; }
+            }
+        }
+    } else if (st == CN_S_OK) {
+        const k2 : u32 = cn_keep(cn_ago(now, cl_get32(cl, CL_N_ASK)), cn_ago(now, cl_get32(cl, CL_N_TOK)));
+        if (k2 == CN_K_STALE) {
+            st = CN_S_STALE;
+        } else if (k2 == CN_K_REFRESH) {
+            cn_round(cl, now);
+        }
+    }
+    if (st == CN_S_OK or st == CN_S_STALE) {
+        var m : u64 = cn_ago(now, cl_get32(cl, CL_N_TOK)) / 60000;
+        if (m > 255) { m = 255; }
+        cl[CL_N_MIN] = @as(u8, @intCast(m));
+    }
+    cl[CL_N_ST] = @as(u8, @intCast(st));
+    // the punch
+    const pt0 : u64 = cl_get32(cl, CL_N_PT0);
+    if (pt0 != 0) {
+        const el : u64 = cn_ago(now, pt0);
+        if (cn_punch_due(el, @as(u64, cl[CL_N_PSENT]))) {
+            if (cs_probe_send(s, cn_addr_at(cl, CL_N_PT))) { cl[CL_N_PSENT] = cl[CL_N_PSENT] + 1; } else { cl_put32(cl, CL_N_PT0, 0); }
+        } else if (el >= 30000) {
+            cl_put32(cl, CL_N_PT0, 0);
+            cn_say(cl, s);
+        }
+    }
+    const pin : u64 = cs_nat(s, CS_N_PROBES);
+    if (pin != cl_get32(cl, CL_N_PSAID)) {
+        cl_put32(cl, CL_N_PSAID, pin);
+        var pl : [96]u8 = undefined;
+        var pn : usize = put_bytes(pl[0..96], 0, "NATPROBE in=");
+        pn = put_dec(pl[0..96], pn, pin);
+        pn = put_bytes(pl[0..96], pn, " from_port=");
+        pn = put_dec(pl[0..96], pn, cs_nat(s, CS_N_PFROM) % 65536);
+        pn = put_bytes(pl[0..96], pn, "\n");
+        sys_write(2, pl[0..96], @as(u64, pn));
+    }
+    if (cl[CL_N_SAID] != cl[CL_N_ST]) {
+        cl[CL_N_SAID] = cl[CL_N_ST];
+        cn_say(cl, s);
+    }
+}
+
+/// The CALL panel's first line: "ONLINE  listening on 192.168.15.8:47727" (call_view cv_listen_text), with the taken
+/// port after it as cl_port_status says it; the port status alone while calls are off.
+pub fn cl_listen_status(cl: []const u8, out: []u8) -> usize {
+    if (cl[CL_UP] == 0 or out.len < 160) { return cl_port_status(cl, out); }
+    var n : usize = put_bytes(out, 0, "ONLINE  ");
+    n = n + cv_listen_text(cl_ip(cl, CL_ME_IP), cl_ip(cl, CL_N_LAN), cl_me_port(cl), out[n..out.len]);
+    var b : [96]u8 = undefined;
+    const bn : usize = cl_port_busy_line(cl, b[0..96]);
+    if (bn > 0 and n + 2 + bn <= out.len) {
+        n = put_bytes(out, n, "  ");
+        n = put_bytes(out, n, b[0..bn]);
+    }
+    return n;
 }
 
 /// One decimal field of the stats line.
@@ -11089,14 +11452,20 @@ pub fn cl_dial(cl: []u8, s: []u8) -> void {
         note = CV_N_PUBASK;
     } else if (d != CV_D_OK) {
         note = CV_N_NEVER;
-    } else if (cv_addr_ip(a) == cl_ip(cl, CL_ME_IP) and cv_addr_port(a) == cl_me_port(cl)) {
+    } else if (cv_is_self(a, cl_ip(cl, CL_ME_IP), cl_ip(cl, CL_N_LAN), cl_me_port(cl))) {
         note = CV_N_SELF;
+    } else if (cn_same_router(a, cl_nat_pub(cl)) and cl[CL_N_ST] == @as(u8, @intCast(CN_S_OK))) {
+        // this router's own public address: a friend behind it is called at its address on this network
+        note = CV_N_ROUTER;
     } else {
         var fp : [10]u8 = undefined;
         if (!fe_typed_key(cl, fp[0..10])) {
             note = FN_KEYNEED;
         } else if (!cs_call(s, cv_addr_ip(a), cv_addr_port(a), fp[0..10])) {
             note = CV_N_REFUSED;
+        } else if (cv_addr_class(cv_addr_ip(a)) == CV_AC_PUBLIC) {
+            // a public address: probes from the call socket as well, so this router opens toward it (call_nat.t27)
+            cn_punch_start(cl, a, ckh_ms());
         }
     }
     cl[CL_NOTE] = @as(u8, @intCast(note));
@@ -11621,17 +11990,12 @@ fn draw_call_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, cl:
     // this device: where it listens and the fingerprint of its identity (the key a friend calls)
     // online or not and on which port; when the configured port was taken, which one and which is used instead
     var pl : [160]u8 = undefined;
-    const pn : usize = cl_port_status(cl, pl[0..160]);
+    const pn : usize = cl_listen_status(cl, pl[0..160]);
     draw_cl_dot(c, kit, x, t + CL_PORT_Y - 8.0, cl[CL_UP] != 0);
     cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
     draw_fit(c, kit, pl[0..160], pn, x + 14.0, t + CL_PORT_Y, 9.5, WEIGHT_SEMIBOLD, false, right);
-    var n : usize = put_bytes(line[0..96], 0, "THIS DEVICE  ");
-    n = n + cv_addr_text(cl_ip(cl, CL_ME_IP), cl_me_port(cl), line[n..96]);
-    // T27OS_CALL_BIND=0.0.0.0: the explicit choice to listen on every interface is said next to the address
-    if (cl[CL_ANY] != 0) {
-        n = put_bytes(line[0..96], n, "  ");
-        n = put_bytes(line[0..96], n, cv_bind_warn(0));
-    }
+    // who gets through (call_view cv_who): every call rings for the person; where it listens is the line above
+    var n : usize = put_bytes(line[0..96], 0, cv_who());
     cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
     draw_fit(c, kit, line[0..96], n, x, t + CV_ME_Y, 9.5, 0.0, false, right);
     if (cl[CL_UP] != 0) {
@@ -11797,11 +12161,14 @@ pub fn ac_leave(cl: []u8, pf: []u8) -> void {
 pub fn ac_upd_shown(cl: []const u8) -> bool { return upv_button(@as(u32, cl[UPV_ST]), upv_has_offer(cl)) != UPV_B_NONE; }
 
 /// What a point means in the cabinet at this window size.
+/// The PUBLIC line answers as LOOK UP: calls are up (the key and the line are shown) and a lookup may be asked for.
+pub fn cn_shown(cl: []const u8) -> bool { return cl.len >= CL_CAP and cl[CL_UP] != 0 and cn_can_ask(@as(u32, cl[CL_N_ST])); }
+
 pub fn ac_hit_now(x: f64, y: f64, sw: f64, sh: f64, cl: []const u8) -> u32 {
     const h : f64 = sh - WS_TOP;
     const vis : usize = ac_rows_vis(h);
     const raw : u32 = ac_hit(x, y, qp_left(sw), QP_W, WS_TOP, h, ac_rows_drawn(@as(usize, cl[FV_SHOWN]), vis), @as(usize, cl[FV_COUNT]), vis, ac_conf_row(cl), ac_upd_shown(cl));
-    return ac_hit_qr(x, y, qp_left(sw), QP_W, WS_TOP, h, 0.0, cl[CL_UP] != 0, ac_qr_is_big(cl), raw);
+    return ac_hit_stun(x, y, qp_left(sw), QP_W, WS_TOP, cn_shown(cl), ac_hit_qr(x, y, qp_left(sw), QP_W, WS_TOP, h, 0.0, cl[CL_UP] != 0, ac_qr_is_big(cl), raw));
 }
 
 /// The friends rows that fit while the invitations are shown (account_view ac_inv_dy).
@@ -11835,7 +12202,7 @@ pub fn ac_hit_now_iv_g(x: f64, y: f64, sw: f64, sh: f64, cl: []const u8, iv: []c
     const inv : usize = ac_inv_rows(iv_waiting(iv));
     const vis : usize = ac_vis_now_g(sh, iv, cl, gv);
     const raw : u32 = ac_hit_inv(x, y, qp_left(sw), QP_W, WS_TOP, h, inv, ac_rows_drawn(@as(usize, cl[FV_SHOWN]), vis), @as(usize, cl[FV_COUNT]), vis, ac_conf_row(cl), ac_upd_shown(cl));
-    return ac_hit_qr(x, y, qp_left(sw), QP_W, WS_TOP, h, ac_inv_dy(inv), cl[CL_UP] != 0, ac_qr_is_big(cl), raw);
+    return ac_hit_stun(x, y, qp_left(sw), QP_W, WS_TOP, cn_shown(cl), ac_hit_qr(x, y, qp_left(sw), QP_W, WS_TOP, h, ac_inv_dy(inv), cl[CL_UP] != 0, ac_qr_is_big(cl), raw));
 }
 
 /// The wheel takes a step over the friends part, wherever the invitations moved it.
@@ -12378,7 +12745,7 @@ fn ac_log(cl: []const u8) -> void {
     n = put_bytes(line[0..384], n, " friends=");
     n = put_dec(line[0..384], n, @as(u64, cl[FV_COUNT]));
     n = put_bytes(line[0..384], n, " state=");
-    n = n + ac_state_line(cl[CL_UP] != 0, cl[FV_NET] == @as(u8, @intCast(FV_NET_UP)), cl_me_port(cl), line[n..384]);
+    n = n + ac_state_line(cl[CL_UP] != 0, cl[FV_NET] == @as(u8, @intCast(FV_NET_UP)), cl_ip(cl, CL_ME_IP), cl_ip(cl, CL_N_LAN), cl_me_port(cl), line[n..384]);
     n = put_bytes(line[0..384], n, " port=[");
     n = n + cl_port_status(cl, line[n..384]);
     n = put_bytes(line[0..384], n, "] ");
@@ -12657,8 +13024,17 @@ fn draw_account_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, 
     }
     cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
     draw_ac_fit(c, kit, gv, gv.len, x, t + AC_GIVE_BASE, 9.0, 0.0, false, qright);
-    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
-    draw_ac_fit(c, kit, av, av.len, x, t + AC_ACCT_BASE, 9.0, 0.0, false, qright);
+    if (qn > 0 and cl[CL_UP] != 0) {
+        // PUBLIC: this device's address on the internet next to the key (call_nat.t27); the whole line is LOOK UP
+        var pb : [128]u8 = undefined;
+        const pbn : usize = ac_pub_line(@as(u32, cl[CL_N_ST]), cl_nat_pub(cl), @as(u64, cl[CL_N_MIN]), pb[0..128]);
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+        if (hit == AC_H_STUN) { cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE)); }
+        draw_ac_fit(c, kit, pb[0..128], pbn, x, t + AC_ACCT_BASE, 9.0, 0.0, false, qright);
+    } else {
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+        draw_ac_fit(c, kit, av, av.len, x, t + AC_ACCT_BASE, 9.0, 0.0, false, qright);
+    }
     // the small code right of these lines; under it what a click does, unless the UPDATE button stands there
     if (qn > 0) {
         const qsx : f64 = ac_qr_small_x(l, QP_W);
@@ -12675,7 +13051,7 @@ fn draw_account_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, 
     // this device: online or not, the port, discovery; then the version, the build and how long it has been up
     const up : bool = cl[CL_UP] != 0 and cl[FV_NET] == @as(u8, @intCast(FV_NET_UP));
     draw_cl_dot(c, kit, x, t + AC_STATE_Y - 8.0, up);
-    n = ac_state_line(cl[CL_UP] != 0, cl[FV_NET] == @as(u8, @intCast(FV_NET_UP)), cl_me_port(cl), line[0..96]);
+    n = ac_state_line(cl[CL_UP] != 0, cl[FV_NET] == @as(u8, @intCast(FV_NET_UP)), cl_ip(cl, CL_ME_IP), cl_ip(cl, CL_N_LAN), cl_me_port(cl), line[0..96]);
     // every call port tried was taken: the line says how many (the CALL panel lists them)
     if (cl[CL_UP] == 0 and cl[CL_PTRIED] > 1) { n = cl_port_status(cl, line[0..96]); }
     cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
@@ -16052,7 +16428,7 @@ pub fn main() -> void {
     }
     // the tool pages (B, K, Q): their state words and text store, all zero, counters "not measured"
     var tgv : [256]u64 = undefined;
-    var tbv : [109160]u8 = undefined;
+    var tbv : [109432]u8 = undefined;
     var tgz : usize = 0;
     while (tgz < 256) {
         tgv[tgz] = 0;
@@ -16060,6 +16436,11 @@ pub fn main() -> void {
     }
     tgz = 0;
     while (tgz < TB_SIZE) {
+        tbv[tgz] = 0;
+        tgz = tgz + 1;
+    }
+    tgz = TBO_NAT;
+    while (tgz < TB_ALL) {
         tbv[tgz] = 0;
         tgz = tgz + 1;
     }
@@ -16709,6 +17090,7 @@ pub fn main() -> void {
                             if (qc_is_hit(ach) == false) { qc_msg_clear(tbv[TBO_QC .. TBO_QC + QC_CAP]); }
                             // UPD. UPDATE / CANCEL / RESTART; RESTART started the installed copy, this one quits
                             if (ach == AC_H_UPD and ug_click(tbv[TBO_CL .. TBO_CL + CL_CAP], ugp[0..2304])) { sys_exit(0); }
+                            if (ach == AC_H_STUN) { cn_ask(tbv[TBO_CL .. TBO_CL + CL_CAP]); }
                             var acr : u32 = 0;
                             if (hv_is_hit(ach)) {
                                 // an opened HELP drops the focus of a field typed in
@@ -17934,6 +18316,8 @@ pub fn main() -> void {
         // CL. and between the loop's slower parts, so no stretch of it keeps the call's socket waiting
         if (cl_tick(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN * 3], clw[0..10])) { clring = true; }
         ug_tick(tbv[TBO_CL .. TBO_CL + CL_CAP], ugp[0..2304], ckh_ms());
+        // CN. where this Mac listens, the STUN lookup the person asked for, the punch (call_nat.t27)
+        cn_tick(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN * 3], tbv[TBO_NAT .. TBO_NAT + CN_NB_LEN], ckh_ms());
         if (bgoff == false) {
             qd_tick(tgv[0..256], tbv[0..TB_SIZE], dhb[0..dhn], now, sst[SST_QDASH] != 0 and screen);
             god_tick(tgv[0..256], tbv[0..65536], dhb[0..dhn], now, god, sst[SST_QRUN]);
@@ -18462,6 +18846,12 @@ pub fn main() -> void {
         }
         fkc = UPV_BASE;
         while (fkc < UPV_KEY_END) {
+            fk = fg_mix(fk, @as(u64, tbv[TBO_CL + fkc]));
+            fkc = fkc + 1;
+        }
+        // CN. the PUBLIC line and where this Mac listens (call_nat.t27)
+        fkc = CL_N_ST;
+        while (fkc < CL_N_KEY_END) {
             fk = fg_mix(fk, @as(u64, tbv[TBO_CL + fkc]));
             fkc = fkc + 1;
         }
@@ -20085,6 +20475,11 @@ test the_call_region_ends_the_text_store_and_draw_reads_only_folded_bytes {
     assert AC_END <= CL_NOCAM and CL_NOCAM < CL_BPORT and CL_BPORT + 2 <= CL_PBUSY and CL_PBUSY + 2 <= CL_PTRIED;
     // the public address bytes follow the port bytes, before the friends snapshot, folded into the frame key
     assert CL_PTRIED < CL_ANY and CL_ANY < CL_PUBENV and CL_PUBENV < CL_PUBOK and CL_PUBOK + 6 <= FV_BASE and FV_BASE <= CL_KEY_N;
+    // CN. past the update part, inside the region, the drawn bytes first
+    assert UPV_END <= CL_N_ST and CL_N_LAN >= CL_N_ST + 1 and CL_N_PUB >= CL_N_LAN + 4 and CL_N_MIN >= CL_N_PUB + 6;
+    assert CL_N_KEY_END == CL_N_MIN + 2 and CL_N_RUN >= CL_N_KEY_END and CL_N_T0 >= CL_N_SAID + 1;
+    assert CL_N_SRV + 6 <= CL_N_TX and CL_N_TX + CN_TXID <= CL_N_PT and CL_N_PT + 6 <= CL_N_PSENT and CL_N_PT0 + 4 <= CL_N_PSAID;
+    assert CL_N_PSAID + 4 <= CL_N_END and CL_N_END <= CL_CAP;
     // the group video's drawn bytes follow the public address, before the friends snapshot, folded into the frame key;
     // its pictures, serials and links stand past the key and before the friends engine
     assert CL_PUBOK + 6 <= CL_GV and CL_GV < CL_GV_MORE and CL_GV_MORE < CL_GV_TAG and CL_GV_TAG + 2 * VG_SHOW <= CL_GV_SER;
@@ -20339,6 +20734,74 @@ test a_point_in_the_cabinet_means_the_same_to_the_click_the_cursor_and_the_drawi
     assert ac_hit_now(ac_del_x(l, QP_W) + 4.0, ac_row_y(WS_TOP, 1) + 4.0, sw, sh, cl[0..8192]) == AC_H_NO + 1;
     // outside the panel nothing answers
     assert ac_hit_now(l - 20.0, ac_row_y(WS_TOP, 1) + 4.0, sw, sh, cl[0..8192]) == AC_H_NONE;
+}
+
+fn gw_eq(a: []const u8, n: usize, b: []const u8) -> bool {
+    if (n != b.len) { return false; }
+    var i : usize = 0;
+    while (i < n) {
+        if (a[i] != b[i]) { return false; }
+        i = i + 1;
+    }
+    return true;
+}
+
+test cn_the_panels_say_where_this_mac_listens_and_the_public_line_is_look_up {
+    var cl : [8192]u8 = undefined;
+    var iv : [IV_LEN]u8 = undefined;
+    var i : usize = 0;
+    while (i < 8192) {
+        cl[i] = 0;
+        i = i + 1;
+    }
+    iv_init(iv[0..IV_LEN]);
+    var o : [160]u8 = undefined;
+    // calls off: the port status as before
+    assert gw_eq(o[0..160], cl_listen_status(cl[0..8192], o[0..160]), "OFFLINE  calls are off");
+    // on every interface (no T27OS_CALL_BIND): the address this Mac sends from
+    cl[CL_UP] = 1;
+    cl_put_port(cl[0..8192], CL_ME_PORT, 47727);
+    cl_put_ip(cl[0..8192], CL_N_LAN, 3232239368);
+    assert gw_eq(o[0..160], cl_listen_status(cl[0..8192], o[0..160]), "ONLINE  listening on 192.168.15.8:47727");
+    cl_put_ip(cl[0..8192], CL_N_LAN, 0);
+    assert gw_eq(o[0..160], cl_listen_status(cl[0..8192], o[0..160]), "ONLINE  listening on port 47727, no network yet");
+    cl_put_ip(cl[0..8192], CL_ME_IP, 2130706433);
+    assert gw_eq(o[0..160], cl_listen_status(cl[0..8192], o[0..160]), "ONLINE  listening on 127.0.0.1:47727, this Mac only");
+    // the public address kept in the region reads back
+    cn_put_addr(cl[0..8192], CL_N_PUB, 3405803783 * 65536 + 51234);
+    assert cl_nat_pub(cl[0..8192]) == 3405803783 * 65536 + 51234;
+    // LOOK UP: asked only while the line may ask, taken once
+    assert cn_shown(cl[0..8192]);
+    cn_ask(cl[0..8192]);
+    assert cl[CL_N_REQ] == 1;
+    cl[CL_N_REQ] = 0;
+    cl[CL_N_ST] = @as(u8, @intCast(CN_S_ASK));
+    assert cn_shown(cl[0..8192]) == false;
+    cn_ask(cl[0..8192]);
+    assert cl[CL_N_REQ] == 0;
+    cl[CL_N_ST] = @as(u8, @intCast(CN_S_OK));
+    assert cn_shown(cl[0..8192]);
+    cl[CL_UP] = 0;
+    assert cn_shown(cl[0..8192]) == false;
+    cn_ask(cl[0..8192]);
+    assert cl[CL_N_REQ] == 0;
+    // the line under the key answers LOOK UP; left of the small code, never over it
+    cl[CL_UP] = 1;
+    cl[AC_ON] = 1;
+    const sw : f64 = 960.0;
+    const sh : f64 = 800.0;
+    const l : f64 = qp_left(sw);
+    const py : f64 = WS_TOP + AC_ACCT_BASE - 3.0;
+    assert ac_hit_now(l + QP_PAD + 10.0, py, sw, sh, cl[0..8192]) == AC_H_STUN;
+    assert ac_hit_now_iv(l + QP_PAD + 10.0, py, sw, sh, cl[0..8192], iv[0..IV_LEN]) == AC_H_STUN;
+    assert ac_hit_now(ac_qr_small_x(l, QP_W) + 20.0, WS_TOP + AC_QR_Y + 20.0, sw, sh, cl[0..8192]) == AC_H_QR;
+    cl[CL_N_ST] = @as(u8, @intCast(CN_S_DNS));
+    assert ac_hit_now(l + QP_PAD + 10.0, py, sw, sh, cl[0..8192]) == AC_H_NONE;
+    // the 32-bit clock of the region: never 0, a difference across the wrap
+    assert cn_ms32(4294967296) == 1 and cn_ms32(5) == 5;
+    assert cn_ago(5, 4294967290) == 11 and cn_ago(1000, 400) == 600;
+    // every interface is the default: the bind the launch reads with no variable
+    assert cv_bind_parse("", 0) == 0;
 }
 
 test the_key_code_answers_a_click_only_while_a_key_is_shown_and_large_it_covers_the_friends {
@@ -20859,7 +21322,8 @@ test ch_a_refused_key_is_written_once_per_session_and_outlives_a_restart {
     assert ch_trust_apply(v2[0..8192], w2[0..12], tt[0..TRU_LEN], a[0..10], CS_ID_VERIFIED, 50, false, now + 6016) == TRU_S_NONE;
     assert tru_refused(tt[0..TRU_LEN], a[0..10]) == 1 and chv_trust(v2[0..8192], a[0..10]) == FV_T_MISMATCH;
     assert CHW_RF_CALL < CHW_N and CHW_RF_MSG < CHW_N and CHW_RF_CALL != CHW_RF_MSG and CHW_SAY_N < CHW_RF_CALL;
-    assert TBO_TRU == TB_SIZE and TB_ALL == TBO_TRU + TRU_LEN;
+    assert TBO_TRU == TB_SIZE and TBO_NAT == TBO_TRU + TRU_LEN and TB_ALL == TBO_NAT + CN_NB_LEN;
+    assert BE_LEN == CN_NB_REF and CN_NB_REF + 8 <= CN_NB_LEN and BE_HOST + CN_STUN_HOST.len + 1 <= BE_IP;
 }
 
 test ch_messages_are_served_with_the_panel_shut_and_after_a_call_that_ended {

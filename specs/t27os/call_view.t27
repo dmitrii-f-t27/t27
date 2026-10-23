@@ -176,6 +176,8 @@ pub const CV_N_PORTS : u32 = 7;
 /// A public address with no consent yet (section 7), and an address that is never called.
 pub const CV_N_PUBASK : u32 = 8;
 pub const CV_N_NEVER : u32 = 9;
+/// This router's own public address (call_nat cn_same_router): a friend behind it is called on this network.
+pub const CV_N_ROUTER : u32 = 10;
 
 pub fn cv_note_text(note: u32) -> str {
     if (note == CV_N_ADDR) { return "Type an address like 192.168.1.10:47727."; }
@@ -187,6 +189,7 @@ pub fn cv_note_text(note: u32) -> str {
     if (note == CV_N_REFUSED) { return "The call could not be started."; }
     if (note == CV_N_SELF) { return "That is this device's own address."; }
     if (note == CV_N_PORTS) { return "Calls are off: every call port tried is taken."; }
+    if (note == CV_N_ROUTER) { return "That is your router's own public address: call that friend at their address on this network."; }
     return "";
 }
 
@@ -610,8 +613,14 @@ pub fn cv_port_all_busy_text(base: u64, used: u64, busy: u64, tried: u64, out: [
 // call that uses it, never kept, never written anywhere), or when T27OS_ALLOW_PUBLIC=1 is set; multicast (224/4),
 // broadcast (255.255.255.255), 0.0.0/8, 240/4 and link-local (169.254/16) are never called, nor a port outside
 // 1..65535. The handshake, the keys and the 6-digit comparison are the same on every address.
-// Listening: T27OS_CALL_BIND is a private address (as before) or 0.0.0.0, all interfaces, an explicit choice the panel
-// warns about (cv_bind_class); the mDNS TXT record then carries pub=1 (cv_txt_pub).
+// Listening (owner, 2026-10-23: "make the app listen on the network by itself"): with no T27OS_CALL_BIND the window
+// listens on 0.0.0.0, every interface, so a friend on the same Wi-Fi reaches it with no variable set; the panel says
+// where in one line, "listening on <address>:<port>", the address being the one this Mac sends from on its default
+// route (cv_lan_pick, looked up by the window with a UDP connect that sends nothing). T27OS_CALL_BIND=127.0.0.1 (or
+// any 127.x) keeps calls on this Mac; a private address keeps them on that interface; anything else turns calls off
+// (cv_bind_class). The mDNS TXT record of a window on 0.0.0.0 carries pub=1 (cv_txt_pub). Listening wider changes no
+// rule of a call: the identity check by key, the sealed audio, the pause after five wrong codes and the addresses
+// that are never called stay as they are, and every call still rings for the person to ANSWER or DECLINE (cv_who).
 
 pub const CV_AC_INVALID : u32 = 0;
 pub const CV_AC_PRIVATE : u32 = 1;
@@ -694,9 +703,10 @@ pub const CV_B_ANY : u32 = 2;
 /// Not an IPv4: what cv_bind_parse gives for a T27OS_CALL_BIND that does not parse.
 pub const CV_BIND_BAD : u64 = 4294967296;
 
-/// The address T27OS_CALL_BIND names: 127.0.0.1 when unset (n = 0), CV_BIND_BAD when it is not an address.
+/// The address T27OS_CALL_BIND names: 0.0.0.0 (every interface) when unset (n = 0), CV_BIND_BAD when it is not an
+/// address.
 pub fn cv_bind_parse(t: []const u8, n: usize) -> u64 {
-    if (n == 0) { return 2130706433; }
+    if (n == 0) { return 0; }
     const a : u64 = cv_parse_addr(t, n);
     if (a == 0) { return CV_BIND_BAD; }
     return cv_addr_ip(a);
@@ -713,6 +723,48 @@ pub fn cv_bind_class(ip: u64) -> u32 {
 pub fn cv_bind_warn(ip: u64) -> str {
     if (cv_bind_class(ip) == CV_B_ANY) { return "listening on all interfaces"; }
     return "";
+}
+
+/// The address a route lookup gave (the source this Mac uses on its default route) when it is one to show: a public
+/// or private unicast IPv4 that is not 127/8; 0 otherwise (no network, a link-local address).
+pub fn cv_lan_pick(ip: u64) -> u64 {
+    if (ip > 4294967295 or (ip >> 24) == 127) { return 0; }
+    const k : u32 = cv_addr_class(ip);
+    if (k != CV_AC_PUBLIC and k != CV_AC_PRIVATE) { return 0; }
+    return ip;
+}
+
+/// Where the window listens, for the CALL panel and the cabinet: "listening on 192.168.1.10:47727" (every interface,
+/// the address this Mac sends from), "listening on port 47727, no network yet" (every interface, no address),
+/// "listening on 127.0.0.1:47727, this Mac only" or "listening on 192.168.1.10:47727 only" (T27OS_CALL_BIND).
+/// out: at least 64 bytes; the length.
+pub fn cv_listen_text(bind: u64, lan: u64, port: u64, out: []u8) -> usize {
+    if (out.len < 64) { return 0; }
+    var n : usize = put_bytes(out, 0, "listening on ");
+    if (bind == 0) {
+        if (lan == 0) {
+            n = put_bytes(out, n, "port ");
+            n = put_dec(out, n, port);
+            return put_bytes(out, n, ", no network yet");
+        }
+        return n + cv_addr_text(lan, port, out[n..out.len]);
+    }
+    n = n + cv_addr_text(bind, port, out[n..out.len]);
+    if ((bind >> 24) == 127) { return put_bytes(out, n, ", this Mac only"); }
+    return put_bytes(out, n, " only");
+}
+
+/// Who gets through, one short line: every call rings for the person (never answered by itself); a friend's stored key
+/// is checked, anyone else compares the 6-digit code; a stranger's message waits in INVITATIONS (ACCEPT / DECLINE).
+pub fn cv_who() -> str { return "Every call rings for you; a friend's key is checked."; }
+
+/// The typed address is this device: its port and either the address it is bound to, or, on every interface, the
+/// address it sends from or any 127.x.
+pub fn cv_is_self(a: u64, bind: u64, lan: u64, port: u64) -> bool {
+    if (cv_addr_port(a) != port or a == 0) { return false; }
+    const ip : u64 = cv_addr_ip(a);
+    if (bind != 0) { return ip == bind; }
+    return (lan != 0 and ip == lan) or (ip >> 24) == 127;
 }
 
 /// The mDNS TXT record of a window listening on all interfaces gets "pub=1" at its end (in place); its new length.
@@ -1006,7 +1058,8 @@ test cv_every_window_note_has_its_text_and_no_note_is_empty {
     assert cv_note_text(CV_N_PORTS) == "Calls are off: every call port tried is taken.";
     assert cv_note_text(CV_N_PUBASK) == "That is a public address. Press ALLOW to call it once, or set T27OS_ALLOW_PUBLIC=1.";
     assert cv_note_text(CV_N_NEVER) == "Never called: a multicast, broadcast, 0.x, 240.x or link-local (169.254.x) address.";
-    assert cv_note_text(CV_N_NEVER + 1).len == 0;
+    assert cv_note_text(CV_N_ROUTER) == "That is your router's own public address: call that friend at their address on this network.";
+    assert cv_note_text(CV_N_ROUTER + 1).len == 0 and CV_N_ROUTER < 16;
     assert cv_note_text(4294967295).len == 0;
 }
 
@@ -1251,18 +1304,53 @@ test cv_port_bounds_hold_on_every_class {
 }
 
 test cv_listening_on_all_interfaces_is_a_warned_choice {
-    assert cv_bind_parse("", 0) == 2130706433;
+    assert cv_bind_parse("", 0) == 0;
+    assert cv_bind_parse("127.0.0.1", 9) == 2130706433;
     assert cv_bind_parse("0.0.0.0", 7) == 0;
     assert cv_bind_parse("0.0.0", 5) == CV_BIND_BAD;
     assert cv_bind_parse("all", 3) == CV_BIND_BAD;
     assert cv_bind_class(cv_bind_parse("0.0.0.0", 7)) == CV_B_ANY;
     assert cv_bind_class(cv_bind_parse("192.168.1.10", 12)) == CV_B_LAN;
-    assert cv_bind_class(cv_bind_parse("", 0)) == CV_B_LAN;
+    assert cv_bind_class(cv_bind_parse("", 0)) == CV_B_ANY;
+    assert cv_bind_class(cv_bind_parse("127.0.0.1", 9)) == CV_B_LAN;
     assert cv_bind_class(cv_bind_parse("8.8.8.8", 7)) == CV_B_NO;
     assert cv_bind_class(cv_bind_parse("224.0.0.1", 9)) == CV_B_NO;
     assert cv_bind_class(CV_BIND_BAD) == CV_B_NO;
     assert cv_bind_warn(0) == "listening on all interfaces";
     assert cv_bind_warn(2130706433).len == 0;
+}
+
+test cv_with_no_variable_the_window_listens_on_the_network_and_says_where {
+    var o : [64]u8 = undefined;
+    const lan : u64 = cv_addr_ip(cv_a("192.168.15.8"));
+    // no T27OS_CALL_BIND: every interface, named by the address this Mac sends from
+    assert cv_eq(o[0..64], cv_listen_text(cv_bind_parse("", 0), lan, 47727, o[0..64]), "listening on 192.168.15.8:47727");
+    assert cv_eq(o[0..64], cv_listen_text(0, 0, 47728, o[0..64]), "listening on port 47728, no network yet");
+    // the explicit ways to stay narrower
+    assert cv_eq(o[0..64], cv_listen_text(cv_bind_parse("127.0.0.1", 9), lan, 47727, o[0..64]), "listening on 127.0.0.1:47727, this Mac only");
+    assert cv_eq(o[0..64], cv_listen_text(cv_bind_parse("192.168.15.8", 12), lan, 47727, o[0..64]), "listening on 192.168.15.8:47727 only");
+    assert cv_listen_text(0, lan, 47727, o[0..63]) == 0;
+    // the route lookup: a unicast address that is not this machine
+    assert cv_lan_pick(lan) == lan;
+    assert cv_lan_pick(cv_addr_ip(cv_a("10.1.2.3"))) != 0 and cv_lan_pick(cv_addr_ip(cv_a("8.8.8.8"))) != 0;
+    assert cv_lan_pick(0) == 0 and cv_lan_pick(2130706433) == 0;
+    assert cv_lan_pick(cv_addr_ip(cv_a("169.254.3.4"))) == 0 and cv_lan_pick(cv_addr_ip(cv_a("224.0.0.251"))) == 0;
+    assert cv_lan_pick(4294967296) == 0;
+    // the lines that say who gets through fit the panel's line (60 characters)
+    assert cv_who().len > 0 and cv_who().len <= 60;
+}
+
+test cv_the_own_address_is_found_on_every_interface {
+    const lan : u64 = cv_addr_ip(cv_a("192.168.15.8"));
+    assert cv_is_self(cv_a("192.168.15.8:47727"), 0, lan, 47727);
+    assert cv_is_self(cv_a("127.0.0.1:47727"), 0, lan, 47727);
+    assert cv_is_self(cv_a("192.168.15.8:47728"), 0, lan, 47727) == false;
+    assert cv_is_self(cv_a("192.168.15.4:47727"), 0, lan, 47727) == false;
+    assert cv_is_self(cv_a("192.168.15.8:47727"), 0, 0, 47727) == false;
+    // bound to one address: that address only
+    assert cv_is_self(cv_a("127.0.0.1:47727"), 2130706433, lan, 47727);
+    assert cv_is_self(cv_a("192.168.15.8:47727"), 2130706433, lan, 47727) == false;
+    assert cv_is_self(0, 0, lan, 47727) == false;
 }
 
 test cv_the_txt_record_says_pub_when_listening_on_all_interfaces {

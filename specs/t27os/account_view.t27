@@ -38,6 +38,15 @@ use t27os::queen::QP_CLOSE;
 use t27os::call_view::CV_FIELD_H;
 use t27os::call_view::CV_BTN_H;
 use t27os::call_view::cv_field_x;
+use t27os::call_view::cv_addr_text;
+use t27os::call_nat::cn_pub_text;
+use t27os::call_nat::cn_can_ask;
+use t27os::call_nat::CN_S_OK;
+use t27os::call_nat::CN_S_NONE;
+use t27os::call_nat::CN_S_DNS;
+use t27os::call_nat::CN_S_STALE;
+use t27os::call_nat::CN_S_NOANSWER;
+use t27os::call_nat::CN_S_NOSOCK;
 use t27os::keys::P_OPENROUTER;
 use t27os::keys::P_ZAI;
 use t27os::keys::P_NVIDIA;
@@ -253,13 +262,51 @@ pub fn ac_bad_reason(typed: []const u8, n: usize) -> u32 {
 
 // ---------------------------------------------------------------- 3. text
 
-/// "ONLINE  port 47735  discovery on", "ONLINE  port 47735  discovery OFF" or "OFFLINE  calls are off".
-pub fn ac_state_line(up: bool, net_up: bool, port: u64, out: []u8) -> usize {
+/// Where this device listens (owner, 2026-10-23: on the network with no variable set, call_view cv_listen_text):
+/// "ONLINE  192.168.15.8:47735  discovery on" (every interface, the address this Mac sends from), "ONLINE  port 47735,
+/// no network  discovery on", "ONLINE  127.0.0.1:47735 this Mac only  discovery OFF" (T27OS_CALL_BIND=127.x),
+/// "ONLINE  192.168.15.8:47735  discovery on" (bound to that address) or "OFFLINE  calls are off". out: 96 bytes.
+pub fn ac_state_line(up: bool, net_up: bool, bind: u64, lan: u64, port: u64, out: []u8) -> usize {
     if (up == false) { return put_bytes(out, 0, "OFFLINE  calls are off"); }
-    var n : usize = put_bytes(out, 0, "ONLINE  port ");
-    n = put_dec(out, n, port);
+    var n : usize = put_bytes(out, 0, "ONLINE  ");
+    if (bind == 0 and lan == 0) {
+        n = put_bytes(out, n, "port ");
+        n = put_dec(out, n, port);
+        n = put_bytes(out, n, ", no network");
+    } else if (bind == 0) {
+        n = n + cv_addr_text(lan, port, out[n..out.len]);
+    } else {
+        n = n + cv_addr_text(bind, port, out[n..out.len]);
+        if ((bind >> 24) == 127) { n = put_bytes(out, n, " this Mac only"); }
+    }
     if (net_up) { return put_bytes(out, n, "  discovery on"); }
     return put_bytes(out, n, "  discovery OFF");
+}
+
+/// The PUBLIC line (owner, 2026-10-23; call_nat.t27): this device's address on the internet, next to the key so a
+/// friend can be given both. It stands where the account line stands while the key is shown (that line comes back
+/// when calls are off): "PUBLIC 203.0.113.7:51234 just now", "PUBLIC asking stun.l.google.com", "PUBLIC  not
+/// looked up  LOOK UP". The whole line is the button (AC_H_STUN) while a lookup may be asked for (call_nat
+/// cn_can_ask); it is the only thing in the panel that makes this device talk to the STUN server. out: 128 bytes.
+pub fn ac_pub_label() -> str { return "PUBLIC"; }
+
+pub fn ac_pub_line(st: u32, a: u64, mins: u64, out: []u8) -> usize {
+    if (out.len < 128) { return 0; }
+    var n : usize = put_bytes(out, 0, "PUBLIC ");
+    n = n + cn_pub_text(st, a, mins, out[n..out.len]);
+    if (cn_can_ask(st) and st != CN_S_OK) { n = put_bytes(out, n, "  LOOK UP"); }
+    return n;
+}
+
+/// The PUBLIC line's box: across the text left of the small code, around its baseline AC_ACCT_BASE.
+pub fn ac_pub_in(x: f64, y: f64, l: f64, w: f64, t: f64) -> bool {
+    return fv_in(x, y, l + QP_PAD, t + AC_ACCT_BASE - 9.0, ac_qr_text_right(l, w) - l - QP_PAD, 12.0);
+}
+
+/// ac_hit with the PUBLIC line over it: `show` = the line is drawn and a lookup may be asked for.
+pub fn ac_hit_stun(x: f64, y: f64, l: f64, w: f64, t: f64, show: bool, raw: u32) -> u32 {
+    if (show and ac_pub_in(x, y, l, w, t)) { return AC_H_STUN; }
+    return raw;
 }
 
 /// "up 45 s", "up 3 min", "up 2 h 05 min", "up 3 d 4 h".
@@ -523,6 +570,8 @@ pub const AC_H_UPD : u32 = 11;
 pub const AC_H_HCALL : u32 = 12;
 /// The key's QR code: the small one in ME, or the large one in the friends part (section 8b).
 pub const AC_H_QR : u32 = 13;
+/// The PUBLIC line: look up this device's public address (call_nat.t27).
+pub const AC_H_STUN : u32 = 14;
 /// Per row i (0..15): the row (a click opens the friend's card, chat_view.t27), copy that friend's key, remove (asks),
 /// YES, NO, CALL, MESSAGE.
 pub const AC_H_ROW : u32 = 16;
@@ -1264,6 +1313,38 @@ test ac_the_launch_values_and_the_clock_read_back {
     assert cl[AC_VER + 16] == 0;
 }
 
+test ac_the_public_line_stands_next_to_the_key_and_is_the_look_up_button {
+    var o : [128]u8 = undefined;
+    const a : u64 = 3405803783 * 65536 + 51234;
+    assert fv_eq(o[0..128], ac_pub_line(CN_S_NONE, 0, 0, o[0..128]), "PUBLIC not looked up  LOOK UP");
+    assert fv_eq(o[0..128], ac_pub_line(CN_S_DNS, 0, 0, o[0..128]), "PUBLIC asking stun.l.google.com");
+    assert fv_eq(o[0..128], ac_pub_line(CN_S_OK, a, 0, o[0..128]), "PUBLIC 203.0.113.7:51234 just now");
+    assert fv_eq(o[0..128], ac_pub_line(CN_S_STALE, a, 11, o[0..128]), "PUBLIC 203.0.113.7:51234 may have changed  LOOK UP");
+    assert fv_eq(o[0..128], ac_pub_line(CN_S_NOANSWER, 0, 0, o[0..128]), "PUBLIC no answer from STUN  LOOK UP");
+    assert ac_pub_line(CN_S_OK, a, 0, o[0..127]) == 0;
+    // every line but the stale one fits left of the small code at 9 pt (the stale one is cut, its LOOK UP is the line)
+    const l : f64 = 400.0;
+    const w : f64 = QP_W;
+    const room : f64 = ac_qr_text_right(l, w) - (l + QP_PAD);
+    const big : u64 = 4294967294 * 65536 + 65535;
+    var st : u32 = 0;
+    while (st <= CN_S_NOSOCK) {
+        const n : usize = ac_pub_line(st, big, 59, o[0..128]);
+        assert chv_text_w(o[0..n], n, 9.0) <= room;
+        st = st + 1;
+    }
+    // the box: the line left of the code, between the key's explanation and the state line
+    const t : f64 = 35.0;
+    const y : f64 = t + AC_ACCT_BASE - 3.0;
+    assert ac_hit_stun(l + QP_PAD + 5.0, y, l, w, t, true, AC_H_NONE) == AC_H_STUN;
+    assert ac_hit_stun(l + QP_PAD + 5.0, y, l, w, t, false, AC_H_NONE) == AC_H_NONE;
+    assert ac_hit_stun(ac_qr_small_x(l, w) + 4.0, y, l, w, t, true, AC_H_QR) == AC_H_QR;
+    assert ac_hit_stun(l + QP_PAD + 5.0, t + AC_GIVE_BASE - 3.0, l, w, t, true, AC_H_NONE) == AC_H_NONE;
+    assert ac_hit_stun(l + QP_PAD + 5.0, t + AC_STATE_Y - 3.0, l, w, t, true, AC_H_NONE) == AC_H_NONE;
+    assert AC_GIVE_BASE + 3.0 <= AC_ACCT_BASE - 9.0 and AC_ACCT_BASE + 3.0 <= AC_STATE_Y - 10.0;
+    assert AC_H_QR < AC_H_STUN and AC_H_STUN < AC_H_ROW and ac_pub_label() == "PUBLIC";
+}
+
 test ac_uptime_and_state_read_as_people_say_them {
     var o : [96]u8 = undefined;
     assert fv_eq(o[0..96], ac_up_text(0, o[0..96]), "up 0 s");
@@ -1271,9 +1352,14 @@ test ac_uptime_and_state_read_as_people_say_them {
     assert fv_eq(o[0..96], ac_up_text(60, o[0..96]), "up 1 min");
     assert fv_eq(o[0..96], ac_up_text(3600 * 2 + 300, o[0..96]), "up 2 h 05 min");
     assert fv_eq(o[0..96], ac_up_text(86400 * 3 + 3600 * 4 + 60, o[0..96]), "up 3 d 4 h");
-    assert fv_eq(o[0..96], ac_state_line(true, true, 47735, o[0..96]), "ONLINE  port 47735  discovery on");
-    assert fv_eq(o[0..96], ac_state_line(true, false, 47735, o[0..96]), "ONLINE  port 47735  discovery OFF");
-    assert fv_eq(o[0..96], ac_state_line(false, false, 47735, o[0..96]), "OFFLINE  calls are off");
+    const lan : u64 = 3232239368;
+    assert fv_eq(o[0..96], ac_state_line(true, true, 0, lan, 47735, o[0..96]), "ONLINE  192.168.15.8:47735  discovery on");
+    assert fv_eq(o[0..96], ac_state_line(true, false, 0, lan, 47735, o[0..96]), "ONLINE  192.168.15.8:47735  discovery OFF");
+    assert fv_eq(o[0..96], ac_state_line(true, true, 0, 0, 47735, o[0..96]), "ONLINE  port 47735, no network  discovery on");
+    assert fv_eq(o[0..96], ac_state_line(true, false, 2130706433, lan, 47735, o[0..96]), "ONLINE  127.0.0.1:47735 this Mac only  discovery OFF");
+    assert fv_eq(o[0..96], ac_state_line(true, true, lan, 0, 47735, o[0..96]), "ONLINE  192.168.15.8:47735  discovery on");
+    assert fv_eq(o[0..96], ac_state_line(false, false, 0, lan, 47735, o[0..96]), "OFFLINE  calls are off");
+    assert ac_state_line(true, false, 2130706433, 0, 65535, o[0..96]) <= 96;
 }
 
 test ac_the_short_fingerprint_is_the_form_a_person_compares {

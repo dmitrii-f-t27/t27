@@ -86,6 +86,13 @@
 //                                                      the block is not open or the key is not the one of me_fp.
 //   cs_id_state(s) -> u32                              CS_ID_* of the current or last call (unverified, verified,
 //                                                      refused, key stored now).
+// Beyond the home network (owner, 2026-10-23; call_nat.t27): the call socket also carries the one STUN lookup the
+// person asks for and the punch probes. cs_poll takes a datagram that looks like STUN (cn_stun_looks) or is a probe
+// (cn_probe_is) off before any call frame is looked at: an answer from the server asked, to the transaction asked,
+// gives the public address; every other one is only counted. Neither ever reaches call_core, rings or changes a call.
+//   cs_stun_send(s, txid, srv_ip, srv_port) -> bool    one Binding request from the call socket (the window resends).
+//   cs_probe_send(s, a) -> bool                        one probe to a (ip * 65536 + port, call_nat cn_punch_ok).
+//   cs_nat(s, CS_N_*) -> u64                           the public address and when it came, the counters.
 // Behaviour checks, not a security audit.
 module T27osCallSession;
 
@@ -228,6 +235,15 @@ use t27os::call_core::ck_rate_counts;
 use t27os::call_core::CK_RATE_LEN;
 use t27os::call_core::CK_PAUSE_MS;
 use t27os::call_view::cv_dial_decide;
+use t27os::call_nat::cn_stun_looks;
+use t27os::call_nat::cn_stun_parse;
+use t27os::call_nat::cn_stun_request;
+use t27os::call_nat::cn_probe;
+use t27os::call_nat::cn_probe_is;
+use t27os::call_nat::cn_punch_ok;
+use t27os::call_nat::CN_TXID;
+use t27os::call_nat::CN_STUN_HDR;
+use t27os::call_nat::CN_PROBE_LEN;
 use t27os::call_view::CV_D_OK;
 use t27os::call_core::CK_INVITE_LEN;
 use t27os::call_core::CK_ANSWER_LEN;
@@ -555,6 +571,26 @@ const G_GONE : u32 = 53;
 const G_FULL_TICKS : u32 = 54;
 const G_MIX_UNDER : u32 = 55;
 const G_MEM : u32 = 64;
+/// The STUN lookup and the probes (call_nat.t27), in the block of link 0, kept across calls and groups: the
+/// transaction id asked (12 bytes in two slots), the server asked (ip * 65536 + port), the public address it gave
+/// and when (ms), answers taken, STUN-shaped datagrams refused, probes received and where the last one came from.
+const G_NAT_TX0 : u32 = 80;
+const G_NAT_TX1 : u32 = 81;
+const G_NAT_SRV : u32 = 82;
+const G_NAT_PUB : u32 = 83;
+const G_NAT_AT : u32 = 84;
+const G_NAT_RX : u32 = 85;
+const G_NAT_BAD : u32 = 86;
+const G_NAT_PROBES : u32 = 87;
+const G_NAT_PFROM : u32 = 88;
+/// What cs_nat reads.
+pub const CS_N_PUB : u32 = 0;
+pub const CS_N_AT : u32 = 1;
+pub const CS_N_RX : u32 = 2;
+pub const CS_N_BAD : u32 = 3;
+pub const CS_N_PROBES : u32 = 4;
+pub const CS_N_PFROM : u32 = 5;
+pub const CS_N_SRV : u32 = 6;
 
 /// Set by cs_open, cleared by cs_close: the block is a live session.
 const CS_MAGIC_V : u64 = 3472328519473427298;
@@ -1837,11 +1873,14 @@ fn csg_free_link(s: []const u8, nl: usize) -> usize {
     return nl;
 }
 
+/// A slot of the STUN lookup and the probes: a finished group leaves it alone.
+fn cs_nat_slot(k: u32) -> bool { return k >= G_NAT_TX0 and k <= G_NAT_PFROM; }
+
 /// Forget a finished group: the member table and the group counters (not the link or audio bookkeeping).
 fn csg_reset(s: []u8) -> void {
     var k : u32 = G_ON;
     while (k < 96) {
-        if (k != G_NL and k != G_ME_IP and k != G_ME_PORT and k != G_AUDIO_RUN and k != G_VCLK) { cgp(s, k, 0); }
+        if (k != G_NL and k != G_ME_IP and k != G_ME_PORT and k != G_AUDIO_RUN and k != G_VCLK and !cs_nat_slot(k)) { cgp(s, k, 0); }
         k = k + 1;
     }
 }
@@ -2847,6 +2886,96 @@ fn cs_link_tick(s: []u8, now: u64) -> void {
     }
 }
 
+// ---------------------------------------------------------------- beyond the home network (call_nat.t27)
+
+/// The sender of a datagram (a sockaddr_in) as ip * 65536 + port.
+pub fn cs_from_addr(from: []const u8) -> u64 {
+    if (from.len < 8) { return 0; }
+    const port : u64 = (@as(u64, from[2]) << 8) | @as(u64, from[3]);
+    const ip : u64 = (@as(u64, from[4]) << 24) | (@as(u64, from[5]) << 16) | (@as(u64, from[6]) << 8) | @as(u64, from[7]);
+    return ip * 65536 + port;
+}
+
+/// The transaction id the lookup asked with, back from its two slots.
+fn cs_nat_txid(s: []const u8, t: []u8) -> void {
+    var b : [16]u8 = undefined;
+    put_u64(b[0..16], 0, cg(s, G_NAT_TX0));
+    put_u64(b[0..16], 8, cg(s, G_NAT_TX1));
+    var i : usize = 0;
+    while (i < CN_TXID) {
+        t[i] = b[i];
+        i = i + 1;
+    }
+}
+
+/// A datagram that looks like STUN or is a probe: an answer from the server asked, to the transaction asked, gives
+/// the public address (and when); any other STUN-shaped datagram is counted as refused; a probe is counted with where
+/// it came from. Nothing else happens.
+fn cs_nat_take(s: []u8, pk: []const u8, from: []const u8, now: u64) -> void {
+    const fa : u64 = cs_from_addr(from);
+    if (cn_probe_is(pk)) {
+        cgp(s, G_NAT_PROBES, cg(s, G_NAT_PROBES) + 1);
+        cgp(s, G_NAT_PFROM, fa);
+        return;
+    }
+    var t : [12]u8 = undefined;
+    cs_nat_txid(s, t[0..12]);
+    const srv : u64 = cg(s, G_NAT_SRV);
+    var a : u64 = 0;
+    if (srv != 0 and fa == srv) { a = cn_stun_parse(pk, t[0..12]); }
+    if (a == 0) {
+        cgp(s, G_NAT_BAD, cg(s, G_NAT_BAD) + 1);
+        return;
+    }
+    cgp(s, G_NAT_PUB, a);
+    cgp(s, G_NAT_AT, now);
+    cgp(s, G_NAT_RX, cg(s, G_NAT_RX) + 1);
+}
+
+/// One Binding request with transaction id txid (12 bytes) from the call socket to srv_ip:srv_port; the server and
+/// the id are kept so that only its answer is taken. False when the block is not open or the send fails.
+pub fn cs_stun_send(s: []u8, txid: []const u8, srv_ip: u64, srv_port: u64) -> bool {
+    if (!cs_live(s) or txid.len != CN_TXID or srv_ip == 0 or srv_ip > 4294967295 or srv_port == 0 or srv_port > 65535) { return false; }
+    var q : [20]u8 = undefined;
+    if (cn_stun_request(txid, q[0..20]) != CN_STUN_HDR) { return false; }
+    var b : [16]u8 = undefined;
+    ck_wipe(b[0..16]);
+    var i : usize = 0;
+    while (i < CN_TXID) {
+        b[i] = txid[i];
+        i = i + 1;
+    }
+    cgp(s, G_NAT_TX0, get_u64(b[0..16], 0));
+    cgp(s, G_NAT_TX1, get_u64(b[0..16], 8));
+    cgp(s, G_NAT_SRV, srv_ip * 65536 + srv_port);
+    var to : [16]u8 = undefined;
+    ckh_addr4(to[0..16], srv_ip, srv_port);
+    return ckh_sendto(cs_fd(s), q[0..20], 20, 0, to[0..16], 16) == 20;
+}
+
+/// One probe from this device's fingerprint (the block's own) to a (call_nat cn_punch_ok). False when refused.
+pub fn cs_probe_send(s: []u8, a: u64) -> bool {
+    if (!cs_live(s) or !cn_punch_ok(a)) { return false; }
+    var p : [16]u8 = undefined;
+    if (cn_probe(s[EP_ME..EP_ME + 10], p[0..16]) != CN_PROBE_LEN) { return false; }
+    var to : [16]u8 = undefined;
+    ckh_addr4(to[0..16], a / 65536, a % 65536);
+    return ckh_sendto(cs_fd(s), p[0..16], 16, 0, to[0..16], 16) == 16;
+}
+
+/// The lookup's and the probes' state: CS_N_PUB (ip * 65536 + port, 0 = none yet), CS_N_AT (ms), CS_N_RX, CS_N_BAD,
+/// CS_N_PROBES, CS_N_PFROM, CS_N_SRV; 0 for anything else or a block that is not open.
+pub fn cs_nat(s: []const u8, k: u32) -> u64 {
+    if (!cs_live(s) or k > CS_N_SRV) { return 0; }
+    if (k == CS_N_PUB) { return cg(s, G_NAT_PUB); }
+    if (k == CS_N_AT) { return cg(s, G_NAT_AT); }
+    if (k == CS_N_RX) { return cg(s, G_NAT_RX); }
+    if (k == CS_N_BAD) { return cg(s, G_NAT_BAD); }
+    if (k == CS_N_PROBES) { return cg(s, G_NAT_PROBES); }
+    if (k == CS_N_PFROM) { return cg(s, G_NAT_PFROM); }
+    return cg(s, G_NAT_SRV);
+}
+
 pub fn cs_poll(s: []u8) -> u32 {
     if (!cs_live(s)) { return CS_EV_NONE; }
     const nl : usize = cs_links(s);
@@ -2859,13 +2988,19 @@ pub fn cs_poll(s: []u8) -> u32 {
         fl[0] = 16; fl[1] = 0; fl[2] = 0; fl[3] = 0;
         const r : i64 = ckh_recvfrom(cs_fd(s), rx[0..2048], 2048, 0, sys_addr(from[0..16], from[0..16], 0), sys_addr(fl[0..4], fl[0..4], 0));
         if (r <= 0) { break; }
-        const k : usize = cs_route(s, rx[0..@as(usize, @intCast(r))]);
-        if (k == 0) {
-            cs_on_packet(s, rx[0..@as(usize, @intCast(r))], from[0..16]);
-            cs_sync(s);
+        const pk : []const u8 = rx[0..@as(usize, @intCast(r))];
+        if (cn_stun_looks(pk) or cn_probe_is(pk)) {
+            // the lookup's answer or a punch probe (call_nat.t27): taken off here, never a call frame
+            cs_nat_take(s, pk, from[0..16], ckh_ms());
         } else {
-            cs_on_packet(s[k * CS_LEN..(k + 1) * CS_LEN], rx[0..@as(usize, @intCast(r))], from[0..16]);
-            cs_sync(s[k * CS_LEN..(k + 1) * CS_LEN]);
+            const k : usize = cs_route(s, pk);
+            if (k == 0) {
+                cs_on_packet(s, pk, from[0..16]);
+                cs_sync(s);
+            } else {
+                cs_on_packet(s[k * CS_LEN..(k + 1) * CS_LEN], pk, from[0..16]);
+                cs_sync(s[k * CS_LEN..(k + 1) * CS_LEN]);
+            }
         }
         got = got + 1;
     }
@@ -2908,6 +3043,8 @@ test the_block_holds_its_parts_without_overlap {
     assert CS_K_VDROP < 64;
     assert CS_GRP + CS_GBODY + GR_LIST_MAX <= CS_GRP + CS_GRP_LEN;
     assert G_MEM + 3 * 3 <= 96;
+    // the lookup's slots sit past the member table and inside the 96 group slots
+    assert G_MEM + 3 * 3 <= G_NAT_TX0 and G_NAT_PFROM < 96 and G_MIX_UNDER < G_MEM;
     assert 96 * 8 <= CS_GBODY;
     assert CS_K_JB_MAX < 64;
     // the text queue of a message session sits in the audio block, past every slot the audio code writes
@@ -2915,6 +3052,49 @@ test the_block_holds_its_parts_without_overlap {
     assert CS_TXE >= 2 + CS_TXT_MAX;
     assert CK_HDR + CS_TXT_MAX + CK_TAG <= 808;
     assert CS_K_VENC < CS_ST_TEXT_TX and CS_ST_TEXT_DROP < 64;
+}
+
+test the_lookup_answer_and_the_probes_are_taken_off_the_socket_and_nothing_else {
+    var s : [166528]u8 = undefined;
+    ck_wipe(s[0..CS_LEN]);
+    // the RFC 5769 sample answer (call_nat.t27) to transaction b7e7a701 bc34d686 fa87dfae, from 74.125.250.129:19302
+    const v : [80]u8 = [1, 1, 0, 60, 33, 18, 164, 66, 183, 231, 167, 1, 188, 52, 214, 134, 250, 135, 223, 174, 128, 34, 0, 11, 116, 101, 115, 116, 32, 118, 101, 99, 116, 111, 114, 32, 0, 32, 0, 8, 0, 1, 161, 71, 225, 18, 166, 67, 0, 8, 0, 20, 43, 145, 245, 153, 253, 158, 144, 17, 156, 31, 138, 82, 63, 243, 254, 57, 200, 181, 253, 150, 128, 40, 0, 4, 192, 125, 76, 150];
+    const tx : [16]u8 = [183, 231, 167, 1, 188, 52, 214, 134, 250, 135, 223, 174, 0, 0, 0, 0];
+    const srv : u64 = 1249770113 * 65536 + 19302;
+    var from : [16]u8 = undefined;
+    ckh_addr4(from[0..16], 1249770113, 19302);
+    assert cs_from_addr(from[0..16]) == srv;
+    // nothing asked yet: refused
+    cs_nat_take(s[0..CS_LEN], v[0..80], from[0..16], 1000);
+    assert cg(s[0..CS_LEN], G_NAT_PUB) == 0 and cg(s[0..CS_LEN], G_NAT_BAD) == 1;
+    // asked: taken, with the time
+    cgp(s[0..CS_LEN], G_NAT_TX0, get_u64(tx[0..16], 0));
+    cgp(s[0..CS_LEN], G_NAT_TX1, get_u64(tx[0..16], 8));
+    cgp(s[0..CS_LEN], G_NAT_SRV, srv);
+    cs_nat_take(s[0..CS_LEN], v[0..80], from[0..16], 2000);
+    assert cg(s[0..CS_LEN], G_NAT_PUB) == 3221225985 * 65536 + 32853 and cg(s[0..CS_LEN], G_NAT_AT) == 2000 and cg(s[0..CS_LEN], G_NAT_RX) == 1;
+    // the same answer from another host or port: refused, the address stays
+    ckh_addr4(from[0..16], 1249770113, 19303);
+    cs_nat_take(s[0..CS_LEN], v[0..80], from[0..16], 3000);
+    assert cg(s[0..CS_LEN], G_NAT_BAD) == 2 and cg(s[0..CS_LEN], G_NAT_AT) == 2000;
+    // a probe: counted with its sender, nothing else
+    const fp : [10]u8 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    var p : [16]u8 = undefined;
+    assert cn_probe(fp[0..10], p[0..16]) == 16;
+    ckh_addr4(from[0..16], 3405803783, 51234);
+    cs_nat_take(s[0..CS_LEN], p[0..16], from[0..16], 4000);
+    assert cg(s[0..CS_LEN], G_NAT_PROBES) == 1 and cg(s[0..CS_LEN], G_NAT_PFROM) == 3405803783 * 65536 + 51234;
+    assert cg(s[0..CS_LEN], G_NAT_RX) == 1 and cg(s[0..CS_LEN], G_NAT_PUB) == 3221225985 * 65536 + 32853;
+    // a finished group forgets its members, never the lookup
+    csg_reset(s[0..CS_LEN]);
+    assert cg(s[0..CS_LEN], G_NAT_PUB) != 0 and cg(s[0..CS_LEN], G_NAT_PROBES) == 1 and cg(s[0..CS_LEN], G_NAT_SRV) == srv;
+    // a call frame head is neither
+    assert cn_stun_looks(s[0..0]) == false;
+    var h : [52]u8 = undefined;
+    ck_put_header(h[0..52], CK_T_BYE, fp[0..10], fp[0..10], s[0..16], 0);
+    assert cn_stun_looks(h[0..52]) == false and cn_probe_is(h[0..52]) == false;
+    // a block that is not open reads nothing
+    assert cs_nat(s[0..CS_LEN], CS_N_PUB) == 0;
 }
 
 test a_sealed_media_frame_is_header_packet_tag_and_fits_a_datagram {
