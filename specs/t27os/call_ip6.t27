@@ -14,7 +14,7 @@
 //    gives for an IPv4 sender (ip6_ep_v4, ip6_mapped, ip6_v4of). The IPv4 rules of call_view.t27 (cv_dial_decide) and
 //    call_nat.t27 (cn_punch_ok) still decide every v4-mapped endpoint, unchanged.
 // 2. The text. The CALL field and T27OS_PUNCH take "a.b.c.d", "a.b.c.d:port", "[v6]", "[v6]:port" or a bare v6
-//    ("2804:18::1", no port: the default one). A v6 is 1..8 groups of 1..4 hex digits with at most one "::"; a scope
+//    ("3ffe:18::1", no port: the default one). A v6 is 1..8 groups of 1..4 hex digits with at most one "::"; a scope
 //    ("%en0") and a dotted tail ("::ffff:1.2.3.4") are refused, and so is any v4-mapped address typed as a v6: an IPv4
 //    friend is typed as an IPv4 (ip6_parse). The panels print RFC 5952 text: lower case, no leading zeros, the longest
 //    run of two or more zero groups (the first of equal ones) as "::", brackets around it before the port (ip6_text).
@@ -37,9 +37,10 @@
 //    socket, "v6" for a native IPv6 friend. The CALL panel and CALLSTAT say which.
 // 6. This device's own address (ip6_own_rank): the address a friend is given is read from the interfaces, no STUN: a
 //    global unicast address of an interface that is up and running, not a loopback and not a point-to-point tunnel
-//    (a VPN), not tentative, duplicated, detached, deprecated, optimistic or the one kept for 464XLAT (CLAT46); a
-//    stable secured one first (RFC 7217), then any stable one, then a temporary one. The call socket prefers the
-//    stable address as its source (IPV6_PREFER_TEMPADDR = 0), so the address shown is the one the friend sees.
+//    (a VPN), not anycast, tentative, duplicated, detached, deprecated, optimistic or the one kept for 464XLAT
+//    (CLAT46); a stable secured one first (RFC 7217), then any stable one, then a temporary one. The call socket
+//    prefers the stable address as its source (IPV6_PREFER_TEMPADDR = 0), so the address shown is the one the friend
+//    sees.
 // 7. Firewalls. A home router lets an IPv6 datagram in only to an address and port that sent toward its sender a moment
 //    before. The punch of call_nat.t27 (16-byte probes, fast for 3 s, then once a second to 30 s) goes to a v6
 //    endpoint the same way: the caller punches when it dials a public IPv6, the callee is told the caller's address
@@ -565,8 +566,9 @@ pub fn ip6_sa_take(sa: []const u8, n: usize, ep: []u8) -> bool {
     return true;
 }
 
-/// Where the call socket is bound: 0 (every interface) is :: on the dual-stack socket; any other IPv4 is its v4-mapped
-/// address, so T27OS_CALL_BIND=127.0.0.1 keeps calls on this Mac as before. Into a sockaddr_in6; its length.
+/// Where the dual-stack call socket is bound: 0 (every interface) is ::; any other IPv4 is its v4-mapped address.
+/// call_session opens the dual-stack socket only for 0 (cs_dual_stack): T27OS_CALL_BIND=127.0.0.1 is an IPv4 socket,
+/// as before. Into a sockaddr_in6; its length.
 pub fn ip6_bind_sa(bind_ip: u64, port: u64, out: []u8) -> usize {
     if (bind_ip > 4294967295 or port > 65535) { return 0; }
     var ep : [18]u8 = undefined;
@@ -578,6 +580,7 @@ pub fn ip6_bind_sa(bind_ip: u64, port: u64, out: []u8) -> usize {
 // ---------------------------------------------------------------- 7. this device's own address
 
 /// SIOCGIFAFLAG_IN6 flags (netinet6/in6_var.h) and the interface flags (net/if.h) the rank reads.
+pub const IP6_IFF_ANYCAST : u64 = 1;
 pub const IP6_IFF_TENTATIVE : u64 = 2;
 pub const IP6_IFF_DUPLICATED : u64 = 4;
 pub const IP6_IFF_DETACHED : u64 = 8;
@@ -592,11 +595,12 @@ pub const IP6_IF_P2P : u64 = 16;
 pub const IP6_IF_RUNNING : u64 = 64;
 
 /// How good the address a (16 bytes, flags af, its interface's flags iff) is to give a friend: 0 not at all, 1 a
-/// temporary one, 2 a stable one, 3 a stable secured one. The window keeps the first of the highest.
+/// temporary one, 2 a stable one, 3 a stable secured one. The window keeps the first of the highest. An anycast
+/// address is never one: it names a group of hosts, and no datagram is sent from it.
 pub fn ip6_own_rank(a: []const u8, af: u64, iff: u64) -> u32 {
     if ((iff & IP6_IF_UP) == 0 or (iff & IP6_IF_RUNNING) == 0 or (iff & IP6_IF_LOOPBACK) != 0 or (iff & IP6_IF_P2P) != 0) { return 0; }
     if (ip6_class(a) != IP6_C_GLOBAL) { return 0; }
-    const bad : u64 = IP6_IFF_TENTATIVE | IP6_IFF_DUPLICATED | IP6_IFF_DETACHED | IP6_IFF_DEPRECATED | IP6_IFF_OPTIMISTIC | IP6_IFF_CLAT46;
+    const bad : u64 = IP6_IFF_ANYCAST | IP6_IFF_TENTATIVE | IP6_IFF_DUPLICATED | IP6_IFF_DETACHED | IP6_IFF_DEPRECATED | IP6_IFF_OPTIMISTIC | IP6_IFF_CLAT46;
     if ((af & bad) != 0) { return 0; }
     if ((af & IP6_IFF_TEMPORARY) != 0) { return 1; }
     if ((af & IP6_IFF_SECURED) != 0) { return 3; }
@@ -674,8 +678,8 @@ test ip6_the_text_forms_parse_and_print_as_rfc_5952 {
     assert ip6_eq(o[0..64], ip6_round("192.168.1.10", o[0..64]), "192.168.1.10:47727");
     assert ip6_eq(o[0..64], ip6_round("203.0.113.7:51234", o[0..64]), "203.0.113.7:51234");
     var ep : [18]u8 = undefined;
-    assert ip6_ep_of("[2804:18:1917:f34e::1]:47728", ep[0..18]);
-    assert ep[0] == 40 and ep[1] == 4 and ep[2] == 0 and ep[3] == 24 and ep[15] == 1 and ip6_port(ep[0..18]) == 47728;
+    assert ip6_ep_of("[3ffe:18:1917:f34e::1]:47728", ep[0..18]);
+    assert ep[0] == 63 and ep[1] == 254 and ep[2] == 0 and ep[3] == 24 and ep[15] == 1 and ip6_port(ep[0..18]) == 47728;
     assert ip6_text(ep[0..18], o[0..46]) == 0;
 }
 
@@ -708,7 +712,7 @@ test ip6_anything_but_those_shapes_is_refused_and_leaves_the_endpoint_alone {
 test ip6_each_kind_of_address_is_named {
     var ep : [18]u8 = undefined;
     assert ip6_ep_of("2001:4860:4860::8888", ep[0..18]) and ip6_class(ep[0..18]) == IP6_C_GLOBAL;
-    assert ip6_ep_of("2804:18:1917:f34e::1", ep[0..18]) and ip6_class(ep[0..18]) == IP6_C_GLOBAL;
+    assert ip6_ep_of("3ffe:18:1917:f34e::1", ep[0..18]) and ip6_class(ep[0..18]) == IP6_C_GLOBAL;
     assert ip6_ep_of("3ffe::1", ep[0..18]) and ip6_class(ep[0..18]) == IP6_C_GLOBAL;
     assert ip6_ep_of("2001:200::1", ep[0..18]) and ip6_class(ep[0..18]) == IP6_C_GLOBAL;
     assert ip6_ep_of("fd12:3456::1", ep[0..18]) and ip6_class(ep[0..18]) == IP6_C_ULA;
@@ -830,10 +834,10 @@ test ip6_the_sockaddr_is_what_the_socket_takes_and_gives {
     var a : [18]u8 = undefined;
     var sa : [28]u8 = undefined;
     var back : [18]u8 = undefined;
-    assert ip6_ep_of("[2804:18:1917:f34e::ff78]:47727", g[0..18]) and ip6_ep_of("192.168.1.10:47728", a[0..18]);
+    assert ip6_ep_of("[3ffe:18:1917:f34e::ff78]:47727", g[0..18]) and ip6_ep_of("192.168.1.10:47728", a[0..18]);
     assert ip6_sa6(g[0..18], sa[0..28]) == 28;
     assert sa[0] == 28 and sa[1] == 30 and sa[2] == 186 and sa[3] == 111 and sa[4] == 0 and sa[7] == 0;
-    assert sa[8] == 40 and sa[9] == 4 and sa[22] == 255 and sa[23] == 120 and sa[24] == 0 and sa[27] == 0;
+    assert sa[8] == 63 and sa[9] == 254 and sa[22] == 255 and sa[23] == 120 and sa[24] == 0 and sa[27] == 0;
     assert ip6_sa_take(sa[0..28], 28, back[0..18]) and ip6_same(back[0..18], g[0..18]);
     // an IPv4 on the dual-stack socket is its v4-mapped sockaddr_in6 and comes back as the IPv4
     assert ip6_sa_for(true, a[0..18], sa[0..28]) == 28 and sa[18] == 255 and sa[19] == 255 and sa[20] == 192 and sa[23] == 10;
@@ -857,7 +861,7 @@ test ip6_the_address_given_to_a_friend_is_stable_and_secured_first {
     var s : [18]u8 = undefined;
     var u : [18]u8 = undefined;
     const up : u64 = IP6_IF_UP | IP6_IF_RUNNING | 34816;
-    assert ip6_ep_of("2804:7f5:b101:10a8::5dff", s[0..18]) and ip6_ep_of("fd00::1", u[0..18]);
+    assert ip6_ep_of("3ffe:7f5:b101:10a8::5dff", s[0..18]) and ip6_ep_of("fd00::1", u[0..18]);
     // as this Mac's en0 reads: 0x440 secured, 0xc0 temporary
     assert ip6_own_rank(s[0..18], 1088, up) == 3;
     assert ip6_own_rank(s[0..18], 192, up) == 1;
@@ -869,6 +873,8 @@ test ip6_the_address_given_to_a_friend_is_stable_and_secured_first {
     assert ip6_own_rank(s[0..18], 192 | IP6_IFF_DEPRECATED, up) == 0;
     assert ip6_own_rank(s[0..18], IP6_IFF_TENTATIVE, up) == 0 and ip6_own_rank(s[0..18], IP6_IFF_DUPLICATED, up) == 0;
     assert ip6_own_rank(s[0..18], IP6_IFF_DETACHED, up) == 0 and ip6_own_rank(s[0..18], IP6_IFF_OPTIMISTIC, up) == 0;
+    // an anycast address (IN6_IFF_ANYCAST), even a stable secured one
+    assert ip6_own_rank(s[0..18], 1088 | IP6_IFF_ANYCAST, up) == 0 and ip6_own_rank(s[0..18], IP6_IFF_ANYCAST, up) == 0;
     assert ip6_own_rank(s[0..18], 64 | IP6_IFF_CLAT46, up) == 0;
     assert ip6_own_rank(u[0..18], 1088, up) == 0;
     assert ip6_own_rank(s[0..18], 1088, up | IP6_IF_P2P) == 0 and ip6_own_rank(s[0..18], 1088, up | IP6_IF_LOOPBACK) == 0;

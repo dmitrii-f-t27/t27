@@ -405,8 +405,9 @@ fn grp_member() -> bool {
     }
     // one message session, driver and small friend's log per other member
     const base : u64 = ckh_env_num("GRP_BASE", 47900);
-    var ss : [1165696]u8 = undefined;
-    var ms : [1792]u8 = undefined;
+    // seven message sessions and seven drivers at most (CS_LEN 299648 and CHM_LEN 384 each)
+    var ss : [2097536]u8 = undefined;
+    var ms : [2688]u8 = undefined;
     var logs : [14504]u8 = undefined;
     var asms : [56448]u8 = undefined;
     i = 0;
@@ -424,7 +425,7 @@ fn grp_member() -> bool {
             if (!cs_identity(ss[so..so + CS_LEN], idb[ID_OFF_PUB..ID_OFF_PUB + 65], idb[ID_OFF_PRIV..ID_OFF_PRIV + 97])) { return ckh_check("identity handed to the session", false); }
             cs_set(ss[so..so + CS_LEN], CS_K_CALLING_MS, CH_CALLING_MS);
             cs_set(ss[so..so + CS_LEN], CS_K_SILENT_MS, CH_SILENT_MS);
-            chm_init(ms[j * 256..j * 256 + 256], roster[j * 10..j * 10 + 10], 2130706433, base + 10 * @as(u64, j) + @as(u64, me));
+            chm_init(ms[j * CHM_LEN..j * CHM_LEN + CHM_LEN], roster[j * 10..j * 10 + 10], 2130706433, base + 10 * @as(u64, j) + @as(u64, me));
             cl_init(logs[j * 2072..j * 2072 + 2072], roster[j * 10..j * 10 + 10], 1);
         }
         j = j + 1;
@@ -440,7 +441,7 @@ fn grp_member() -> bool {
             while (j < n) {
                 if (@as(u32, @intCast(j)) != me) {
                     const so0 : usize = j * CS_LEN;
-                    const ev0 : u32 = chm_tick_g(ms[j * 256..j * 256 + 256], ss[so0..so0 + CS_LEN], logs[j * 2072..j * 2072 + 2072], asms[j * 8064..j * 8064 + 8064], friends[0..FT_LEN], fp[0..10], now0, g[0..GRM_LEN], t2[0..GT_LEN], glog[0..L], gasm[0..CA_LEN], own[0..32]);
+                    const ev0 : u32 = chm_tick_g(ms[j * CHM_LEN..j * CHM_LEN + CHM_LEN], ss[so0..so0 + CS_LEN], logs[j * 2072..j * 2072 + 2072], asms[j * 8064..j * 8064 + 8064], friends[0..FT_LEN], fp[0..10], now0, g[0..GRM_LEN], t2[0..GT_LEN], glog[0..L], gasm[0..CA_LEN], own[0..32]);
                     if ((ev0 & CHM_E_GINFO) != 0) { ghh_save(t2[0..GT_LEN]); }
                 }
                 j = j + 1;
@@ -488,7 +489,7 @@ fn grp_member() -> bool {
         while (j < n) {
             if (@as(u32, @intCast(j)) != me) {
                 const so : usize = j * CS_LEN;
-                const ev : u32 = chm_tick_g(ms[j * 256..j * 256 + 256], ss[so..so + CS_LEN], logs[j * 2072..j * 2072 + 2072], asms[j * 8064..j * 8064 + 8064], friends[0..FT_LEN], fp[0..10], now, g[0..GRM_LEN], t2[0..GT_LEN], glog[0..L], gasm[0..CA_LEN], own[0..32]);
+                const ev : u32 = chm_tick_g(ms[j * CHM_LEN..j * CHM_LEN + CHM_LEN], ss[so..so + CS_LEN], logs[j * 2072..j * 2072 + 2072], asms[j * 8064..j * 8064 + 8064], friends[0..FT_LEN], fp[0..10], now, g[0..GRM_LEN], t2[0..GT_LEN], glog[0..L], gasm[0..CA_LEN], own[0..32]);
                 if ((ev & CHM_E_GDIRTY) != 0) { dirty = true; }
                 const cst : u32 = cs_state(ss[so..so + CS_LEN]);
                 if (trace and @as(u32, prev[j]) != cst) {
@@ -501,7 +502,7 @@ fn grp_member() -> bool {
                     ckh_num("  rej_state", cs_stat(ss[so..so + CS_LEN], 4));
                     ckh_num("  ms", now - start);
                 }
-                if (cs_state(ss[so..so + CS_LEN]) != CK_IDLE or chm_stat(ms[j * 256..j * 256 + 256], CHM_SESSIONS) == 0) { idle = false; }
+                if (cs_state(ss[so..so + CS_LEN]) != CK_IDLE or chm_stat(ms[j * CHM_LEN..j * CHM_LEN + CHM_LEN], CHM_SESSIONS) == 0) { idle = false; }
             }
             j = j + 1;
         }
@@ -545,11 +546,11 @@ fn grp_member() -> bool {
     j = 0;
     while (j < n) {
         if (@as(u32, @intCast(j)) != me) {
-            itx = itx + chm_stat(ms[j * 256..j * 256 + 256], CHM_INFO_TX);
-            ikept = ikept + chm_stat(ms[j * 256..j * 256 + 256], CHM_INFO_KEPT);
-            ihave = ihave + chm_stat(ms[j * 256..j * 256 + 256], CHM_INFO_HAVE);
-            iref = iref + chm_stat(ms[j * 256..j * 256 + 256], CHM_INFO_REFUSED);
-            if (chm_stat(ms[j * 256..j * 256 + 256], CHM_INFO_WHY) != 0) { iwhy = chm_stat(ms[j * 256..j * 256 + 256], CHM_INFO_WHY); }
+            itx = itx + chm_stat(ms[j * CHM_LEN..j * CHM_LEN + CHM_LEN], CHM_INFO_TX);
+            ikept = ikept + chm_stat(ms[j * CHM_LEN..j * CHM_LEN + CHM_LEN], CHM_INFO_KEPT);
+            ihave = ihave + chm_stat(ms[j * CHM_LEN..j * CHM_LEN + CHM_LEN], CHM_INFO_HAVE);
+            iref = iref + chm_stat(ms[j * CHM_LEN..j * CHM_LEN + CHM_LEN], CHM_INFO_REFUSED);
+            if (chm_stat(ms[j * CHM_LEN..j * CHM_LEN + CHM_LEN], CHM_INFO_WHY) != 0) { iwhy = chm_stat(ms[j * CHM_LEN..j * CHM_LEN + CHM_LEN], CHM_INFO_WHY); }
         }
         j = j + 1;
     }
@@ -581,10 +582,10 @@ fn grp_member() -> bool {
     j = 0;
     while (j < n) {
         if (@as(u32, @intCast(j)) != me) {
-            sess = sess + chm_stat(ms[j * 256..j * 256 + 256], CHM_SESSIONS);
-            dials = dials + chm_stat(ms[j * 256..j * 256 + 256], CHM_DIALS);
-            idles = idles + chm_stat(ms[j * 256..j * 256 + 256], CHM_IDLE_CLOSED);
-            errs = errs + chm_stat(ms[j * 256..j * 256 + 256], CHM_SEND_ERR);
+            sess = sess + chm_stat(ms[j * CHM_LEN..j * CHM_LEN + CHM_LEN], CHM_SESSIONS);
+            dials = dials + chm_stat(ms[j * CHM_LEN..j * CHM_LEN + CHM_LEN], CHM_DIALS);
+            idles = idles + chm_stat(ms[j * CHM_LEN..j * CHM_LEN + CHM_LEN], CHM_IDLE_CLOSED);
+            errs = errs + chm_stat(ms[j * CHM_LEN..j * CHM_LEN + CHM_LEN], CHM_SEND_ERR);
             stx = stx + cs_stat(ss[j * CS_LEN..j * CS_LEN + CS_LEN], CS_ST_TEXT_TX);
             srx = srx + cs_stat(ss[j * CS_LEN..j * CS_LEN + CS_LEN], CS_ST_TEXT_RX);
             rep = rep + cs_stat(ss[j * CS_LEN..j * CS_LEN + CS_LEN], CS_ST_REJ_REPLAY);

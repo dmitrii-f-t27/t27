@@ -1395,9 +1395,9 @@ test ac_the_public_v6_line_gives_the_own_address_and_copies_it {
     }
     // no own IPv6 (none yet, or an IPv4): no line
     assert ac_v6_line(ep[0..18], false, o[0..128]) == 0;
-    // 2804:18:1917:f34e:14a2:3b3e:e291:ff78 on port 47727
-    const a : [18]u8 = [40, 4, 0, 24, 25, 23, 243, 78, 20, 162, 59, 62, 226, 145, 255, 120, 186, 111];
-    assert fv_eq(o[0..128], ac_v6_line(a[0..18], false, o[0..128]), "PUBLIC v6 [2804:18:1917:f34e:14a2:3b3e:e291:ff78]:47727");
+    // 3ffe:18:1917:f34e:14a2:3b3e:e291:ff78 on port 47727
+    const a : [18]u8 = [63, 254, 0, 24, 25, 23, 243, 78, 20, 162, 59, 62, 226, 145, 255, 120, 186, 111];
+    assert fv_eq(o[0..128], ac_v6_line(a[0..18], false, o[0..128]), "PUBLIC v6 [3ffe:18:1917:f34e:14a2:3b3e:e291:ff78]:47727");
     assert fv_eq(o[0..128], ac_v6_line(a[0..18], true, o[0..128]), "PUBLIC v6 copied");
     assert ac_v6_line(a[0..18], false, o[0..63]) == 0;
     var m : [18]u8 = undefined;

@@ -18,6 +18,9 @@
 //   8 C, who is not a friend, starts a message session to B: B ends it as an invitation (CS_R_INVITE) with C's proven
 //     key, nothing opens, nothing is stored for C;
 //   9 B accepts: C becomes a friend with that key stored, and C's next message session opens by itself.
+// Along the way, the last verified endpoint (cs_verified_ep, the only address the window's chat may take from a call):
+// none before call 1; after it each side holds the other's fingerprint and call port; the refused impostor (4) and
+// the bad signature (5) leave it as call 2 left it.
 // Ports: 47775 for C's message session.
 // Build (Apple silicon):
 //   t27b build specs/t27os/call_identity_probe.t27 -o cip.o --macho
@@ -76,6 +79,8 @@ use t27os::call_session::CS_R_INVITE;
 use t27os::call_session::cs_id_proven;
 use t27os::call_session::CS_ID_VERIFIED;
 use t27os::call_session::CS_ID_STORED;
+use t27os::call_session::cs_verified_ep;
+use t27os::call_ip6::ip6_v4of;
 use t27os::peer_identity::FT_LEN;
 use t27os::peer_identity::ft_init;
 use t27os::peer_identity::ft_add;
@@ -185,6 +190,9 @@ fn cip_main() -> bool {
     cs_set(ma[0..CS_LEN], CS_K_VERIFY_MS, 8000);
     cs_set(mb[0..CS_LEN], CS_K_VERIFY_MS, 8000);
     var got : [65]u8 = undefined;
+    var vfp : [10]u8 = undefined;
+    var vep : [18]u8 = undefined;
+    all = ckh_check("0 no verified endpoint before any call", cs_verified_ep(a[0..CS_LEN], vfp[0..10], vep[0..18]) == 0 and cs_verified_ep(b[0..CS_LEN], vfp[0..10], vep[0..18]) == 0) and all;
 
     // 1 first call: code on both sides, both say match, keys stored
     cip_new(da[0..64], false, true);
@@ -194,6 +202,9 @@ fn cip_main() -> bool {
     all = ckh_check("1 strangers by key: both saw the code, both said match, the call opened", rg(da[0..64], 0) == 1 and rg(db[0..64], 0) == 1 and rg(da[0..64], 1) == 1 and rg(db[0..64], 1) == 1) and all;
     all = ckh_check("1 each side stored the other's key", cs_id_state(a[0..CS_LEN]) == CS_ID_STORED and cs_id_state(b[0..CS_LEN]) == CS_ID_STORED) and all;
     all = ckh_check("1 the friends file holds B's real key and A's real key", ih_pin_get(fb[0..10], got[0..65]) and ck_same(got[0..65], pb[0..65]) and ih_pin_get(fa[0..10], got[0..65]) and ck_same(got[0..65], pa[0..65])) and all;
+    var vok : bool = cs_verified_ep(a[0..CS_LEN], vfp[0..10], vep[0..18]) != 0 and ck_same(vfp[0..10], fb[0..10]) and ip6_v4of(vep[0..18]) == lo * 65536 + 47772;
+    vok = vok and cs_verified_ep(b[0..CS_LEN], vfp[0..10], vep[0..18]) != 0 and ck_same(vfp[0..10], fa[0..10]) and ip6_v4of(vep[0..18]) == lo * 65536 + 47771;
+    all = ckh_check("1 the call that opened with stored keys is each side's last verified endpoint", vok) and all;
 
     // 2 second call: no code, nobody says anything
     cip_new(da[0..64], false, false);
@@ -202,6 +213,7 @@ fn cip_main() -> bool {
     cip_run(a[0..CS_LEN], da[0..64], b[0..CS_LEN], db[0..64], 6000);
     all = ckh_check("2 stored keys and good signatures: the call opened with no code and no person", rg(da[0..64], 0) == 0 and rg(db[0..64], 0) == 0 and rg(da[0..64], 1) == 1 and rg(db[0..64], 1) == 1) and all;
     all = ckh_check("2 both sides say VERIFIED", cs_id_state(a[0..CS_LEN]) == CS_ID_VERIFIED and cs_id_state(b[0..CS_LEN]) == CS_ID_VERIFIED) and all;
+    const vat2 : u64 = cs_verified_ep(a[0..CS_LEN], vfp[0..10], vep[0..18]);
 
     // 3 a message session opens by itself
     cip_new(da[0..64], false, false);
@@ -227,6 +239,7 @@ fn cip_main() -> bool {
     cs_call(a[0..CS_LEN], lo, 47772, fb[0..10]);
     cip_run(a[0..CS_LEN], da[0..64], b[0..CS_LEN], db[0..64], 6000);
     all = ckh_check("5 the right key with a signature that does not verify: refused (CS_R_IDENTITY)", rg(da[0..64], 3) == @as(u64, CS_R_IDENTITY) and rg(da[0..64], 1) == 0 and rg(db[0..64], 1) == 0) and all;
+    all = ckh_check("5 the refused calls left A's last verified endpoint as call 2 left it", vat2 != 0 and cs_verified_ep(a[0..CS_LEN], vfp[0..10], vep[0..18]) == vat2 and ck_same(vfp[0..10], fb[0..10]) and ip6_v4of(vep[0..18]) == lo * 65536 + 47772) and all;
     ck_put(b[0..CS_LEN], CS_ID + CI_PRIV, kb[0..97]);
 
     // 6 B forgets A's key: the next message session stores A's proven key on B's side and opens

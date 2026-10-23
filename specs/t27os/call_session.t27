@@ -503,11 +503,18 @@ pub const CS_ID_LEN : usize = 1024;
 /// The peer's address in full (owner, 2026-10-23, IPv6; call_ip6.t27), in the last 256 bytes of the identity region,
 /// so cs_fresh clears it with the rest of the last peer: the sockaddr the socket sends to (sockaddr_in6, or
 /// sockaddr_in on an IPv4 socket), its length, then the endpoint (16 bytes of address, the port). CS_PADDR is no
-/// longer used: an IPv6 sockaddr is 28 bytes.
+/// longer used: an IPv6 sockaddr is 28 bytes. Past CN6_KEEP, kept across calls (cs_id_fresh stops there): the last
+/// verified endpoint (cs_verified_ep), the fingerprint and endpoint of the last call that was ACTIVE with the peer's
+/// identity verified or stored, and when it was last seen so (ms). Only it may give another part of the window (the
+/// chat) an address: an INVITE alone names any fingerprint from any address.
 pub const CS_NET : usize = 166272;
 const CN6_SA : usize = 0;
 const CN6_SALEN : usize = 28;
 const CN6_EP : usize = 32;
+const CN6_KEEP : usize = 64;
+const CN6_VFP : usize = 64;
+const CN6_VEP : usize = 80;
+const CN6_VAT : usize = 104;
 /// The per-call net slots: datagrams not sent because they were bigger than IPv6 carries (IP6_UDP_MAX), in the
 /// group region's per-call part (LG 3); INVITEs refused for their sender (ip6_from_ok), per link (LG 28).
 const LG_BIG6 : u32 = 3;
@@ -975,6 +982,7 @@ fn cs_sync(s: []u8) -> void {
         cs_p(s, CS_CODE_SAID, 1);
         cs_push(s, CS_EV_CODE);
     }
+    if (st == CK_ACTIVE) { cs_vep_keep(s, ckh_ms()); }
 }
 
 // ---------------------------------------------------------------- the socket
@@ -1041,6 +1049,11 @@ fn cs_send_sealed_bye(s: []u8) -> void {
 
 // ---------------------------------------------------------------- open, dial, answer
 
+/// Is the socket of cs_open(bind_ip) the dual-stack one (AF_INET6 bound to ::, CS_SOCK6 1): only on every interface
+/// (bind_ip 0). An IPv4 address to bind gets an IPv4 socket: one bound to ::ffff:a.b.c.d could never send to an IPv6
+/// peer, and CS_SOCK6 would let cs_call6 try.
+pub fn cs_dual_stack(bind_ip: u64) -> bool { return bind_ip == 0; }
+
 /// Open the session: one UDP socket bound to bind_ip:port, non-blocking. False when the block is short, the
 /// fingerprint is not 10 bytes, the mode is unknown or the OS refuses.
 pub fn cs_open(s: []u8, me_fp: []const u8, bind_ip: u64, port: u64, audio: u32) -> bool {
@@ -1051,12 +1064,15 @@ pub fn cs_open(s: []u8, me_fp: []const u8, bind_ip: u64, port: u64, audio: u32) 
     s[1] = @as(u8, @intCast(CK_IDLE));
     // one dual-stack socket (call_ip6.t27): AF_INET6 with IPV6_V6ONLY off takes IPv4 friends as v4-mapped addresses
     // and IPv6 friends as they are; the stable address is preferred as the source (IPV6_PREFER_TEMPADDR 0), so the
-    // address the cabinet shows is the one a friend sees. When the system gives no such socket: IPv4 as before.
+    // address the cabinet shows is the one a friend sees. Only on every interface (cs_dual_stack): an IPv4 bind
+    // (T27OS_CALL_BIND, the probes on 127.0.0.1) reaches no IPv6 peer, so it is the IPv4 socket as before, and so is
+    // a system that gives no AF_INET6 one.
     var a : [28]u8 = undefined;
     var off : [4]u8 = undefined;
     off[0] = 0; off[1] = 0; off[2] = 0; off[3] = 0;
-    var six : bool = true;
-    var fd : i32 = sys_socket(30, 2, 0);
+    var six : bool = cs_dual_stack(bind_ip);
+    var fd : i32 = -1;
+    if (six) { fd = sys_socket(30, 2, 0); }
     if (fd >= 0 and cs_setsockopt(fd, 41, 27, off[0..4], 4) != 0) {
         sys_close(fd);
         fd = -1;
@@ -1238,12 +1254,25 @@ pub fn cs_peer_ep(s: []const u8, out: []u8) -> bool {
 }
 
 /// The fingerprint and endpoint of the current call or, once it ended, of the last one (kept until the next call
-/// starts); false when no call was made or taken on this block since it opened.
-pub fn cs_last_ep(s: []const u8, fp_out: []u8, ep_out: []u8) -> bool {
+/// starts); false when no call was made or taken on this block since it opened. Not for the window: a ringing
+/// INVITE's sender is unproven, it names any fingerprint (cs_verified_ep is the one to give out).
+fn cs_last_ep(s: []const u8, fp_out: []u8, ep_out: []u8) -> bool {
     if (!cs_live(s) or fp_out.len < 10 or ep_out.len < IP6_EP) { return false; }
     if (!ip6_is_set(s[CS_NET + CN6_EP..CS_NET + CN6_EP + IP6_EP])) { return false; }
     ck_put(fp_out, 0, s[EP_PEER..EP_PEER + 10]);
     return ip6_copy(ep_out, s[CS_NET + CN6_EP..CS_NET + CN6_EP + IP6_EP]);
+}
+
+/// The last verified endpoint (cs_vep_keep): the fingerprint and endpoint of the last call that was ACTIVE with the
+/// peer's identity verified or stored, kept across later calls and INVITEs; the ms it was last seen so is returned
+/// (0 = none, then nothing is written).
+pub fn cs_verified_ep(s: []const u8, fp_out: []u8, ep_out: []u8) -> u64 {
+    if (!cs_live(s) or fp_out.len < 10 or ep_out.len < IP6_EP) { return 0; }
+    const at : u64 = get_u64(s, CS_NET + CN6_VAT);
+    if (at == 0 or !ip6_is_set(s[CS_NET + CN6_VEP..CS_NET + CN6_VEP + IP6_EP])) { return 0; }
+    ck_put(fp_out, 0, s[CS_NET + CN6_VFP..CS_NET + CN6_VFP + 10]);
+    ip6_copy(ep_out, s[CS_NET + CN6_VEP..CS_NET + CN6_VEP + IP6_EP]);
+    return at;
 }
 
 /// The network side of the call: CS_NET_FAM (call_ip6 IP6_F_*: v4, v6 or v4-mapped; 0 with no peer), CS_NET_SOCK6
@@ -1918,11 +1947,23 @@ pub fn cs_id_state(s: []const u8) -> u32 {
     return CS_ID_UNVERIFIED;
 }
 
-/// A new call: every flag of the last peer, its stored and shown keys and the sealed IDENT go; CI_ON and the own key
-/// pair stay.
+/// A new call: every flag of the last peer, its stored and shown keys, the sealed IDENT and its address go; CI_ON, the
+/// own key pair and the last verified endpoint (CS_NET past CN6_KEEP) stay.
 fn cs_id_fresh(s: []u8) -> void {
     ck_wipe(s[CS_ID + CI_PIN..CS_ID + CI_PUB]);
-    ck_wipe(s[CS_ID + CI_PEER..CS_ID + CS_ID_LEN]);
+    ck_wipe(s[CS_ID + CI_PEER..CS_NET + CN6_KEEP]);
+}
+
+/// While the call is ACTIVE with the peer's identity verified or stored (cs_id_state): its fingerprint and endpoint
+/// become the last verified endpoint, seen at now. Anything else leaves the last one as it was.
+fn cs_vep_keep(s: []u8, now: u64) -> void {
+    if (ckh_state(s[0..EP_LEN]) != CK_ACTIVE) { return; }
+    const v : u32 = cs_id_state(s);
+    if (v != CS_ID_VERIFIED and v != CS_ID_STORED) { return; }
+    if (!ip6_is_set(s[CS_NET + CN6_EP..CS_NET + CN6_EP + IP6_EP])) { return; }
+    ck_put(s, CS_NET + CN6_VFP, s[EP_PEER..EP_PEER + 10]);
+    ip6_copy(s[CS_NET + CN6_VEP..CS_NET + CN6_VEP + IP6_EP], s[CS_NET + CN6_EP..CS_NET + CN6_EP + IP6_EP]);
+    put_u64(s, CS_NET + CN6_VAT, now);
 }
 
 /// A new call with a known peer: read the key stored for it (none for a stranger, a v1 file or no identity).
@@ -2852,6 +2893,8 @@ fn cs_vtick(s: []u8, now: u64) -> void {
         return;
     }
     if (ckh_state(s[0..EP_LEN]) != CK_ACTIVE or cs_n_active(s) != 1) { return; }
+    // a message session carries no video at all: no H.264 control (no HELLO to a friend's chat port), no frame
+    if (cs_g(s, CS_MODE) == @as(u64, CS_AUDIO_NONE)) { return; }
     // H.264 when both ends agreed on it (cs_vh_tick also keeps the control messages going for the video received)
     if (cs_vh_tick(s, now)) { return; }
     if (cs_g(s, CS_K_VIDEO) == 0) { return; }
@@ -3786,6 +3829,9 @@ test the_block_holds_its_parts_without_overlap {
     assert CS_VID + CS_VSLOTS == CS_VASM;
     assert CS_VASM + CS_VBUF == CS_VLAST and CS_VLAST + CS_VBUF == CS_VCAM and CS_VCAM + CS_VBUF == CS_ID;
     assert CS_ID + CS_ID_LEN == CS_VH and CS_VH + CS_VH_LEN == CS_LEN;
+    // the IPv6 peer is the identity region's last 256 bytes: the per-call part, then the last verified endpoint
+    assert CS_NET + 256 == CS_VH and CS_NET + CN6_EP + IP6_EP <= CS_NET + CN6_KEEP and CN6_KEEP <= CN6_VFP;
+    assert CN6_VFP + 10 <= CN6_VEP and CN6_VEP + IP6_EP <= CN6_VAT and CN6_VAT + 8 <= 256;
     assert CS_VH_RX + VA_LEN <= CS_VH_SS and CS_VH_SS + VS_LEN <= CS_VH_MRX and CS_VH_MRX + VF_LEN <= CS_VH_MTX;
     assert CS_VH_MTX + VF_LEN <= CS_VH_MPB and CS_VH_MPB + VF_LEN <= CS_VH_X and CS_VH_X + 34 * 8 <= CS_VH_BUF;
     assert CS_VH_BUF + VH_FRAME_MAX == CS_VH_LEN;
@@ -4692,9 +4738,9 @@ fn t6_block(s: []u8, sock6: bool) -> void {
     if (sock6) { cs_p(s, CS_SOCK6, 1); }
 }
 
-/// The 16 bytes of 2804:18:1917:f34e::ff78, then a port.
+/// The 16 bytes of 3ffe:18:1917:f34e::ff78 (3ffe::/16 is no network's: a test address), then a port.
 fn t6_ep(ep: []u8, port: u64) -> void {
-    const a : [16]u8 = [40, 4, 0, 24, 25, 23, 243, 78, 0, 0, 0, 0, 0, 0, 255, 120];
+    const a : [16]u8 = [63, 254, 0, 24, 25, 23, 243, 78, 0, 0, 0, 0, 0, 0, 255, 120];
     var i : usize = 0;
     while (i < 16) {
         ep[i] = a[i];
@@ -4712,7 +4758,7 @@ test an_ipv6_peer_is_kept_in_full_and_only_what_ipv6_carries_is_sent_to_it {
     assert cs_set_peer(s[0..CS_LEN], ep[0..18]);
     // the sockaddr_in6 the socket sends to, its length, the endpoint; cs_peer says "not an IPv4"
     assert s[CS_NET + CN6_SA] == 28 and s[CS_NET + CN6_SA + 1] == 30 and s[CS_NET + CN6_SA + 2] == 186 and s[CS_NET + CN6_SA + 3] == 111;
-    assert s[CS_NET + CN6_SA + 8] == 40 and s[CS_NET + CN6_SA + 23] == 120 and s[CS_NET + CN6_SALEN] == 28;
+    assert s[CS_NET + CN6_SA + 8] == 63 and s[CS_NET + CN6_SA + 23] == 120 and s[CS_NET + CN6_SALEN] == 28;
     assert cs_g(s[0..CS_LEN], CS_PEER_IP) == CS_PEER_V6 and cs_net(s[0..CS_LEN], CS_NET_FAM) == @as(u64, IP6_F_V6);
     // more than 1232 bytes never leaves for an IPv6 peer: counted, not sent
     var big : [1996]u8 = undefined;
@@ -4881,6 +4927,10 @@ test every_datagram_of_a_one_to_one_call_fits_what_ipv6_carries {
     assert CK_HDR + CK_IDENT_PT + CK_TAG <= IP6_UDP_MAX and CN_PROBE_LEN <= IP6_UDP_MAX and CN_STUN_HDR <= IP6_UDP_MAX;
     // the frame with its copy does not: that is why it splits over IPv6
     assert CS_SEALED > IP6_UDP_MAX;
+    // an H.264 part of this build (version 3) and a control message do; a part cut for build 7136 (version 2) does not,
+    // and 7136 has no IPv6 socket: it is only ever sent to an IPv4 peer
+    assert CK_HDR + VH_HDR + VH_PART + CK_TAG <= IP6_UDP_MAX and CK_HDR + VX_LEN + CK_TAG <= IP6_UDP_MAX;
+    assert CK_HDR + VH_HDR + VH_PART_V2 + CK_TAG > IP6_UDP_MAX;
 }
 
 test the_links_of_a_group_send_on_the_same_dual_stack_socket {
@@ -4893,4 +4943,94 @@ test the_links_of_a_group_send_on_the_same_dual_stack_socket {
     var v4 : [18]u8 = undefined;
     ip6_ep_v4(3232235786, 47728, v4[0..18]);
     assert cs_set_peer(s[CS_LEN..2 * CS_LEN], v4[0..18]) and s[CS_LEN + CS_NET + CN6_SALEN] == 28;
+}
+
+test an_invite_alone_never_gives_the_window_an_address_only_a_verified_call_does {
+    var s : [299648]u8 = undefined;
+    t6_block(s[0..CS_LEN], true);
+    const f : [10]u8 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    var x : [18]u8 = undefined;
+    t6_ep(x[0..18], 47727);
+    var fp : [10]u8 = undefined;
+    var ep : [18]u8 = undefined;
+    // an INVITE from x that names f rings: the call has a peer, but nothing proved it is f
+    assert cs_set_peer(s[0..CS_LEN], x[0..18]);
+    ck_put(s[0..CS_LEN], EP_PEER, f[0..10]);
+    s[1] = @as(u8, @intCast(CK_RINGING));
+    cs_vep_keep(s[0..CS_LEN], 1000);
+    assert cs_verified_ep(s[0..CS_LEN], fp[0..10], ep[0..18]) == 0 and cs_last_ep(s[0..CS_LEN], fp[0..10], ep[0..18]);
+    // a proof that came while the codes are shown is not yet a call: only ACTIVE keeps it
+    s[1] = @as(u8, @intCast(CK_VERIFY));
+    s[CS_ID + CI_GOT] = 1;
+    s[CS_ID + CI_VERDICT] = @as(u8, @intCast(PID_TRUSTED));
+    cs_vep_keep(s[0..CS_LEN], 1500);
+    assert cs_id_state(s[0..CS_LEN]) == CS_ID_VERIFIED and cs_verified_ep(s[0..CS_LEN], fp[0..10], ep[0..18]) == 0;
+    s[CS_ID + CI_GOT] = 0;
+    s[CS_ID + CI_VERDICT] = 0;
+    // ACTIVE with no proof of the identity (an old build, no identity handed in, a code that was never matched); every
+    // cs_sync of an ACTIVE call runs cs_vep_keep (call_identity_probe reads it after a real call)
+    s[1] = @as(u8, @intCast(CK_ACTIVE));
+    cs_vep_keep(s[0..CS_LEN], 2000);
+    assert cs_verified_ep(s[0..CS_LEN], fp[0..10], ep[0..18]) == 0;
+    // a refused key never counts
+    s[CS_ID + CI_GOT] = 1;
+    s[CS_ID + CI_VERDICT] = @as(u8, @intCast(PID_REFUSE));
+    cs_vep_keep(s[0..CS_LEN], 3000);
+    assert cs_id_state(s[0..CS_LEN]) == CS_ID_REFUSED and cs_verified_ep(s[0..CS_LEN], fp[0..10], ep[0..18]) == 0;
+    // f's IDENT verified against its stored key: (f, x) is kept with when it was seen up
+    s[CS_ID + CI_VERDICT] = @as(u8, @intCast(PID_TRUSTED));
+    cs_vep_keep(s[0..CS_LEN], 4000);
+    const at : u64 = cs_verified_ep(s[0..CS_LEN], fp[0..10], ep[0..18]);
+    assert at == 4000 and ck_same(fp[0..10], f[0..10]) and ip6_same(ep[0..18], x[0..18]);
+    // the call ends; a later INVITE from y that names f again: the new call forgets x as its peer, the verified
+    // endpoint stays x, also when that call becomes ACTIVE without a proof
+    var y : [18]u8 = undefined;
+    t6_ep(y[0..18], 47727);
+    y[15] = 1;
+    s[1] = @as(u8, @intCast(CK_ENDED));
+    cs_id_fresh(s[0..CS_LEN]);
+    assert cs_set_peer(s[0..CS_LEN], y[0..18]);
+    ck_put(s[0..CS_LEN], EP_PEER, f[0..10]);
+    s[1] = @as(u8, @intCast(CK_RINGING));
+    assert cs_last_ep(s[0..CS_LEN], fp[0..10], ep[0..18]) and ip6_same(ep[0..18], y[0..18]);
+    assert cs_verified_ep(s[0..CS_LEN], fp[0..10], ep[0..18]) == at and ip6_same(ep[0..18], x[0..18]) and ck_same(fp[0..10], f[0..10]);
+    s[1] = @as(u8, @intCast(CK_ACTIVE));
+    cs_vep_keep(s[0..CS_LEN], 9000);
+    assert cs_verified_ep(s[0..CS_LEN], fp[0..10], ep[0..18]) == at and ip6_same(ep[0..18], x[0..18]);
+    // a key stored after the people matched the code (the first call) is a proof too: y is kept now
+    s[CS_ID + CI_STORED] = 1;
+    cs_vep_keep(s[0..CS_LEN], at + 5);
+    assert cs_verified_ep(s[0..CS_LEN], fp[0..10], ep[0..18]) == at + 5 and ip6_same(ep[0..18], y[0..18]);
+    // a block that is not open gives nothing
+    t6_block(s[0..CS_LEN], true);
+    assert cs_verified_ep(s[0..CS_LEN], fp[0..10], ep[0..18]) == 0;
+    cs_p(s[0..CS_LEN], CS_MAGIC, 0);
+    assert cs_verified_ep(s[0..CS_LEN], fp[0..10], ep[0..18]) == 0 and cs_verified_ep(s[0..CS_LEN], fp[0..9], ep[0..18]) == 0;
+}
+
+test only_a_socket_on_every_interface_is_the_dual_stack_one {
+    // :: reaches IPv4 friends (v4-mapped) and IPv6 ones; an IPv4 bind is an IPv4 socket and never dials an IPv6
+    assert cs_dual_stack(0);
+    assert cs_dual_stack(2130706433) == false and cs_dual_stack(3232235786) == false and cs_dual_stack(1) == false;
+    // the flag a dial reads (call_session_probe opens both kinds: the default run on 127.0.0.1, CS_V6=1 on ::)
+    var s : [299648]u8 = undefined;
+    t6_block(s[0..CS_LEN], false);
+    const fp : [10]u8 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    var g : [18]u8 = undefined;
+    t6_ep(g[0..18], 47727);
+    assert cs_call6(s[0..CS_LEN], g[0..18], fp[0..10]) == false and cs_net(s[0..CS_LEN], CS_NET_SOCK6) == 0;
+}
+
+test a_message_session_never_sends_video_control_or_frames {
+    var s : [299648]u8 = undefined;
+    t6_block(s[0..CS_LEN], true);
+    cs_p(s[0..CS_LEN], CS_MODE, @as(u64, CS_AUDIO_NONE));
+    cs_p(s[0..CS_LEN], CS_K_VIDEO, 1);
+    s[1] = @as(u8, @intCast(CK_ACTIVE));
+    cs_vtick(s[0..CS_LEN], 5000);
+    // no H.264 stream begun, no HELLO sealed (a call block would seal one at once: a HELLO is due when a stream has
+    // heard nothing yet, call_h264 vn_hello_due), no JPEG frame cut
+    assert vs_get(s[CS_VH + CS_VH_SS..CS_VH + CS_VH_SS + VS_LEN], VN_T0) == 0 and vs_get(s[CS_VH + CS_VH_SS..CS_VH + CS_VH_SS + VS_LEN], VN_HELLO_AT) == 0;
+    assert cvx(s[0..CS_LEN], VX_HELLO_TX) == 0 and cvx(s[0..CS_LEN], VX_SEND_ERR) == 0 and cvg(s[0..CS_LEN], VT_LAST_MS) == 0;
+    assert vn_hello_due(0, 0, 0, 0, 5000, 0);
 }

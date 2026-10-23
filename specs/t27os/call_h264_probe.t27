@@ -13,6 +13,9 @@
 //   CS_HEXPECT=old           the other side is an older T27 OS window (7132 and before: JPEG only, no HELLO): check
 //                            that this side fell back to the JPEG of call_core after 3 s, both pictures flow (8+ a
 //                            second each way) and the sound is untouched
+//   CS_V6=1                  (both sides) the dual-stack socket bound to :: (call_ip6.t27), the IPv6 loopback allowed
+//                            (CS_K_LOOP6, a test aid) and the caller dials [::1]:CS_PEER_PORT: the same checks, and the
+//                            call is over IPv6 with no datagram too big for it (every sealed part at most 1232 bytes)
 //   CS_PEER_INVITE=T27-...   (caller) the callee is a T27 OS window on this machine, known by its invite key: the
 //                            probe dials it at 127.0.0.1:CS_PEER_PORT (47727) with that key's fingerprint; the window
 //                            answers with T27OS_CALL_AUTOTEST=1 and T27OS_QA=1 (a test aid), its people compare the
@@ -102,6 +105,15 @@ use t27os::call_session::CS_V_SHOWN;
 use t27os::call_session::CS_V_TXFRAMES;
 use t27os::call_session::CS_K_VHLOSS;
 use t27os::call_session::CS_H_LOST_TX;
+use t27os::call_session::cs_call6;
+use t27os::call_session::cs_net;
+use t27os::call_session::CS_K_LOOP6;
+use t27os::call_session::CS_NET_SOCK6;
+use t27os::call_session::CS_NET_FAM;
+use t27os::call_session::CS_NET_BIG;
+use t27os::call_session::CS_H_PARTS_TX;
+use t27os::call_ip6::ip6_clear;
+use t27os::call_ip6::IP6_F_V6;
 use t27os::call_h264::VN_JPEG_OLD;
 use t27os::call_h264::VN_H264;
 use t27os::call_vt::VT_BGRA;
@@ -206,6 +218,7 @@ fn hp_side(caller: bool) -> bool {
     const hloss : u64 = ckh_env_num("CS_HLOSS", 0);
     var eb : [32]u8 = undefined;
     const old : bool = ckh_env("CS_HEXPECT", eb[0..32]) == 3 and eb[0] == 111 and eb[1] == 108 and eb[2] == 100;
+    const v6 : bool = ckh_env("CS_V6", eb[0..32]) == 1 and eb[0] == 49;
     // the other side's loss: its parts are lost, so this side sees the losses (both sides are given the same CS_HLOSS)
     if (my_port == 0 or my_port > 65535 or peer_port == 0 or peer_port > 65535 or secs == 0 or secs > 600) {
         ckh_line("NOT RUN: CS_PORT, CS_PEER_PORT or CS_HSECS is malformed\n");
@@ -220,7 +233,9 @@ fn hp_side(caller: bool) -> bool {
         if (window) { peer[i] = wfp[i]; }
         i = i + 1;
     }
-    if (!cs_open(s[0..CS_LEN], me[0..10], 2130706433, my_port, CS_AUDIO_TEST)) {
+    var bind : u64 = 2130706433;
+    if (v6) { bind = 0; }
+    if (!cs_open(s[0..CS_LEN], me[0..10], bind, my_port, CS_AUDIO_TEST)) {
         ckh_line("NOT RUN: cs_open failed (socket or bind)\n");
         return false;
     }
@@ -231,8 +246,17 @@ fn hp_side(caller: bool) -> bool {
     all = ckh_check("encoder, decoder and 8 source buffers", e != 0 and d != 0 and mem != 0 and hp_pool(mem)) and all;
     all = ckh_check("video on, codec blocks handed in", cs_set(s[0..CS_LEN], CS_K_VIDEO, 1) and cs_video_h264(s[0..CS_LEN], e, d)) and all;
     if (hloss != 0) { all = ckh_check("a part in every CS_HLOSS is lost on the way", cs_set(s[0..CS_LEN], CS_K_VHLOSS, hloss)) and all; }
+    if (v6) { all = ckh_check("the dual-stack socket on ::, the IPv6 loopback allowed (test aid)", cs_net(s[0..CS_LEN], CS_NET_SOCK6) == 1 and cs_set(s[0..CS_LEN], CS_K_LOOP6, 1)) and all; }
     if (!all) { return false; }
-    if (caller and !cs_call(s[0..CS_LEN], 2130706433, peer_port, peer[0..10])) {
+    var p6 : [18]u8 = undefined;
+    ip6_clear(p6[0..18]);
+    p6[15] = 1;
+    p6[16] = @as(u8, @intCast((peer_port >> 8) & 255));
+    p6[17] = @as(u8, @intCast(peer_port & 255));
+    var dialled : bool = true;
+    if (caller and v6) { dialled = cs_call6(s[0..CS_LEN], p6[0..18], peer[0..10]); }
+    if (caller and !v6) { dialled = cs_call(s[0..CS_LEN], 2130706433, peer_port, peer[0..10]); }
+    if (!dialled) {
         ckh_line("NOT RUN: cs_call refused\n");
         cs_close(s[0..CS_LEN]);
         return false;
@@ -419,6 +443,10 @@ fn hp_side(caller: bool) -> bool {
     // a second's count wobbles by a few frames with the moment it is read (94 then 106); five seconds do not
     all = ckh_check("the sound kept flowing (490+ of 500 frames accepted in every 5 counted seconds)", nsec >= 5 and acc_min >= 490) and all;
     all = ckh_check("0 AEAD failures, 0 replays", cs_stat(s[0..CS_LEN], CS_ST_REJ_AEAD) + cs_stat(s[0..CS_LEN], CS_ST_REJ_REPLAY) == 0) and all;
+    if (v6) {
+        hp_n(caller, "family (2 = v6) / datagrams too big for IPv6: ", cs_net(v, CS_NET_FAM) * 1000 + cs_net(v, CS_NET_BIG));
+        all = ckh_check("over IPv6 (family v6), parts sent, none too big for IPv6 (big6 0)", cs_net(v, CS_NET_FAM) == @as(u64, IP6_F_V6) and cs_vh_stat(v, CS_H_PARTS_TX) > 0 and cs_net(v, CS_NET_BIG) == 0) and all;
+    }
     if (last_pb != 0) { vt_pb_release(last_pb); }
     vtd_close(d);
     vte_close(e);

@@ -7,7 +7,8 @@
 //                          devices), reused call after call: a full call (ring, answer, the same code on both
 //                          sides, ACTIVE, CS_FRAMES frames each way with the caller muted for 50 of them, a forged
 //                          plain BYE ignored, hang-up, IDLE), a person who says differ, a decline, a cancel while
-//                          ringing, a hang-up while the codes are shown.
+//                          ringing, a hang-up while the codes are shown. Bound to 127.0.0.1 the sockets are IPv4
+//                          ones (cs_dual_stack) with FD_CLOEXEC, and a dial to an IPv6 is refused.
 //   CS_V6=1 (no CS_ROLE)   the same two sessions on the dual-stack socket (call_ip6.t27), bound to :: on 47753 / 47754,
 //                          the IPv6 loopback allowed (CS_K_LOOP6, a test aid): a full call to [::1]:47754 (family v6,
 //                          every redundant audio copy sent and taken as a datagram of its own, none too big for
@@ -533,6 +534,11 @@ fn csp_inproc() -> bool {
     const ob : bool = cs_open(b[0..CS_LEN], fb[0..10], 2130706433, 47752, CS_AUDIO_TEST);
     all = ckh_check("open: two sessions on 127.0.0.1:47751 and :47752, both IDLE", oa and ob and cs_state(a[0..CS_LEN]) == CK_IDLE and cs_state(b[0..CS_LEN]) == CK_IDLE) and all;
     if (!oa or !ob) { return false; }
+    // bound to an IPv4 address each is the IPv4 socket (call_session cs_dual_stack), closed in a started process, and
+    // a native IPv6 is never dialled from it
+    var g6 : [18]u8 = undefined;
+    const g6ok : bool = ip6_parse("[3ffe:18:1917:f34e::ff78]:47752", 31, g6[0..18]);
+    all = ckh_check("open: an IPv4 bind is an IPv4 socket (FD_CLOEXEC) and refuses a dial to an IPv6", g6ok and cs_net(a[0..CS_LEN], CS_NET_SOCK6) == 0 and cs_net(b[0..CS_LEN], CS_NET_SOCK6) == 0 and cs_net(a[0..CS_LEN], CS_NET_CLOEXEC) == 1 and cs_net(b[0..CS_LEN], CS_NET_CLOEXEC) == 1 and cs_call6(a[0..CS_LEN], g6[0..18], fb[0..10]) == false and cs_state(a[0..CS_LEN]) == CK_IDLE) and all;
     cs_set(a[0..CS_LEN], CS_K_VERIFY_MS, 5000);
     cs_set(b[0..CS_LEN], CS_K_VERIFY_MS, 5000);
 

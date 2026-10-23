@@ -351,7 +351,7 @@ use t27os::call_session::cs_probe_send;
 use t27os::call_session::cs_nat;
 use t27os::call_session::CS_N_PUB;
 use t27os::call_session::cs_call6;
-use t27os::call_session::cs_last_ep;
+use t27os::call_session::cs_verified_ep;
 use t27os::chat_host::chm_addr6;
 use t27os::call_ip6::ip6_prefer;
 use t27os::call_ip6::IP6_P_V6;
@@ -10584,9 +10584,11 @@ pub fn cl_put_consent(cl: []u8, a: u64) -> void {
     cl_put_port(cl, CL_PUBOK + 4, a % 65536);
 }
 
-/// The endpoint typed in the debug field (call_ip6 ip6_parse: an IPv4 as v4-mapped, or an IPv6); false when none.
+/// The endpoint typed in the debug field (call_ip6 ip6_parse: an IPv4 as v4-mapped, or an IPv6 only with T27OS_QA=1);
+/// false when none.
 pub fn cl_typed_ep(cl: []const u8, ep: []u8) -> bool {
-    return ip6_parse(cl[CL_V6_TXT .. CL_V6_TXT + IP6_TEXT_MAX], @as(usize, cl[CL_V6_ALEN]), ep);
+    if (!ip6_parse(cl[CL_V6_TXT .. CL_V6_TXT + IP6_TEXT_MAX], @as(usize, cl[CL_V6_ALEN]), ep)) { return false; }
+    return cl[CL_V6_QA] != 0 or ip6_mapped(ep);
 }
 
 /// The IPv4 typed in the debug field as ip * 65536 + port (0 = none, or an IPv6 is typed).
@@ -12275,7 +12277,8 @@ pub fn cl_do(cl: []u8, s: []u8, w: []u64, act: u32) -> void {
 }
 
 /// One typed UTF-16 unit into the focused field: the invite field takes letters, digits and the dash (25 at most); the
-/// address field digits, dots and a colon only.
+/// address field digits, dots and a colon (CV_ADDR_MAX at most), and with T27OS_QA=1 also the hex digits and brackets
+/// of an IPv6 (IP6_TEXT_MAX at most).
 pub fn cl_unit(cl: []u8, unit: u32) -> void {
     if (cl[CL_FOCUS] == 2) {
         const ic : u32 = fv_inv_char(unit);
@@ -12287,7 +12290,11 @@ pub fn cl_unit(cl: []u8, unit: u32) -> void {
         return;
     }
     const n : usize = @as(usize, cl[CL_V6_ALEN]);
-    if (!ip6_addr_char(unit) or n >= IP6_TEXT_MAX) { return; }
+    if (cl[CL_V6_QA] != 0) {
+        if (!ip6_addr_char(unit) or n >= IP6_TEXT_MAX) { return; }
+    } else if (!cv_addr_char(unit) or n >= CV_ADDR_MAX) {
+        return;
+    }
     cl[CL_V6_TXT + n] = @as(u8, @intCast(unit));
     cl[CL_V6_ALEN] = @as(u8, @intCast(n + 1));
     // ALLOW was for the address as it was typed
@@ -12522,7 +12529,9 @@ fn draw_cl_front(c: u64, kit: [48]u64, sh: f64, mx: f64, my: f64, l: f64, t: f64
     if (debug) {
         cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
         draw_bytes(c, kit, "DEBUG: ADDRESS, CALLED WITH THE KEY TYPED ABOVE", 46, x, t + FV_DBG_LABEL_Y, 9.0, 0.0, false);
-        draw_cl_field(c, kit, cv_field_x(l), t + FV_DFIELD_Y, cv_field_w(QP_W), cl[CL_FOCUS] == 1, hit == FV_H_DFIELD, cl[CL_V6_TXT .. CL_V6_TXT + IP6_TEXT_MAX], @as(usize, cl[CL_V6_ALEN]), "192.168.1.10:47727 or [IPv6]:47727");
+        var dhint : []const u8 = "192.168.1.10:47727";
+        if (cl[CL_V6_QA] != 0) { dhint = "192.168.1.10:47727 or [IPv6]:47727"; }
+        draw_cl_field(c, kit, cv_field_x(l), t + FV_DFIELD_Y, cv_field_w(QP_W), cl[CL_FOCUS] == 1, hit == FV_H_DFIELD, cl[CL_V6_TXT .. CL_V6_TXT + IP6_TEXT_MAX], @as(usize, cl[CL_V6_ALEN]), dhint);
         draw_cl_btn(c, kit, cv_btn_x(l, QP_W, 0), t + FV_DCALL_Y, cv_btn_w(QP_W), "CALL", hit == FV_H_DCALL);
         // a public address (call_view section 7): ALLOW while it waits for consent, the row, and the port forward hint
         const prow : u32 = cl_pub_row(cl);
@@ -12829,9 +12838,9 @@ fn draw_call_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, cl:
         n = put_dec(line[0..96], n, cl_get32(cl, CL_RECV));
         n = put_bytes(line[0..96], n, "  rejected ");
         n = put_dec(line[0..96], n, cl_get32(cl, CL_REJ));
-        // the family the call uses (call_ip6 ip6_fam): v4, v6 or v4-mapped
+        // the family the call uses (call_ip6 ip6_fam): v4, v6 or v4-mapped; a network word, so with T27OS_QA=1 only
         const fw : []const u8 = ip6_fam_word(@as(u32, cl[CL_V6_FAM]));
-        if (fw.len > 0) {
+        if (fw.len > 0 and cl[CL_V6_QA] != 0) {
             n = put_bytes(line[0..96], n, "  ");
             n = put_bytes(line[0..96], n, fw);
         }
@@ -12911,8 +12920,9 @@ pub fn ac_hit_now(x: f64, y: f64, sw: f64, sh: f64, cl: []const u8) -> u32 {
     return ac_hit_v6(x, y, qp_left(sw), QP_W, WS_TOP, cn6_shown(cl), r1);
 }
 
-/// The PUBLIC v6 line is drawn: calls are up and this device has a global IPv6 (call_ip6 ip6_own_rank).
-pub fn cn6_shown(cl: []const u8) -> bool { return cl.len >= CL_CAP and cl[CL_UP] != 0 and cl[CL_V6_OWNR] != 0; }
+/// The PUBLIC v6 line is drawn: only with T27OS_QA=1 (an ordinary view names no address, owner 2026-10-23), while calls
+/// are up and this device has a global IPv6 (call_ip6 ip6_own_rank).
+pub fn cn6_shown(cl: []const u8) -> bool { return cl.len >= CL_CAP and cl[CL_V6_QA] != 0 and cl[CL_UP] != 0 and cl[CL_V6_OWNR] != 0; }
 
 /// The friends rows that fit while the invitations are shown (account_view ac_inv_dy).
 pub fn ac_vis_now(sh: f64, iv: []const u8) -> usize { return ac_vis_now_g(sh, iv, iv[0..0], iv[0..0]); }
@@ -13767,7 +13777,7 @@ fn draw_account_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, 
     }
     var v6b : [64]u8 = undefined;
     var v6n : usize = 0;
-    if (cl[CL_UP] != 0 and cl[CL_V6_OWNR] != 0) { v6n = ac_v6_line(cl[CL_V6_OWN .. CL_V6_OWN_END], cl[CL_V6_COPIED] != 0, v6b[0..64]); }
+    if (cn6_shown(cl)) { v6n = ac_v6_line(cl[CL_V6_OWN .. CL_V6_OWN_END], cl[CL_V6_COPIED] != 0, v6b[0..64]); }
     if (v6n > 0) {
         // PUBLIC v6: this device's own IPv6 and the call port (call_ip6.t27), in the place of what the key is for; the
         // whole line copies it (AC_H_V6), smaller when it does not fit left of the code
@@ -14320,12 +14330,22 @@ pub const CHW_TR_HELD : usize = 12;
 /// How many stored keys of the friends file did not hash to their friend's fingerprint at the last read (+ 1, 0 =
 /// none said yet): one line on stderr when it changes.
 pub const CHW_FK_BAD : usize = 13;
-/// IP6: when the chat socket last punched toward the friend of the last call over IPv6 (ch_tick_at).
+/// IP6: when the chat socket last punched toward the friend of the last verified call over IPv6 (ch_tick_at).
 pub const CHW_P6_AT : usize = 14;
 pub const CHW_N : usize = 15;
 /// How often the chat socket sends a probe to that friend's chat port: a home router forgets an unused pinhole in some
 /// tens of seconds.
 pub const CH6_PUNCH_MS : u64 = 5000;
+/// How long after that call was last seen up the punch goes on (10 min, 120 probes at most), then it stops.
+pub const CH6_PUNCH_FOR_MS : u64 = 600000;
+
+/// Is the chat punch due at now: every CH6_PUNCH_MS (last = the last one, 0 = none yet), and only for
+/// CH6_PUNCH_FOR_MS after the last verified call was last seen up (seen, call_session cs_verified_ep; 0 = there was
+/// none: never).
+pub fn ch6_punch_due(now: u64, last: u64, seen: u64) -> bool {
+    if (seen == 0 or now >= seen + CH6_PUNCH_FOR_MS) { return false; }
+    return last == 0 or now >= last + CH6_PUNCH_MS;
+}
 /// The test aid sends one line this often.
 pub const CH_SAY_MS : u64 = 1000;
 /// At most this many lines from the test aid.
@@ -14380,13 +14400,14 @@ pub fn ch_friend_addr(cl: []const u8, fp: []const u8) -> u64 {
     return (a / 65536) * 65536 + p;
 }
 
-/// The chat endpoint of friend fp over IPv6 into ep (cleared when none): the endpoint of the call block's current or
-/// last call when that call was with fp over native IPv6, with the chat port (chat_view chv_chat_port).
+/// The chat endpoint of friend fp over IPv6 into ep (cleared when none): the call block's last verified endpoint
+/// (call_session cs_verified_ep: a call that was ACTIVE with fp's identity verified or stored, never an INVITE alone)
+/// when that call was with fp over native IPv6, with the chat port (chat_view chv_chat_port).
 pub fn ch_friend_ep6(cs: []const u8, fp: []const u8, ep: []u8) -> void {
     ip6_clear(ep);
     var lfp : [10]u8 = undefined;
     var lep : [18]u8 = undefined;
-    if (cs.len < CS_LEN or !cs_last_ep(cs[0..CS_LEN], lfp[0..10], lep[0..18])) { return; }
+    if (cs.len < CS_LEN or cs_verified_ep(cs[0..CS_LEN], lfp[0..10], lep[0..18]) == 0) { return; }
     ch_ep6_of(lfp[0..10], lep[0..18], fp, ep);
 }
 
@@ -14844,16 +14865,19 @@ pub fn ch_tick(cl: []u8, v: []u8, s: []u8, m: []u8, log: []u8, asm: []u8, buf: [
 /// ch_tick at the time now (ms of ckh_ms). gv and gx are the groups' region and the open group's buffer (GR; empty
 /// slices: no group).
 pub fn ch_tick_at(cl: []u8, v: []u8, s: []u8, m: []u8, log: []u8, asm: []u8, buf: []u8, w: []u64, cs: []u8, iv: []u8, gv: []u8, gx: []u8, tz: u64, h: f64, now: u64, tt: []u8) -> void {
-    // IP6: after a call with a friend over IPv6 both chat sockets punch toward each other's chat port (call_nat probes),
-    // so a message later passes both routers; in memory only, while this window runs
-    if (w.len > CHW_P6_AT and (w[CHW_P6_AT] == 0 or now >= w[CHW_P6_AT] + CH6_PUNCH_MS)) {
+    // IP6: after a verified call with a friend over IPv6 both chat sockets punch toward each other's chat port
+    // (call_nat probes) for 10 min after it (ch6_punch_due), so a message then passes both routers; in memory only
+    if (w.len > CHW_P6_AT and cs.len >= CS_LEN) {
         var pfp : [10]u8 = undefined;
         var pep : [18]u8 = undefined;
-        if (cs.len >= CS_LEN and cs_last_ep(cs[0..CS_LEN], pfp[0..10], pep[0..18]) and ft_find(cl[FE_FT .. FE_FT + FT_LEN], pfp[0..10]) != FT_MAX) {
-            ch_friend_ep6(cs, pfp[0..10], pep[0..18]);
-            if (ip6_is_set(pep[0..18])) { cs_probe_send6(s, pep[0..18]); }
+        if (ch6_punch_due(now, w[CHW_P6_AT], cs_verified_ep(cs[0..CS_LEN], pfp[0..10], pep[0..18]))) {
+            w[CHW_P6_AT] = now;
+            if (ft_find(cl[FE_FT .. FE_FT + FT_LEN], pfp[0..10]) != FT_MAX) {
+                var cep : [18]u8 = undefined;
+                ch_ep6_of(pfp[0..10], pep[0..18], pfp[0..10], cep[0..18]);
+                if (ip6_is_set(cep[0..18])) { cs_probe_send6(s, cep[0..18]); }
+            }
         }
-        w[CHW_P6_AT] = now;
     }
     // the call block goes back to its launch setting once a call is over (CALL turned video and the camera off for it)
     if (cl[CL_NOCAM] != 0 and cs_state(cs) == CK_IDLE) {
@@ -21420,7 +21444,7 @@ test the_call_pill_stands_between_the_header_cluster_and_the_profile_circle {
     }
 }
 
-test the_address_field_takes_an_ipv4_or_a_bracketed_ipv6_and_stops_at_47 {
+test the_address_field_takes_an_ipv4_and_with_qa_a_bracketed_ipv6_and_stops_at_47 {
     var cl : [8192]u8 = undefined;
     pft_blank(cl[0..8192]);
     cl_unit(cl[0..8192], 49);
@@ -21437,9 +21461,39 @@ test the_address_field_takes_an_ipv4_or_a_bracketed_ipv6_and_stops_at_47 {
     cl_back(cl[0..8192]);
     cl_back(cl[0..8192]);
     assert cl[CL_V6_ALEN] == 0;
-    // hex digits and brackets for an IPv6
+    // without T27OS_QA=1: no hex digit or bracket, an IPv4's 21 characters at most, and a v6 of digits and colons is
+    // not an address (an ordinary view names no IPv6)
     const t : [17]u8 = [91, 102, 100, 48, 48, 58, 58, 49, 93, 58, 52, 55, 55, 50, 55, 65, 70];
     var i : usize = 0;
+    while (i < 15) {
+        cl_unit(cl[0..8192], @as(u32, t[i]));
+        i = i + 1;
+    }
+    assert cl[CL_V6_ALEN] == 11;
+    var ep : [18]u8 = undefined;
+    assert cl_typed_ep(cl[0..8192], ep[0..18]) == false and cl_typed_addr(cl[0..8192]) == 0;
+    var k : u32 = 0;
+    while (k < 30) {
+        cl_unit(cl[0..8192], 57);
+        k = k + 1;
+    }
+    assert @as(usize, cl[CL_V6_ALEN]) == CV_ADDR_MAX;
+    k = 0;
+    while (k < CV_ADDR_MAX) {
+        cl_back(cl[0..8192]);
+        k = k + 1;
+    }
+    const v4 : str = "192.168.1.10:47727";
+    i = 0;
+    while (i < v4.len) {
+        cl_unit(cl[0..8192], @as(u32, v4[i]));
+        i = i + 1;
+    }
+    assert cl_typed_ep(cl[0..8192], ep[0..18]) and ip6_mapped(ep[0..18]) and cl_typed_addr(cl[0..8192]) == 3232235786 * 65536 + 47727;
+    while (cl[CL_V6_ALEN] > 0) { cl_back(cl[0..8192]); }
+    // with it: hex digits and brackets for an IPv6
+    cl[CL_V6_QA] = 1;
+    i = 0;
     while (i < 15) {
         cl_unit(cl[0..8192], @as(u32, t[i]));
         i = i + 1;
@@ -21448,7 +21502,7 @@ test the_address_field_takes_an_ipv4_or_a_bracketed_ipv6_and_stops_at_47 {
     var ep : [18]u8 = undefined;
     assert cl_typed_ep(cl[0..8192], ep[0..18]) and ip6_port(ep[0..18]) == 47727 and ep[0] == 253 and ep[15] == 1;
     assert cl_typed_addr(cl[0..8192]) == 0;
-    var k : u32 = 0;
+    k = 0;
     while (k < 60) {
         cl_unit(cl[0..8192], 57);
         k = k + 1;
@@ -21469,9 +21523,9 @@ test ip6_the_chat_reaches_a_friend_over_ipv6_at_the_chat_port_of_its_last_call {
     const fb : [10]u8 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 11];
     var lep : [18]u8 = undefined;
     var ep : [18]u8 = undefined;
-    assert ip6_parse("[2804:18:1917:f34e::ff78]:47727", 31, lep[0..18]);
+    assert ip6_parse("[3ffe:18:1917:f34e::ff78]:47727", 31, lep[0..18]);
     ch_ep6_of(fa[0..10], lep[0..18], fa[0..10], ep[0..18]);
-    assert ep[0] == 40 and ep[15] == 120 and ip6_port(ep[0..18]) == chv_chat_port(47727) and ip6_port(ep[0..18]) == 47728;
+    assert ep[0] == 63 and ep[15] == 120 and ip6_port(ep[0..18]) == chv_chat_port(47727) and ip6_port(ep[0..18]) == 47728;
     // another friend, an IPv4 call, no call: nothing
     ch_ep6_of(fa[0..10], lep[0..18], fb[0..10], ep[0..18]);
     assert ip6_is_set(ep[0..18]) == false;
@@ -21487,6 +21541,35 @@ test ip6_the_chat_reaches_a_friend_over_ipv6_at_the_chat_port_of_its_last_call {
     assert ip6_prefer(3232235786 * 65536 + 47728, true, ep[0..18]) != IP6_P_V6 and ip6_prefer(0, false, ep[0..18]) == IP6_P_V6;
 }
 
+test ip6_the_chat_punch_runs_only_for_ten_minutes_after_a_verified_call {
+    // no verified call (call_session cs_verified_ep gave 0): never, whatever the clock
+    assert ch6_punch_due(5000, 0, 0) == false and ch6_punch_due(999999999, 0, 0) == false;
+    // the call was last seen up at 100000: the first punch at once, then one every CH6_PUNCH_MS
+    assert ch6_punch_due(100000, 0, 100000);
+    assert ch6_punch_due(100000 + CH6_PUNCH_MS - 1, 100000, 100000) == false;
+    assert ch6_punch_due(100000 + CH6_PUNCH_MS, 100000, 100000);
+    // while the call is up its time moves on, and so does the end of the punch
+    assert ch6_punch_due(100000 + CH6_PUNCH_FOR_MS + CH6_PUNCH_MS, 100000 + CH6_PUNCH_FOR_MS, 100000 + CH6_PUNCH_FOR_MS);
+    // 10 min after it was last seen up: no more, also when the last punch is long ago
+    assert ch6_punch_due(100000 + CH6_PUNCH_FOR_MS - 1, 100000 + CH6_PUNCH_FOR_MS - CH6_PUNCH_MS - 1, 100000);
+    assert ch6_punch_due(100000 + CH6_PUNCH_FOR_MS, 100000 + CH6_PUNCH_FOR_MS - CH6_PUNCH_MS, 100000) == false;
+    assert ch6_punch_due(100000 + 2 * CH6_PUNCH_FOR_MS, 0, 100000) == false;
+    // at most 120 probes for one call
+    assert CH6_PUNCH_FOR_MS / CH6_PUNCH_MS == 120;
+    // the chat's endpoint comes only from the verified call: a block that never had one gives nothing
+    var cs : [299648]u8 = undefined;
+    var i : usize = 0;
+    while (i < 299648) {
+        cs[i] = 0;
+        i = i + 1;
+    }
+    const fa : [10]u8 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    var ep : [18]u8 = undefined;
+    ep[0] = 9;
+    ch_friend_ep6(cs[0..CS_LEN], fa[0..10], ep[0..18]);
+    assert ip6_is_set(ep[0..18]) == false;
+}
+
 test ip6_a_typed_ipv6_is_dialled_after_allow_and_never_when_the_rules_refuse_it {
     var cl : [8192]u8 = undefined;
     pft_blank(cl[0..8192]);
@@ -21499,7 +21582,9 @@ test ip6_a_typed_ipv6_is_dialled_after_allow_and_never_when_the_rules_refuse_it 
     cl[CL_UP] = 1;
     cl_put_port(cl[0..8192], CL_ME_PORT, 47727);
     var ep : [18]u8 = undefined;
-    // a global IPv6 asks for ALLOW; ALLOW is offered and held for that address only
+    // the typed IPv6 is a QA aid (T27OS_QA=1); a global IPv6 asks for ALLOW; ALLOW is offered and held for that address
+    // only
+    cl[CL_V6_QA] = 1;
     const g : str = "[2001:4860:4860::8888]:47727";
     i = 0;
     while (i < g.len) {
@@ -21522,6 +21607,7 @@ test ip6_a_typed_ipv6_is_dialled_after_allow_and_never_when_the_rules_refuse_it 
     assert ip6_parse("[fd00::5]:47727", 15, ep[0..18]) and cl_dial6(cl[0..8192], s[0..64], ep[0..18]) == FN_KEYNEED;
     var cu : [8192]u8 = undefined;
     pft_blank(cu[0..8192]);
+    cu[CL_V6_QA] = 1;
     const u : str = "[fd00::5]:47727";
     i = 0;
     while (i < u.len) {
@@ -21531,6 +21617,7 @@ test ip6_a_typed_ipv6_is_dialled_after_allow_and_never_when_the_rules_refuse_it 
     cl_front(cu[0..8192], s[0..64], w[0..10], FV_H_DALLOW);
     assert cu[CL_V6_OK] == 0 and cl_pub_row(cu[0..8192]) == 0;
     // never: link-local, multicast, documentation; the loopback only with T27OS_QA=1, and on my port it is me
+    cl[CL_V6_QA] = 0;
     assert ip6_parse("[fe80::1]:47727", 15, ep[0..18]) and cl_dial6(cl[0..8192], s[0..64], ep[0..18]) == CV_N_NEVER;
     assert ip6_parse("[ff02::1]:47727", 15, ep[0..18]) and cl_dial6(cl[0..8192], s[0..64], ep[0..18]) == CV_N_NEVER;
     assert ip6_parse("[2001:db8::1]:47727", 19, ep[0..18]) and cl_dial6(cl[0..8192], s[0..64], ep[0..18]) == CV_N_NEVER;
@@ -21539,20 +21626,66 @@ test ip6_a_typed_ipv6_is_dialled_after_allow_and_never_when_the_rules_refuse_it 
     assert cl_dial6(cl[0..8192], s[0..64], ep[0..18]) == FN_KEYNEED;
     assert ip6_parse("[::1]:47727", 11, ep[0..18]) and cl_dial6(cl[0..8192], s[0..64], ep[0..18]) == CV_N_SELF;
     // this device's own address and port is me; another port is not
-    assert ip6_parse("[2804:18:1917:f34e::ff78]:47727", 31, ep[0..18]);
+    assert ip6_parse("[3ffe:18:1917:f34e::ff78]:47727", 31, ep[0..18]);
     ip6_copy(cl[CL_V6_OWN .. CL_V6_OWN_END], ep[0..18]);
     cl[CL_V6_OWNR] = 3;
     cl[CL_PUBENV] = 1;
     assert cl_dial6(cl[0..8192], s[0..64], ep[0..18]) == CV_N_SELF;
     ep[17] = 112;
     assert cl_is_self6(cl[0..8192], ep[0..18]) == false and cl_dial6(cl[0..8192], s[0..64], ep[0..18]) == FN_KEYNEED;
-    // the PUBLIC v6 line is drawn only while calls are up and there is an own address
+    // the PUBLIC v6 line is drawn only with T27OS_QA=1, while calls are up and there is an own address
     assert cn6_shown(cl[0..8192]);
     cl[CL_UP] = 0;
     assert cn6_shown(cl[0..8192]) == false;
     cl[CL_UP] = 1;
+    cl[CL_V6_QA] = 0;
+    assert cn6_shown(cl[0..8192]) == false;
+    cl[CL_V6_QA] = 1;
     cl[CL_V6_OWNR] = 0;
     assert cn6_shown(cl[0..8192]) == false;
+}
+
+test ip6_without_qa_no_view_shows_or_takes_an_ipv6 {
+    var cl : [8192]u8 = undefined;
+    pft_blank(cl[0..8192]);
+    var s : [64]u8 = undefined;
+    var i : usize = 0;
+    while (i < 64) {
+        s[i] = 0;
+        i = i + 1;
+    }
+    cl[CL_UP] = 1;
+    cl_put_port(cl[0..8192], CL_ME_PORT, 47727);
+    // an own global IPv6 is known (cn6_own), the cabinet still draws no PUBLIC v6 line and its place copies nothing
+    var own : [18]u8 = undefined;
+    assert ip6_parse("[3ffe:18:1917:f34e::ff78]:47727", 31, own[0..18]);
+    ip6_copy(cl[CL_V6_OWN .. CL_V6_OWN_END], own[0..18]);
+    cl[CL_V6_OWNR] = 3;
+    assert cn6_shown(cl[0..8192]) == false;
+    const sw : f64 = 1200.0;
+    const l : f64 = qp_left(sw);
+    assert ac_hit_v6(l + QP_PAD + 5.0, WS_TOP + AC_GIVE_BASE - 3.0, l, QP_W, WS_TOP, cn6_shown(cl[0..8192]), AC_H_NONE) == AC_H_NONE;
+    // an IPv6 typed with digits and colons only (the field takes them for an IPv4) is no address: no ALLOW row, ALLOW
+    // gives no consent, CALL says the address is not one
+    const g : str = "2001:4860::8888";
+    i = 0;
+    while (i < g.len) {
+        cl_unit(cl[0..8192], @as(u32, g[i]));
+        i = i + 1;
+    }
+    var ep : [18]u8 = undefined;
+    assert @as(usize, cl[CL_V6_ALEN]) == g.len and ip6_parse(cl[CL_V6_TXT .. CL_V6_TXT + IP6_TEXT_MAX], g.len, ep[0..18]);
+    assert cl_typed_ep(cl[0..8192], ep[0..18]) == false and cl_pub_row(cl[0..8192]) == 0;
+    var w : [10]u64 = undefined;
+    cl[FV_DEBUG] = 1;
+    assert cl_allow_shown(cl[0..8192]) == false;
+    cl_front(cl[0..8192], s[0..64], w[0..10], FV_H_DALLOW);
+    assert cl[CL_V6_OK] == 0 and cl_consent(cl[0..8192]) == 0;
+    cl_dial(cl[0..8192], s[0..64]);
+    assert cl[CL_NOTE] == @as(u8, @intCast(CV_N_ADDR));
+    // the same with T27OS_QA=1: it is the IPv6 it reads as, ALLOW is offered
+    cl[CL_V6_QA] = 1;
+    assert cl_typed_ep(cl[0..8192], ep[0..18]) and ip6_mapped(ep[0..18]) == false and cl_pub_row(cl[0..8192]) == 1 and cn6_shown(cl[0..8192]);
 }
 
 test with_calls_off_only_call_answers_and_it_says_why {

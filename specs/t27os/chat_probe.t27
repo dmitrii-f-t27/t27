@@ -17,7 +17,8 @@
 //   CHP_ROLE=b             the same peer setup; once all CHP_N messages are here it opens the chat and replies
 //                          CHP_R times, then waits for the idle close.
 //   Both sides then save, read their log back from disk and check: every line once, in order, the texts, every
-//   outgoing line READ, no unread left, and the counters (frames, resends, ACKs, duplicates) are printed.
+//   outgoing line READ, no unread left, the message socket closed in a started process (FD_CLOEXEC), no video control
+//   sent by the message session, and the counters (frames, resends, ACKs, duplicates) are printed.
 // Build (Apple silicon):
 //   t27b build specs/t27os/chat_probe.t27 -o chp.o --macho
 //   ld -arch arm64 -platform_version macos 11.0 $(xcrun --show-sdk-version) -syslibroot $(xcrun --show-sdk-path) \
@@ -57,6 +58,11 @@ use t27os::call_session::CS_K_SILENT_MS;
 use t27os::call_session::CS_ST_TEXT_TX;
 use t27os::call_session::CS_ST_TEXT_RX;
 use t27os::call_session::CS_ST_REJ_REPLAY;
+use t27os::call_session::cs_net;
+use t27os::call_session::cs_vh_stat;
+use t27os::call_session::CS_NET_CLOEXEC;
+use t27os::call_session::CS_H_HELLO_TX;
+use t27os::call_session::CS_H_PARTS_TX;
 use t27os::peer_identity::invite_make;
 use t27os::peer_identity::ft_add;
 use t27os::peer_identity::ft_fp_at;
@@ -368,6 +374,10 @@ fn chp_side(is_a: bool) -> bool {
     }
     const total : u64 = ckh_ms() - t0;
     chh_save(log[0..L], buf[0..CF_MAX]);
+    // the message socket is closed in any process the window starts (FD_CLOEXEC), and a message session sends no video
+    // at all: no H.264 HELLO or part (call_session cs_vtick)
+    ok = ckh_check("the message socket has FD_CLOEXEC", cs_net(s[0..299648], CS_NET_CLOEXEC) == 1) and ok;
+    ok = ckh_check("the message session sent no video control or part", cs_vh_stat(s[0..299648], CS_H_HELLO_TX) == 0 and cs_vh_stat(s[0..299648], CS_H_PARTS_TX) == 0) and ok;
     cs_close(s[0..299648]);
     ok = ckh_check("finished before the time limit", done) and ok;
     ok = ckh_check("every outgoing message delivered and read", chp_all_out(log[0..L], CH_S_READ) and cl_count_dir(log[0..L], CH_DIR_OUT) == nout) and ok;
