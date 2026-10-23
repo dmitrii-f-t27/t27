@@ -563,9 +563,22 @@ const CVL_Q : u64 = 241;
 const CVL_ENC0 : u64 = 242;
 const CVL_FN_SETUP : u64 = 243;
 const CVL_FN_STOP : u64 = 244;
+const CVL_SCAN : u64 = 245;
+const CVL_GSEQ : u64 = 246;
+const CVL_GFED : u64 = 247;
 const CVL_BUF : u64 = 4096;
 const CVL_BUF_MAX : u64 = 24000;
 const CVL_PERIOD_US : u64 = 90000;
+// SCAN in the cabinet (owner, 2026-10-23; qr_cam.t27): the same block and path in "scan" mode (slot CVL_SCAN = 1, a
+// block of its own, never the call's): the session asks for 640x480, the camera thread takes at most one frame in
+// 100 ms and writes it as grey 640 x 480 (aspect fill, nearest pixel, 29 B + 150 G + 77 R over 256) at st + CVL_GREY
+// under the sequence CVL_GSEQ (odd = being written); cvl_take_grey copies the newest one for qr_scan.qs_scan_key.
+// No JPEG, no sound, nothing of a call is touched.
+pub const CVL_GREY_W : u64 = 640;
+pub const CVL_GREY_H : u64 = 480;
+const CVL_GREY : u64 = 28672;
+const CVL_SCAN_PERIOD_US : u64 = 100000;
+const CVL_ROW_MAX : u64 = 4096;
 
 // The start never runs on the main thread (owner, 2026-10-22; a live call measured startRunning holding the main thread
 // about 2 s, 226 of 229 audio underruns in the first 4 s). cvl_start only queues cvl_setup_job on the block's own serial
@@ -703,7 +716,9 @@ fn cvl_frame(st: u64, sbuf: u64) -> u64 {
     cv_put(st + CVL_CB * 8, cbp_get(st + CVL_CB * 8) + 1);
     const t : u64 = cv_us();
     const last : u64 = cbp_get(st + CVL_LAST_US * 8);
-    if (last != 0 and t - last < CVL_PERIOD_US) { return 0; }
+    var period : u64 = CVL_PERIOD_US;
+    if (cbp_get(st + CVL_SCAN * 8) != 0) { period = CVL_SCAN_PERIOD_US; }
+    if (last != 0 and t - last < period) { return 0; }
     const pb : u64 = cv_sample_image(sbuf);
     if (pb == 0) { return 0; }
     cv_put(st + CVL_LAST_US * 8, t);
@@ -713,7 +728,10 @@ fn cvl_frame(st: u64, sbuf: u64) -> u64 {
     const h : u64 = cv_pb_h(pb);
     cv_put(st + CVL_W * 8, w);
     cv_put(st + CVL_H * 8, h);
-    if (base != 0 and w > 0 and h > 0 and cv_pb_fmt(pb) == CV_BGRA) {
+    if (base != 0 and w > 0 and h > 0 and cv_pb_fmt(pb) == CV_BGRA and cbp_get(st + CVL_SCAN * 8) != 0) {
+        if (cvl_grey(st, base, w, h, cv_pb_row(pb))) { cv_put(st + CVL_ENC * 8, cbp_get(st + CVL_ENC * 8) + 1); }
+        else { cv_put(st + CVL_FAIL * 8, cbp_get(st + CVL_FAIL * 8) + 1); }
+    } else if (base != 0 and w > 0 and h > 0 and cv_pb_fmt(pb) == CV_BGRA) {
         const n : u64 = cvl_encode(st, base, w, h, cv_pb_row(pb));
         if (n > 0) {
             const k : u64 = cbp_get(st + CVL_ENC * 8) + 1;
@@ -733,11 +751,20 @@ fn cvl_frame(st: u64, sbuf: u64) -> u64 {
 
 /// A new live-camera block (not yet running); `dump` 1 writes the 40th JPEG to /tmp/camcall/cam40.jpg (a test aid).
 /// 0 when AVFoundation or memory is missing.
-pub fn cvl_new(dump: u64) -> u64 {
-    const st : u64 = cv_calloc(1, CVL_BUF + CVL_BUF_MAX + 64);
+pub fn cvl_new(dump: u64) -> u64 { return cvl_make(dump, 0); }
+
+/// A new scan-camera block (qr_cam.t27): the live block in scan mode, its grey frame after the JPEG buffer. Its own
+/// session and queue, so a call's camera block is never touched. 0 when memory is missing.
+pub fn cvl_scan_new() -> u64 { return cvl_make(0, 1); }
+
+fn cvl_make(dump: u64, scan: u64) -> u64 {
+    var size : u64 = CVL_BUF + CVL_BUF_MAX + 64;
+    if (scan != 0) { size = CVL_GREY + CVL_GREY_W * CVL_GREY_H + 64; }
+    const st : u64 = cv_calloc(1, size);
     if (st == 0) { return 0; }
     cv_put(st + 64, CV_MAGIC);
     cv_put(st + CVL_MODE * 8, 1);
+    cv_put(st + CVL_SCAN * 8, scan);
     cv_put(st + CVL_DUMP * 8, dump);
     // Never true: makes sure cv_frame, cv_granted and the queue jobs are emitted and exported for dlsym.
     if (cbp_get(st + 72) == 99) { cv_frame(0, 0, 0, 0, 0); cv_granted(0, 0); cvl_setup_job(0); cvl_stop_job(0); }
@@ -833,7 +860,8 @@ fn cvl_setup(st: u64) -> u64 {
         const inp : u64 = msg2(cv_objc_class("AVCaptureDeviceInput"), cv_sel("deviceInputWithDevice:error:"), dev, 0);
         sess = msg0(msg0(cv_objc_class("AVCaptureSession"), cv_sel("alloc")), cv_sel("init"));
         if (inp == 0 or sess == 0) { return 3; }
-        const preset : u64 = cv_konst("AVCaptureSessionPreset320x240");
+        var preset : u64 = cv_konst("AVCaptureSessionPreset320x240");
+        if (cbp_get(st + CVL_SCAN * 8) != 0) { preset = cv_konst("AVCaptureSessionPreset640x480"); }
         if (preset != 0 and msg_test1(sess, cv_sel("canSetSessionPreset:"), preset)) { msg1(sess, cv_sel("setSessionPreset:"), preset); }
         if (!msg_test1(sess, cv_sel("canAddInput:"), inp)) { return 3; }
         msg1(sess, cv_sel("addInput:"), inp);
@@ -872,6 +900,72 @@ pub fn cvl_stop(st: u64) -> void {
     const q : u64 = cbp_get(st + CVL_Q * 8);
     const f : u64 = cbp_get(st + CVL_FN_STOP * 8);
     if (q != 0 and f != 0) { cv_async(q, st, f); }
+}
+
+/// The locked BGRA frame (w x h, row bytes) as grey 640 x 480 (aspect fill, nearest pixel) at st + CVL_GREY; false
+/// when a row is wider than CVL_ROW_MAX pixels. Camera thread; one source row is read at a time.
+fn cvl_grey(st: u64, base: u64, w: u64, h: u64, row: u64) -> bool {
+    if (w > CVL_ROW_MAX or w * 4 > row) { return false; }
+    var src : [16384]u8 = undefined;
+    var dst : [640]u8 = undefined;
+    var num : u64 = h;
+    var den : u64 = CVL_GREY_H;
+    var x0 : u64 = 0;
+    var y0 : u64 = 0;
+    if (w * CVL_GREY_H >= h * CVL_GREY_W) {
+        x0 = (w - CVL_GREY_W * h / CVL_GREY_H) / 2;
+    } else {
+        num = w;
+        den = CVL_GREY_W;
+        y0 = (h - CVL_GREY_H * w / CVL_GREY_W) / 2;
+    }
+    cv_put(st + CVL_GSEQ * 8, cbp_get(st + CVL_GSEQ * 8) + 1);
+    var last_sy : u64 = h;
+    var dy : u64 = 0;
+    while (dy < CVL_GREY_H) {
+        var sy : u64 = y0 + dy * num / den;
+        if (sy >= h) { sy = h - 1; }
+        if (sy != last_sy) {
+            sys_peek(src[0..@as(usize, w * 4)], base + sy * row, w * 4);
+            var dx : u64 = 0;
+            while (dx < CVL_GREY_W) {
+                var sx : u64 = x0 + dx * num / den;
+                if (sx >= w) { sx = w - 1; }
+                const p : usize = @as(usize, sx * 4);
+                const v : u64 = (29 * @as(u64, src[p]) + 150 * @as(u64, src[p + 1]) + 77 * @as(u64, src[p + 2])) / 256;
+                dst[@as(usize, dx)] = @as(u8, @intCast(v));
+                dx = dx + 1;
+            }
+            last_sy = sy;
+        }
+        cv_poke(st + CVL_GREY + dy * CVL_GREY_W, dst[0..640], CVL_GREY_W);
+        dy = dy + 1;
+    }
+    cv_put(st + CVL_GSEQ * 8, cbp_get(st + CVL_GSEQ * 8) + 1);
+    return true;
+}
+
+/// Copy the newest grey frame not yet taken (640 x 480) into out; its size, 0 when there is none, the writer was busy
+/// or this is not a scan block.
+pub fn cvl_take_grey(st: u64, out: []u8) -> usize {
+    if (st == 0 or cbp_get(st + 64) != CV_MAGIC or cbp_get(st + CVL_SCAN * 8) == 0) { return 0; }
+    const n : u64 = CVL_GREY_W * CVL_GREY_H;
+    if (@as(u64, out.len) < n) { return 0; }
+    const seq : u64 = cbp_get(st + CVL_GSEQ * 8);
+    if (seq == 0 or seq % 2 == 1 or seq == cbp_get(st + CVL_GFED * 8)) { return 0; }
+    sys_peek(out[0..@as(usize, n)], st + CVL_GREY, n);
+    if (cbp_get(st + CVL_GSEQ * 8) != seq) { return 0; }
+    cv_put(st + CVL_GFED * 8, seq);
+    return @as(usize, n);
+}
+
+/// The camera's authorization (AVCaptureDevice: 0 not asked, 1 restricted, 2 denied, 3 allowed) without a block; 3
+/// when AVFoundation is missing is never claimed: 1 then (restricted, SCAN off).
+pub fn cvl_auth() -> u64 {
+    const dev_cls : u64 = cv_objc_class("AVCaptureDevice");
+    const media : u64 = cv_konst("AVMediaTypeVideo");
+    if (dev_cls == 0 or media == 0) { return 1; }
+    return msg1(dev_cls, cv_sel("authorizationStatusForMediaType:"), media);
 }
 
 /// Copy the newest JPEG not yet taken into out; its length, 0 when there is none (or the writer was busy).
@@ -1033,6 +1127,14 @@ test the_camera_is_the_source_only_while_live_with_a_new_jpeg {
     assert cvs_use_camera(CVS_LIVE, 1200);
     assert !cvs_use_camera(CVS_LIVE, 0);
     assert !cvs_use_camera(CVS_STARTING, 1200) and !cvs_use_camera(CVS_FAILED, 1200) and !cvs_use_camera(CVS_IDLE, 1200);
+}
+
+test the_scan_slots_and_its_grey_frame_stand_apart_from_the_call_buffer {
+    assert CVL_FN_STOP < CVL_SCAN and CVL_GFED * 8 + 8 <= CVL_BUF;
+    assert CVL_BUF + CVL_BUF_MAX <= CVL_GREY;
+    assert CVL_GREY_W * CVL_GREY_H == 307200 and CVL_SCAN_PERIOD_US == 100000 and CVL_PERIOD_US == 90000;
+    var b : [8]u8 = undefined;
+    assert cvl_take_grey(0, b[0..8]) == 0;
 }
 
 test the_new_live_slots_stand_before_the_buffer {
