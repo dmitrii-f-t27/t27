@@ -756,6 +756,8 @@ pub const CHV_AV_R : f64 = 24.0;
 pub const CHV_AV_CY : f64 = 72.0;
 pub const CHV_NICK_BASE : f64 = 68.0;
 pub const CHV_FP_BASE : f64 = 85.0;
+/// trust.t27: the card's "refused N times, last ..." line, between the key and the online state.
+pub const CHV_RF_BASE : f64 = 100.0;
 pub const CHV_STATE_BASE : f64 = 118.0;
 pub const CHV_CARD_BTN_Y : f64 = 132.0;
 pub const CHV_HINT_BASE : f64 = 180.0;
@@ -1077,6 +1079,8 @@ test chv_the_card_shows_three_buttons_in_a_row_and_each_answers_its_own {
     assert CHV_BACK_Y + CHV_CHIP_H < CHV_AV_CY - CHV_AV_R;
     assert CHV_NICK_BASE < CHV_FP_BASE and CHV_FP_BASE < CHV_AV_CY + CHV_AV_R;
     assert CHV_AV_CY + CHV_AV_R < CHV_STATE_BASE - 10.0 and CHV_STATE_BASE < CHV_CARD_BTN_Y;
+    // the refusal line (trust.t27) sits between the key and the online state, clear of both
+    assert CHV_FP_BASE + 10.0 < CHV_RF_BASE and CHV_RF_BASE + 10.0 < CHV_STATE_BASE;
     assert CHV_CARD_BTN_Y + CV_BTN_H < CHV_HINT_BASE - 10.0 and CHV_HINT_BASE + 24.0 < CHV_CARD_NOTE_BASE;
 }
 

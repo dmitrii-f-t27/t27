@@ -12,6 +12,8 @@
 //     .tmp with mode 0600, write, fsync, rename), the directory made with mode 0700. A file that is there and does not
 //     check is NEVER written over: the open returns IH_REFUSED and the file stays as found. The private key sits in
 //     the identity file in the clear (the owner's file mode, as ssh keys do); the Keychain route is keysync_host's.
+//   * ~/.t27os/trust.t27 (trust.t27: the key mismatch warnings): handled like invites.t27 (a damaged file goes to
+//     trust.t27.bad, kept; written whole and atomically, 0600).
 //   * mDNS-SD from <dns_sd.h> (libSystem, public): DNSServiceRegister announces _t27call._udp with a TXT record,
 //     DNSServiceBrowse finds announcements, DNSServiceResolve gives host, port and TXT, DNSServiceGetAddrInfo the
 //     IPv4 address; DNSServiceProcessResult runs the callbacks on the calling thread after a poll(2) on the
@@ -77,6 +79,11 @@ use t27os::invites::IV_OK;
 use t27os::invites::iv_init;
 use t27os::invites::iv_load;
 use t27os::invites::iv_check;
+use t27os::trust::TRU_LEN;
+use t27os::trust::TRU_OK;
+use t27os::trust::tru_init;
+use t27os::trust::tru_load;
+use t27os::trust::tru_check;
 
 pub const IH_CREATED : u32 = 1;
 pub const IH_LOADED : u32 = 2;
@@ -466,6 +473,55 @@ pub fn ih_invites_save(t: []const u8) -> bool {
     ih_invites_path(home[0..IH_PATH_MAX], hn, 0, path[0..IH_PATH_MAX]);
     ih_invites_path(home[0..IH_PATH_MAX], hn, 1, tmp[0..IH_PATH_MAX]);
     return ih_write_atomic(dir[0..IH_PATH_MAX], path[0..IH_PATH_MAX], tmp[0..IH_PATH_MAX], t[0..IV_LEN], IV_LEN);
+}
+
+// ---------------------------------------------------------------- the trust file
+
+/// <home>/.t27os/trust.t27; kind 1 adds ".tmp", kind 2 ".bad". NUL-terminated; the length, 0 when it does not fit.
+pub fn ih_trust_path(home: []const u8, hn: usize, kind: u32, out: []u8) -> usize {
+    if (hn + 32 > out.len) { return 0; }
+    var n : usize = put_bytes(out, 0, home[0..hn]);
+    n = put_bytes(out, n, "/.t27os/trust.t27");
+    if (kind == 1) { n = put_bytes(out, n, ".tmp"); }
+    if (kind == 2) { n = put_bytes(out, n, ".bad"); }
+    out[n] = 0;
+    return n;
+}
+
+/// ih_trust_open: no file -> an empty table (IH_CREATED, nothing written until the first refusal); a good file ->
+/// loaded; a file that does not check -> moved to trust.t27.bad and an empty table (IH_REFUSED | status << 8).
+pub fn ih_trust_open(t: []u8) -> u32 {
+    if (t.len < TRU_LEN or !tru_init(t)) { return IH_IOERR; }
+    var home : [IH_PATH_MAX]u8 = undefined;
+    const hn : usize = ih_home(home[0..IH_PATH_MAX]);
+    if (hn == 0) { return IH_IOERR; }
+    var path : [IH_PATH_MAX]u8 = undefined;
+    if (ih_trust_path(home[0..IH_PATH_MAX], hn, 0, path[0..IH_PATH_MAX]) == 0) { return IH_IOERR; }
+    if (ih_access(path[0..IH_PATH_MAX], 0) != 0) { return IH_CREATED; }
+    var f : [1557]u8 = undefined;
+    const got : i64 = ih_slurp(path[0..IH_PATH_MAX], f[0..1557], TRU_LEN + 1);
+    if (got < 0) { return IH_IOERR; }
+    const st : u32 = tru_load(f[0..1557], @as(usize, @intCast(got)), t);
+    if (st == TRU_OK) { return IH_LOADED; }
+    var bad : [IH_PATH_MAX]u8 = undefined;
+    ih_trust_path(home[0..IH_PATH_MAX], hn, 2, bad[0..IH_PATH_MAX]);
+    sys_rename(path[0..IH_PATH_MAX], bad[0..IH_PATH_MAX]);
+    return IH_REFUSED | (st << 8);
+}
+
+/// Write the table (it must check) whole and atomically, mode 0600, the directory 0700.
+pub fn ih_trust_save(t: []const u8) -> bool {
+    if (t.len < TRU_LEN or tru_check(t[0..TRU_LEN]) != TRU_OK) { return false; }
+    var home : [IH_PATH_MAX]u8 = undefined;
+    const hn : usize = ih_home(home[0..IH_PATH_MAX]);
+    if (hn == 0) { return false; }
+    var dir : [IH_PATH_MAX]u8 = undefined;
+    var path : [IH_PATH_MAX]u8 = undefined;
+    var tmp : [IH_PATH_MAX]u8 = undefined;
+    ih_path(home[0..IH_PATH_MAX], hn, 0, false, dir[0..IH_PATH_MAX]);
+    ih_trust_path(home[0..IH_PATH_MAX], hn, 0, path[0..IH_PATH_MAX]);
+    ih_trust_path(home[0..IH_PATH_MAX], hn, 1, tmp[0..IH_PATH_MAX]);
+    return ih_write_atomic(dir[0..IH_PATH_MAX], path[0..IH_PATH_MAX], tmp[0..IH_PATH_MAX], t[0..TRU_LEN], TRU_LEN);
 }
 
 // ---------------------------------------------------------------- mDNS state blocks
