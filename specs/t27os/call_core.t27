@@ -395,9 +395,10 @@ pub const CK_RP_AHEAD : u32 = 1;
 pub const CK_RP_FILL : u32 = 2;
 pub const CK_RP_OLD : u32 = 3;
 
-/// What seq would be to the window, without changing it.
+/// What seq would be to the window, without changing it. A seq no sender makes (0, or past CK_SEQ_MAX) is OLD: the
+/// window never moves to it, so a peer cannot run the slot loop below to the end of u64.
 pub fn ck_replay_check(st: []const u8, seq: u64) -> u32 {
-    if (st.len < CK_WIN_LEN or seq == 0) { return CK_RP_OLD; }
+    if (st.len < CK_WIN_LEN or seq == 0 or seq > CK_SEQ_MAX) { return CK_RP_OLD; }
     const hi : u64 = get_u64(st, 0);
     if (seq > hi) { return CK_RP_AHEAD; }
     if (hi - seq >= CK_WIN) { return CK_RP_OLD; }
@@ -1904,4 +1905,20 @@ test a_link_that_comes_up_later_does_not_count_the_frames_before_its_first_as_sk
     }
     // frames 1..10 went to the other members before this link was up: not skipped; frame 13 was lost: skipped
     assert vr_get(st[0..128], VR_DONE) == 3 and vr_get(st[0..128], VR_SKIP) == 1 and vr_get(st[0..128], VR_LAST) == 14;
+}
+
+test a_seq_no_sender_makes_is_refused_and_does_not_move_the_window {
+    var w : [72]u8 = undefined;
+    ck_wipe(w[0..72]);
+    assert ck_replay_accept(w[0..72], 5);
+    // the last seq a sender makes is taken; anything past it, up to the end of u64, is old and changes nothing
+    assert ck_replay_check(w[0..72], CK_SEQ_MAX) == CK_RP_AHEAD;
+    assert ck_replay_check(w[0..72], CK_SEQ_MAX + 1) == CK_RP_OLD;
+    assert ck_replay_accept(w[0..72], 18446744073709551615) == false;
+    assert ck_replay_accept(w[0..72], 18446744073709551552) == false;
+    assert get_u64(w[0..72], 0) == 5;
+    assert ck_replay_accept(w[0..72], 6);
+    assert ck_replay_accept(w[0..72], CK_SEQ_MAX);
+    assert get_u64(w[0..72], 0) == CK_SEQ_MAX;
+    assert ck_replay_accept(w[0..72], CK_SEQ_MAX) == false;
 }

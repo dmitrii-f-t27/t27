@@ -152,6 +152,7 @@ pub fn ch_put_text(out: []u8, msg: u32, part: u32, time: u64, text: []const u8) 
 /// One part already cut (`bytes`, part `part` of `parts`) into out: CH_PHDR + its bytes, 0 when it cannot be one.
 pub fn ch_put_part(out: []u8, msg: u32, part: u32, parts: u32, time: u64, bytes: []const u8) -> usize {
     if (msg == 0 or parts == 0 or parts > CH_PARTS_MAX or part >= parts or bytes.len == 0 or bytes.len > CH_PART_MAX) { return 0; }
+    if (@as(usize, part) * CH_PART_MAX + bytes.len > CH_MSG_MAX) { return 0; }
     if (out.len < CH_PHDR + bytes.len) { return 0; }
     put_phdr(out, CH_K_TEXT, msg, part, parts, time, bytes.len);
     copy(out, CH_PHDR, bytes, 0, bytes.len);
@@ -171,7 +172,8 @@ pub fn ch_put_read(out: []u8, upto: u32) -> usize {
 }
 
 /// The kind of a payload that checks, 0 for anything else: the length matches, a TEXT part is inside its
-/// message (every part but the last full), an ACK names a part a message can have, a READ names a message.
+/// message (every part but the last full, and the message it ends no longer than CH_MSG_MAX, so a third part of
+/// 700 bytes cannot carry the join past the assembly slot and the line), an ACK names a part a message can have, a READ names a message.
 pub fn ch_kind(p: []const u8) -> u32 {
     if (p.len < CH_PHDR or p.len > CH_PAYLOAD_MAX or p[1] != 0) { return 0; }
     const kind : u32 = @as(u32, p[0]);
@@ -183,6 +185,7 @@ pub fn ch_kind(p: []const u8) -> u32 {
     if (kind == CH_K_TEXT) {
         if (parts == 0 or parts > CH_PARTS_MAX or part >= parts or len == 0 or len > CH_PART_MAX) { return 0; }
         if (part + 1 < parts and len != CH_PART_MAX) { return 0; }
+        if (@as(usize, part) * CH_PART_MAX + len > CH_MSG_MAX) { return 0; }
         return kind;
     }
     if (kind == CH_K_ACK) {
@@ -1526,4 +1529,41 @@ test a_receiver_that_lost_its_half_built_message_gets_every_part_again_in_the_ne
     }
     assert r == CH_RX_NEW;
     assert cl_count(lb[0..T_LOG]) == 1 and cl_len(lb[0..T_LOG], 0) == 1500 and cl_text(lb[0..T_LOG], 0)[0] == t[0];
+}
+
+test a_third_part_that_would_make_the_message_longer_than_2000_bytes_is_refused_and_writes_nothing {
+    var log : [16296]u8 = undefined;
+    var asm : [8064]u8 = undefined;
+    ck_wipe(asm[0..CA_LEN]);
+    assert cl_init(log[0..T_LOG], T_A[0..10], T_CAP);
+    var t : [700]u8 = undefined;
+    t_fill(t[0..700], 700, 2);
+    // a third part may carry 600 bytes at most: 2 * 700 + 600 = CH_MSG_MAX
+    var p : [720]u8 = undefined;
+    put_phdr(p[0..720], CH_K_TEXT, 5, 2, 3, 1, 600);
+    copy(p[0..720], CH_PHDR, t[0..700], 0, 600);
+    assert ch_kind(p[0..CH_PHDR + 600]) == CH_K_TEXT;
+    put_phdr(p[0..720], CH_K_TEXT, 5, 2, 3, 1, 601);
+    assert ch_kind(p[0..CH_PHDR + 601]) == 0;
+    put_phdr(p[0..720], CH_K_TEXT, 5, 2, 3, 1, 700);
+    copy(p[0..720], CH_PHDR, t[0..700], 0, 700);
+    assert ch_kind(p[0..CH_PHDR + 700]) == 0;
+    assert ch_put_part(p[0..720], 5, 2, 3, 1, t[0..700]) == 0;
+    assert ch_put_part(p[0..720], 5, 2, 3, 1, t[0..600]) == CH_PHDR + 600;
+    // the hostile third part after two full ones: refused, the next slot and the log untouched
+    var q : [720]u8 = undefined;
+    assert ch_put_part(q[0..720], 5, 0, 3, 1, t[0..700]) == CH_PHDR + 700;
+    assert ch_rx_text(log[0..T_LOG], asm[0..CA_LEN], q[0..CH_PHDR + 700]) == CH_RX_PART;
+    assert ch_put_part(q[0..720], 5, 1, 3, 1, t[0..700]) == CH_PHDR + 700;
+    assert ch_rx_text(log[0..T_LOG], asm[0..CA_LEN], q[0..CH_PHDR + 700]) == CH_RX_PART;
+    put_phdr(p[0..720], CH_K_TEXT, 5, 2, 3, 1, 700);
+    assert ch_rx_text(log[0..T_LOG], asm[0..CA_LEN], p[0..CH_PHDR + 700]) == CH_RX_BAD;
+    assert cl_count(log[0..T_LOG]) == 0;
+    var k : usize = CA_SLOT;
+    var clean : bool = true;
+    while (k < CA_SLOT + 16) {
+        if (asm[k] != 0) { clean = false; }
+        k = k + 1;
+    }
+    assert clean;
 }

@@ -831,9 +831,11 @@ fn qs_try(bin: []const u8, w: usize, h: usize, text: []u8) -> u32 {
     var k : u32 = 0;
     while (k < 3) {
         var v : u32 = v0;
-        if (k == 1) { v = v0 - 1; }
+        // the version below; there is none below 0 (three finders closer than a version 1 symbol)
+        if (k == 1) {
+            if (v0 > 0) { v = v0 - 1; } else { v = 0; }
+        }
         if (k == 2) { v = v0 + 1; }
-        if (k == 1 and v0 == 0) { v = 0; }
         if (v >= 1 and v <= QS_VER_MAX) {
             const r : u32 = qs_decode_at(bin, w, h, cand[0..256], tri[0..3], v, text);
             if (qs_reason(r) == QS_OK) { return r; }
@@ -1449,4 +1451,36 @@ test qs_a_cut_code_and_a_badly_damaged_code_are_refused_not_misread {
     qs_t_draw(t[0..QR_CELLS_MAX], 25, g[0..QS_T_N], QS_T_W, QS_T_H, 96, 1024, 0, false);
     r = qs_scan_key(g[0..QS_T_N], QS_T_W, QS_T_H, bin[0..QS_T_N], out[0..32]);
     assert r == QS_ECC;
+}
+
+/// A finder pattern of module size md with its top left corner at (x, y): 7 x 7 dark, 5 x 5 light, 3 x 3 dark.
+fn qs_t_finder(g: []u8, w: usize, x: usize, y: usize, md: usize) -> void {
+    qs_t_fill(g, w, x, y, x + 7 * md, y + 7 * md, 40);
+    qs_t_fill(g, w, x + md, y + md, x + 6 * md, y + 6 * md, 215);
+    qs_t_fill(g, w, x + 2 * md, y + 2 * md, x + 5 * md, y + 5 * md, 40);
+}
+
+test qs_three_finders_too_close_for_a_version_give_no_key_and_do_not_stop_the_reader {
+    var g : [QS_T_N]u8 = undefined;
+    var bin : [QS_T_N]u8 = undefined;
+    var out : [32]u8 = undefined;
+    // three finders whose legs make a side of 15 .. 18 modules: the estimate is version 0, and the neighbour
+    // below it is not a version either
+    var side : usize = 15;
+    while (side <= 18) {
+        qs_t_fill(g[0..QS_T_N], QS_T_W, 0, 0, QS_T_W, QS_T_H, 215);
+        const md : usize = 6;
+        const leg : usize = (side - 7) * md;
+        qs_t_finder(g[0..QS_T_N], QS_T_W, 60, 40, md);
+        qs_t_finder(g[0..QS_T_N], QS_T_W, 60 + leg, 40, md);
+        qs_t_finder(g[0..QS_T_N], QS_T_W, 60, 40 + leg, md);
+        assert qs_binarize(g[0..QS_T_N], QS_T_W, QS_T_H, bin[0..QS_T_N]);
+        var cand : [256]i64 = undefined;
+        const n : usize = qs_finders(bin[0..QS_T_N], QS_T_W, QS_T_H, cand[0..256]);
+        var tri : [3]usize = [0, 0, 0];
+        if (n >= 3 and qs_pick3(cand[0..256], n, tri[0..3])) { assert qs_version_est(cand[0..256], tri[0..3]) == 0; }
+        const r : u32 = qs_scan_key(g[0..QS_T_N], QS_T_W, QS_T_H, bin[0..QS_T_N], out[0..32]);
+        assert r != QS_OK and r != QS_NOT_KEY;
+        side = side + 1;
+    }
 }

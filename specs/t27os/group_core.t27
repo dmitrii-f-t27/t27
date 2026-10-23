@@ -491,6 +491,7 @@ pub fn gm_kind(p: []const u8) -> u32 {
     if (kind == GM_K_TEXT) {
         if (parts == 0 or parts > CH_PARTS_MAX or part >= parts or len == 0 or len > CH_PART_MAX) { return 0; }
         if (part + 1 < parts and len != CH_PART_MAX) { return 0; }
+        if (@as(usize, part) * CH_PART_MAX + len > CH_MSG_MAX) { return 0; }
         return kind;
     }
     if (kind == GM_K_ACK) {
@@ -1890,4 +1891,37 @@ test a_line_owes_a_member_only_while_it_is_an_open_own_line_to_that_recipient_wi
     log[cl_line_at(k) + 1] = @as(u8, @intCast(CH_S_FAILED));
     log[cl_line_at(k) + CL_EXT + X_RCPT] = 255;
     assert gl_owes(log[0..T_LOG], k, 1) == false and gl_owes(log[0..T_LOG], k, 2) == false;
+}
+
+test a_group_third_part_that_would_make_the_message_longer_than_2000_bytes_is_refused {
+    var log : [16296]u8 = undefined;
+    var asm : [8064]u8 = undefined;
+    var fl : [32]u8 = undefined;
+    ck_wipe(asm[0..CA_LEN]);
+    ck_wipe(fl[0..32]);
+    t_log(log[0..T_LOG]);
+    var t : [2000]u8 = undefined;
+    var i : usize = 0;
+    while (i < 2000) {
+        t[i] = 97 + @as(u8, @intCast(i % 26));
+        i = i + 1;
+    }
+    var p : [738]u8 = undefined;
+    const a0 : usize = gm_put_text(p[0..738], T_DIGEST[0..8], T_B[0..10], 4, 0, 10, t[0..2000]);
+    assert gl_rx_text(log[0..T_LOG], asm[0..CA_LEN], fl[0..32], 2, 1, p[0..a0]) == CH_RX_PART;
+    const a1 : usize = gm_put_text(p[0..738], T_DIGEST[0..8], T_B[0..10], 4, 1, 10, t[0..2000]);
+    assert gl_rx_text(log[0..T_LOG], asm[0..CA_LEN], fl[0..32], 2, 1, p[0..a1]) == CH_RX_PART;
+    // an honest last part is 600 bytes; one of 700 would put the join 100 bytes past the slot
+    const a2 : usize = gm_put_text(p[0..738], T_DIGEST[0..8], T_B[0..10], 4, 2, 10, t[0..2000]);
+    assert a2 == GM_HDR + 600 and gm_kind(p[0..a2]) == GM_K_TEXT;
+    put_ghdr(p[0..738], GM_K_TEXT, T_DIGEST[0..8], T_B[0..10], 4, 2, 3, 10, 601);
+    assert gm_kind(p[0..GM_HDR + 601]) == 0;
+    put_ghdr(p[0..738], GM_K_TEXT, T_DIGEST[0..8], T_B[0..10], 4, 2, 3, 10, 700);
+    assert gm_kind(p[0..GM_HDR + 700]) == 0;
+    assert gl_rx_text(log[0..T_LOG], asm[0..CA_LEN], fl[0..32], 2, 1, p[0..GM_HDR + 700]) == CH_RX_BAD;
+    assert cl_count(log[0..T_LOG]) == 0;
+    // the honest one completes the 2000-byte message
+    gm_put_text(p[0..738], T_DIGEST[0..8], T_B[0..10], 4, 2, 10, t[0..2000]);
+    assert gl_rx_text(log[0..T_LOG], asm[0..CA_LEN], fl[0..32], 2, 1, p[0..a2]) == CH_RX_NEW;
+    assert cl_count(log[0..T_LOG]) == 1 and cl_text(log[0..T_LOG], 0).len == 2000;
 }
