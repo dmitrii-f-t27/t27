@@ -24,6 +24,8 @@ use t27os::pty_sys::sys_strlen;
 use t27os::callback_probe::cbp_get;
 use t27os::pty_proto::put_u64;
 use t27os::pty_proto::get_u64;
+use t27os::call_vid::vid_dims;
+use t27os::call_vid::vid_quality;
 
 const CV_RTLD_DEFAULT : u64 = 18446744073709551614;
 /// kCVPixelFormatType_32BGRA, 'BGRA'.
@@ -577,6 +579,10 @@ const CVL_PERIOD_US : u64 = 90000;
 pub const CVL_GREY_W : u64 = 640;
 pub const CVL_GREY_H : u64 = 480;
 const CVL_GREY : u64 = 28672;
+// A group call (owner, 2026-10-23): with CVL_SMALL = 1 (cvl_small) the camera thread takes at most one frame in
+// CVL_G_PERIOD_US and encodes it as 160x120 at quality 0.3, the size a group call sends; 0 is the one to one 320x240.
+const CVL_SMALL : u64 = 248;
+const CVL_G_PERIOD_US : u64 = 190000;
 const CVL_SCAN_PERIOD_US : u64 = 100000;
 const CVL_ROW_MAX : u64 = 4096;
 
@@ -637,30 +643,54 @@ fn cvl_block() -> u64 {
     return blk;
 }
 
-/// The locked BGRA frame (w x h, row bytes) as a 320x240 JPEG (aspect fill, quality 0.5) into the live buffer;
-/// the stats of the 320x240 picture go to slots CVL_STATS..+3. Its length, 0 on failure.
+/// The camera thread's period: SCAN 100 ms, a group call 190 ms (5 frames a second are sent), a one to one call 90 ms.
+pub fn cvl_period(scan: bool, small: bool) -> u64 {
+    if (scan) { return CVL_SCAN_PERIOD_US; }
+    if (small) { return CVL_G_PERIOD_US; }
+    return CVL_PERIOD_US;
+}
+
+/// The group call's size from now on (main thread; the camera thread reads it at its next frame). False for no block.
+pub fn cvl_small(st: u64, on: bool) -> bool {
+    if (st == 0 or cbp_get(st + 64) != CV_MAGIC) { return false; }
+    var v : u64 = 0;
+    if (on) { v = 1; }
+    if (cbp_get(st + CVL_SMALL * 8) != v) { cv_put(st + CVL_SMALL * 8, v); }
+    return true;
+}
+
+/// The locked BGRA frame (w x h, row bytes) as a 320x240 JPEG (aspect fill, quality 0.5) into the live buffer, or
+/// 160x120 at quality 0.3 in a group call (CVL_SMALL); the stats of that picture go to slots CVL_STATS..+3. Its
+/// length, 0 on failure.
 fn cvl_encode(st: u64, base: u64, w: u64, h: u64, row: u64) -> u64 {
     var n : u64 = 0;
+    const small : bool = cbp_get(st + CVL_SMALL * 8) != 0;
+    // the size and the quality are the generator's (call_vid vid_dims / vid_quality): the picture a call sends
+    const dd : u64 = vid_dims(small);
+    const ow : u64 = dd >> 16;
+    const oh : u64 = dd & 65535;
+    const fw : f64 = @as(f64, @floatFromInt(ow));
+    const fh : f64 = @as(f64, @floatFromInt(oh));
     const space : u64 = cv_cg_rgb();
     const sctx : u64 = cv_cg_bitmap(base, @as(usize, w), @as(usize, h), 8, @as(usize, row), space, CV_BITMAP_INFO);
-    const mem : u64 = cv_calloc(CV_W * CV_H, 4);
+    const mem : u64 = cv_calloc(ow * oh, 4);
     if (sctx != 0 and mem != 0) {
         const simg : u64 = cv_cg_image(sctx);
-        const dctx : u64 = cv_cg_bitmap(mem, @as(usize, CV_W), @as(usize, CV_H), 8, @as(usize, CV_W * 4), space, CV_BITMAP_INFO);
+        const dctx : u64 = cv_cg_bitmap(mem, @as(usize, ow), @as(usize, oh), 8, @as(usize, ow * 4), space, CV_BITMAP_INFO);
         if (simg != 0 and dctx != 0) {
             var dx : f64 = 0.0;
             var dy : f64 = 0.0;
-            var dw : f64 = 320.0;
-            var dh : f64 = 240.0;
-            if (w * CV_H >= h * CV_W) {
-                dw = @as(f64, @floatFromInt(w * CV_H)) / @as(f64, @floatFromInt(h));
-                dx = (320.0 - dw) / 2.0;
+            var dw : f64 = fw;
+            var dh : f64 = fh;
+            if (w * oh >= h * ow) {
+                dw = @as(f64, @floatFromInt(w * oh)) / @as(f64, @floatFromInt(h));
+                dx = (fw - dw) / 2.0;
             } else {
-                dh = @as(f64, @floatFromInt(h * CV_W)) / @as(f64, @floatFromInt(w));
-                dy = (240.0 - dh) / 2.0;
+                dh = @as(f64, @floatFromInt(h * ow)) / @as(f64, @floatFromInt(w));
+                dy = (fh - dh) / 2.0;
             }
             cv_cg_draw(dctx, dx, dy, dw, dh, simg);
-            cv_stats(mem, CV_W * 4, CV_W, CV_H, 4, 4, st, CVL_STATS);
+            cv_stats(mem, ow * 4, ow, oh, 4, 4, st, CVL_STATS);
             const dimg : u64 = cv_cg_image(dctx);
             if (dimg != 0) {
                 const data : u64 = cv_cf_mdata(0, 0);
@@ -671,7 +701,7 @@ fn cvl_encode(st: u64, base: u64, w: u64, h: u64, row: u64) -> u64 {
                     var vb : [8]u8 = undefined;
                     var qb : [8]u8 = undefined;
                     put_u64(kb[0..8], 0, cv_konst("kCGImageDestinationLossyCompressionQuality"));
-                    put_u64(qb[0..8], 0, 4602678819172646912);
+                    put_u64(qb[0..8], 0, vid_quality(small));
                     const qn : u64 = cv_cf_num(0, 6, qb[0..8]);
                     put_u64(vb[0..8], 0, qn);
                     const props : u64 = cv_cf_dict(0, kb[0..8], vb[0..8], 1, cv_dlsym(CV_RTLD_DEFAULT, "kCFTypeDictionaryKeyCallBacks"), cv_dlsym(CV_RTLD_DEFAULT, "kCFTypeDictionaryValueCallBacks"));
@@ -716,8 +746,7 @@ fn cvl_frame(st: u64, sbuf: u64) -> u64 {
     cv_put(st + CVL_CB * 8, cbp_get(st + CVL_CB * 8) + 1);
     const t : u64 = cv_us();
     const last : u64 = cbp_get(st + CVL_LAST_US * 8);
-    var period : u64 = CVL_PERIOD_US;
-    if (cbp_get(st + CVL_SCAN * 8) != 0) { period = CVL_SCAN_PERIOD_US; }
+    const period : u64 = cvl_period(cbp_get(st + CVL_SCAN * 8) != 0, cbp_get(st + CVL_SMALL * 8) != 0);
     if (last != 0 and t - last < period) { return 0; }
     const pb : u64 = cv_sample_image(sbuf);
     if (pb == 0) { return 0; }
@@ -1135,6 +1164,16 @@ test the_scan_slots_and_its_grey_frame_stand_apart_from_the_call_buffer {
     assert CVL_GREY_W * CVL_GREY_H == 307200 and CVL_SCAN_PERIOD_US == 100000 and CVL_PERIOD_US == 90000;
     var b : [8]u8 = undefined;
     assert cvl_take_grey(0, b[0..8]) == 0;
+}
+
+test a_group_call_takes_160_by_120_at_a_lower_quality_five_times_a_second {
+    assert vid_dims(false) == (CV_W << 16 | CV_H) and vid_dims(true) == ((CV_W / 2) << 16 | (CV_H / 2));
+    assert vid_quality(true) < vid_quality(false);
+    assert cvl_period(false, false) == CVL_PERIOD_US and cvl_period(true, true) == CVL_SCAN_PERIOD_US;
+    // a frame in at most 190 ms: never fewer than the 5 a second a group call sends, never many more
+    assert cvl_period(false, true) == CVL_G_PERIOD_US and CVL_G_PERIOD_US < 200000 and CVL_G_PERIOD_US > CVL_PERIOD_US;
+    assert CVL_GFED < CVL_SMALL and CVL_SMALL * 8 + 8 <= CVL_BUF;
+    assert cvl_small(0, true) == false;
 }
 
 test the_new_live_slots_stand_before_the_buffer {

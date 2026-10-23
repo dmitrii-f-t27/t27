@@ -683,19 +683,36 @@ pub const VC_LIVE_MS : u64 = 1000;
 pub const VC_SRC_GEN : u32 = 1;
 pub const VC_SRC_CAM : u32 = 2;
 
-/// The parts a JPEG of `total` bytes needs: 0 when it is empty or longer than VC_JPEG_MAX.
-pub fn vc_parts_for(total: usize) -> usize {
-    if (total == 0 or total > VC_JPEG_MAX) { return 0; }
-    return (total + VC_PART - 1) / VC_PART;
+// Group video (owner, 2026-10-23): a group call sends 5 frames a second of 160x120 at a lower JPEG quality (1.5-3 KB),
+// cut into parts of VC_G_PART (700) bytes. The part format is the same; the receiver tells the part size from the
+// header itself (vc_psz: the count of parts and the length of the cut agree with one size only, or the frame is one
+// part and the size does not matter), so a one to one call's parts are byte for byte what they were.
+pub const VC_G_PART : usize = 700;
+pub const VC_G_W : u32 = 160;
+pub const VC_G_H : u32 = 120;
+/// 5 frames a second.
+pub const VC_G_PERIOD_MS : u64 = 200;
+
+/// The parts a JPEG of `total` bytes needs at part size psz (VC_PART or VC_G_PART): 0 when it is empty, longer than
+/// VC_JPEG_MAX or psz is neither.
+pub fn vc_parts_of(total: usize, psz: usize) -> usize {
+    if (total == 0 or total > VC_JPEG_MAX or (psz != VC_PART and psz != VC_G_PART)) { return 0; }
+    return (total + psz - 1) / psz;
 }
 
-/// The length of part `k` of a JPEG of `total` bytes (0 when k is out of range).
-pub fn vc_cut_len(total: usize, k: usize) -> usize {
-    const n : usize = vc_parts_for(total);
+/// The length of part `k` of a JPEG of `total` bytes at part size psz (0 when k is out of range).
+pub fn vc_cut_of(total: usize, k: usize, psz: usize) -> usize {
+    const n : usize = vc_parts_of(total, psz);
     if (n == 0 or k >= n) { return 0; }
-    if (k + 1 < n) { return VC_PART; }
-    return total - k * VC_PART;
+    if (k + 1 < n) { return psz; }
+    return total - k * psz;
 }
+
+/// The parts a JPEG of `total` bytes needs in a one to one call: 0 when it is empty or longer than VC_JPEG_MAX.
+pub fn vc_parts_for(total: usize) -> usize { return vc_parts_of(total, VC_PART); }
+
+/// The length of part `k` of a JPEG of `total` bytes in a one to one call (0 when k is out of range).
+pub fn vc_cut_len(total: usize, k: usize) -> usize { return vc_cut_of(total, k, VC_PART); }
 
 fn vc_put32(b: []u8, at: usize, v: u64) -> void {
     b[at] = @as(u8, @intCast(v & 255));
@@ -713,10 +730,13 @@ fn vc_get16(b: []const u8, at: usize) -> usize {
 }
 
 /// The plaintext of part `k` of `jpeg` as frame number `frame` into out: its length, 0 on a bad part or a short out.
-pub fn vc_part(out: []u8, frame: u64, jpeg: []const u8, k: usize) -> usize {
+pub fn vc_part(out: []u8, frame: u64, jpeg: []const u8, k: usize) -> usize { return vc_part_of(out, frame, jpeg, k, VC_PART); }
+
+/// The same at part size psz (a group call cuts at VC_G_PART).
+pub fn vc_part_of(out: []u8, frame: u64, jpeg: []const u8, k: usize, psz: usize) -> usize {
     const total : usize = jpeg.len;
-    const n : usize = vc_parts_for(total);
-    const len : usize = vc_cut_len(total, k);
+    const n : usize = vc_parts_of(total, psz);
+    const len : usize = vc_cut_of(total, k, psz);
     if (n == 0 or len == 0 or out.len < VC_HDR + len or frame == 0 or frame > 4294967295) { return 0; }
     vc_put32(out, 0, frame);
     out[4] = @as(u8, @intCast(k & 255));
@@ -726,21 +746,27 @@ pub fn vc_part(out: []u8, frame: u64, jpeg: []const u8, k: usize) -> usize {
     vc_put32(out, 8, @as(u64, total));
     var i : usize = 0;
     while (i < len) {
-        out[VC_HDR + i] = jpeg[k * VC_PART + i];
+        out[VC_HDR + i] = jpeg[k * psz + i];
         i = i + 1;
     }
     return VC_HDR + len;
 }
 
-/// A part plaintext that is well formed: header, counts and length agree.
-pub fn vc_ok(pt: []const u8) -> bool {
-    if (pt.len < VC_HDR + 1 or pt.len > VC_PT_MAX) { return false; }
+/// The part size a part plaintext was cut with: VC_PART when header, counts and length agree with it, else
+/// VC_G_PART when they agree with that; 0 for a malformed part.
+pub fn vc_psz(pt: []const u8) -> usize {
+    if (pt.len < VC_HDR + 1 or pt.len > VC_PT_MAX) { return 0; }
     const total : usize = @as(usize, @intCast(vc_get32(pt, 8)));
     const n : usize = vc_get16(pt, 6);
     const k : usize = vc_get16(pt, 4);
-    if (vc_get32(pt, 0) == 0 or n == 0 or n != vc_parts_for(total) or k >= n) { return false; }
-    return pt.len == VC_HDR + vc_cut_len(total, k);
+    if (vc_get32(pt, 0) == 0 or n == 0 or k >= n) { return 0; }
+    if (n == vc_parts_of(total, VC_PART) and pt.len == VC_HDR + vc_cut_of(total, k, VC_PART)) { return VC_PART; }
+    if (n == vc_parts_of(total, VC_G_PART) and pt.len == VC_HDR + vc_cut_of(total, k, VC_G_PART)) { return VC_G_PART; }
+    return 0;
 }
+
+/// A part plaintext that is well formed: header, counts and length agree (at either part size).
+pub fn vc_ok(pt: []const u8) -> bool { return vc_psz(pt) != 0; }
 
 pub fn vc_frame(pt: []const u8) -> u64 { return vc_get32(pt, 0); }
 pub fn vc_index(pt: []const u8) -> usize { return vc_get16(pt, 4); }
@@ -776,6 +802,108 @@ pub fn vc_live(now: u64, last_at: u64) -> bool {
     return last_at != 0 and now >= last_at and now - last_at <= VC_LIVE_MS;
 }
 
+// ---------------------------------------------------------------- group video (owner, 2026-10-23)
+
+// In a group call every member sends ONE picture a period to every other member whose link is healthy: the frame is
+// made (or taken from the camera) once and sealed once per link, on the link's own key. A link is FULL while it is
+// ACTIVE and its sound arrives (the last frame within VG_STALE_MS, at most VG_UNDER_MAX underruns in the last second);
+// an ACTIVE link that misses either is PARTIAL and gets the sound only, so the video never pushes a weak link over.
+// The receiver shows at most VG_SHOW pictures: the members whose first frame came first; the others are heard only.
+pub const VG_STALE_MS : u64 = 300;
+pub const VG_UNDER_MAX : u64 = 3;
+pub const VG_SHOW : usize = 2;
+/// No link (vg_show).
+pub const VG_NO_LINK : u32 = 255;
+
+/// The video class of a link: GR_NONE (not ACTIVE), GR_PARTIAL (ACTIVE, weak) or GR_FULL.
+pub fn vg_link(active: bool, rx_age_ms: u64, under_1s: u64) -> u32 {
+    if (!active) { return GR_NONE; }
+    if (rx_age_ms > VG_STALE_MS or under_1s > VG_UNDER_MAX) { return GR_PARTIAL; }
+    return GR_FULL;
+}
+
+/// The links a frame goes to: bit k for every link whose class is GR_FULL (never a PARTIAL one), at most 8 links.
+pub fn vg_to(cls: []const u32) -> u32 {
+    var m : u32 = 0;
+    var k : usize = 0;
+    while (k < cls.len and k < 8) {
+        if (cls[k] == GR_FULL) { m = m | (@as(u32, 1) << @as(u32, @intCast(k))); }
+        k = k + 1;
+    }
+    return m;
+}
+
+/// How many links a mask names.
+pub fn vg_count(m: u32) -> u64 {
+    var n : u64 = 0;
+    var x : u32 = m;
+    while (x != 0) {
+        n = n + @as(u64, x & 1);
+        x = x >> 1;
+    }
+    return n;
+}
+
+/// The sender's state (u64 slots): the last due tick, frames sent, encoder jobs queued, due frames skipped because the
+/// encoder was still busy (txencskip), frames sealed and sent summed over the links.
+pub const VG_LAST : usize = 0;
+pub const VG_FRAMES : usize = 1;
+pub const VG_ENC : usize = 2;
+pub const VG_SKIP : usize = 3;
+pub const VG_SENDS : usize = 4;
+pub const VG_N : usize = 5;
+/// What a tick does: send the JPEG at hand to every link of the mask, queue ONE encoder job, or count a skip.
+pub const VG_A_SEND : u32 = 1;
+pub const VG_A_KICK : u32 = 2;
+pub const VG_A_BUSY : u32 = 4;
+
+/// One pass of the group sender. Nothing happens with nobody to send to or before VC_G_PERIOD_MS passed (one frame a
+/// period, a late pass does not burst). `have`: a JPEG is at hand without the encoder (the camera's, or one made in the
+/// pass); `ready`: the encoder published the frame queued last time; `busy`: its job still runs. A frame at hand goes
+/// to every link of `to` (one JPEG, sealed once per link); then one job is queued for the next frame, or, while one
+/// still runs, the frame is skipped and counted: never two jobs in flight, never one job per link.
+pub fn vg_step(st: []u64, now: u64, to: u32, have: bool, ready: bool, busy: bool) -> u32 {
+    if (st.len < VG_N or to == 0) { return 0; }
+    if (st[VG_LAST] != 0 and now < st[VG_LAST] + VC_G_PERIOD_MS) { return 0; }
+    st[VG_LAST] = now;
+    var a : u32 = 0;
+    if (have or ready) {
+        st[VG_FRAMES] = st[VG_FRAMES] + 1;
+        st[VG_SENDS] = st[VG_SENDS] + vg_count(to);
+        a = a | VG_A_SEND;
+    }
+    if (have) { return a; }
+    if (busy) {
+        st[VG_SKIP] = st[VG_SKIP] + 1;
+        a = a | VG_A_BUSY;
+    } else {
+        st[VG_ENC] = st[VG_ENC] + 1;
+        a = a | VG_A_KICK;
+    }
+    return a;
+}
+
+/// The links whose pictures are shown: first[k] is when link k's first frame was complete (0 = none yet); the two
+/// earliest, the lower link first on a tie, as a | b << 8 (VG_NO_LINK for a missing one).
+pub fn vg_show(first: []const u64) -> u32 {
+    var a : u32 = VG_NO_LINK;
+    var b : u32 = VG_NO_LINK;
+    var k : usize = 0;
+    while (k < first.len and k < 8) {
+        const t : u64 = first[k];
+        if (t != 0) {
+            if (a == VG_NO_LINK or t < first[@as(usize, a)]) {
+                b = a;
+                a = @as(u32, @intCast(k));
+            } else if (b == VG_NO_LINK or t < first[@as(usize, b)]) {
+                b = @as(u32, @intCast(k));
+            }
+        }
+        k = k + 1;
+    }
+    return a | (b << 8);
+}
+
 // The assembly state (VR_LEN bytes, u64 LE slots) and the bytes of the frame in assembly are the receiver's.
 pub const VR_LEN : usize = 128;
 pub const VR_CUR : usize = 0;
@@ -805,7 +933,7 @@ pub fn vr_get(st: []const u8, k: usize) -> u64 {
 
 /// Take one opened part. VR_NO a malformed part; VR_STORED kept; VR_OLD a duplicate or a part of a frame that is
 /// already shown or dropped; VR_COMPLETE every part of the frame is in `buf` (buf[0..VR_SIZE]) and it is newer than
-/// the last shown one. The frames between two shown ones are counted as skipped.
+/// the last shown one. The frames between two shown ones are counted as skipped (not those before the first).
 pub fn vr_take(st: []u8, buf: []u8, pt: []const u8, now: u64) -> u32 {
     if (st.len < VR_LEN or buf.len < VC_JPEG_MAX or !vc_ok(pt)) {
         if (st.len >= VR_LEN) { vr_p(st, VR_REFUSED, vr_g(st, VR_REFUSED) + 1); }
@@ -833,16 +961,19 @@ pub fn vr_take(st: []u8, buf: []u8, pt: []const u8, now: u64) -> u32 {
         vr_p(st, VR_STALE, vr_g(st, VR_STALE) + 1);
         return VR_OLD;
     }
+    const psz : usize = vc_psz(pt);
     var i : usize = 0;
     while (i < pt.len - VC_HDR) {
-        buf[k * VC_PART + i] = pt[VC_HDR + i];
+        buf[k * psz + i] = pt[VC_HDR + i];
         i = i + 1;
     }
     vr_p(st, VR_MASK, vr_g(st, VR_MASK) | bit);
     vr_p(st, VR_PARTS, vr_g(st, VR_PARTS) + 1);
     const all : u64 = (@as(u64, 1) << @as(u64, @intCast(n))) - 1;
     if (vr_g(st, VR_MASK) != all) { return VR_STORED; }
-    vr_p(st, VR_SKIP, vr_g(st, VR_SKIP) + (f - vr_g(st, VR_LAST) - 1));
+    // the numbers before the first frame shown are not frames lost: a link of a group that comes up later gets its
+    // first frame with a number above 1 (the sender numbers one stream for all its links)
+    if (vr_g(st, VR_DONE) > 0) { vr_p(st, VR_SKIP, vr_g(st, VR_SKIP) + (f - vr_g(st, VR_LAST) - 1)); }
     vr_p(st, VR_LAST, f);
     vr_p(st, VR_DONE, vr_g(st, VR_DONE) + 1);
     vr_p(st, VR_SIZE, @as(u64, total));
@@ -1589,4 +1720,188 @@ test the_source_is_the_camera_only_while_its_frame_is_fresh {
     assert vc_live(5000, 4500);
     assert vc_live(5000, 3999) == false;
     assert vc_live(5000, 0) == false;
+}
+
+test a_group_frame_is_cut_in_parts_of_700_and_a_one_to_one_frame_is_cut_as_before {
+    assert vc_parts_of(2500, VC_G_PART) == 4 and vc_cut_of(2500, 3, VC_G_PART) == 400 and vc_cut_of(2500, 2, VC_G_PART) == 700;
+    assert vc_parts_of(2500, 999) == 0 and vc_parts_of(VC_JPEG_MAX, VC_G_PART) == 35 and vc_parts_of(VC_JPEG_MAX, VC_G_PART) < 64;
+    assert CK_HDR + VC_HDR + VC_G_PART + CK_TAG == 780;
+    assert VC_G_W * 2 == VC_W and VC_G_H * 2 == VC_H and VC_G_PERIOD_MS == 2 * VC_PERIOD_MS;
+    var j : [2500]u8 = undefined;
+    vc_fake(j[0..2500], 2500, 5);
+    var a : [1012]u8 = undefined;
+    var b : [1012]u8 = undefined;
+    // a one to one part is byte for byte the part of 1000 it always was
+    assert vc_part(a[0..1012], 9, j[0..2500], 1) == vc_part_of(b[0..1012], 9, j[0..2500], 1, VC_PART);
+    var same : bool = true;
+    var i : usize = 0;
+    while (i < VC_HDR + 1000) {
+        if (a[i] != b[i]) { same = false; }
+        i = i + 1;
+    }
+    assert same and vc_psz(a[0..VC_HDR + 1000]) == VC_PART;
+    // a group part: 700 bytes, its size read back from the header alone
+    assert vc_part_of(b[0..1012], 9, j[0..2500], 1, VC_G_PART) == VC_HDR + 700;
+    assert vc_psz(b[0..VC_HDR + 700]) == VC_G_PART and vc_ok(b[0..VC_HDR + 700]);
+    assert b[VC_HDR] == j[700] and vc_count(b[0..VC_HDR + 700]) == 4;
+    assert vc_part_of(b[0..1012], 9, j[0..2500], 3, VC_G_PART) == VC_HDR + 400 and vc_psz(b[0..VC_HDR + 400]) == VC_G_PART;
+    // 1400 bytes: two parts at either size, told apart by the length of the cut
+    assert vc_part_of(a[0..1012], 3, j[0..1400], 1, VC_PART) == VC_HDR + 400 and vc_psz(a[0..VC_HDR + 400]) == VC_PART;
+    assert vc_part_of(a[0..1012], 3, j[0..1400], 1, VC_G_PART) == VC_HDR + 700 and vc_psz(a[0..VC_HDR + 700]) == VC_G_PART;
+    // a cut that fits neither size is refused
+    assert vc_psz(a[0..VC_HDR + 699]) == 0;
+}
+
+test every_part_of_a_group_frame_builds_the_same_jpeg {
+    var j : [2500]u8 = undefined;
+    vc_fake(j[0..2500], 2500, 21);
+    var st : [128]u8 = undefined;
+    kfill(st[0..128], 0);
+    var buf : [24576]u8 = undefined;
+    var pt : [1012]u8 = undefined;
+    var k : usize = 4;
+    var got : u32 = 0;
+    while (k > 0) {
+        k = k - 1;
+        const n : usize = vc_part_of(pt[0..1012], 1, j[0..2500], k, VC_G_PART);
+        got = vr_take(st[0..128], buf[0..24576], pt[0..n], 1000);
+    }
+    assert got == VR_COMPLETE and vr_get(st[0..128], VR_SIZE) == 2500 and vr_get(st[0..128], VR_HASH) == vc_hash(j[0..2500]);
+    var same : bool = true;
+    var i : usize = 0;
+    while (i < 2500) {
+        if (buf[i] != j[i]) { same = false; }
+        i = i + 1;
+    }
+    assert same;
+}
+
+test a_frame_goes_to_full_links_only_never_to_a_partial_one {
+    assert vg_link(false, 0, 0) == GR_NONE;
+    assert vg_link(true, 10, 0) == GR_FULL;
+    assert vg_link(true, VG_STALE_MS, VG_UNDER_MAX) == GR_FULL;
+    assert vg_link(true, VG_STALE_MS + 1, 0) == GR_PARTIAL;
+    assert vg_link(true, 10, VG_UNDER_MAX + 1) == GR_PARTIAL;
+    var c : [3]u32 = undefined;
+    c[0] = GR_FULL;
+    c[1] = GR_PARTIAL;
+    c[2] = GR_FULL;
+    assert vg_to(c[0..3]) == 5 and vg_count(vg_to(c[0..3])) == 2;
+    c[0] = GR_PARTIAL;
+    c[2] = GR_NONE;
+    assert vg_to(c[0..3]) == 0;
+    c[1] = GR_FULL;
+    assert vg_to(c[0..3]) == 2;
+    assert vg_count(0) == 0 and vg_count(255) == 8;
+}
+
+/// A group call of `secs` seconds polled every 10 ms, two FULL links, the encoder job taking `cost` ms: frames, jobs,
+/// skips, sends, the most jobs in flight and the shortest gap between two frames.
+fn vg_sim(secs: u64, cost: u64, out: []u64) -> void {
+    var st : [5]u64 = undefined;
+    var i : usize = 0;
+    while (i < VG_N) {
+        st[i] = 0;
+        i = i + 1;
+    }
+    var req : u64 = 0;
+    var done : u64 = 0;
+    var due : u64 = 0;
+    var have : bool = false;
+    var maxfly : u64 = 0;
+    var gap : u64 = 1000000;
+    var last : u64 = 0;
+    var t : u64 = 1000;
+    while (t < 1000 + secs * 1000) {
+        if (req > done and t >= due) {
+            done = done + 1;
+            have = true;
+        }
+        const a : u32 = vg_step(st[0..5], t, 3, false, have, req > done);
+        if ((a & VG_A_SEND) != 0) {
+            have = false;
+            if (last != 0 and t - last < gap) { gap = t - last; }
+            last = t;
+        }
+        if ((a & VG_A_KICK) != 0) {
+            req = req + 1;
+            due = t + cost;
+        }
+        if (req - done > maxfly) { maxfly = req - done; }
+        t = t + 10;
+    }
+    out[0] = st[VG_FRAMES];
+    out[1] = st[VG_ENC];
+    out[2] = st[VG_SKIP];
+    out[3] = st[VG_SENDS];
+    out[4] = maxfly;
+    out[5] = gap;
+}
+
+test one_encode_a_frame_for_two_links_and_at_most_5_frames_a_second {
+    var r : [6]u64 = undefined;
+    vg_sim(10, 30, r[0..6]);
+    // one job per frame (the last one still in flight), each frame sealed for both links
+    assert r[0] >= 45 and r[0] <= 50;
+    assert r[1] == r[0] + 1;
+    assert r[3] == 2 * r[0];
+    assert r[2] == 0 and r[4] == 1;
+    // never closer than 200 ms
+    assert r[5] >= VC_G_PERIOD_MS;
+}
+
+test a_busy_encoder_skips_the_frame_and_counts_it {
+    var r : [6]u64 = undefined;
+    // a job of 450 ms: two due ticks find it busy for every frame made
+    vg_sim(10, 450, r[0..6]);
+    assert r[4] == 1;
+    assert r[2] > 0 and r[2] >= r[0];
+    assert r[0] + r[2] <= 50;
+    assert r[3] == 2 * r[0];
+    // nobody to send to: no frame, no job
+    var st : [5]u64 = undefined;
+    st[0] = 0; st[1] = 0; st[2] = 0; st[3] = 0; st[4] = 0;
+    assert vg_step(st[0..5], 5000, 0, true, true, false) == 0 and st[VG_ENC] == 0 and st[VG_FRAMES] == 0;
+    // a frame at hand (the camera's) is sent without the encoder
+    assert vg_step(st[0..5], 5000, 6, true, false, false) == VG_A_SEND and st[VG_ENC] == 0 and st[VG_SENDS] == 2;
+    assert vg_step(st[0..5], 5100, 6, true, false, false) == 0;
+}
+
+test the_first_two_members_who_sent_a_frame_are_shown {
+    var f : [3]u64 = undefined;
+    f[0] = 0; f[1] = 0; f[2] = 0;
+    assert vg_show(f[0..3]) == VG_NO_LINK | (VG_NO_LINK << 8);
+    f[2] = 500;
+    assert vg_show(f[0..3]) == 2 | (VG_NO_LINK << 8);
+    f[0] = 700;
+    assert vg_show(f[0..3]) == 2 | (0 << 8);
+    // a third member is heard, not shown
+    f[1] = 900;
+    assert vg_show(f[0..3]) == 2 | (0 << 8);
+    // a tie goes to the lower link
+    f[1] = 500;
+    assert vg_show(f[0..3]) == 1 | (2 << 8);
+}
+
+test a_link_that_comes_up_later_does_not_count_the_frames_before_its_first_as_skipped {
+    var j : [1500]u8 = undefined;
+    vc_fake(j[0..1500], 1500, 8);
+    var st : [128]u8 = undefined;
+    kfill(st[0..128], 0);
+    var buf : [24576]u8 = undefined;
+    var pt : [1012]u8 = undefined;
+    var f : u64 = 11;
+    while (f <= 14) {
+        if (f != 13) {
+            var k : usize = 0;
+            while (k < 3) {
+                const n : usize = vc_part_of(pt[0..1012], f, j[0..1500], k, VC_G_PART);
+                vr_take(st[0..128], buf[0..24576], pt[0..n], f * 200);
+                k = k + 1;
+            }
+        }
+        f = f + 1;
+    }
+    // frames 1..10 went to the other members before this link was up: not skipped; frame 13 was lost: skipped
+    assert vr_get(st[0..128], VR_DONE) == 3 and vr_get(st[0..128], VR_SKIP) == 1 and vr_get(st[0..128], VR_LAST) == 14;
 }

@@ -371,6 +371,29 @@ pub fn cv_field_y(t: f64) -> f64 { return t + CV_FIELD_Y; }
 pub fn cv_field_w(w: f64) -> f64 { return w - 2.0 * QP_PAD; }
 
 pub fn cv_btn_w(w: f64) -> f64 { return 0.5 * (w - 2.0 * QP_PAD - CV_BTN_GAP); }
+
+// The thumbnail strip of a group call (owner, 2026-10-23): under the video line, one picture per shown member (at most
+// two, call_core VG_SHOW), each 4:3. One member takes the width of the panel; two stand side by side with a gap.
+// When the window is short the tiles shrink to the room left, never past it.
+pub const CV_STRIP_GAP : f64 = 6.0;
+/// The space under a tile for the member's name.
+pub const CV_STRIP_LABEL : f64 = 14.0;
+
+/// The width of one tile for n shown members in a strip w wide with `room` of height left.
+pub fn cv_strip_w(n: u32, w: f64, room: f64) -> f64 {
+    var tw : f64 = w;
+    if (n >= 2) { tw = 0.5 * (w - CV_STRIP_GAP); }
+    const hmax : f64 = room - CV_STRIP_LABEL;
+    if (tw * 0.75 > hmax) { tw = hmax * 4.0 / 3.0; }
+    if (tw < 0.0) { tw = 0.0; }
+    return tw;
+}
+
+/// The height of a tile of width tw.
+pub fn cv_strip_h(tw: f64) -> f64 { return tw * 0.75; }
+
+/// The left edge of tile i of a strip starting at x.
+pub fn cv_strip_x(i: u32, x: f64, tw: f64) -> f64 { return x + @as(f64, @floatFromInt(i)) * (tw + CV_STRIP_GAP); }
 pub fn cv_btn_x(l: f64, w: f64, b: u32) -> f64 { return l + QP_PAD + @as(f64, @floatFromInt(b)) * (cv_btn_w(w) + CV_BTN_GAP); }
 
 /// The top of the button row: under the field while IDLE, under the big digits otherwise.
@@ -1207,4 +1230,19 @@ test cv_the_txt_record_says_pub_when_listening_on_all_interfaces {
     // no room: the record is left as it was
     assert cv_txt_pub(t[0..96], 91, true) == 91;
     assert cv_txt_pub(t[0..96], 90, true) == 96;
+}
+
+test cv_the_strip_holds_one_wide_tile_or_two_side_by_side_and_fits_the_room {
+    // one member: the width of the panel at 4:3
+    const w1 : f64 = cv_strip_w(1, 300.0, 1000.0);
+    assert w1 == 300.0 and cv_strip_h(w1) == 225.0 and cv_strip_x(0, 20.0, w1) == 20.0;
+    // two members: half the width each less the gap, the second right of the first
+    const w2 : f64 = cv_strip_w(2, 300.0, 1000.0);
+    assert w2 == 147.0 and cv_strip_h(w2) == 110.25;
+    assert cv_strip_x(1, 20.0, w2) == 20.0 + 147.0 + CV_STRIP_GAP and cv_strip_x(1, 20.0, w2) + w2 == 320.0;
+    // a short window: the tiles shrink to the room left under them (the label included), at 4:3
+    const ws : f64 = cv_strip_w(1, 300.0, 104.0);
+    assert ws == 120.0 and cv_strip_h(ws) + CV_STRIP_LABEL == 104.0;
+    assert cv_strip_w(2, 300.0, 104.0) == 120.0;
+    assert cv_strip_w(2, 300.0, 10.0) == 0.0;
 }

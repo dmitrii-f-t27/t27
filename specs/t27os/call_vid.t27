@@ -6,6 +6,7 @@
 // (quality 0.5, 3-6 KB). When the camera is allowed, call_session takes its JPEG instead (vc_source in call_core:
 // the camera while its frame is fresh, the generator otherwise); nothing here changes.
 // vid_make(frame, out) -> n          the JPEG of frame `frame` into out (n bytes, 0 on failure).
+// vid_make_of(frame, out, small)     the same; small = a group call's 160x120 at quality 0.3 (owner, 2026-10-23).
 // vid_decode(jpeg) -> CGImage        the picture of a JPEG (ImageIO), 0 when it does not decode; release it with
 //                                     vid_release. The window draws it in the CALL panel.
 // vid_size(img) -> w << 16 | h       the size of a decoded picture.
@@ -175,20 +176,57 @@ pub fn vid_row(row: []u8, y: u64, frame: u64) -> void {
     }
 }
 
+/// The size of the picture: 320x240 for a one to one call, 160x120 for a group call (small), as w << 16 | h.
+pub fn vid_dims(small: bool) -> u64 {
+    if (small) { return (VID_W / 2) << 16 | (VID_H / 2); }
+    return VID_W << 16 | VID_H;
+}
+
+/// The JPEG quality as IEEE-754 binary64: 0.5 for a one to one call, 0.3 for a group call (owner, 2026-10-23).
+pub fn vid_quality(small: bool) -> u64 {
+    if (small) { return 4599075939470750515; }
+    return 4602678819172646912;
+}
+
+/// Row y of the small picture (160 px, BGRA) into half: every other pixel of row 2y of the large one.
+pub fn vid_half_row(half: []u8, row: []u8, y: u64, frame: u64) -> void {
+    vid_row(row, 2 * y, frame);
+    var x : usize = 0;
+    while (x < 160) {
+        half[4 * x] = row[8 * x];
+        half[4 * x + 1] = row[8 * x + 1];
+        half[4 * x + 2] = row[8 * x + 2];
+        half[4 * x + 3] = row[8 * x + 3];
+        x = x + 1;
+    }
+}
+
 /// The JPEG of frame `frame` into out. Its length, 0 when ImageIO fails or out is too small.
-pub fn vid_make(frame: u64, out: []u8) -> usize {
-    const mem : u64 = vid_calloc(VID_W * VID_H, 4);
+pub fn vid_make(frame: u64, out: []u8) -> usize { return vid_make_of(frame, out, false); }
+
+/// The same, small: the group call's 160x120 at quality 0.3.
+pub fn vid_make_of(frame: u64, out: []u8, small: bool) -> usize {
+    const d : u64 = vid_dims(small);
+    const w : u64 = d >> 16;
+    const h : u64 = d & 65535;
+    const mem : u64 = vid_calloc(w * h, 4);
     if (mem == 0) { return 0; }
     var row : [1280]u8 = undefined;
+    var half : [640]u8 = undefined;
     var y : u64 = 0;
-    while (y < VID_H) {
-        vid_row(row[0..1280], y, frame);
-        vid_poke(mem + y * VID_W * 4, row[0..1280], 1280);
+    while (y < h) {
+        if (small) {
+            vid_half_row(half[0..640], row[0..1280], y, frame);
+            vid_poke(mem + y * w * 4, half[0..640], 640);
+        } else {
+            vid_row(row[0..1280], y, frame);
+            vid_poke(mem + y * w * 4, row[0..1280], 1280);
+        }
         y = y + 1;
     }
     var n : usize = 0;
     const space : u64 = vid_cg_rgb();
-    const ctx : u64 = vid_cg_bitmap(mem, @as(usize, @intCast(VID_W)), @as(usize, @intCast(VID_H)), 8, @as(usize, @intCast(VID_W * 4)), space, VID_BITMAP_INFO);
+    const ctx : u64 = vid_cg_bitmap(mem, @as(usize, @intCast(w)), @as(usize, @intCast(h)), 8, @as(usize, @intCast(w * 4)), space, VID_BITMAP_INFO);
     if (ctx != 0) {
         const img : u64 = vid_cg_image(ctx);
         if (img != 0) {
@@ -200,8 +238,7 @@ pub fn vid_make(frame: u64, out: []u8) -> usize {
                 var vb : [8]u8 = undefined;
                 var qb : [8]u8 = undefined;
                 put_u64(kb[0..8], 0, vid_konst("kCGImageDestinationLossyCompressionQuality"));
-                // 0.5 as IEEE-754 binary64
-                put_u64(qb[0..8], 0, 4602678819172646912);
+                put_u64(qb[0..8], 0, vid_quality(small));
                 const qn : u64 = vid_cf_num(0, 6, qb[0..8]);
                 put_u64(vb[0..8], 0, qn);
                 const props : u64 = vid_cf_dict(0, kb[0..8], vb[0..8], 1, vid_dlsym(VID_RTLD_DEFAULT, "kCFTypeDictionaryKeyCallBacks"), vid_dlsym(VID_RTLD_DEFAULT, "kCFTypeDictionaryValueCallBacks"));
@@ -275,6 +312,8 @@ const VGQ_ENC : u64 = 9;
 const VGQ_FAIL : u64 = 10;
 const VGQ_MAX_US : u64 = 11;
 const VGQ_REFUSED : u64 = 12;
+/// 1 = the job makes the group call's small picture (vgq_kick_of), written with the frame number before the job is queued.
+const VGQ_SMALL : u64 = 13;
 const VGQ_BUF : u64 = 128;
 const VGQ_BUF_MAX : u64 = 24000;
 
@@ -344,13 +383,19 @@ pub fn vgq_plan_of(st: u64) -> u32 {
 }
 
 /// Queue the making of frame `frame` (polling thread, returns at once). False, and counted, while a job is in flight.
-pub fn vgq_kick(st: u64, frame: u64) -> bool {
+pub fn vgq_kick(st: u64, frame: u64) -> bool { return vgq_kick_of(st, frame, false); }
+
+/// The same for the small picture of a group call (small = true).
+pub fn vgq_kick_of(st: u64, frame: u64, small: bool) -> bool {
     if (!vgq_ok(st)) { return false; }
     const req : u64 = vgq_get(st + VGQ_REQ * 8);
     if (req != vgq_get(st + VGQ_DONE * 8)) {
         vgq_put(st + VGQ_REFUSED * 8, vgq_get(st + VGQ_REFUSED * 8) + 1);
         return false;
     }
+    var sm : u64 = 0;
+    if (small) { sm = 1; }
+    vgq_put(st + VGQ_SMALL * 8, sm);
     vgq_put(st + VGQ_FRAME * 8, frame);
     vgq_put(st + VGQ_REQ * 8, req + 1);
     vgq_fence();
@@ -363,7 +408,7 @@ pub fn vgq_job(st: u64) -> u64 {
     if (!vgq_ok(st)) { return 0; }
     const t0 : f64 = vgq_now();
     var jpeg : [24000]u8 = undefined;
-    const n : usize = vid_make(vgq_get(st + VGQ_FRAME * 8), jpeg[0..24000]);
+    const n : usize = vid_make_of(vgq_get(st + VGQ_FRAME * 8), jpeg[0..24000], vgq_get(st + VGQ_SMALL * 8) != 0);
     if (n >= 4 and @as(u64, n) <= VGQ_BUF_MAX) {
         // odd sequence = being written; the reader refuses an odd or a changed one
         vgq_put(st + VGQ_SEQ * 8, vgq_get(st + VGQ_SEQ * 8) + 1);
@@ -525,5 +570,32 @@ test a_simulated_call_keeps_at_most_one_frame_in_flight_and_counts_sent_and_skip
 test the_encoder_block_refuses_no_block {
     var b : [64]u8 = undefined;
     assert vgq_plan_of(0) == 0 and vgq_kick(0, 1) == false and vgq_take(0, b[0..64]) == 0 and vgq_stat(0, 0) == 0;
-    assert VGQ_BUF >= 8 * (VGQ_REFUSED + 1) and VGQ_BUF_MAX == 24000;
+    assert VGQ_BUF >= 8 * (VGQ_SMALL + 1) and VGQ_BUF_MAX == 24000;
+    assert vgq_kick_of(0, 1, true) == false;
+}
+
+test the_group_picture_is_160_by_120_at_a_lower_quality_and_is_every_other_pixel {
+    assert vid_dims(false) == (320 << 16 | 240) and vid_dims(true) == (160 << 16 | 120);
+    // binary64 of 0.3 and 0.5: same sign and exponent order, so the smaller bits are the lower quality
+    assert vid_quality(true) < vid_quality(false) and vid_quality(false) == 4602678819172646912;
+    var row : [1280]u8 = undefined;
+    var half : [640]u8 = undefined;
+    var big : [1280]u8 = undefined;
+    var bad : u64 = 0;
+    var f : u64 = 1;
+    while (f < 400) {
+        var y : u64 = 0;
+        while (y < 120) {
+            vid_half_row(half[0..640], row[0..1280], y, f);
+            vid_row(big[0..1280], 2 * y, f);
+            var x : usize = 0;
+            while (x < 160) {
+                if (half[4 * x] != big[8 * x] or half[4 * x + 1] != big[8 * x + 1] or half[4 * x + 2] != big[8 * x + 2] or half[4 * x + 3] != 255) { bad = bad + 1; }
+                x = x + 1;
+            }
+            y = y + 37;
+        }
+        f = f + 97;
+    }
+    assert bad == 0;
 }

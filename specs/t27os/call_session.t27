@@ -62,6 +62,12 @@
 // assembles; cs_vstat(CS_V_*) counts, cs_vlen / s[CS_VLAST ..] give the last complete JPEG, cs_vlive says "video on".
 // cs_video_encoder hands in an encoder block (call_vid.t27 vgq_new): the generator's JPEG is then made on its own
 // queue and the poll only takes it and cuts it into parts.
+// Group video (owner, 2026-10-23): in a group the same switch sends 5 frames a second of 160x120 (quality 0.3, parts
+// of 700) to every member whose link is FULL (call_core vg_link: ACTIVE, its sound fresh, few underruns); a PARTIAL
+// link gets the sound only. The frame is made once (the encoder queue, or the camera's small JPEG) and sealed once per
+// link on that link's key. Every link assembles what its member sends in its own block; csg_vshow names the two links
+// whose first frame came first, csg_vlink / csg_vstat count. With CS_K_GSTATS each frame sent is a GVTX line and each
+// frame completed a GVRX line on stderr (wall clock ms), so the delay can be read from the two ends.
 // Identity (owner, 2026-10-22): cs_identity(s, pub, priv) hands in this device's identity key pair (peer_identity's
 // ~/.t27os/identity, the key whose fingerprint was given to cs_open). Once the keys of a call exist, each side sends a
 // sealed IDENT (call_core ck_ident_*): its identity key and an ECDSA signature over the session's transcript. The key
@@ -134,6 +140,22 @@ use t27os::call_core::VC_JPEG_MAX;
 use t27os::call_core::VC_SRC_CAM;
 use t27os::call_core::VC_PT_MAX;
 use t27os::call_core::vc_parts_for;
+use t27os::call_core::vc_parts_of;
+use t27os::call_core::vc_part_of;
+use t27os::call_core::VC_G_PART;
+use t27os::call_core::vg_link;
+use t27os::call_core::vg_to;
+use t27os::call_core::vg_step;
+use t27os::call_core::vg_show;
+use t27os::call_core::vg_count;
+use t27os::call_core::VG_N;
+use t27os::call_core::VG_FRAMES;
+use t27os::call_core::VG_ENC;
+use t27os::call_core::VG_SKIP;
+use t27os::call_core::VG_SENDS;
+use t27os::call_core::VG_A_SEND;
+use t27os::call_core::VG_A_KICK;
+use t27os::call_core::VG_A_BUSY;
 use t27os::call_core::vc_part;
 use t27os::call_core::vc_hash;
 use t27os::call_core::vc_due;
@@ -153,6 +175,8 @@ use t27os::call_core::VR_LAST;
 use t27os::call_core::vr_take;
 use t27os::call_core::vr_get;
 use t27os::call_vid::vid_make;
+use t27os::call_vid::vid_make_of;
+use t27os::call_vid::vgq_kick_of;
 use t27os::call_vid::vgq_plan_of;
 use t27os::call_vid::vgq_kick;
 use t27os::call_vid::vgq_take;
@@ -1951,6 +1975,16 @@ fn csg_stats(s: []u8, now: u64) -> void {
             n = put_dec(line[0..320], n, get_u64(s, a + CS_SLOTS + @as(usize, CS_ST_BAD_CONTENT) * 8));
             n = put_bytes(line[0..320], n, " aead=");
             n = put_dec(line[0..320], n, get_u64(s, a + CS_SLOTS + @as(usize, CS_ST_REJ_AEAD) * 8));
+            n = put_bytes(line[0..320], n, " vto=");
+            n = put_dec(line[0..320], n, csg_vlink(s, k, 0));
+            n = put_bytes(line[0..320], n, " vfrom=");
+            n = put_dec(line[0..320], n, csg_vlink(s, k, 1));
+            n = put_bytes(line[0..320], n, " vskip=");
+            n = put_dec(line[0..320], n, csg_vlink(s, k, 2));
+            n = put_bytes(line[0..320], n, " vcls=");
+            n = put_dec(line[0..320], n, csg_vlink(s, k, 3));
+            n = put_bytes(line[0..320], n, " vheld=");
+            n = put_dec(line[0..320], n, csg_vlink(s, k, 4));
             n = put_bytes(line[0..320], n, "\n");
             sys_write(2, line[0..n], @as(u64, n));
         }
@@ -1980,6 +2014,16 @@ fn csg_stats(s: []u8, now: u64) -> void {
     n2 = put_dec(line[0..320], n2, csg_under(s));
     n2 = put_bytes(line[0..320], n2, " full_since=");
     n2 = put_dec(line[0..320], n2, cg(s, G_FULL_MS));
+    n2 = put_bytes(line[0..320], n2, " vframes=");
+    n2 = put_dec(line[0..320], n2, csg_vstat(s, 0));
+    n2 = put_bytes(line[0..320], n2, " venc=");
+    n2 = put_dec(line[0..320], n2, csg_vstat(s, 1));
+    n2 = put_bytes(line[0..320], n2, " vencskip=");
+    n2 = put_dec(line[0..320], n2, csg_vstat(s, 2));
+    n2 = put_bytes(line[0..320], n2, " vsends=");
+    n2 = put_dec(line[0..320], n2, csg_vstat(s, 3));
+    n2 = put_bytes(line[0..320], n2, " vshow=");
+    n2 = put_dec(line[0..320], n2, @as(u64, csg_vshow(s)));
     n2 = put_bytes(line[0..320], n2, "\n");
     sys_write(2, line[0..n2], @as(u64, n2));
 }
@@ -2167,7 +2211,19 @@ const VT_SERIAL : usize = 12;
 const VT_MAKE_MAX : usize = 13;
 const VT_DROPHASH : usize = 14;
 const VT_ENCSKIP : usize = 15;
-const VT_END : usize = 16;
+/// Group video (owner, 2026-10-23), per link: when its first frame was complete, frames sent to it, due frames held back
+/// because it was PARTIAL, its class (GR_*), the underrun count at the last mark, the time of the mark, the underruns of
+/// the last whole second, the serial last written as a GVRX line. VT_G .. VT_G + VG_N: the sender (link 0 only).
+const VT_FIRST : usize = 16;
+const VT_GTO : usize = 17;
+const VT_GHELD : usize = 18;
+const VT_GCLS : usize = 19;
+const VT_UND_MARK : usize = 20;
+const VT_UND_AT : usize = 21;
+const VT_UND_1S : usize = 22;
+const VT_GLOGSER : usize = 23;
+const VT_G : usize = 24;
+const VT_END : usize = 29;
 
 fn cvg(s: []const u8, k: usize) -> u64 { return get_u64(s, CS_VID + VR_LEN + k * 8); }
 fn cvp(s: []u8, k: usize, v: u64) -> void { put_u64(s, CS_VID + VR_LEN + k * 8, v); }
@@ -2268,12 +2324,17 @@ fn cs_take_video(s: []u8, pt: []const u8) -> void {
     }
     cvp(s, VT_LASTLEN, @as(u64, n));
     cvp(s, VT_SERIAL, cvg(s, VT_SERIAL) + 1);
+    if (cvg(s, VT_FIRST) == 0) { cvp(s, VT_FIRST, ckh_ms()); }
 }
 
 /// Every 100 ms of an ACTIVE one to one call with video on: take a frame, cut it, seal every part, send it. With an
 /// encoder block the generator's JPEG is made off the poll (vgq_*): this tick takes the one finished since the last tick
 /// and queues the next; while that job still runs the frame is skipped (CS_V_ENCSKIP), never waited for.
 fn cs_vtick(s: []u8, now: u64) -> void {
+    if (cs_links(s) > 1 and cg(s, G_ON) != 0) {
+        csg_video(s, now);
+        return;
+    }
     if (cs_g(s, CS_K_VIDEO) == 0 or ckh_state(s[0..EP_LEN]) != CK_ACTIVE or cs_n_active(s) != 1) { return; }
     if (!vc_due(now, cvg(s, VT_LAST_MS))) { return; }
     cvp(s, VT_LAST_MS, now);
@@ -2334,6 +2395,187 @@ fn cs_vtick(s: []u8, now: u64) -> void {
     }
     const took : u64 = ckh_ms() - now;
     if (took > cvg(s, VT_MAKE_MAX)) { cvp(s, VT_MAKE_MAX, took); }
+}
+
+// ---------------------------------------------------------------- group video (owner, 2026-10-23)
+
+fn cvk(s: []const u8, k: usize, i: usize) -> u64 { return get_u64(s, k * CS_LEN + CS_VID + VR_LEN + i * 8); }
+fn cvkp(s: []u8, k: usize, i: usize, v: u64) -> void { put_u64(s, k * CS_LEN + CS_VID + VR_LEN + i * 8, v); }
+
+/// The group's video is on in this window slice (a group is open over more than one link).
+pub fn csg_on(s: []const u8) -> bool { return s.len >= 2 * CS_LEN and cs_links(s) > 1 and cg(s, G_ON) != 0; }
+
+/// One GVTX line (a frame sent: its number, how many links, its bytes and parts) or GVRX line (a frame completed on
+/// link j: who sent it, its number and bytes), with the wall clock in ms.
+fn csg_vlog(s: []u8, now: u64, rx: bool, j: usize, f: u64, links: u64, bytes: u64) -> void {
+    var line : [200]u8 = undefined;
+    var n : usize = 0;
+    if (rx) { n = put_bytes(line[0..200], 0, "GVRX t="); } else { n = put_bytes(line[0..200], 0, "GVTX t="); }
+    n = put_dec(line[0..200], n, now);
+    n = put_bytes(line[0..200], n, " me=");
+    n = csg_hex4(line[0..200], n, s[EP_ME..EP_ME + 10]);
+    if (rx) {
+        n = put_bytes(line[0..200], n, " from=");
+        n = csg_hex4(line[0..200], n, s[j * CS_LEN + EP_PEER..j * CS_LEN + EP_PEER + 10]);
+    } else {
+        n = put_bytes(line[0..200], n, " to=");
+        n = put_dec(line[0..200], n, links);
+    }
+    n = put_bytes(line[0..200], n, " f=");
+    n = put_dec(line[0..200], n, f);
+    n = put_bytes(line[0..200], n, " bytes=");
+    n = put_dec(line[0..200], n, bytes);
+    n = put_bytes(line[0..200], n, "\n");
+    sys_write(2, line[0..n], @as(u64, n));
+}
+
+/// Every pass of a group call: the class of every link (call_core vg_link from its last sound and the underruns of its
+/// last whole second), then, with video on, the sender (call_core vg_step): at most one frame a VC_G_PERIOD_MS, made
+/// once -- the camera's small JPEG while it is fresh, else the encoder queue's (one job in flight, a busy one skips the
+/// frame and counts it), else made in the pass when there is no queue -- cut into parts of 700 and sealed once per
+/// FULL link. A PARTIAL link gets nothing but its sound and counts the frames held back.
+fn csg_video(s: []u8, now: u64) -> void {
+    const nl : usize = cs_links(s);
+    const base : u64 = cs_aud(s) - @as(u64, CS_AUD);
+    const logs : bool = cs_g(s, CS_K_GSTATS) != 0;
+    var cls : [3]u32 = undefined;
+    var k : usize = 0;
+    while (k < 3) {
+        cls[k] = GR_NONE;
+        if (k < nl) {
+            const a : usize = k * CS_LEN;
+            const und : u64 = cbp_get(base + @as(u64, a) + @as(u64, CS_AUD) + 32);
+            if (now >= cvk(s, k, VT_UND_AT) + 1000) {
+                cvkp(s, k, VT_UND_1S, und - cvk(s, k, VT_UND_MARK));
+                cvkp(s, k, VT_UND_MARK, und);
+                cvkp(s, k, VT_UND_AT, now);
+            }
+            const rx : u64 = get_u64(s, a + CS_SLOTS + @as(usize, CS_T_RX) * 8);
+            var age : u64 = 0;
+            if (now > rx) { age = now - rx; }
+            cls[k] = vg_link(cs_lstate(s, k) == CK_ACTIVE, age, cvk(s, k, VT_UND_1S));
+            cvkp(s, k, VT_GCLS, @as(u64, cls[k]));
+            // a frame completed on this link since the last pass: one GVRX line
+            if (logs and cvk(s, k, VT_SERIAL) != cvk(s, k, VT_GLOGSER)) {
+                cvkp(s, k, VT_GLOGSER, cvk(s, k, VT_SERIAL));
+                csg_vlog(s, now, true, k, vr_get(s[a + CS_VID..a + CS_VID + VR_LEN], VR_LAST), 0, cvk(s, k, VT_LASTLEN));
+            }
+        }
+        k = k + 1;
+    }
+    if (cs_g(s, CS_K_VIDEO) == 0) { return; }
+    const to : u32 = vg_to(cls[0..nl]);
+    var st : [5]u64 = undefined;
+    var i : usize = 0;
+    while (i < VG_N) {
+        st[i] = cvg(s, VT_G + i);
+        i = i + 1;
+    }
+    const enc : u64 = cs_g(s, CS_K_VENC);
+    const cam : bool = vc_source(now, cvg(s, VT_CAM_AT)) == VC_SRC_CAM;
+    const have : bool = cam or enc == 0;
+    var plan : u32 = 0;
+    if (!have) { plan = vgq_plan_of(enc); }
+    const act : u32 = vg_step(st[0..5], now, to, have, (plan & VGQ_TAKE) != 0, !have and (plan & VGQ_KICK) == 0);
+    i = 0;
+    while (i < VG_N) {
+        cvp(s, VT_G + i, st[i]);
+        i = i + 1;
+    }
+    if ((act & VG_A_BUSY) != 0) { cvp(s, VT_ENCSKIP, cvg(s, VT_ENCSKIP) + 1); }
+    // one numbering with the one to one path, so a link that carried a one to one call never sees an older frame
+    const f : u64 = cvg(s, VT_FRAMES) + 1;
+    if ((act & VG_A_SEND) != 0) {
+        var jpeg : [24000]u8 = undefined;
+        var n : usize = 0;
+        if (cam) {
+            n = @as(usize, @intCast(cvg(s, VT_CAM_LEN)));
+            if (n > VC_JPEG_MAX) { n = 0; }
+            ck_put(jpeg[0..24000], 0, s[CS_VCAM..CS_VCAM + n]);
+            if (n > 0) { cvp(s, VT_CAM, cvg(s, VT_CAM) + 1); }
+        } else {
+            if (enc == 0) { n = vid_make_of(f, jpeg[0..24000], true); } else { n = vgq_take(enc, jpeg[0..24000]); }
+            if (n > 0) { cvp(s, VT_GEN, cvg(s, VT_GEN) + 1); }
+        }
+        const np : usize = vc_parts_of(n, VC_G_PART);
+        if (np == 0) {
+            cvp(s, VT_ERR, cvg(s, VT_ERR) + 1);
+        } else {
+            cvp(s, VT_FRAMES, f);
+            cvp(s, VT_HASH, cvg(s, VT_HASH) +% vc_hash(jpeg[0..n]));
+            k = 0;
+            while (k < nl) {
+                if ((to & (@as(u32, 1) << @as(u32, @intCast(k)))) != 0) {
+                    const a : usize = k * CS_LEN;
+                    var p : usize = 0;
+                    while (p < np) {
+                        var pt : [1012]u8 = undefined;
+                        var fr : [1080]u8 = undefined;
+                        const pn : usize = vc_part_of(pt[0..1012], f, jpeg[0..n], p, VC_G_PART);
+                        const m : usize = ckh_seal(s[a..a + EP_LEN], CK_T_VIDEO, pt[0..pn], fr[0..1080]);
+                        if (pn == 0 or m == 0) {
+                            cvp(s, VT_ERR, cvg(s, VT_ERR) + 1);
+                        } else if (cs_send(s[a..a + CS_LEN], fr[0..m])) {
+                            cvp(s, VT_PARTS, cvg(s, VT_PARTS) + 1);
+                        } else {
+                            cvp(s, VT_SENDERR, cvg(s, VT_SENDERR) + 1);
+                        }
+                        p = p + 1;
+                    }
+                    cvkp(s, k, VT_GTO, cvk(s, k, VT_GTO) + 1);
+                } else if (cls[k] == GR_PARTIAL) {
+                    cvkp(s, k, VT_GHELD, cvk(s, k, VT_GHELD) + 1);
+                }
+                k = k + 1;
+            }
+            if (logs) { csg_vlog(s, now, false, 0, f, vg_count(to), @as(u64, n)); }
+        }
+    }
+    if ((act & VG_A_KICK) != 0) { vgq_kick_of(enc, cvg(s, VT_FRAMES) + 1, true); }
+    const took : u64 = ckh_ms() - now;
+    if (took > cvg(s, VT_MAKE_MAX)) { cvp(s, VT_MAKE_MAX, took); }
+}
+
+/// A video counter of link j of a group: 0 frames sent to it, 1 frames shown from it, 2 frames skipped from it, 3 its
+/// class (GR_FULL, GR_PARTIAL, GR_NONE), 4 frames held back while it was PARTIAL, 5 when its first frame was complete
+/// (0 = none yet), 6 the serial of its last picture, 7 that picture's length, 8 parts received from it.
+pub fn csg_vlink(s: []const u8, j: usize, k: u32) -> u64 {
+    if (j >= cs_links(s) or s.len < (j + 1) * CS_LEN) { return 0; }
+    const vr : []const u8 = s[j * CS_LEN + CS_VID..j * CS_LEN + CS_VID + VR_LEN];
+    if (k == 0) { return cvk(s, j, VT_GTO); }
+    if (k == 1) { return vr_get(vr, VR_DONE); }
+    if (k == 2) { return vr_get(vr, VR_SKIP); }
+    if (k == 3) { return cvk(s, j, VT_GCLS); }
+    if (k == 4) { return cvk(s, j, VT_GHELD); }
+    if (k == 5) { return cvk(s, j, VT_FIRST); }
+    if (k == 6) { return cvk(s, j, VT_SERIAL); }
+    if (k == 7) { return cvk(s, j, VT_LASTLEN); }
+    if (k == 8) { return vr_get(vr, VR_PARTS); }
+    return 0;
+}
+
+/// The group sender's counters: 0 frames sent, 1 encoder jobs queued, 2 due frames skipped by a busy encoder, 3 frames
+/// sealed and sent summed over the links.
+pub fn csg_vstat(s: []const u8, k: u32) -> u64 {
+    if (s.len < CS_LEN) { return 0; }
+    if (k == 0) { return cvg(s, VT_G + VG_FRAMES); }
+    if (k == 1) { return cvg(s, VT_G + VG_ENC); }
+    if (k == 2) { return cvg(s, VT_G + VG_SKIP); }
+    if (k == 3) { return cvg(s, VT_G + VG_SENDS); }
+    return 0;
+}
+
+/// The two links whose pictures the window shows (call_core vg_show over the links' first frames): a | b << 8,
+/// VG_NO_LINK (255) for none.
+pub fn csg_vshow(s: []const u8) -> u32 {
+    var first : [3]u64 = undefined;
+    var k : usize = 0;
+    while (k < 3) {
+        first[k] = 0;
+        if (k < cs_links(s) and s.len >= (k + 1) * CS_LEN and cs_lstate(s, k) == CK_ACTIVE) { first[k] = cvk(s, k, VT_FIRST); }
+        k = k + 1;
+    }
+    return vg_show(first[0..3]);
 }
 
 // ---------------------------------------------------------------- text (message session)
@@ -3129,4 +3371,47 @@ test cs_identity_refuses_a_key_pair_that_does_not_fit_before_it_stores_anything 
     // nothing was stored in either link
     assert s[CS_ID + CI_ON] == 0 and s[CS_LEN + CS_ID + CI_ON] == 0;
     assert dead[CS_ID + CI_ON] == 0;
+}
+
+test the_group_video_counters_read_each_links_own_slots {
+    var s : [333056]u8 = undefined;
+    cs_t_live(s[0..CS_LEN]);
+    var i : usize = CS_LEN;
+    while (i < 2 * CS_LEN) {
+        s[i] = 0;
+        i = i + 1;
+    }
+    const z : []u8 = s[0..2 * CS_LEN];
+    assert VR_LEN + VT_END * 8 <= CS_VSLOTS and VT_G + VG_N == VT_END;
+    // a one block session is never a group; two blocks are once the group is open
+    assert csg_on(s[0..CS_LEN]) == false and csg_on(z) == false;
+    cgp(z, G_ON, 1);
+    assert csg_on(z) and csg_on(s[0..CS_LEN]) == false;
+    // each link's counters from its own block
+    cvkp(z, 1, VT_GTO, 41);
+    cvkp(z, 1, VT_GHELD, 42);
+    cvkp(z, 1, VT_GCLS, @as(u64, GR_PARTIAL));
+    cvkp(z, 1, VT_FIRST, 43);
+    cvkp(z, 1, VT_SERIAL, 44);
+    cvkp(z, 1, VT_LASTLEN, 45);
+    put_u64(z, CS_LEN + CS_VID + VR_DONE * 8, 46);
+    put_u64(z, CS_LEN + CS_VID + VR_SKIP * 8, 47);
+    put_u64(z, CS_LEN + CS_VID + VR_PARTS * 8, 48);
+    assert csg_vlink(z, 1, 0) == 41 and csg_vlink(z, 1, 4) == 42 and csg_vlink(z, 1, 3) == @as(u64, GR_PARTIAL);
+    assert csg_vlink(z, 1, 5) == 43 and csg_vlink(z, 1, 6) == 44 and csg_vlink(z, 1, 7) == 45;
+    assert csg_vlink(z, 1, 1) == 46 and csg_vlink(z, 1, 2) == 47 and csg_vlink(z, 1, 8) == 48 and csg_vlink(z, 1, 9) == 0;
+    assert csg_vlink(z, 0, 0) == 0 and csg_vlink(z, 2, 0) == 0;
+    // the sender's counters stand in link 0's block
+    cvp(z, VT_G + VG_FRAMES, 51);
+    cvp(z, VT_G + VG_ENC, 52);
+    cvp(z, VT_G + VG_SKIP, 53);
+    cvp(z, VT_G + VG_SENDS, 54);
+    assert csg_vstat(z, 0) == 51 and csg_vstat(z, 1) == 52 and csg_vstat(z, 2) == 53 and csg_vstat(z, 3) == 54 and csg_vstat(z, 4) == 0;
+    // shown: only ACTIVE links that sent a frame, the earliest first
+    assert csg_vshow(z) == 255 | (255 << 8);
+    z[CS_LEN + 1] = @as(u8, @intCast(CK_ACTIVE));
+    assert csg_vshow(z) == 1 | (255 << 8);
+    z[1] = @as(u8, @intCast(CK_ACTIVE));
+    cvkp(z, 0, VT_FIRST, 40);
+    assert csg_vshow(z) == 0 | (1 << 8);
 }
