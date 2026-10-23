@@ -236,6 +236,7 @@ use t27os::call_core::CK_TRANSCRIPT_LEN;
 use t27os::call_crypto_probe::ckh_state;
 use t27os::call_crypto_probe::ckh_caller;
 use t27os::call_crypto_probe::ckh_go;
+use t27os::call_crypto_probe::ckh_wipe_keys;
 use t27os::call_crypto_probe::ckh_invite;
 use t27os::call_crypto_probe::ckh_on_invite;
 use t27os::call_crypto_probe::ckh_answer;
@@ -252,6 +253,10 @@ use t27os::call_crypto_probe::ckh_sendto;
 use t27os::call_crypto_probe::ckh_recvfrom;
 use t27os::call_crypto_probe::ckh_fcntl;
 use t27os::call_crypto_probe::EP_LEN;
+use t27os::call_crypto_probe::EP_PRIV;
+use t27os::call_crypto_probe::EP_TXK;
+use t27os::call_crypto_probe::EP_CTR;
+use t27os::call_crypto_probe::EP_STATE;
 use t27os::call_crypto_probe::EP_ROLE;
 use t27os::call_crypto_probe::EP_ME;
 use t27os::call_crypto_probe::EP_PEER;
@@ -269,6 +274,8 @@ use t27os::call_core::ck_ident_input;
 use t27os::call_core::ck_ident_build;
 use t27os::call_core::ck_ident_sig_len;
 use t27os::keysync_host::ks_sign;
+use t27os::keysync::kfill;
+use t27os::chat_core::t_zero;
 use t27os::keysync_host::ks_verify;
 use t27os::peer_identity::PID_CODE;
 use t27os::peer_identity::PID_TRUSTED;
@@ -1057,14 +1064,23 @@ pub fn cs_close(s: []u8) -> void {
     cs_audio_stop(s);
     sys_close(cs_fd(s));
     cs_p(s, CS_MAGIC, 0);
-    ck_wipe(s[CS_ID..CS_ID + CS_ID_LEN]);
-    var j : usize = 1;
     const nl : usize = cs_links(s);
+    var j : usize = 0;
     while (j < nl) {
         put_u64(s, j * CS_LEN + CS_SLOTS + @as(usize, CS_MAGIC) * 8, 0);
-        ck_wipe(s[j * CS_LEN + CS_ID..j * CS_LEN + CS_ID + CS_ID_LEN]);
+        cs_wipe_secrets(s[j * CS_LEN..j * CS_LEN + CS_LEN]);
         j = j + 1;
     }
+}
+
+/// What a closed block must not keep (audit P2, owner 2026-10-23): the session keys of a call closed while it was up
+/// (an ended one has none left, ckh_go), the identity key pair and proofs, the opened audio and the queued text of a
+/// message session (the audio block), and the video JPEGs.
+fn cs_wipe_secrets(b: []u8) -> void {
+    ckh_wipe_keys(b[0..EP_LEN]);
+    ck_wipe(b[CS_ID..CS_ID + CS_ID_LEN]);
+    ck_wipe(b[CS_AUD..CS_GRP]);
+    ck_wipe(b[CS_VASM..CS_VCAM + CS_VBUF]);
 }
 
 // ---------------------------------------------------------------- audio
@@ -1525,6 +1541,7 @@ fn cs_on_packet(s: []u8, m: []const u8, from: []const u8) -> void {
         }
         if (typ == CK_T_TEXT) {
             cs_take_text(s, pt[0..@as(usize, @intCast(o))]);
+            ck_wipe(pt[0..@as(usize, @intCast(o))]);
             return;
         }
         cs_take_media(s, pt[0..@as(usize, @intCast(o))]);
@@ -2778,6 +2795,7 @@ pub fn cs_text_take(s: []u8, out: []u8) -> usize {
     const n : usize = @as(usize, s[e]) | (@as(usize, s[e + 1]) << 8);
     if (out.len < n) { return 0; }
     ck_put(out, 0, s[e + 2..e + 2 + n]);
+    ck_wipe(s[e..e + 2 + n]);
     cs_tqp(s, 0, h + 1);
     return n;
 }
@@ -3680,4 +3698,32 @@ test five_failed_codes_refuse_the_next_call_for_a_minute_and_a_match_clears_them
     assert cs_rate_paused(s[0..CS_LEN], t + CK_PAUSE_MS - 1);
     assert cs_rate_paused(s[0..CS_LEN], t + CK_PAUSE_MS) == false;
     assert csg_list_stat(s[0..CS_LEN], 6) == 2;
+}
+
+test a_closed_block_keeps_no_session_key_identity_key_or_plaintext {
+    var s : [166528]u8 = undefined;
+    cs_t_live(s[0..CS_LEN]);
+    cs_p(s[0..CS_LEN], CS_MODE, @as(u64, CS_AUDIO_NONE));
+    // a message session that is up: keys of both directions, the private key, an identity, text in the queue, a JPEG
+    kfill(s[EP_PRIV..EP_PRIV + 97], 7);
+    kfill(s[EP_TXK..EP_CTR], 9);
+    s[EP_STATE] = @as(u8, @intCast(CK_ACTIVE));
+    kfill(s[CS_ID..CS_ID + CS_ID_LEN], 5);
+    kfill(s[CS_VASM..CS_VCAM + CS_VBUF], 3);
+    var pt : [20]u8 = undefined;
+    kfill(pt[0..20], 65);
+    cs_take_text(s[0..CS_LEN], pt[0..20]);
+    cs_take_text(s[0..CS_LEN], pt[0..20]);
+    // a text taken leaves no copy in the queue
+    var out : [720]u8 = undefined;
+    assert cs_text_take(s[0..CS_LEN], out[0..720]) == 20 and out[0] == 65;
+    assert t_zero(s[cs_tqe(0)..cs_tqe(0) + 22]);
+    assert t_zero(s[cs_tqe(1)..cs_tqe(1) + 22]) == false;
+    // what cs_close does for every link once the socket is closed (the socket and the audio units are host calls)
+    cs_wipe_secrets(s[0..CS_LEN]);
+    assert s[EP_STATE] == @as(u8, @intCast(CK_ACTIVE));
+    assert t_zero(s[EP_PRIV..EP_PRIV + 97]) and t_zero(s[EP_TXK..EP_CTR]);
+    assert t_zero(s[CS_ID..CS_ID + CS_ID_LEN]);
+    assert t_zero(s[CS_AUD..CS_GRP]);
+    assert t_zero(s[CS_VASM..CS_VCAM + CS_VBUF]);
 }

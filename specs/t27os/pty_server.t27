@@ -1150,7 +1150,8 @@ fn prepare_dirs(st: []u64, mem: []u8) -> void {
     var n : usize = put_bytes(mem[O_TMP2 .. O_TMP2 + 255], 0, home);
     n = put_bytes(mem[O_TMP2 .. O_TMP2 + 255], n, "/.t27os");
     mem[O_TMP2 + n] = 0;
-    sys_mkdir(mem[O_TMP2 .. O_TMP2 + n + 1], 493);
+    // the owner's alone (audit P2): 0700
+    sys_mkdir(mem[O_TMP2 .. O_TMP2 + n + 1], 448);
     n = put_bytes(mem[O_TMP2 .. O_TMP2 + 255], n, "/sessions");
     mem[O_TMP2 + n] = 0;
     sys_mkdir(mem[O_TMP2 .. O_TMP2 + n + 1], 493);

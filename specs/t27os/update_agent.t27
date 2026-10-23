@@ -416,7 +416,8 @@ pub fn ug_boot(cl: []u8, p: []u8, exe: []const u8, bundle: []const u8, ver: []co
     var dn : usize = put_bytes(d[0..256], 0, h[0..hn]);
     dn = put_bytes(d[0..256], dn, "/.t27os");
     d[dn] = 0;
-    sys_mkdir(d[0..256], 493);
+    // the owner's alone (audit P2): 0700
+    sys_mkdir(d[0..256], 448);
     dn = put_bytes(d[0..256], dn, "/update");
     d[dn] = 0;
     sys_mkdir(d[0..256], 493);

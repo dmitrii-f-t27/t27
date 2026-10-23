@@ -8,7 +8,10 @@
 //                          when given, print "INVITE <invite>".
 //   CHP_ROLE=a             the first friend of $HOME's table is the peer, at CHP_PEER (127.0.0.1) : CHP_PEER_PORT;
 //                          this side binds CHP_PORT. Sends CHP_N (20) messages: number 7 is 1500 bytes of Cyrillic
-//                          (3 parts, cut inside characters), number 12 holds an emoji. CHP_DROP=n drops this side's
+//                          (3 parts, cut inside characters), number 12 holds an emoji, number 3 holds U+202E (the
+//                          override that shows "gpj.exe" as "exe.jpg"; cleaned on send, chat_core ch_clean). CHP_RAW=1
+//                          puts the U+202E back into the stored line after the send, as a client that does not clean
+//                          would send it, so the receiver's cleaning is what is measured. CHP_DROP=n drops this side's
 //                          n-th text frame as a lost datagram. Waits for CHP_R (5) replies, opens the chat (READ),
 //                          then for the idle close.
 //   CHP_ROLE=b             the same peer setup; once all CHP_N messages are here it opens the chat and replies
@@ -86,6 +89,10 @@ use t27os::chat_core::cl_text;
 use t27os::chat_core::cl_unread;
 use t27os::chat_core::cl_find;
 use t27os::chat_core::CL_NONE;
+use t27os::chat_core::CL_TEXT;
+use t27os::chat_core::cl_line_at;
+use t27os::chat_core::cl_len;
+use t27os::chat_core::ch_clean;
 use t27os::chat_host::chh_load;
 use t27os::chat_host::chh_save;
 use t27os::chat_host::CHH_NEW;
@@ -133,6 +140,16 @@ pub fn chp_text(who: u8, k: u32, out: []u8) -> usize {
         }
         return n;
     }
+    if (who == 65 and k == 3) {
+        // "A " U+202E "gpj.exe 3"
+        const r : [14]u8 = [65, 32, 226, 128, 174, 103, 112, 106, 46, 101, 120, 101, 32, 51];
+        var j : usize = 0;
+        while (j < 14) {
+            out[j] = r[j];
+            j = j + 1;
+        }
+        return 14;
+    }
     out[0] = who;
     n = 1;
     if (who == 65 and k == 12) {
@@ -173,21 +190,47 @@ fn chp_order_ok(log: []const u8, me: u8, peer: u8, nin: u32, nout: u32) -> bool 
     var want_out : u32 = 1;
     var i : usize = 0;
     var t : [2000]u8 = undefined;
+    var c : [2000]u8 = undefined;
+    var o : [2000]u8 = undefined;
     while (i < n) {
         if (cl_dir(log, i) == CH_DIR_IN) {
+            // an incoming line is exactly the sent text cleaned (whatever the sender kept)
             if (cl_msg(log, i) != want_in) { return false; }
             const tn : usize = chp_text(peer, want_in, t[0..2000]);
-            if (!ck_same(cl_text(log, i), t[0..tn])) { return false; }
+            const cn : usize = ch_clean(t[0..tn], c[0..2000]);
+            if (!ck_same(cl_text(log, i), c[0..cn])) { return false; }
             want_in = want_in + 1;
         } else {
+            // an own line: cleaned on send (with CHP_RAW the run put the raw bytes back, so compare it cleaned)
             if (cl_msg(log, i) != want_out) { return false; }
             const tn : usize = chp_text(me, want_out, t[0..2000]);
-            if (!ck_same(cl_text(log, i), t[0..tn])) { return false; }
+            const cn : usize = ch_clean(t[0..tn], c[0..2000]);
+            const on : usize = ch_clean(cl_text(log, i), o[0..2000]);
+            if (!ck_same(o[0..on], c[0..cn])) { return false; }
             want_out = want_out + 1;
         }
         i = i + 1;
     }
     return want_in == nin + 1 and want_out == nout + 1;
+}
+
+/// Lines of direction dir whose text holds U+202E (E2 80 AE).
+fn chp_rlo_lines(log: []const u8, dir: u32) -> u32 {
+    const n : usize = @as(usize, cl_count(log));
+    var c : u32 = 0;
+    var i : usize = 0;
+    while (i < n) {
+        const t : []const u8 = cl_text(log, i);
+        var k : usize = 0;
+        var hit : bool = false;
+        while (k + 2 < t.len) {
+            if (t[k] == 226 and t[k + 1] == 128 and t[k + 2] == 174) { hit = true; }
+            k = k + 1;
+        }
+        if (hit and cl_dir(log, i) == dir) { c = c + 1; }
+        i = i + 1;
+    }
+    return c;
 }
 
 fn chp_stat(label: []const u8, v: u64) -> void {
@@ -261,14 +304,30 @@ fn chp_side(is_a: bool) -> bool {
     chm_set(m[0..CHM_LEN], CHM_K_DROP, ckh_env_num("CHP_DROP", 0));
     var t : [2000]u8 = undefined;
     const t0 : u64 = ckh_ms();
+    const raw : bool = ckh_env_num("CHP_RAW", 0) == 1;
     if (is_a) {
         var k : u32 = 1;
         while (k <= nmsg) {
-            const tn : usize = chp_text(me, k, t[0..2000]);
+            var tn : usize = chp_text(me, k, t[0..2000]);
+            // CHP_RAW: three placeholder bytes where the override stands, then the raw override into the line itself
+            if (raw and k == 3) {
+                t[2] = 35;
+                t[3] = 35;
+                t[4] = 35;
+            }
             chm_send(m[0..CHM_LEN], log[0..L], t[0..tn], ckh_ms());
+            if (raw and k == 3) {
+                const r3 : usize = cl_find(log[0..L], CH_DIR_OUT, 3);
+                if (r3 != CL_NONE and cl_len(log[0..L], r3) == 14) {
+                    log[cl_line_at(r3) + CL_TEXT + 2] = 226;
+                    log[cl_line_at(r3) + CL_TEXT + 3] = 128;
+                    log[cl_line_at(r3) + CL_TEXT + 4] = 174;
+                }
+            }
             k = k + 1;
         }
     }
+    if (is_a) { chp_stat("own_lines_with_u202e_before_send", @as(u64, chp_rlo_lines(log[0..L], CH_DIR_OUT))); }
     const limit : u64 = ckh_env_num("CHP_SECS", 120) * 1000;
     var opened : bool = false;
     var unread_seen : u32 = 0;
@@ -320,6 +379,8 @@ fn chp_side(is_a: bool) -> bool {
         const i7 : usize = cl_find(log[0..L], CH_DIR_IN, 7);
         const i12 : usize = cl_find(log[0..L], CH_DIR_IN, 12);
         ok = ckh_check("message 7 is 1500 bytes in 3 parts", i7 != CL_NONE and cl_text(log[0..L], i7).len == 1500) and ok;
+        const i3 : usize = cl_find(log[0..L], CH_DIR_IN, 3);
+        ok = ckh_check("message 3 came in without U+202E (14 bytes sent, 11 kept)", i3 != CL_NONE and cl_text(log[0..L], i3).len == 11) and ok;
         ok = ckh_check("message 12 holds the emoji bytes", i12 != CL_NONE and cl_text(log[0..L], i12).len == 15 and cl_text(log[0..L], i12)[8] == 240 and cl_text(log[0..L], i12)[9] == 159) and ok;
     }
     // read back from disk into a second log
@@ -327,6 +388,9 @@ fn chp_side(is_a: bool) -> bool {
     const lr2 : u32 = chh_load(ffp[0..10], log2[0..L], CL_KEEP, buf[0..CF_MAX + 1]);
     ok = ckh_check("the log reads back from ~/.t27os/chat", lr2 == CHH_LOADED and cl_count(log2[0..L]) == nin + nout) and ok;
     ok = ckh_check("the read-back log is the same lines in the same order", chp_order_ok(log2[0..L], me, peer, nin, nout) and chp_all_out(log2[0..L], CH_S_READ) and cl_unread(log2[0..L]) == 0) and ok;
+    ok = ckh_check("no incoming line holds U+202E, in memory or read back from disk", chp_rlo_lines(log[0..L], CH_DIR_IN) == 0 and chp_rlo_lines(log2[0..L], CH_DIR_IN) == 0) and ok;
+    chp_stat("incoming_lines_with_u202e", @as(u64, chp_rlo_lines(log[0..L], CH_DIR_IN)));
+    chp_stat("own_lines_with_u202e_after_read_back", @as(u64, chp_rlo_lines(log2[0..L], CH_DIR_OUT)));
     ok = ckh_check("no line failed", chm_stat(m[0..CHM_LEN], CHM_FAILED) == 0 and chm_stat(m[0..CHM_LEN], CHM_SEND_ERR) == 0) and ok;
     chp_stat("lines", @as(u64, cl_count(log[0..L])));
     chp_stat("out", @as(u64, nout));
@@ -388,4 +452,7 @@ test the_probe_texts_are_the_shapes_the_run_checks {
     assert t[8] == 240 and t[11] == 128 and t[13] == 49 and t[14] == 50;
     assert chp_text(66, 3, t[0..2000]) == 3;
     assert t[0] == 66 and t[2] == 51;
+    var c : [2000]u8 = undefined;
+    assert chp_text(65, 3, t[0..2000]) == 14 and t[2] == 226 and t[4] == 174;
+    assert ch_clean(t[0..14], c[0..2000]) == 11 and c[2] == 103;
 }

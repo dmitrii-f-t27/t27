@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // specs/t27os/call_video.t27 -- the camera INSIDE the app: capture frames from the default camera in .t27 (owner, 2026-10-22).
-// glass_window.t27 calls cv_probe_run when T27OS_CAMERA_PROBE is set; without it nothing here runs.
+// glass_window.t27 calls cv_probe_run when T27OS_CAMERA_PROBE is set with T27OS_QA=1; without them nothing here runs.
 // Why inside the app: the camera permission (TCC) belongs to a signed bundle with a window; a bare probe has none and
 // the system never asks. The app has Info.plist NSCameraUsageDescription (install.t27) and a stable signing identity
 // (T27OS_SIGN_ID), so the grant given once survives a rebuild.
@@ -18,6 +18,7 @@
 module T27osCallVideo;
 
 use t27os::pty_sys::sys_write;
+use t27os::pty_sys::sys_mode_private;
 use t27os::pty_sys::sys_peek;
 use t27os::pty_sys::sys_addr;
 use t27os::pty_sys::sys_strlen;
@@ -49,6 +50,8 @@ fn cv_mkdir(path: []const u8, mode: u32) -> i32 { return @extern("mkdir"); }
 fn cv_calloc(n: u64, size: u64) -> u64 { return @extern("calloc"); }
 fn cv_free(p: u64) -> void { @extern("free"); }
 fn cv_open(path: []const u8, flags: i32, mode: u32) -> i32 { return @extern("open"); }
+fn cv_chmod(path: []const u8, mode: u32) -> i32 { return @extern("chmod"); }
+fn cv_fchmod(fd: i32, mode: u32) -> i32 { return @extern("fchmod"); }
 fn cv_close(fd: i32) -> i32 { return @extern("close"); }
 fn cv_write_at(fd: i32, p: u64, n: u64) -> i64 { return @extern("write"); }
 fn cv_cf_str(alloc: u64, bytes: []const u8, n: usize, enc: u32, ext: bool) -> u64 { return @extern("CFStringCreateWithBytes"); }
@@ -165,9 +168,35 @@ fn cv_stats(base: u64, row: u64, w: u64, h: u64, sx: u64, sy: u64, st: u64, at: 
     return cnt;
 }
 
+// Test files under /tmp (audit P2, owner 2026-10-23): their folders are 0700 and the files 0600, opened without
+// following a link; a folder that is there and cannot be made 0700 (another user's) gets no file. The probe and the
+// dump run only with T27OS_QA=1 (glass_window).
+
+pub const CV_DIR_MODE : u32 = 448;
+pub const CV_FILE_MODE : u32 = 384;
+/// O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW.
+pub const CV_WFLAGS : i32 = 1793;
+
+/// The folder made 0700, or one already there tightened to 0700; false when it cannot be.
+fn cv_private_dir(path: []const u8) -> bool {
+    cv_mkdir(path, CV_DIR_MODE);
+    return cv_chmod(path, CV_DIR_MODE) == 0;
+}
+
+/// A test file opened for writing, 0600 even when it was there before; -1 when it cannot be.
+fn cv_private_file(path: []const u8) -> i32 {
+    const fd : i32 = cv_open(path, CV_WFLAGS, CV_FILE_MODE);
+    if (fd < 0) { return -1; }
+    if (cv_fchmod(fd, CV_FILE_MODE) != 0) {
+        cv_close(fd);
+        return -1;
+    }
+    return fd;
+}
+
 /// All bytes of the locked frame to /tmp/vid/live/raw_frame.bgra (row * h bytes, rows as the camera gave them).
 fn cv_dump_raw(base: u64, row: u64, h: u64) -> bool {
-    const fd : i32 = cv_open("/tmp/vid/live/raw_frame.bgra", 1537, 420);
+    const fd : i32 = cv_private_file("/tmp/vid/live/raw_frame.bgra");
     if (fd < 0) { return false; }
     const n : u64 = row * h;
     const w : i64 = cv_write_at(fd, base, n);
@@ -401,8 +430,10 @@ pub fn cv_probe_run() -> i32 {
     cv_put(st + 64, CV_MAGIC);
     // Never true (the magic is set): only makes sure cv_frame is emitted and so exported for dlsym.
     if (cbp_get(st + 64) == 99) { cv_frame(0, 0, 0, 0, 0); }
-    cv_mkdir("/tmp/vid", 493);
-    cv_mkdir("/tmp/vid/live", 493);
+    if (!cv_private_dir("/tmp/vid") or !cv_private_dir("/tmp/vid/live")) {
+        cv_err("CAMERA-PROBE FAIL: /tmp/vid/live cannot be made 0700\n");
+        return 4;
+    }
     const mode : u64 = cv_konst("kCFRunLoopDefaultMode");
     const media : u64 = cv_konst("AVMediaTypeVideo");
     const dev_cls : u64 = cv_objc_class("AVCaptureDevice");
@@ -716,7 +747,7 @@ fn cvl_encode(st: u64, base: u64, w: u64, h: u64, row: u64) -> u64 {
                             cv_put(st + CVL_SEQ * 8, cbp_get(st + CVL_SEQ * 8) + 1);
                             n = @as(u64, @intCast(len));
                             if (cbp_get(st + CVL_DUMP * 8) != 0 and cbp_get(st + CVL_DUMPED * 8) == 0 and cbp_get(st + CVL_ENC * 8) >= 40) {
-                                const fd : i32 = cv_open("/tmp/camcall/cam40.jpg", 1537, 420);
+                                const fd : i32 = cv_private_file("/tmp/camcall/cam40.jpg");
                                 if (fd >= 0) { cv_write_at(fd, cv_cf_ptr(data), @as(u64, @intCast(len))); cv_close(fd); cv_put(st + CVL_DUMPED * 8, 1); }
                             }
                         } else if (len > 0) {
@@ -797,7 +828,7 @@ fn cvl_make(dump: u64, scan: u64) -> u64 {
     cv_put(st + CVL_DUMP * 8, dump);
     // Never true: makes sure cv_frame, cv_granted and the queue jobs are emitted and exported for dlsym.
     if (cbp_get(st + 72) == 99) { cv_frame(0, 0, 0, 0, 0); cv_granted(0, 0); cvl_setup_job(0); cvl_stop_job(0); }
-    if (dump != 0) { cv_mkdir("/tmp/camcall", 493); }
+    if (dump != 0 and !cv_private_dir("/tmp/camcall")) { cv_put(st + CVL_DUMP * 8, 0); }
     // the serial queue of the start and stop jobs, and their entry points, found once here
     cv_put(st + CVL_Q * 8, cv_queue("t27.callvideo.setup", 0));
     cv_put(st + CVL_FN_SETUP * 8, cv_dlsym(CV_RTLD_DEFAULT, "cvl_setup_job"));
@@ -1179,4 +1210,13 @@ test a_group_call_takes_160_by_120_at_a_lower_quality_five_times_a_second {
 test the_new_live_slots_stand_before_the_buffer {
     assert CVL_STARTS < CVL_STATE and CVL_FN_STOP * 8 + 8 <= CVL_BUF;
     assert cvl_tick(0) == CVS_IDLE and cvl_stat(0, 15) == 0;
+}
+
+test test_files_under_tmp_are_0600_in_0700_folders_and_never_follow_a_link {
+    assert CV_DIR_MODE == 448 and sys_mode_private(CV_DIR_MODE);
+    assert CV_FILE_MODE == 384 and sys_mode_private(CV_FILE_MODE);
+    // the modes the dumps had before: readable by everyone
+    assert sys_mode_private(493) == false and sys_mode_private(420) == false and sys_mode_private(416) == false;
+    // write only, create, truncate, and O_NOFOLLOW (256)
+    assert (CV_WFLAGS & 3) == 1 and (CV_WFLAGS & 512) != 0 and (CV_WFLAGS & 1024) != 0 and (CV_WFLAGS & 256) != 0;
 }

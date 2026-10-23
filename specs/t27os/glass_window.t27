@@ -2171,6 +2171,9 @@ use t27os::pty_sys::sys_waitpid;
 use t27os::pty_sys::sys_open_ro;
 use t27os::pty_sys::sys_read;
 use t27os::pty_sys::sys_mkdir;
+use t27os::pty_sys::sys_chmod;
+use t27os::pty_sys::T27OS_HOME_MODE;
+use t27os::pty_sys::T27OS_FILE_MODE;
 use t27os::pty_sys::sys_creat;
 use t27os::pty_sys::sys_write;
 use t27os::pty_sys::sys_rename;
@@ -10269,7 +10272,7 @@ fn cl_port_save(st: []const u64) -> bool {
     if (n == 0) { return false; }
     var d : [320]u8 = undefined;
     if (cl_state_path("", d[0..320]) == 0) { return false; }
-    sys_mkdir(d[0..320], 448);
+    sys_mkdir(d[0..320], T27OS_HOME_MODE);
     var tmp : [320]u8 = undefined;
     var fin : [320]u8 = undefined;
     cl_state_path(CV_CP_LEAF_TMP, tmp[0..320]);
@@ -10355,6 +10358,15 @@ fn qa_env() -> bool {
     var e : [8]u8 = undefined;
     const n : usize = cl_env("T27OS_QA", e[0..8]);
     return qa_on(e[0..8], n);
+}
+
+/// At launch, before anything is written: ~/.t27os made 0700, or one an older build made 0755 set to 0700 (audit P2,
+/// owner 2026-10-23). The chmod result, -1 without HOME.
+fn home_private() -> i32 {
+    var d : [320]u8 = undefined;
+    if (cl_state_path("", d[0..320]) == 0) { return -1; }
+    sys_mkdir(d[0..320], T27OS_HOME_MODE);
+    return sys_chmod(d[0..320], T27OS_HOME_MODE);
 }
 
 /// At launch, before the identity opens: the one line when test aids are set without QA.
@@ -10609,7 +10621,8 @@ pub fn cl_camera(cl: []u8, s: []u8) -> void {
         cl[CL_CAMTRY] = 1;
         if (cp == 0) {
             var dump : u64 = 0;
-            if (cl[CL_STATS] != 0) { dump = 1; }
+            // the 40th JPEG goes to /tmp/camcall only under the stats and T27OS_QA=1 (a test aid)
+            if (qa_aid(qa_env(), cl[CL_STATS] != 0)) { dump = 1; }
             cp = cvl_new(dump);
             cl_put32(cl, CL_CAMP, cp & 4294967295);
             cl_put32(cl, CL_CAMP + 4, cp >> 32);
@@ -15348,9 +15361,9 @@ fn pins_save(home: []const u8, letter: u32, pb: []const u8, n: usize) -> void {
     var k : usize = put_bytes(dp[0..320], 0, home);
     k = put_bytes(dp[0..320], k, "/.t27os/pins");
     dp[k] = 0;
-    sys_mkdir(dp[0..320], 493);
+    sys_mkdir(dp[0..320], T27OS_HOME_MODE);
     pin_path(home, letter, pp[0..320]);
-    const fd : i32 = sys_creat(pp[0..320], 420);
+    const fd : i32 = sys_creat(pp[0..320], T27OS_FILE_MODE);
     if (fd < 0) { return; }
     sys_write(fd, pb[0..PB_PINS], @as(u64, n));
     sys_close(fd);
@@ -15418,10 +15431,10 @@ pub fn main() -> void {
     const icon : u64 = msg_image(msg0(cls("NSImage"), s_alloc), sel("initWithCGImage:size:"), cg_image(ic), ICON_SIZE, ICON_SIZE);
     msg1(app, sel("setApplicationIconImage:"), icon);
     msg_flag(app, sel("activateIgnoringOtherApps:"), true);
-    // Camera check (test aid, off by default, not product behavior): T27OS_CAMERA_PROBE=1 captures the camera inside the
+    // Camera check (test aid, off by default, not product behavior): T27OS_CAMERA_PROBE=1 with T27OS_QA=1 captures the camera inside the
     // app (call_video.t27), prints the brightness table to stderr and exits; the camera permission is this bundle's.
     var cam_env : [32]u8 = undefined;
-    if (cl_env("T27OS_CAMERA_PROBE", cam_env[0..32]) > 0) { sys_exit(cv_probe_run()); }
+    if (qa_aid(qa_env(), cl_env("T27OS_CAMERA_PROBE", cam_env[0..32]) > 0)) { sys_exit(cv_probe_run()); }
 
     // the text kit: every class, selector and string the frames need, made once.
     const s_split : u64 = sel("componentsSeparatedByString:");
@@ -15902,6 +15915,7 @@ pub fn main() -> void {
     // (test aids, off by default)
     var acv : [16]u8 = undefined;
     const acn : usize = ns_bytes(msg1(msg0(cls("NSBundle"), sel("mainBundle")), sel("objectForInfoDictionaryKey:"), cf("CFBundleShortVersionString")), acv[0..16]);
+    home_private();
     ac_boot(tbv[TBO_CL .. TBO_CL + CL_CAP], acv[0..16], acn, tgv[TPG_U_CUR], unix_time(0));
     // UPD. updates from friends nearby (update_agent.t27): the paths, this bundle's version and build, the stale lock next
     // to the install target removed; the server's port is taken in cl_boot (it goes into the announcement) and its helper
@@ -16000,10 +16014,10 @@ pub fn main() -> void {
     var dpath : [300]u8 = undefined;
     put_bytes(dpath[0..300], put_bytes(dpath[0..300], 0, dhb[0..dhn]), "/.t27os");
     dpath[dhn + 7] = 0;
-    sys_mkdir(dpath[0..300], 493);
+    sys_mkdir(dpath[0..300], T27OS_HOME_MODE);
     put_bytes(dpath[0..300], put_bytes(dpath[0..300], 0, dhb[0..dhn]), "/.t27os/cards");
     dpath[dhn + 13] = 0;
-    sys_mkdir(dpath[0..300], 493);
+    sys_mkdir(dpath[0..300], T27OS_HOME_MODE);
     dcv[D_PINN] = @as(u64, pins_load(dhb[0..dhn], letter_of_petal(shown), pbuf[0..4160]));
     dcv[D_PINLET] = @as(u64, letter_of_petal(shown));
     gallery_load(dcv[0..512], gal[0..49152], gt[0..2560], dhb[0..dhn]);

@@ -272,14 +272,17 @@ fn ckh_state(ep: []const u8) -> u32 { return @as(u32, ep[EP_STATE]); }
 
 fn ckh_caller(ep: []const u8) -> bool { return ep[EP_ROLE] == 1; }
 
+/// Wipe the ephemeral private key and both directions' keys and IVs (an end state, and call_session cs_close).
+pub fn ckh_wipe_keys(ep: []u8) -> void {
+    ck_wipe(ep[EP_PRIV..EP_PRIV + 97]);
+    ck_wipe(ep[EP_TXK..EP_CTR]);
+}
+
 /// Move the call; an end state wipes the private key and both directions' keys.
 fn ckh_go(ep: []u8, ev: u32) -> void {
     const n : u32 = ck_next(ckh_state(ep), ev);
     ep[EP_STATE] = @as(u8, @intCast(n));
-    if (n == CK_ENDED or n == CK_FAILED) {
-        ck_wipe(ep[EP_PRIV..EP_PRIV + 97]);
-        ck_wipe(ep[EP_TXK..EP_CTR]);
-    }
+    if (n == CK_ENDED or n == CK_FAILED) { ckh_wipe_keys(ep); }
 }
 
 fn ckh_ep_init(ep: []u8, caller: bool, me: []const u8, peer: []const u8) -> void {

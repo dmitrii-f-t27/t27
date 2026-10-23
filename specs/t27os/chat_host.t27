@@ -52,6 +52,7 @@ use t27os::peer_identity_host::IH_IOERR;
 use t27os::peer_identity::ft_find;
 use t27os::peer_identity::FT_MAX;
 use t27os::call_core::CK_IDLE;
+use t27os::call_core::ck_wipe;
 use t27os::call_core::CK_RINGING;
 use t27os::call_core::CK_ACTIVE;
 use t27os::call_core::CK_ENDED;
@@ -776,6 +777,7 @@ fn grm_out(m: []u8, s: []u8, g: []u8, t: []const u8, glog: []u8, pidx: u32, now:
                     var p : [738]u8 = undefined;
                     const pn : usize = gm_put_text(p[0..738], gt_id(t, gi), me_fp, cl_msg(glog, i), k, cl_time(glog, i), cl_text(glog, i));
                     if (pn > 0 and chm_tx(m, s, p[0..pn])) { ma(g, @as(usize, GRM_TX_FRAMES)); }
+                    ck_wipe(p[0..738]);
                 }
                 k = k + 1;
             }
@@ -973,6 +975,7 @@ pub fn chm_tick_g(m: []u8, s: []u8, log: []u8, asm: []u8, friends: []const u8, m
             }
             n = cs_text_take(s, pt[0..740]);
         }
+        ck_wipe(pt[0..740]);
         // what is due goes out: every part still without its ACK
         const cnt : usize = @as(usize, cl_count(log));
         var i : usize = 0;
@@ -995,6 +998,7 @@ pub fn chm_tick_g(m: []u8, s: []u8, log: []u8, asm: []u8, friends: []const u8, m
                         } else if (pn > 0 and chm_tx(m, s, p[0..pn])) {
                             ma(m, CHM_TX_FRAMES);
                         }
+                        ck_wipe(p[0..720]);
                     }
                     k = k + 1;
                 }

@@ -47,6 +47,8 @@ use t27os::call_core::CK_T_MEDIA;
 use t27os::call_core::CK_T_VIDEO;
 use t27os::call_core::CK_T_BYE;
 use t27os::call_core::ck_wipe;
+use t27os::call_core::ck_same;
+use tri::t27b::text_escape::utf8_len;
 
 // ---------------------------------------------------------------- bytes
 
@@ -124,6 +126,75 @@ pub fn ch_utf8_ok(b: []const u8) -> bool {
     }
     return true;
 }
+
+// ---------------------------------------------------------------- clean text (audit P2, owner 2026-10-23)
+
+/// A code point that may hide or reorder what a line shows, or is no text at all: a C0 control (LF and TAB are taken
+/// before), DEL, a C1 control, U+061C, the zero-width and direction marks U+200B..U+200F, the embeddings and overrides
+/// U+202A..U+202E, the word joiner, invisible operators and isolates U+2060..U+206F, the BOM U+FEFF.
+pub fn ch_hidden(cp: u32) -> bool {
+    if (cp < 32 or cp == 127 or (cp >= 128 and cp <= 159) or cp == 1564) { return true; }
+    if ((cp >= 8203 and cp <= 8207) or (cp >= 8234 and cp <= 8238) or (cp >= 8288 and cp <= 8303)) { return true; }
+    return cp == 65279;
+}
+
+/// The code point of the w-byte character at b[i] (w from text_escape utf8_len).
+fn u8_cp(b: []const u8, i: usize, w: usize) -> u32 {
+    var cp : u32 = @as(u32, b[i]);
+    if (w == 2) { cp = cp & 31; }
+    if (w == 3) { cp = cp & 15; }
+    if (w == 4) { cp = cp & 7; }
+    var k : usize = 1;
+    while (k < w) {
+        cp = (cp << 6) | (@as(u32, b[i + k]) & 63);
+        k = k + 1;
+    }
+    return cp;
+}
+
+/// A line as a person may read it, into out; its length. The input is well-formed UTF-8 (ch_utf8_ok). CR LF, a lone
+/// CR, U+2028 and U+2029 become one LF; a TAB becomes a space; every ch_hidden character is dropped; the text is cut
+/// after the last whole character that fits out and CH_MSG_MAX. Applied to what is sent and to what comes in, so a
+/// line from another client cannot show reordered or hidden text either.
+pub fn ch_clean(src: []const u8, out: []u8) -> usize {
+    var lim : usize = out.len;
+    if (lim > CH_MSG_MAX) { lim = CH_MSG_MAX; }
+    var i : usize = 0;
+    var n : usize = 0;
+    while (i < src.len) {
+        var w : usize = utf8_len(src[i]);
+        if (i + w > src.len) { return n; }
+        const cp : u32 = u8_cp(src, i, w);
+        if (cp == 10 or cp == 13 or cp == 8232 or cp == 8233 or cp == 9) {
+            if (n + 1 > lim) { return n; }
+            if (cp == 9) { out[n] = 32; } else { out[n] = 10; }
+            n = n + 1;
+            if (cp == 13 and i + 1 < src.len and src[i + 1] == 10) { w = 2; }
+        } else if (!ch_hidden(cp)) {
+            if (n + w > lim) { return n; }
+            copy(out, n, src, i, w);
+            n = n + w;
+        }
+        i = i + w;
+    }
+    return n;
+}
+
+/// Text with no character ch_clean would drop or change (no control, no line break, no ch_hidden mark): a name.
+pub fn ch_plain(b: []const u8) -> bool {
+    var i : usize = 0;
+    while (i < b.len) {
+        const w : usize = utf8_len(b[i]);
+        if (i + w > b.len) { return false; }
+        const cp : u32 = u8_cp(b, i, w);
+        if (ch_hidden(cp) or cp == 8232 or cp == 8233) { return false; }
+        i = i + w;
+    }
+    return true;
+}
+
+/// U+FFFD, the line kept for a message that had nothing left once cleaned (it still counts as received).
+const CH_EMPTY : [3]u8 = [239, 191, 189];
 
 fn put_phdr(out: []u8, kind: u32, msg: u32, part: u32, parts: u32, time: u64, len: usize) -> void {
     out[0] = @as(u8, @intCast(kind));
@@ -346,14 +417,31 @@ fn put_line(log: []u8, at: usize, dir: u32, st: u32, msg: u32, time: u64, text: 
 }
 
 /// A new outgoing message: the next number, appended PENDING (a full log drops its oldest line first). Its number,
-/// or 0 when the text is empty, too long or not UTF-8.
+/// or 0 when the text is empty, too long (the person is told, nothing is cut unseen), not UTF-8 or has nothing left
+/// once cleaned (ch_clean).
 pub fn cl_out_add(log: []u8, text: []const u8, now: u64) -> u32 {
     if (ch_parts_for(text.len) == 0 or !ch_utf8_ok(text)) { return 0; }
+    var c : [2000]u8 = undefined;
+    const n : usize = ch_clean(text, c[0..CH_MSG_MAX]);
+    if (n == 0) { return 0; }
     if (cl_count(log) >= cl_cap(log)) { cl_drop_oldest(log); }
     const msg : u32 = cl_last_out(log) + 1;
     put32(log, 16, msg);
-    put_line(log, @as(usize, cl_count(log)), CH_DIR_OUT, CH_S_PENDING, msg, now, text);
+    put_line(log, @as(usize, cl_count(log)), CH_DIR_OUT, CH_S_PENDING, msg, now, c[0..n]);
+    ck_wipe(c[0..n]);
     return msg;
+}
+
+/// put_line of a text from outside (the peer, the file): cleaned first; a text with nothing left is U+FFFD.
+fn put_clean(log: []u8, at: usize, dir: u32, st: u32, msg: u32, time: u64, text: []const u8) -> void {
+    var c : [2000]u8 = undefined;
+    const n : usize = ch_clean(text, c[0..CH_MSG_MAX]);
+    if (n == 0) {
+        put_line(log, at, dir, st, msg, time, CH_EMPTY[0..3]);
+    } else {
+        put_line(log, at, dir, st, msg, time, c[0..n]);
+    }
+    ck_wipe(c[0..CH_MSG_MAX]);
 }
 
 /// Where incoming message msg stands: before the first incoming line with a higher number, else at the end.
@@ -378,7 +466,7 @@ fn cl_in_put(log: []u8, msg: u32, time: u64, text: []const u8) -> bool {
     if (cl_count(log) >= cl_cap(log)) { cl_drop_oldest(log); }
     // the drop may have raised the floor past this message: then it is the oldest one and stays out
     if (cl_have_in(log, msg)) { return false; }
-    put_line(log, cl_in_pos(log, msg), CH_DIR_IN, CH_S_DELIVERED, msg, time, text);
+    put_clean(log, cl_in_pos(log, msg), CH_DIR_IN, CH_S_DELIVERED, msg, time, text);
     return true;
 }
 
@@ -448,8 +536,8 @@ pub fn ch_rx_text(log: []u8, asm: []u8, p: []const u8) -> u32 {
     const total : usize = @as(usize, parts - 1) * CH_PART_MAX + @as(usize, get16(asm, o + 6));
     var ok : bool = ch_utf8_ok(asm[o + 16..o + 16 + total]);
     if (ok) { cl_in_put(log, msg, get_u64(asm, o + 8), asm[o + 16..o + 16 + total]); }
-    put32(asm, o, 0);
-    asm[o + 5] = 0;
+    // the joined plaintext goes from the slot whether it was kept or refused
+    ck_wipe(asm[o..o + 16 + CH_MSG_MAX]);
     if (!ok) { return CH_RX_BAD; }
     return CH_RX_NEW;
 }
@@ -728,7 +816,7 @@ pub fn cf_decode(b: []const u8, log: []u8) -> u32 {
         const len : usize = @as(usize, get16(b, at + 2));
         if (cl_count(log) >= cap) { cl_drop_oldest(log); }
         const k : usize = @as(usize, cl_count(log));
-        put_line(log, k, @as(u32, b[at]), @as(u32, b[at + 1]), get32(b, at + 4), get_u64(b, at + 8), b[at + CF_REC..at + CF_REC + len]);
+        put_clean(log, k, @as(u32, b[at]), @as(u32, b[at + 1]), get32(b, at + 4), get_u64(b, at + 8), b[at + CF_REC..at + CF_REC + len]);
         const st : u32 = @as(u32, b[at + 1]);
         if (st == CH_S_DELIVERED or st == CH_S_READ) {
             log[ln(k) + LN_ACKED] = @as(u8, @intCast((@as(u32, 1) << cl_parts(log, k)) - 1));
@@ -1566,4 +1654,102 @@ test a_third_part_that_would_make_the_message_longer_than_2000_bytes_is_refused_
         k = k + 1;
     }
     assert clean;
+}
+
+fn t_zero(b: []const u8) -> bool {
+    var i : usize = 0;
+    while (i < b.len) {
+        if (b[i] != 0) { return false; }
+        i = i + 1;
+    }
+    return true;
+}
+
+test the_cleaner_drops_bidi_zero_width_and_controls_and_keeps_text_cyrillic_and_emoji {
+    var o : [2100]u8 = undefined;
+    // "A" U+202E "B": the override that would show the rest backwards goes
+    const rlo : [5]u8 = [65, 226, 128, 174, 66];
+    assert ch_clean(rlo[0..5], o[0..2100]) == 2 and o[0] == 65 and o[1] == 66;
+    // "x" U+200B U+200F U+202A U+2066 U+2069 U+FEFF U+0085 ^A ESC DEL U+061C U+2060 "y" -> "xy"
+    const hid : [30]u8 = [120, 226, 128, 139, 226, 128, 143, 226, 128, 170, 226, 129, 166, 226, 129, 169, 239, 187, 191, 194, 133, 1, 27, 127, 216, 156, 226, 129, 160, 121];
+    assert ch_utf8_ok(hid[0..30]);
+    assert ch_clean(hid[0..30], o[0..2100]) == 2 and o[0] == 120 and o[1] == 121;
+    // "Hi " U+1F600, Cyrillic "Da", and the neighbours of the dropped ranges stay: U+2010, U+202F, U+2070, U+00A0
+    const keep : [22]u8 = [72, 105, 32, 240, 159, 152, 128, 208, 148, 208, 176, 226, 128, 144, 226, 128, 175, 226, 129, 176, 194, 160];
+    assert ch_clean(keep[0..22], o[0..2100]) == 22 and ck_same(o[0..22], keep[0..22]);
+    assert ch_plain(keep[0..22]) and ch_plain(rlo[0..5]) == false and ch_plain(hid[0..30]) == false;
+    // CR LF, a lone CR, U+2029 and U+2028 are one LF each; a TAB is a space
+    const br : [16]u8 = [97, 13, 10, 98, 13, 99, 9, 100, 226, 128, 169, 101, 226, 128, 168, 102];
+    const brc : [11]u8 = [97, 10, 98, 10, 99, 32, 100, 10, 101, 10, 102];
+    assert ch_clean(br[0..16], o[0..2100]) == 11 and ck_same(o[0..11], brc[0..11]);
+    // cut after the last whole character that fits: "abc" + Cyrillic "D" + "e" into 4 bytes keeps "abc"
+    const cut : [6]u8 = [97, 98, 99, 208, 148, 101];
+    assert ch_clean(cut[0..6], o[0..4]) == 3;
+    assert ch_clean(cut[0..6], o[0..5]) == 5 and o[3] == 208 and o[4] == 148;
+    // and never past CH_MSG_MAX
+    var big : [2010]u8 = undefined;
+    t_fill(big[0..2010], 2010, 0);
+    assert ch_clean(big[0..2010], o[0..2100]) == CH_MSG_MAX;
+}
+
+test what_is_sent_and_what_comes_in_is_cleaned_before_it_is_a_line {
+    var la : [16296]u8 = undefined;
+    var lb : [16296]u8 = undefined;
+    var asm : [8064]u8 = undefined;
+    assert cl_init(la[0..T_LOG], T_B[0..10], T_CAP) and cl_init(lb[0..T_LOG], T_A[0..10], T_CAP);
+    ck_wipe(asm[0..CA_LEN]);
+    // sent: the override goes, and a text that is nothing but marks is refused
+    const rlo : [5]u8 = [65, 226, 128, 174, 66];
+    const only : [6]u8 = [226, 128, 174, 226, 128, 139];
+    assert cl_out_add(la[0..T_LOG], only[0..6], 10) == 0;
+    assert cl_out_add(la[0..T_LOG], rlo[0..5], 10) == 1;
+    assert cl_len(la[0..T_LOG], 0) == 2 and cl_text(la[0..T_LOG], 0)[1] == 66;
+    // a text longer than a message is refused as before (the person sees it), one of CH_MSG_MAX is kept whole
+    var big : [2300]u8 = undefined;
+    t_fill(big[0..2300], 2300, 1);
+    assert cl_out_add(la[0..T_LOG], big[0..2300], 11) == 0;
+    assert cl_out_add(la[0..T_LOG], big[0..CH_MSG_MAX], 11) == 2 and cl_len(la[0..T_LOG], 1) == CH_MSG_MAX;
+    // received from a client that does not clean: the line holds no override
+    var p : [720]u8 = undefined;
+    var n : usize = ch_put_text(p[0..720], 1, 0, 20, rlo[0..5]);
+    assert ch_rx_text(lb[0..T_LOG], asm[0..CA_LEN], p[0..n]) == CH_RX_NEW;
+    assert cl_len(lb[0..T_LOG], 0) == 2 and cl_text(lb[0..T_LOG], 0)[0] == 65 and cl_text(lb[0..T_LOG], 0)[1] == 66;
+    // one with nothing left is kept as U+FFFD (it was received and is ACKed)
+    n = ch_put_text(p[0..720], 2, 0, 21, only[0..6]);
+    assert ch_rx_text(lb[0..T_LOG], asm[0..CA_LEN], p[0..n]) == CH_RX_NEW;
+    assert cl_len(lb[0..T_LOG], 1) == 3 and cl_text(lb[0..T_LOG], 1)[0] == 239;
+    // a file written before this rule is cleaned as it is read (the file's layout is the same)
+    var f : [4200]u8 = undefined;
+    var lc : [16296]u8 = undefined;
+    assert cl_init(lc[0..T_LOG], T_A[0..10], T_CAP);
+    lb[cl_line_at(0) + CL_TEXT + 1] = 9;
+    const fn1 : usize = cf_encode(lb[0..T_LOG], f[0..4200]);
+    assert fn1 > 0 and cf_decode(f[0..fn1], lc[0..T_LOG]) == CF_OK;
+    assert cl_text(lc[0..T_LOG], 0)[1] == 32;
+}
+
+test the_assembly_slot_keeps_no_plaintext_after_a_message_is_joined_or_refused {
+    var la : [16296]u8 = undefined;
+    var lb : [16296]u8 = undefined;
+    var asm : [8064]u8 = undefined;
+    assert cl_init(la[0..T_LOG], T_B[0..10], T_CAP) and cl_init(lb[0..T_LOG], T_A[0..10], T_CAP);
+    ck_wipe(asm[0..CA_LEN]);
+    var t : [1500]u8 = undefined;
+    t_fill(t[0..1500], 1500, 8);
+    assert cl_out_add(la[0..T_LOG], t[0..1500], 30) == 1;
+    const order : [3]u32 = [0, 1, 2];
+    assert t_carry(la[0..T_LOG], 0, lb[0..T_LOG], asm[0..CA_LEN], order[0..3]) == CH_RX_NEW;
+    assert t_zero(asm[0..CA_LEN]);
+    // two parts that do not join into UTF-8 (the first ends inside a Cyrillic letter, the second is ASCII)
+    var a : [700]u8 = undefined;
+    t_fill(a[0..700], 700, 2);
+    a[699] = 208;
+    const b : [1]u8 = [97];
+    var p : [720]u8 = undefined;
+    var n : usize = ch_put_part(p[0..720], 5, 0, 2, 40, a[0..700]);
+    assert ch_rx_text(lb[0..T_LOG], asm[0..CA_LEN], p[0..n]) == CH_RX_PART;
+    assert t_zero(asm[0..CA_LEN]) == false;
+    n = ch_put_part(p[0..720], 5, 1, 2, 40, b[0..1]);
+    assert ch_rx_text(lb[0..T_LOG], asm[0..CA_LEN], p[0..n]) == CH_RX_BAD;
+    assert t_zero(asm[0..CA_LEN]);
 }

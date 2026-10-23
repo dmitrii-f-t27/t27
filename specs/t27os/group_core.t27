@@ -71,6 +71,7 @@ use t27os::chat_core::CL_LINE;
 use t27os::chat_core::CL_EXT;
 use t27os::chat_core::CL_NONE;
 use t27os::chat_core::ch_utf8_ok;
+use t27os::chat_core::ch_plain;
 use t27os::chat_core::ch_parts_for;
 use t27os::chat_core::ch_put_part;
 use t27os::chat_core::ch_rx_text;
@@ -230,8 +231,12 @@ pub fn gr_known(friends: []const u8, me_fp: []const u8, roster: []const u8, n: u
     return GR_OK;
 }
 
-/// A group name: 1..32 bytes of UTF-8 with no control byte.
-pub fn gr_name_ok(name: []const u8) -> bool {
+/// A new group name (typed, or in a list from a member): gr_name_bytes_ok and no mark that hides or reorders text
+/// (ch_plain). A name already in groups.t27 is read with gr_name_bytes_ok, so the file of an older build still reads.
+pub fn gr_name_ok(name: []const u8) -> bool { return gr_name_bytes_ok(name) and ch_plain(name); }
+
+/// 1..32 bytes of UTF-8 with no control byte.
+fn gr_name_bytes_ok(name: []const u8) -> bool {
     if (name.len == 0 or name.len > GR_NAME_MAX or !ch_utf8_ok(name)) { return false; }
     var i : usize = 0;
     while (i < name.len) {
@@ -333,7 +338,7 @@ fn g_rec_ok(t: []const u8, gi: usize) -> bool {
     const n : usize = @as(usize, t[o + R_N]);
     const nl : usize = @as(usize, t[o + R_NAMELEN]);
     if (n < @as(usize, GR_MIN) or n > @as(usize, GR_MEMBERS) or @as(usize, t[o + R_CREATOR]) >= n or t[o + 19] != 0) { return false; }
-    if (nl > GR_NAME_MAX or !gr_name_ok(t[o + R_NAME..o + R_NAME + nl])) { return false; }
+    if (nl > GR_NAME_MAX or !gr_name_bytes_ok(t[o + R_NAME..o + R_NAME + nl])) { return false; }
     var i : usize = nl;
     while (i < GR_NAME_MAX) {
         if (t[o + R_NAME + i] != 0) { return false; }
@@ -889,6 +894,7 @@ pub fn gl_rx_text(log: []u8, asm: []u8, floors: []u8, me: u32, sidx: u32, p: []c
     const qn : usize = ch_put_part(q[0..CH_PAYLOAD_MAX], key, gm_part(p), gm_parts(p), gm_time(p), p[GM_HDR..p.len]);
     if (qn == 0) { return CH_RX_BAD; }
     const r : u32 = ch_rx_text(log, asm, q[0..qn]);
+    ck_wipe(q[0..720]);
     if (r == CH_RX_NEW) {
         const i : usize = cl_find(log, CH_DIR_IN, key);
         if (i != CL_NONE) { gl_place(log, i, me); }
@@ -1139,6 +1145,11 @@ test a_group_is_two_to_eight_friends_of_the_creator {
     const nl : [3]u8 = [97, 10, 98];
     assert gr_name_ok("trio") and gr_name_ok("") == false and gr_name_ok(nl[0..3]) == false;
     assert gr_name_ok("0123456789012345678901234567890123") == false;
+    // a name with U+202E (shown backwards from there) or U+200B is refused; Cyrillic is a name
+    const rlo : [5]u8 = [97, 226, 128, 174, 98];
+    const zw : [5]u8 = [97, 226, 128, 139, 98];
+    const ru : [4]u8 = [208, 148, 208, 176];
+    assert gr_name_ok(rlo[0..5]) == false and gr_name_ok(zw[0..5]) == false and gr_name_ok(ru[0..4]);
 }
 
 test the_groups_file_reads_back_and_a_broken_one_is_refused {
