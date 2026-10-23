@@ -4201,6 +4201,8 @@ test an_ipv6_call_goes_only_where_a_call_may_go {
     var z4 : [18]u8 = undefined;
     ip6_ep_v4(0, 47727, z4[0..18]);
     assert cs_call6(s[0..CS_LEN], z4[0..18], fp[0..10]) == false;
+    ip6_ep_v4(3232235786, 0, z4[0..18]);
+    assert cs_call6(s[0..CS_LEN], z4[0..18], fp[0..10]) == false;
     t6_block(s[0..CS_LEN], false);
     t6_ep(ep[0..18], 47727);
     assert cs_call6(s[0..CS_LEN], ep[0..18], fp[0..10]) == false and cs_state(s[0..CS_LEN]) == CK_IDLE;
@@ -4311,4 +4313,16 @@ test every_datagram_of_a_one_to_one_call_fits_what_ipv6_carries {
     assert CK_HDR + CK_IDENT_PT + CK_TAG <= IP6_UDP_MAX and CN_PROBE_LEN <= IP6_UDP_MAX and CN_STUN_HDR <= IP6_UDP_MAX;
     // the frame with its copy does not: that is why it splits over IPv6
     assert CS_SEALED > IP6_UDP_MAX;
+}
+
+test the_links_of_a_group_send_on_the_same_dual_stack_socket {
+    var s : [333056]u8 = undefined;
+    t6_block(s[0..CS_LEN], true);
+    ck_wipe(s[CS_LEN..2 * CS_LEN]);
+    cs_link_copy(s[0..2 * CS_LEN], CS_LEN);
+    // a member's link builds the sockaddr its socket takes: the v4-mapped sockaddr_in6, never a sockaddr_in on it
+    assert get_u64(s[0..2 * CS_LEN], CS_LEN + CS_SLOTS + @as(usize, CS_SOCK6) * 8) == 1;
+    var v4 : [18]u8 = undefined;
+    ip6_ep_v4(3232235786, 47728, v4[0..18]);
+    assert cs_set_peer(s[CS_LEN..2 * CS_LEN], v4[0..18]) and s[CS_LEN + CS_NET + CN6_SALEN] == 28;
 }
