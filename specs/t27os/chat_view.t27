@@ -8,6 +8,9 @@
 //     check mark sent, two delivered, two and "read" read, "failed, will retry"); the field and SEND under it (Return
 //     sends); the wheel scrolls the history; an empty log says "No messages yet. Write the first one."
 //   * the unread count of every friend (a small table in this region), drawn as a badge on the friend's row.
+//   * the trust of every friend (another small table, friends_view FV_TB_* bits): the card and the rows say verified,
+//     not verified or key mismatch; MESSAGE of a friend who is not verified says why instead of opening a session that
+//     would be refused (CS_R_UNVERIFIED).
 // The window (glass_window.t27) owns the log, the message session (chat_host.t27 chm_*) and the call; it calls
 // chv_layout after the log or the scroll changed, and draw() only paints the items chv_layout left in the region.
 // Text widths here are an estimate per code point (chv_cp_w), on the wide side, so a line never runs past its bubble;
@@ -26,6 +29,15 @@ use t27os::friends_view::fv_get32;
 use t27os::friends_view::fv_put32;
 use t27os::friends_view::fv_ago_text;
 use t27os::friends_view::FV_NEVER;
+use t27os::friends_view::FV_T_UNVERIFIED;
+use t27os::friends_view::FV_T_VERIFIED;
+use t27os::friends_view::FV_T_MISMATCH;
+use t27os::friends_view::FV_TB_PIN;
+use t27os::friends_view::FV_TB_BAD;
+use t27os::friends_view::fv_trust_of;
+use t27os::friends_view::fv_trust_step;
+use t27os::friends_view::fv_trust_hint;
+use t27os::friends_view::fv_trust_word_put;
 use t27os::chat_core::CH_DIR_OUT;
 use t27os::chat_core::CH_DIR_IN;
 use t27os::chat_core::CH_S_PENDING;
@@ -97,6 +109,12 @@ pub const CHV_ITEMS_MAX : usize = 40;
 /// The bytes of a line of text in one item.
 pub const CHV_LINE_BYTES : usize = 112;
 pub const CHV_END : usize = 7680;
+/// The trust table: CHV_TR_MAX entries of a fingerprint and the friends_view FV_TB_* bits (0 = a free entry). Folded
+/// into the frame key with the head, so a change of trust redraws the card and the rows.
+pub const CHV_TR : usize = 7680;
+pub const CHV_TR_ROW : usize = 12;
+pub const CHV_TR_MAX : usize = 32;
+pub const CHV_TR_END : usize = 8064;
 
 pub const CHV_M_OFF : u32 = 0;
 pub const CHV_M_CARD : u32 = 1;
@@ -232,6 +250,78 @@ pub fn chv_unr_set(v: []u8, fp: []const u8, n: u32) -> bool {
     }
     chv_put16(v, chv_unr_at(free) + 10, c);
     return true;
+}
+
+// ---------------------------------------------------------------- 2a. trust per friend
+
+pub fn chv_tr_at(k: usize) -> usize { return CHV_TR + k * CHV_TR_ROW; }
+
+fn chv_tr_same(v: []const u8, k: usize, fp: []const u8) -> bool {
+    var i : usize = 0;
+    while (i < 10) {
+        if (v[chv_tr_at(k) + i] != fp[i]) { return false; }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// The trust bits of friend fp; 0 (not verified) when none are known.
+pub fn chv_tr_get(v: []const u8, fp: []const u8) -> u32 {
+    if (fp.len < 10) { return 0; }
+    var k : usize = 0;
+    while (k < CHV_TR_MAX) {
+        const b : u32 = @as(u32, v[chv_tr_at(k) + 10]);
+        if (b != 0 and chv_tr_same(v, k, fp)) { return b; }
+        k = k + 1;
+    }
+    return 0;
+}
+
+/// Friend fp has these bits (0 frees its entry). False when the table is full (the friend then reads not verified).
+pub fn chv_tr_set(v: []u8, fp: []const u8, bits: u32) -> bool {
+    if (fp.len < 10) { return false; }
+    const b : u8 = @as(u8, @intCast(bits & (FV_TB_PIN | FV_TB_BAD)));
+    var free : usize = CHV_TR_MAX;
+    var k : usize = 0;
+    while (k < CHV_TR_MAX) {
+        const has : u8 = v[chv_tr_at(k) + 10];
+        if (has != 0 and chv_tr_same(v, k, fp)) {
+            v[chv_tr_at(k) + 10] = b;
+            return true;
+        }
+        if (has == 0 and free == CHV_TR_MAX) { free = k; }
+        k = k + 1;
+    }
+    if (b == 0) { return true; }
+    if (free == CHV_TR_MAX) { return false; }
+    var i : usize = 0;
+    while (i < 10) {
+        v[chv_tr_at(free) + i] = fp[i];
+        i = i + 1;
+    }
+    v[chv_tr_at(free) + 10] = b;
+    return true;
+}
+
+/// What the person sees for friend fp: friends_view FV_T_UNVERIFIED, FV_T_VERIFIED or FV_T_MISMATCH.
+pub fn chv_trust(v: []const u8, fp: []const u8) -> u32 { return fv_trust_of(chv_tr_get(v, fp)); }
+
+/// One session's verdict on friend fp (friends_view fv_trust_step); true when what is shown changed.
+pub fn chv_tr_step(v: []u8, fp: []const u8, stored: bool, proven: bool, refused: bool) -> bool {
+    const was : u32 = chv_tr_get(v, fp);
+    const now : u32 = fv_trust_step(was, stored, proven, refused);
+    if (now == was) { return false; }
+    chv_tr_set(v, fp, now);
+    return true;
+}
+
+/// MESSAGE is open to a friend whose key is stored (a mismatch keeps it: the stored key still opens the session, an
+/// impostor is refused by it). For a friend who is not verified the click says why: CHV_N_UNVERIFIED.
+pub fn chv_message_ok(trust: u32) -> bool { return trust != FV_T_UNVERIFIED; }
+
+pub fn chv_message_note(trust: u32) -> u32 {
+    if (chv_message_ok(trust)) { return CHV_N_NONE; }
+    return CHV_N_UNVERIFIED;
 }
 
 /// The badge on a friend's row: "3", "99+" past 99, nothing for 0.
@@ -377,6 +467,7 @@ pub const CHV_N_OFFLINE : u32 = 3;
 pub const CHV_N_NOVIDEO : u32 = 4;
 pub const CHV_N_NOSAVE : u32 = 5;
 pub const CHV_N_CALLS_OFF : u32 = 6;
+pub const CHV_N_UNVERIFIED : u32 = 7;
 
 pub fn chv_note_text(code: u32) -> str {
     if (code == CHV_N_LONG) { return "A message is at most 2000 bytes."; }
@@ -385,11 +476,14 @@ pub fn chv_note_text(code: u32) -> str {
     if (code == CHV_N_NOVIDEO) { return "Video is off on this device (T27OS_CALL_VIDEO=0)."; }
     if (code == CHV_N_NOSAVE) { return "The chat could not be saved."; }
     if (code == CHV_N_CALLS_OFF) { return "Calls are off on this device."; }
+    if (code == CHV_N_UNVERIFIED) { return fv_trust_hint(FV_T_UNVERIFIED); }
     return "";
 }
 
-/// The line under the card's buttons.
-pub fn chv_card_hint(online: bool) -> str {
+/// The line under the card's buttons: what trust means while the key is not verified or did not match, else what the
+/// buttons do.
+pub fn chv_card_hint(online: bool, trust: u32) -> str {
+    if (trust != FV_T_VERIFIED) { return fv_trust_hint(trust); }
     if (online) { return "MESSAGE opens the chat. CALL and VIDEO ring the friend now."; }
     return "Calls wait until the friend is online. A message is kept and sent when they are.";
 }
@@ -696,6 +790,17 @@ pub fn chv_card_word(b: u32) -> str {
 pub fn chv_av_cx(l: f64) -> f64 { return l + QP_PAD + CHV_AV_R; }
 pub fn chv_nick_x(l: f64) -> f64 { return l + QP_PAD + 2.0 * CHV_AV_R + 12.0; }
 
+/// The trust mark on the key's line of the card: CHV_TR_GAP after a key fpw wide, held inside the panel's text width
+/// (the key is then cut CHV_TR_GAP before it). The line is the key's, below the nickname, so no name moves it.
+pub const CHV_TR_GAP : f64 = 6.0;
+pub fn chv_trust_x(l: f64, w: f64, fpw: f64, mw: f64) -> f64 {
+    const right : f64 = l + w - QP_PAD;
+    var x : f64 = chv_nick_x(l) + fpw + CHV_TR_GAP;
+    if (x + mw > right) { x = right - mw; }
+    if (x < chv_nick_x(l)) { x = chv_nick_x(l); }
+    return x;
+}
+
 pub fn chv_card_hit(x: f64, y: f64, l: f64, w: f64, t: f64) -> u32 {
     if (fv_in(x, y, chv_back_x(l), t + CHV_BACK_Y, CHV_BACK_W, CHV_CHIP_H)) { return CHV_H_BACK; }
     var b : u32 = 0;
@@ -941,6 +1046,7 @@ test chv_the_region_keeps_its_parts_apart_and_fits {
     assert CHV_UNR + CHV_UNR_MAX * CHV_UNR_ROW <= CHV_TYPED;
     assert CHV_TYPED + CH_MSG_MAX <= CHV_ITEMS;
     assert CHV_ITEMS + CHV_ITEMS_MAX * CHV_ITEM == CHV_END and CHV_END <= CHV_CAP;
+    assert CHV_TR == CHV_END and chv_tr_at(CHV_TR_MAX) == CHV_TR_END and CHV_TR_END <= CHV_CAP;
     assert 16 + CHV_LINE_BYTES <= CHV_ITEM;
     assert CHV_LINES_MAX == @as(usize, CL_KEEP);
 }
@@ -1376,7 +1482,80 @@ test chv_the_card_opens_from_a_row_message_opens_the_chat_back_goes_back {
     assert v[CHV_NICKLEN] == 32 and v[CHV_ONLINE] == 1 and fv_get32(v[0..8192], CHV_AGO) == 5;
     var o : [128]u8 = undefined;
     assert fv_eq(o[0..128], put_bytes(o[0..128], 0, chv_note_text(CHV_N_LONG)), "A message is at most 2000 bytes.");
-    assert chv_note_text(CHV_N_NONE).len == 0 and chv_card_hint(true).len > 0 and chv_card_hint(false).len > 0;
+    assert chv_note_text(CHV_N_NONE).len == 0 and chv_card_hint(true, FV_T_VERIFIED).len > 0 and chv_card_hint(false, FV_T_VERIFIED).len > 0;
+}
+
+test chv_the_card_says_whose_key_is_verified_and_message_waits_for_it {
+    var v : [8192]u8 = undefined;
+    fv_blank(v[0..8192]);
+    var a : [10]u8 = undefined;
+    var b : [10]u8 = undefined;
+    t_fp(10, a[0..10]);
+    t_fp(50, b[0..10]);
+    var o : [128]u8 = undefined;
+    // a new friend: not verified; the hint is the message session's own refusal line; MESSAGE says it and opens nothing
+    assert chv_trust(v[0..8192], a[0..10]) == FV_T_UNVERIFIED;
+    assert fv_eq(o[0..128], put_bytes(o[0..128], 0, chv_card_hint(true, FV_T_UNVERIFIED)), "Not verified yet: call once and compare the code.");
+    assert chv_message_ok(FV_T_UNVERIFIED) == false and chv_message_note(FV_T_UNVERIFIED) == CHV_N_UNVERIFIED;
+    assert fv_eq(o[0..128], put_bytes(o[0..128], 0, chv_note_text(chv_message_note(FV_T_UNVERIFIED))), "Not verified yet: call once and compare the code.");
+    // a call with a compared code stored a's key: the card reads verified without a restart, MESSAGE opens
+    assert chv_tr_step(v[0..8192], a[0..10], true, false, false);
+    assert chv_trust(v[0..8192], a[0..10]) == FV_T_VERIFIED and chv_trust(v[0..8192], b[0..10]) == FV_T_UNVERIFIED;
+    assert chv_message_ok(FV_T_VERIFIED) and chv_message_note(FV_T_VERIFIED) == CHV_N_NONE;
+    assert fv_eq(o[0..128], put_bytes(o[0..128], 0, chv_card_hint(true, FV_T_VERIFIED)), "MESSAGE opens the chat. CALL and VIDEO ring the friend now.");
+    // the same verdict again changes nothing (no redraw)
+    assert chv_tr_step(v[0..8192], a[0..10], true, false, false) == false;
+    // another key offered for a: key mismatch with its warning; MESSAGE stays open (the stored key still decides)
+    assert chv_tr_step(v[0..8192], a[0..10], false, false, true);
+    assert chv_trust(v[0..8192], a[0..10]) == FV_T_MISMATCH and chv_message_ok(FV_T_MISMATCH);
+    assert fv_eq(o[0..128], put_bytes(o[0..128], 0, chv_card_hint(false, FV_T_MISMATCH)), "Key mismatch: the last call offered another key than the stored one and was refused.");
+    // the stored key proven again: verified
+    assert chv_tr_step(v[0..8192], a[0..10], false, true, false);
+    assert chv_trust(v[0..8192], a[0..10]) == FV_T_VERIFIED;
+    // a removed friend's entry is freed; a full table refuses a new friend (it reads not verified), keeps the others
+    assert chv_tr_set(v[0..8192], a[0..10], 0) and chv_tr_get(v[0..8192], a[0..10]) == 0;
+    var k : u8 = 0;
+    while (k < 32) {
+        var f : [10]u8 = undefined;
+        t_fp(100 + k, f[0..10]);
+        assert chv_tr_set(v[0..8192], f[0..10], FV_TB_PIN);
+        k = k + 1;
+    }
+    assert chv_tr_set(v[0..8192], b[0..10], FV_TB_PIN) == false and chv_trust(v[0..8192], b[0..10]) == FV_T_UNVERIFIED;
+    // the trust table and the unread table are apart: unread counts do not touch trust
+    var f0 : [10]u8 = undefined;
+    t_fp(100, f0[0..10]);
+    assert chv_unr_set(v[0..8192], f0[0..10], 9) and chv_trust(v[0..8192], f0[0..10]) == FV_T_VERIFIED;
+}
+
+test chv_the_trust_mark_stands_beside_the_key_and_a_long_nickname_does_not_move_it {
+    const l : f64 = 660.0;
+    const w : f64 = 300.0;
+    const right : f64 = l + w - QP_PAD;
+    var o : [32]u8 = undefined;
+    // a short key: the mark follows it by the gap
+    assert chv_trust_x(l, w, 60.0, 40.0) == chv_nick_x(l) + 60.0 + CHV_TR_GAP;
+    // a key too wide: the mark is held at the panel's right edge, never past it, never left of the key's start
+    assert chv_trust_x(l, w, 400.0, 40.0) + 40.0 == right;
+    assert chv_trust_x(l, w, 400.0, 900.0) == chv_nick_x(l);
+    var mw : f64 = 0.0;
+    var t : u32 = FV_T_UNVERIFIED;
+    while (t <= FV_T_MISMATCH) {
+        const n : usize = fv_trust_word_put(o[0..32], t);
+        mw = chv_text_w(o[0..32], n, 9.0);
+        assert chv_trust_x(l, w, 90.0, mw) + mw <= right;
+        t = t + 1;
+    }
+    // the nickname is its own line above: a 36-byte name is cut at 32 and leaves the trust table alone
+    var a : [10]u8 = undefined;
+    t_fp(10, a[0..10]);
+    var v : [8192]u8 = undefined;
+    fv_blank(v[0..8192]);
+    assert chv_tr_set(v[0..8192], a[0..10], FV_TB_PIN | FV_TB_BAD);
+    chv_open_card(v[0..8192], a[0..10]);
+    chv_friend(v[0..8192], "abcdefghijklmnopqrstuvwxyz0123456789", 36, true, 5);
+    assert v[CHV_NICKLEN] == 32 and chv_trust(v[0..8192], a[0..10]) == FV_T_MISMATCH;
+    assert CHV_NICK_BASE < CHV_FP_BASE;
 }
 
 test chv_the_chat_port_is_the_call_port_plus_one {

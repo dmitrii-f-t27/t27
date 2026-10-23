@@ -681,6 +681,39 @@ use t27os::peer_identity::ft_fp_at;
 use t27os::peer_identity::ft_find;
 use t27os::peer_identity::FT_LEN;
 use t27os::peer_identity::FT_MAX;
+use t27os::peer_identity::FK_LEN;
+use t27os::peer_identity::fk_find;
+use t27os::peer_identity::fk_pin;
+use t27os::peer_identity::ft_init;
+use t27os::peer_identity::ft_add;
+use t27os::peer_identity::ft_remove;
+use t27os::peer_identity::PIN_NEW;
+use t27os::peer_identity::FA_OK;
+use t27os::peer_identity_host::ih_friends_keys;
+use t27os::call_session::cs_id_state;
+use t27os::call_session::CS_ID_VERIFIED;
+use t27os::call_session::CS_ID_REFUSED;
+use t27os::call_session::CS_ID_STORED;
+use t27os::chat_view::CHV_TR;
+use t27os::chat_view::CHV_TR_END;
+use t27os::chat_view::CHV_TR_MAX;
+use t27os::chat_view::CHV_N_UNVERIFIED;
+use t27os::chat_view::CHV_N_NONE;
+use t27os::chat_view::CHV_TR_GAP;
+use t27os::chat_view::chv_tr_at;
+use t27os::chat_view::chv_tr_get;
+use t27os::chat_view::chv_tr_set;
+use t27os::chat_view::chv_tr_step;
+use t27os::chat_view::chv_trust;
+use t27os::chat_view::chv_trust_x;
+use t27os::chat_view::chv_message_ok;
+use t27os::chat_view::chv_message_note;
+use t27os::friends_view::fv_trust_word_put;
+use t27os::friends_view::FV_T_UNVERIFIED;
+use t27os::friends_view::FV_T_VERIFIED;
+use t27os::friends_view::FV_T_MISMATCH;
+use t27os::friends_view::FV_TB_PIN;
+use t27os::friends_view::FV_TB_BAD;
 use t27os::friends_view::fv_row_addr;
 use t27os::friends_view::FR_AGO;
 use t27os::friends_view::FR_IP;
@@ -10212,7 +10245,7 @@ fn draw_cl_field(c: u64, kit: [48]u64, fx: f64, fy: f64, fw: f64, typing: bool, 
 
 /// The IDLE view of the CALL panel: this device's invite, the friends (nickname, short fingerprint, online or not and
 /// when last met), the field that adds a friend by invite, and the debug call by address.
-fn draw_cl_front(c: u64, kit: [48]u64, sh: f64, mx: f64, my: f64, l: f64, t: f64, cl: []const u8) -> void {
+fn draw_cl_front(c: u64, kit: [48]u64, sh: f64, mx: f64, my: f64, l: f64, t: f64, cl: []const u8, ch: []const u8) -> void {
     const x : f64 = l + QP_PAD;
     const right : f64 = l + QP_W - QP_PAD;
     const shown : u32 = @as(u32, cl[FV_SHOWN]);
@@ -10267,7 +10300,7 @@ fn draw_cl_front(c: u64, kit: [48]u64, sh: f64, mx: f64, my: f64, l: f64, t: f64
             cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
             draw_bytes(c, kit, "CALL", 4, right - 28.0, ry + 13.0, 9.5, WEIGHT_SEMIBOLD, false);
         }
-        n = fv_row_line(cl, i, line[0..96]);
+        n = fv_row_line(cl, i, chv_trust(ch, cl[r + FR_FP .. r + FR_FP + 10]), line[0..96]);
         cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
         draw_fit(c, kit, line[0..96], n, x + 16.0, ry + 25.0, 9.0, 0.0, true, right);
         i = i + 1;
@@ -10353,7 +10386,7 @@ fn draw_cl_video(c: u64, kit: [48]u64, x: f64, right: f64, y: f64, sh: f64, cl: 
     cg_fill_rect(c, x + w - HAIR, top, HAIR, h);
 }
 
-fn draw_call_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, cl: []const u8) -> void {
+fn draw_call_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, cl: []const u8, ch: []const u8) -> void {
     const l : f64 = qp_left(sw);
     const t : f64 = WS_TOP;
     const x : f64 = l + QP_PAD;
@@ -10377,7 +10410,7 @@ fn draw_call_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, cl:
         draw_fit(c, kit, line[0..96], n, x, t + CV_FPME_Y, 9.5, 0.0, true, right);
     }
     if (view == CV_IDLE) {
-        draw_cl_front(c, kit, sh, mx, my, l, t, cl);
+        draw_cl_front(c, kit, sh, mx, my, l, t, cl, ch);
         return;
     }
     const hit : u32 = cv_hit(mx, my, l, QP_W, t, view);
@@ -10887,7 +10920,7 @@ fn draw_account_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, 
             draw_ac_chip(c, kit, ac_fcopy_x(l, QP_W), ry + 2.0, AC_ZONE_COPY_W, "COPY", hit == AC_H_FCOPY + k);
             draw_ac_chip(c, kit, ac_del_x(l, QP_W), ry + 2.0, AC_ZONE_DEL_W, "x", hit == AC_H_DEL + k);
         }
-        n = ac_row_line(cl, i, line[0..96]);
+        n = ac_row_line(cl, i, chv_trust(ch, cl[r + FR_FP .. r + FR_FP + 10]), line[0..96]);
         cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
         draw_fit(c, kit, line[0..96], n, x + 16.0, ry + 23.0, 9.0, 0.0, true, right);
         i = i + 1;
@@ -10941,6 +10974,9 @@ pub const CHW_SAVE_AT : usize = 1;
 pub const CHW_LAYOUT_AT : usize = 2;
 pub const CHW_HH : usize = 3;
 pub const CHW_AID : usize = 4;
+/// The trust table: the friend count it was read for (+ 1, 0 = never read) and when the friends file was last read.
+pub const CHW_TR_N : usize = 5;
+pub const CHW_TR_AT : usize = 6;
 pub const CHW_N : usize = 8;
 /// The history is laid out again at least this often ("today" turns into a date after midnight).
 pub const CH_RELAYOUT_MS : u64 = 30000;
@@ -10989,6 +11025,7 @@ pub fn ch_boot(cl: []u8, v: []u8, s: []u8, log: []u8, buf: []u8, w: []u64) -> vo
     const en : usize = cl_env("T27OS_CHAT", e[0..8]);
     if (en == 4 and e[0] == 99 and e[1] == 97 and e[2] == 114 and e[3] == 100) { w[CHW_AID] = 1; }
     if (en == 4 and e[0] == 99 and e[1] == 104 and e[2] == 97 and e[3] == 116) { w[CHW_AID] = 2; }
+    ch_trust_load(cl, v, w);
     if (cl[CL_UP] == 0) { return; }
     const port : u64 = chv_chat_port(cl_me_port(cl));
     if (port == 0) { return; }
@@ -11039,6 +11076,59 @@ pub fn ch_open_log(cl: []const u8, v: []u8, s: []u8, m: []u8, log: []u8, buf: []
     chv_unr_set(v, fp, cl_unread(log));
     v[CHV_DIRTY] = 1;
     return true;
+}
+
+/// The trust table from the friends file's key slots: a friend of the list with a stored key is pinned (a refusal seen
+/// in this run is kept), one with none is not verified; a friend no longer in the list loses its entry.
+pub fn ch_trust_from_keys(cl: []const u8, v: []u8, keys: []const u8) -> void {
+    var k : usize = 0;
+    while (k < CHV_TR_MAX) {
+        const a : usize = chv_tr_at(k);
+        if (v[a + 10] != 0 and ft_find(cl[FE_FT .. FE_FT + FT_LEN], v[a .. a + 10]) == FT_MAX) { v[a + 10] = 0; }
+        k = k + 1;
+    }
+    const n : usize = @as(usize, ft_count(cl[FE_FT .. FE_FT + FT_LEN]));
+    var i : usize = 0;
+    while (i < n and i < FT_MAX) {
+        var fp : [10]u8 = undefined;
+        if (ft_fp_at(cl[FE_FT .. FE_FT + FT_LEN], i, fp[0..10])) {
+            const was : u32 = chv_tr_get(v, fp[0..10]);
+            if (fk_find(keys[0..FK_LEN], fp[0..10]) != FT_MAX) {
+                chv_tr_set(v, fp[0..10], FV_TB_PIN | (was & FV_TB_BAD));
+            } else {
+                chv_tr_set(v, fp[0..10], 0);
+            }
+        }
+        i = i + 1;
+    }
+}
+
+/// Read the friends file's keys (public keys only; none is printed) into the trust table.
+pub fn ch_trust_load(cl: []const u8, v: []u8, w: []u64) -> void {
+    var keys : [2400]u8 = undefined;
+    ih_friends_keys(keys[0..FK_LEN]);
+    ch_trust_from_keys(cl, v, keys[0..FK_LEN]);
+    w[CHW_TR_N] = @as(u64, ft_count(cl[FE_FT .. FE_FT + FT_LEN])) + 1;
+    w[CHW_TR_AT] = ckh_ms();
+}
+
+/// The verdict of one session (a call or the message session) on its peer's trust: a refused key is a mismatch, a
+/// proven stored key clears it, a key stored after a matched code is read back from the friends file (at most every
+/// CH_TR_READ_MS while the file still says otherwise).
+pub const CH_TR_READ_MS : u64 = 2000;
+
+pub fn ch_trust_session(cl: []const u8, v: []u8, w: []u64, s: []const u8, now: u64) -> void {
+    var fp : [10]u8 = undefined;
+    if (cs_peer(s, fp[0..10]) == 0) { return; }
+    if (ft_find(cl[FE_FT .. FE_FT + FT_LEN], fp[0..10]) == FT_MAX) { return; }
+    const id : u32 = cs_id_state(s);
+    if (id == CS_ID_STORED) {
+        if ((chv_tr_get(v, fp[0..10]) & FV_TB_PIN) == 0 and now >= w[CHW_TR_AT] + CH_TR_READ_MS) { ch_trust_load(cl, v, w); }
+        chv_tr_step(v, fp[0..10], false, (chv_tr_get(v, fp[0..10]) & FV_TB_PIN) != 0, false);
+        return;
+    }
+    if (id == CS_ID_VERIFIED) { chv_tr_step(v, fp[0..10], false, true, false); }
+    if (id == CS_ID_REFUSED) { chv_tr_step(v, fp[0..10], false, false, true); }
 }
 
 /// A friend's row in the cabinet: that friend's card.
@@ -11150,7 +11240,13 @@ pub fn ch_do(cl: []u8, v: []u8, s: []u8, m: []u8, log: []u8, buf: []u8, w: []u64
         chv_back(v);
         cl[CL_NOTE] = 0;
     } else if (hit == CHV_H_MESSAGE) {
-        ch_message(cl, v, s, m, log, buf, w);
+        // a friend who is not verified: the reason, not a session the friend's side would refuse (CS_R_UNVERIFIED)
+        const note : u32 = chv_message_note(chv_trust(v, v[CHV_FP .. CHV_FP + 10]));
+        if (note != CHV_N_NONE) {
+            v[CHV_NOTE] = @as(u8, @intCast(note));
+        } else {
+            ch_message(cl, v, s, m, log, buf, w);
+        }
     } else if (hit == CHV_H_CALL or hit == CHV_H_VIDEO) {
         ch_call(cl, v, s, log, buf, w, cs, clw, hit == CHV_H_VIDEO);
     } else if (hit == CHV_H_FIELD or hit == CHV_H_HIST) {
@@ -11176,6 +11272,11 @@ pub fn ch_tick(cl: []u8, v: []u8, s: []u8, m: []u8, log: []u8, asm: []u8, buf: [
         if (w[CHW_AID] == 2) { ch_message(cl, v, s, m, log, buf, w); }
         w[CHW_AID] = 0;
     }
+    // trust: the list changed (a friend added or removed) -> read the keys again; each session's verdict on its peer
+    if (w[CHW_TR_N] != @as(u64, ft_count(cl[FE_FT .. FE_FT + FT_LEN])) + 1) { ch_trust_load(cl, v, w); }
+    const tnow : u64 = ckh_ms();
+    ch_trust_session(cl, v, w, cs, tnow);
+    ch_trust_session(cl, v, w, s, tnow);
     if (chv_mode(v) != CHV_M_OFF) {
         const row : usize = fv_find_fp(cl, v[CHV_FP .. CHV_FP + 10]);
         if (row >= FV_ROWS_SNAP) {
@@ -11274,6 +11375,18 @@ fn draw_ch_note(c: u64, kit: [48]u64, cl: []const u8, v: []const u8, x: f64, rig
     }
 }
 
+/// A card button that cannot be used now: no hover, its word muted (a click still says why, in the note line).
+fn draw_ch_btn_off(c: u64, kit: [48]u64, bx: f64, by: f64, bw: f64, word: []const u8) -> void {
+    draw_plate(c, bx - 2.0, by - 2.0, bw + 4.0, CV_BTN_H + 4.0);
+    round_rect(c, bx, by, bw, CV_BTN_H, 5.0);
+    cg_line_width(c, 1.0);
+    cg_stroke_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LINE_WHITE));
+    cg_stroke_path(c);
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+    const lw : f64 = bytes_w(kit, word, word.len, 9.5, WEIGHT_SEMIBOLD, false);
+    draw_bytes(c, kit, word, word.len, bx + 0.5 * (bw - lw), by + 17.0, 9.5, WEIGHT_SEMIBOLD, false);
+}
+
 fn draw_ch_card(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, cl: []const u8, v: []const u8) -> void {
     const l : f64 = qp_left(sw);
     const t : f64 = WS_TOP;
@@ -11297,9 +11410,17 @@ fn draw_ch_card(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, cl: []
         cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
         draw_bytes(c, kit, "(no name yet)", 13, chv_nick_x(l), t + CHV_NICK_BASE, 13.0, 0.0, false);
     }
+    // the key and beside it whether it is verified (a check mark), not verified, or did not match last time
+    const trust : u32 = chv_trust(v, v[CHV_FP .. CHV_FP + 10]);
+    var tw : [32]u8 = undefined;
+    const twn : usize = fv_trust_word_put(tw[0..32], trust);
+    const twd : f64 = bytes_w(kit, tw[0..32], twn, 9.0, WEIGHT_SEMIBOLD, false);
     var n : usize = ac_fp_line(v[CHV_FP .. CHV_FP + 10], line[0..96]);
+    const tx : f64 = chv_trust_x(l, QP_W, bytes_w(kit, line[0..96], n, 9.0, 0.0, true), twd);
     cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
-    draw_fit(c, kit, line[0..96], n, chv_nick_x(l), t + CHV_FP_BASE, 9.0, 0.0, true, right);
+    draw_fit(c, kit, line[0..96], n, chv_nick_x(l), t + CHV_FP_BASE, 9.0, 0.0, true, tx - CHV_TR_GAP);
+    if (trust == FV_T_UNVERIFIED) { cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE)); } else { cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE)); }
+    draw_fit(c, kit, tw[0..32], twn, tx, t + CHV_FP_BASE, 9.0, WEIGHT_SEMIBOLD, false, right);
     const online : bool = v[CHV_ONLINE] != 0;
     draw_cl_dot(c, kit, x, t + CHV_STATE_BASE - 8.0, online);
     n = chv_status_put(line[0..96], online, fv_get32(v, CHV_AGO), chv_unr_get(v, v[CHV_FP .. CHV_FP + 10]));
@@ -11308,11 +11429,15 @@ fn draw_ch_card(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, cl: []
     // MESSAGE, CALL, VIDEO
     var b : u32 = 0;
     while (b < 3) {
-        draw_cl_btn(c, kit, chv_card_btn_x(l, QP_W, b), t + CHV_CARD_BTN_Y, chv_card_btn_w(QP_W), chv_card_word(b), hit == CHV_H_MESSAGE + b);
+        if (b == 0 and chv_message_ok(trust) == false) {
+            draw_ch_btn_off(c, kit, chv_card_btn_x(l, QP_W, b), t + CHV_CARD_BTN_Y, chv_card_btn_w(QP_W), chv_card_word(b));
+        } else {
+            draw_cl_btn(c, kit, chv_card_btn_x(l, QP_W, b), t + CHV_CARD_BTN_Y, chv_card_btn_w(QP_W), chv_card_word(b), hit == CHV_H_MESSAGE + b);
+        }
         b = b + 1;
     }
-    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
-    draw_cl_wrap(c, kit, chv_card_hint(online), x, right, t + CHV_HINT_BASE, 9.5, 2, sh);
+    if (trust == FV_T_MISMATCH) { cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE)); } else { cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE)); }
+    draw_cl_wrap(c, kit, chv_card_hint(online, trust), x, right, t + CHV_HINT_BASE, 9.5, 2, sh);
     draw_ch_note(c, kit, cl, v, x, right, t + CHV_CARD_NOTE_BASE, sh);
 }
 
@@ -11484,7 +11609,7 @@ fn draw(c: u64, kit: [48]u64, frame: u32, state: u32, hov: u32, ma: f64, shown: 
                 draw_account_panel(c, kit, sw, sh, mx, my, tb[TBO_CL .. TBO_CL + CL_CAP], tb[TBO_PF .. TBO_PF + PF_CAP], tg[TPG_PF_IMG], tb[TBO_CH .. TBO_CH + CHV_CAP]);
             }
         } else {
-            draw_call_panel(c, kit, sw, sh, mx, my, tb[TBO_CL .. TBO_CL + CL_CAP]);
+            draw_call_panel(c, kit, sw, sh, mx, my, tb[TBO_CL .. TBO_CL + CL_CAP], tb[TBO_CH .. TBO_CH + CHV_CAP]);
         }
     }
     if (ma > 0.0) {
@@ -15028,6 +15153,11 @@ pub fn main() -> void {
             fk = fg_mix(fk, @as(u64, tbv[TBO_CH + fkc]));
             fkc = fkc + 1;
         }
+        fkc = CHV_TR;
+        while (fkc < CHV_TR_END) {
+            fk = fg_mix(fk, @as(u64, tbv[TBO_CH + fkc]));
+            fkc = fkc + 1;
+        }
         fkc = CHV_ITEMS;
         const fke : usize = CHV_ITEMS + chv_nitems(tbv[TBO_CH .. TBO_CH + CHV_CAP]) * CHV_ITEM;
         while (fkc < fke) {
@@ -16911,4 +17041,60 @@ test ch_a_row_opens_the_card_and_the_hit_follows_the_mode {
     assert ch_friend_addr(cl[0..8192], cl[r + FR_FP .. r + FR_FP + 10]) == 3232235786 * 65536 + 47728;
     cl[r + FR_ONLINE] = 0;
     assert ch_friend_addr(cl[0..8192], cl[r + FR_FP .. r + FR_FP + 10]) == 0;
+}
+
+test ch_trust_turns_verified_once_the_key_is_stored_and_follows_the_list {
+    var cl : [8192]u8 = undefined;
+    var v : [8192]u8 = undefined;
+    var keys : [2400]u8 = undefined;
+    var i : usize = 0;
+    while (i < 8192) {
+        cl[i] = 0;
+        v[i] = 0;
+        i = i + 1;
+    }
+    i = 0;
+    while (i < FK_LEN) {
+        keys[i] = 0;
+        i = i + 1;
+    }
+    var own : [10]u8 = undefined;
+    var a : [10]u8 = undefined;
+    var b : [10]u8 = undefined;
+    i = 0;
+    while (i < 10) {
+        own[i] = @as(u8, @intCast(200 + i));
+        a[i] = @as(u8, @intCast(10 + i));
+        b[i] = @as(u8, @intCast(60 + i));
+        i = i + 1;
+    }
+    var inv : [25]u8 = undefined;
+    assert ft_init(cl[FE_FT .. FE_FT + FT_LEN]);
+    assert invite_make(a[0..10], inv[0..25]) == 25 and ft_add(cl[FE_FT .. FE_FT + FT_LEN], inv[0..25], own[0..10]) == FA_OK;
+    assert invite_make(b[0..10], inv[0..25]) == 25 and ft_add(cl[FE_FT .. FE_FT + FT_LEN], inv[0..25], own[0..10]) == FA_OK;
+    // a v1 file or no key yet: both friends read not verified, MESSAGE says why
+    ch_trust_from_keys(cl[0..8192], v[0..8192], keys[0..FK_LEN]);
+    assert chv_trust(v[0..8192], a[0..10]) == FV_T_UNVERIFIED and chv_trust(v[0..8192], b[0..10]) == FV_T_UNVERIFIED;
+    assert chv_message_note(chv_trust(v[0..8192], a[0..10])) == CHV_N_UNVERIFIED;
+    // a matched call stored a's key in the friends table: read back, a is verified, b is still not
+    var pk : [65]u8 = undefined;
+    pk[0] = 4;
+    i = 1;
+    while (i < 65) {
+        pk[i] = @as(u8, @intCast(i));
+        i = i + 1;
+    }
+    assert fk_pin(cl[FE_FT .. FE_FT + FT_LEN], keys[0..FK_LEN], a[0..10], pk[0..65]) == PIN_NEW;
+    ch_trust_from_keys(cl[0..8192], v[0..8192], keys[0..FK_LEN]);
+    assert chv_trust(v[0..8192], a[0..10]) == FV_T_VERIFIED and chv_trust(v[0..8192], b[0..10]) == FV_T_UNVERIFIED;
+    assert chv_message_note(chv_trust(v[0..8192], a[0..10])) == CHV_N_NONE;
+    // a refusal seen in this run survives a reread of the file; b's row and a's row each show their own mark
+    assert chv_tr_step(v[0..8192], a[0..10], false, false, true);
+    ch_trust_from_keys(cl[0..8192], v[0..8192], keys[0..FK_LEN]);
+    assert chv_trust(v[0..8192], a[0..10]) == FV_T_MISMATCH;
+    // a friend removed from the list loses its entry
+    assert ft_remove(cl[FE_FT .. FE_FT + FT_LEN], a[0..10]);
+    ch_trust_from_keys(cl[0..8192], v[0..8192], keys[0..FK_LEN]);
+    assert chv_tr_get(v[0..8192], a[0..10]) == 0 and chv_trust(v[0..8192], b[0..10]) == FV_T_UNVERIFIED;
+    assert CHW_TR_AT < CHW_N and CHW_TR_N != CHW_AID and FV_T_VERIFIED != FV_T_MISMATCH;
 }

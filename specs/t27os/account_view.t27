@@ -56,6 +56,10 @@ use t27os::friends_view::fv_eq;
 use t27os::friends_view::fv_blank;
 use t27os::friends_view::fv_short_fp;
 use t27os::friends_view::fv_ago_text;
+use t27os::friends_view::fv_trust_tag_put;
+use t27os::friends_view::FV_T_UNVERIFIED;
+use t27os::friends_view::FV_T_VERIFIED;
+use t27os::friends_view::FV_T_MISMATCH;
 
 // ---------------------------------------------------------------- 1. the state in the CALL region (below 256, folded)
 
@@ -250,11 +254,13 @@ pub fn ac_fp_line(fp: []const u8, out: []u8) -> usize {
     return n + k;
 }
 
-/// The second line of a friend's row: "abcd-1234  online", "abcd-1234  offline, seen 10 min ago" or "abcd-1234  offline,
-/// never seen" (the short key of the friend, and when the friend was last met).
-pub fn ac_row_line(cl: []const u8, i: usize, out: []u8) -> usize {
+/// The second line of a friend's row: "abcd-1234 <mark>  online", "abcd-1234 <mark>  offline, seen 10 min ago" or
+/// "abcd-1234 <mark>  offline, never seen" (the short key of the friend, whether that key is verified -- a check mark,
+/// "not verified" or "key mismatch!", friends_view fv_trust_tag_put -- and when the friend was last met).
+pub fn ac_row_line(cl: []const u8, i: usize, trust: u32, out: []u8) -> usize {
     const r : usize = fv_row_at(i);
     var n : usize = fv_short_fp(cl[r + FR_FP .. r + FR_FP + 10], out);
+    n = fv_trust_tag_put(out, n, trust);
     if (cl[r + FR_ONLINE] != 0) { return put_bytes(out, n, "  online"); }
     n = put_bytes(out, n, "  offline, ");
     const ago : u64 = fv_get32(cl, r + FR_AGO);
@@ -781,15 +787,44 @@ test ac_a_row_line_names_the_short_key_and_when_the_friend_was_met {
         k = k + 1;
     }
     cl[r + FR_ONLINE] = 1;
-    assert fv_eq(o[0..96], ac_row_line(cl[0..1024], 0, o[0..96]), "1122-3344  online");
+    assert fv_eq(o[0..96], ac_row_line(cl[0..1024], 0, FV_T_UNVERIFIED, o[0..96]), "1122-3344 not verified  online");
     cl[r + FR_ONLINE] = 0;
     cl[r + FR_AGO] = 130;
-    assert fv_eq(o[0..96], ac_row_line(cl[0..1024], 0, o[0..96]), "1122-3344  offline, seen 2 min ago");
+    assert fv_eq(o[0..96], ac_row_line(cl[0..1024], 0, FV_T_MISMATCH, o[0..96]), "1122-3344 key mismatch!  offline, seen 2 min ago");
     cl[r + FR_AGO] = 255;
     cl[r + FR_AGO + 1] = 255;
     cl[r + FR_AGO + 2] = 255;
     cl[r + FR_AGO + 3] = 255;
-    assert fv_eq(o[0..96], ac_row_line(cl[0..1024], 0, o[0..96]), "1122-3344  offline, never seen");
+    // verified: a space and a check mark right after the key, then the state
+    const n : usize = ac_row_line(cl[0..1024], 0, FV_T_VERIFIED, o[0..96]);
+    assert o[9] == 32 and o[10] == 226 and o[11] == 156 and o[12] == 147;
+    assert fv_eq(o[13..96], n - 13, "  offline, never seen");
+}
+
+test ac_a_long_nickname_does_not_move_the_trust_mark_off_its_key {
+    var cl : [1024]u8 = undefined;
+    fv_blank(cl[0..1024]);
+    var o : [96]u8 = undefined;
+    const r : usize = fv_row_at(0);
+    // the longest nickname a row holds: the mark stands on the key's line, right after the key, whatever the name
+    var k : usize = 0;
+    while (k < 24) {
+        cl[r + 1 + k] = 119;
+        k = k + 1;
+    }
+    cl[r + FR_NICKLEN] = 24;
+    cl[r + FR_ONLINE] = 1;
+    var t : u32 = FV_T_UNVERIFIED;
+    while (t <= FV_T_MISMATCH) {
+        const n : usize = ac_row_line(cl[0..1024], 0, t, o[0..96]);
+        assert n < 96 and o[4] == 45 and o[9] == 32;
+        var w : usize = 0;
+        while (w < n) {
+            assert o[w] != 119;
+            w = w + 1;
+        }
+        t = t + 1;
+    }
 }
 
 test ac_a_pasted_message_with_a_key_inside_pastes_as_the_key {

@@ -357,6 +357,32 @@ pub fn ih_pin_get(fp: []const u8, out: []u8) -> bool {
     return fk_get(keys[0..FK_LEN], fp[0..FP_BYTES], out);
 }
 
+/// The key slots of the friends file (FK_LEN bytes of fingerprints and public keys, no private key): true when the file
+/// checks. A missing, v1 or damaged file gives none (every slot zero), so every friend reads not verified.
+pub fn ih_friends_keys(keys: []u8) -> bool {
+    if (keys.len < FK_LEN) { return false; }
+    var i : usize = 0;
+    while (i < FK_LEN) {
+        keys[i] = 0;
+        i = i + 1;
+    }
+    var dir : [IH_PATH_MAX]u8 = undefined;
+    var path : [IH_PATH_MAX]u8 = undefined;
+    var tmp : [IH_PATH_MAX]u8 = undefined;
+    if (!ih_friends_paths(dir[0..IH_PATH_MAX], path[0..IH_PATH_MAX], tmp[0..IH_PATH_MAX])) { return false; }
+    var t : [1108]u8 = undefined;
+    var ex : [1]u8 = undefined;
+    if (ih_friends_read(path[0..IH_PATH_MAX], t[0..FT_LEN], keys[0..FK_LEN], ex[0..1]) != FT_OK) {
+        i = 0;
+        while (i < FK_LEN) {
+            keys[i] = 0;
+            i = i + 1;
+        }
+        return false;
+    }
+    return true;
+}
+
 /// Store a friend's proven key: it must hash to fp (else PIN_BAD), fp must be in the friends file (else
 /// PIN_NOT_FRIEND), and a friend keeps its first key (PIN_CONFLICT). The file is written (v2) only on PIN_NEW; a file
 /// that does not check is never written over (PIN_BAD).

@@ -224,11 +224,69 @@ pub fn fv_ago_text(secs: u64, out: []u8) -> usize {
     return put_bytes(out, n, " d ago");
 }
 
-/// The second line of a row: "fp 1234-5678  online, seen just now" or "fp 1234-5678  offline, <why>".
-pub fn fv_row_line(cl: []const u8, i: usize, out: []u8) -> usize {
+// ---------------------------------------------------------------- 3a. trust: is this friend's key stored (owner, 2026-10-22)
+
+/// What the person sees about a friend's key (peer_identity.t27 pid_verdict): not verified (no key stored: the next
+/// call shows the 6-digit code), verified (a key is stored: calls and messages need no code), key mismatch (a key is
+/// stored and the last call or message session offered another key or a bad proof, so it was refused).
+pub const FV_T_UNVERIFIED : u32 = 0;
+pub const FV_T_VERIFIED : u32 = 1;
+pub const FV_T_MISMATCH : u32 = 2;
+
+/// The bits the window keeps per friend: a key is stored in the friends file; the last session was refused for its key.
+pub const FV_TB_PIN : u32 = 1;
+pub const FV_TB_BAD : u32 = 2;
+
+/// A refusal counts only while a key is stored (pid_verdict refuses nobody else).
+pub fn fv_trust_of(bits: u32) -> u32 {
+    if ((bits & FV_TB_PIN) == 0) { return FV_T_UNVERIFIED; }
+    if ((bits & FV_TB_BAD) != 0) { return FV_T_MISMATCH; }
+    return FV_T_VERIFIED;
+}
+
+/// One session's verdict on the bits: a stored or proven key is a pin, a proven key clears a refusal, a refusal sets it.
+pub fn fv_trust_step(bits: u32, stored: bool, proven: bool, refused: bool) -> u32 {
+    var b : u32 = bits;
+    if (stored) { b = b | FV_TB_PIN; }
+    if (proven or stored) { b = b & FV_TB_PIN; }
+    if (refused) { b = b | FV_TB_BAD; }
+    return b;
+}
+
+fn fv_check(out: []u8, at: usize) -> usize {
+    out[at] = 226;
+    out[at + 1] = 156;
+    out[at + 2] = 147;
+    return at + 3;
+}
+
+/// The mark after a friend's short key in a row: " <check mark>", " not verified", " key mismatch!".
+pub fn fv_trust_tag_put(out: []u8, at: usize, trust: u32) -> usize {
+    if (trust == FV_T_VERIFIED) { return fv_check(out, put_bytes(out, at, " ")); }
+    if (trust == FV_T_MISMATCH) { return put_bytes(out, at, " key mismatch!"); }
+    return put_bytes(out, at, " not verified");
+}
+
+/// The mark beside the key on a friend's card: "<check mark> verified", "not verified", "! key mismatch".
+pub fn fv_trust_word_put(out: []u8, trust: u32) -> usize {
+    if (trust == FV_T_VERIFIED) { return put_bytes(out, fv_check(out, 0), " verified"); }
+    if (trust == FV_T_MISMATCH) { return put_bytes(out, 0, "! key mismatch"); }
+    return put_bytes(out, 0, "not verified");
+}
+
+/// The line that says what the trust state means and what to do; the unverified one is the message session's refusal.
+pub fn fv_trust_hint(trust: u32) -> str {
+    if (trust == FV_T_VERIFIED) { return "Verified: the key is stored, calls and messages need no code."; }
+    if (trust == FV_T_MISMATCH) { return "Key mismatch: the last call offered another key than the stored one and was refused."; }
+    return "Not verified yet: call once and compare the code.";
+}
+
+/// The second line of a row: "fp 1234-5678 <mark>  online, seen just now" or "fp 1234-5678 <mark>  offline, <why>".
+pub fn fv_row_line(cl: []const u8, i: usize, trust: u32, out: []u8) -> usize {
     const r : usize = fv_row_at(i);
     var n : usize = put_bytes(out, 0, "fp ");
     n = n + fv_short_fp(cl[r + FR_FP .. r + FR_FP + 10], out[n..out.len]);
+    n = fv_trust_tag_put(out, n, trust);
     if (cl[r + FR_ONLINE] != 0) {
         n = put_bytes(out, n, "  online, seen ");
         n = n + fv_ago_text(fv_get32(cl, r + FR_AGO), out[n..out.len]);
@@ -411,12 +469,14 @@ test fv_a_row_line_says_online_or_offline_and_why {
     }
     cl[r + FR_ONLINE] = 1;
     fv_put32(cl[0..1024], r + FR_AGO, 3);
-    assert fv_eq(o[0..96], fv_row_line(cl[0..1024], 0, o[0..96]), "fp 1122-3344  online, seen 3 s ago");
+    assert fv_eq(o[0..96], fv_row_line(cl[0..1024], 0, FV_T_UNVERIFIED, o[0..96]), "fp 1122-3344 not verified  online, seen 3 s ago");
     cl[r + FR_ONLINE] = 0;
     fv_put32(cl[0..1024], r + FR_AGO, 125);
-    assert fv_eq(o[0..96], fv_row_line(cl[0..1024], 0, o[0..96]), "fp 1122-3344  offline, last seen 2 min ago");
+    assert fv_eq(o[0..96], fv_row_line(cl[0..1024], 0, FV_T_MISMATCH, o[0..96]), "fp 1122-3344 key mismatch!  offline, last seen 2 min ago");
     fv_put32(cl[0..1024], r + FR_AGO, FV_NEVER);
-    assert fv_eq(o[0..96], fv_row_line(cl[0..1024], 0, o[0..96]), "fp 1122-3344  offline, never seen");
+    const vn : usize = fv_row_line(cl[0..1024], 0, FV_T_VERIFIED, o[0..96]);
+    assert vn == 37 and o[12] == 32 and o[13] == 226 and o[14] == 156 and o[15] == 147;
+    assert fv_eq(o[16..96], vn - 16, "  offline, never seen");
     assert fv_reason_text(FV_R_ONLINE).len == 0;
     var q : u32 = 1;
     while (q <= 5) {
@@ -424,6 +484,35 @@ test fv_a_row_line_says_online_or_offline_and_why {
         assert fv_offline_text(fv_offline_note(q)).len > 0;
         q = q + 1;
     }
+}
+
+test fv_trust_reads_as_verified_not_verified_or_key_mismatch {
+    var o : [96]u8 = undefined;
+    // the bits: nothing stored is not verified; a stored key is verified; a refusal with a stored key is a mismatch
+    assert fv_trust_of(0) == FV_T_UNVERIFIED;
+    assert fv_trust_of(FV_TB_PIN) == FV_T_VERIFIED;
+    assert fv_trust_of(FV_TB_PIN | FV_TB_BAD) == FV_T_MISMATCH;
+    assert fv_trust_of(FV_TB_BAD) == FV_T_UNVERIFIED;
+    // not verified -> verified once the key of a matched call is stored; a later refusal is a mismatch, a proof clears it
+    var b : u32 = 0;
+    b = fv_trust_step(b, false, false, false);
+    assert fv_trust_of(b) == FV_T_UNVERIFIED;
+    b = fv_trust_step(b, true, false, false);
+    assert fv_trust_of(b) == FV_T_VERIFIED;
+    b = fv_trust_step(b, false, false, true);
+    assert fv_trust_of(b) == FV_T_MISMATCH;
+    b = fv_trust_step(b, false, true, false);
+    assert fv_trust_of(b) == FV_T_VERIFIED;
+    // a code compared in a call with no key yet (neither stored nor proven) changes nothing
+    assert fv_trust_step(0, false, false, false) == 0;
+    // the card's words and the hints: the unverified one is the message session's own refusal line
+    assert fv_eq(o[0..96], fv_trust_word_put(o[0..96], FV_T_UNVERIFIED), "not verified");
+    assert fv_eq(o[0..96], fv_trust_word_put(o[0..96], FV_T_MISMATCH), "! key mismatch");
+    const n : usize = fv_trust_word_put(o[0..96], FV_T_VERIFIED);
+    assert n == 12 and o[0] == 226 and o[1] == 156 and o[2] == 147 and fv_eq(o[3..96], n - 3, " verified");
+    assert fv_eq(o[0..96], put_bytes(o[0..96], 0, fv_trust_hint(FV_T_UNVERIFIED)), "Not verified yet: call once and compare the code.");
+    assert fv_trust_hint(FV_T_VERIFIED).len > 0 and fv_trust_hint(FV_T_MISMATCH).len > 0;
+    assert fv_eq(o[0..96], put_bytes(o[0..96], 0, fv_trust_hint(FV_T_MISMATCH)), "Key mismatch: the last call offered another key than the stored one and was refused.");
 }
 
 test fv_every_note_has_its_line_and_a_click_on_a_friend_who_is_off_says_why {
