@@ -649,6 +649,27 @@ pub fn ft2_split(f: []const u8, n: usize, t: []u8, keys: []u8) -> u32 {
     return FT_OK;
 }
 
+/// Drop every stored key that does not hash to the fingerprint it is stored under: calc holds, slot by slot (FP_BYTES
+/// each, FT_MAX slots), the fingerprint the host computed from that slot's key (zeros when it could not). A key read
+/// from a file that was changed by hand must not make its friend "verified"; the friend reads not verified (no key)
+/// until a matched code stores the right one. How many were dropped (0 when calc is short: nothing is trusted then
+/// either, every key goes).
+pub fn fk_drop_unhashed(keys: []u8, calc: []const u8) -> u32 {
+    if (keys.len < FK_LEN) { return 0; }
+    var n : u32 = 0;
+    var i : usize = 0;
+    while (i < FT_MAX) {
+        if (fk_used(keys, i)) {
+            if (calc.len < FT_MAX * FP_BYTES or !same_range(keys, i * FK_SLOT, calc, i * FP_BYTES, FP_BYTES)) {
+                zero_fill(keys[i * FK_SLOT .. (i + 1) * FK_SLOT]);
+                n = n + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
 /// Lay out the v2 file from a table that checks and the keys: the key of a fingerprint that is not in the rows is
 /// left out, so is a second key for the same friend. FT2_LEN, or 0 on a bad table or size.
 pub fn ft2_join(t: []const u8, keys: []const u8, out: []u8) -> usize {
@@ -1804,4 +1825,49 @@ test same_range_uses_each_side_s_own_offset {
     assert same_range(a[0..6], 2, c[0..4], 1, 3) == false;
     assert same_range(c[0..4], 0, a[0..6], 2, 3);
     assert same_range(c[0..4], 0, a[0..6], 3, 3) == false;
+}
+
+test a_stored_key_that_does_not_hash_to_its_fingerprint_is_dropped_and_its_friend_is_not_verified {
+    var t : [1108]u8 = undefined;
+    t_two(t[0..1108]);
+    var keys : [2400]u8 = undefined;
+    zero_fill(keys[0..2400]);
+    var ka : [65]u8 = undefined;
+    var kb : [65]u8 = undefined;
+    t_key(5, ka[0..65]);
+    t_key(6, kb[0..65]);
+    var mid : [10]u8 = [50, 51, 52, 53, 54, 55, 56, 57, 58, 59];
+    assert fk_pin(t[0..1108], keys[0..2400], T_FP[0..10], ka[0..65]) == PIN_NEW;
+    assert fk_pin(t[0..1108], keys[0..2400], mid[0..10], kb[0..65]) == PIN_NEW;
+    // the file goes through ft2_join / ft2_split unchanged in format (v2)
+    var f : [3508]u8 = undefined;
+    assert ft2_join(t[0..1108], keys[0..2400], f[0..3508]) == FT2_LEN;
+    var t2 : [1108]u8 = undefined;
+    var k2 : [2400]u8 = undefined;
+    assert ft2_split(f[0..3508], 3508, t2[0..1108], k2[0..2400]) == FT_OK;
+    // the host's hashes: slot 0 hashes to its fingerprint, slot 1 (a key put in by hand) to another one
+    var calc : [320]u8 = undefined;
+    zero_fill(calc[0..320]);
+    var k : usize = 0;
+    while (k < 10) {
+        calc[k] = k2[k];
+        calc[10 + k] = k2[FK_SLOT + k] ^ 1;
+        k = k + 1;
+    }
+    var got : [65]u8 = undefined;
+    const keep0 : bool = fk_get(k2[0..2400], k2[0..10], got[0..65]);
+    assert keep0;
+    var fp1 : [10]u8 = undefined;
+    k = 0;
+    while (k < 10) {
+        fp1[k] = k2[FK_SLOT + k];
+        k = k + 1;
+    }
+    assert fk_drop_unhashed(k2[0..2400], calc[0..320]) == 1;
+    assert fk_count(k2[0..2400]) == 1;
+    assert fk_get(k2[0..2400], fp1[0..10], got[0..65]) == false;
+    assert fk_get(k2[0..2400], calc[0..10], got[0..65]);
+    // the keys that hash are left alone; a short calc trusts none
+    assert fk_drop_unhashed(k2[0..2400], calc[0..320]) == 0;
+    assert fk_drop_unhashed(k2[0..2400], calc[0..10]) == 1 and fk_count(k2[0..2400]) == 0;
 }

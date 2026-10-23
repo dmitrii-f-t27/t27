@@ -74,6 +74,9 @@ use t27os::peer_identity::ft2_split;
 use t27os::peer_identity::ft2_join;
 use t27os::peer_identity::fk_get;
 use t27os::peer_identity::fk_pin;
+use t27os::peer_identity::fk_drop_unhashed;
+use t27os::peer_identity::FK_SLOT;
+use t27os::peer_identity::FT_MAX;
 use t27os::invites::IV_LEN;
 use t27os::invites::IV_OK;
 use t27os::invites::iv_init;
@@ -294,15 +297,34 @@ fn ih_friends_paths(dir: []u8, path: []u8, tmp: []u8) -> bool {
 }
 
 /// Read the friends file (v1 or v2) into the table t (the v1 shape) and the keys. FT_OK, the peer_identity status of
-/// what is wrong, or FT_SHORT when it cannot be read; exists says whether the file is there.
+/// what is wrong, or FT_SHORT when it cannot be read; exists[0] says whether the file is there, exists[1] (when given)
+/// how many stored keys were dropped because they do not hash to their friend's fingerprint (fk_drop_unhashed).
 fn ih_friends_read(path: []const u8, t: []u8, keys: []u8, exists: []u8) -> u32 {
     exists[0] = 0;
+    if (exists.len > 1) { exists[1] = 0; }
     if (ih_access(path, 0) != 0) { return FT_SHORT; }
     exists[0] = 1;
     var f : [3509]u8 = undefined;
     const got : i64 = ih_slurp(path, f[0..3509], FT2_LEN + 1);
     if (got < 0) { return FT_SHORT; }
-    return ft2_split(f[0..3509], @as(usize, @intCast(got)), t, keys);
+    const st : u32 = ft2_split(f[0..3509], @as(usize, @intCast(got)), t, keys);
+    if (st != FT_OK) { return st; }
+    var calc : [320]u8 = undefined;
+    var i : usize = 0;
+    while (i < FT_MAX) {
+        const a : usize = i * FK_SLOT;
+        if (!ih_fingerprint(keys[a + FP_BYTES .. a + FP_BYTES + PUB_BYTES], calc[i * FP_BYTES .. (i + 1) * FP_BYTES])) {
+            var k : usize = 0;
+            while (k < FP_BYTES) {
+                calc[i * FP_BYTES + k] = 0;
+                k = k + 1;
+            }
+        }
+        i = i + 1;
+    }
+    const bad : u32 = fk_drop_unhashed(keys, calc[0..320]);
+    if (exists.len > 1) { exists[1] = @as(u8, @intCast(bad)); }
+    return FT_OK;
 }
 
 /// Write the table and the keys as a v2 file, atomically.
@@ -374,8 +396,15 @@ pub fn ih_pin_get(fp: []const u8, out: []u8) -> bool {
 
 /// The key slots of the friends file (FK_LEN bytes of fingerprints and public keys, no private key): true when the file
 /// checks. A missing, v1 or damaged file gives none (every slot zero), so every friend reads not verified.
-pub fn ih_friends_keys(keys: []u8) -> bool {
-    if (keys.len < FK_LEN) { return false; }
+pub fn ih_friends_keys(keys: []u8) -> bool { return ih_friends_keys_n(keys) != IH_FK_FAIL; }
+
+/// ih_friends_keys_n when the file does not check (every slot zero).
+pub const IH_FK_FAIL : u32 = 4294967295;
+
+/// ih_friends_keys that says how many stored keys the read dropped for not hashing to their friend's fingerprint (those
+/// friends read not verified), or IH_FK_FAIL.
+pub fn ih_friends_keys_n(keys: []u8) -> u32 {
+    if (keys.len < FK_LEN) { return IH_FK_FAIL; }
     var i : usize = 0;
     while (i < FK_LEN) {
         keys[i] = 0;
@@ -384,18 +413,18 @@ pub fn ih_friends_keys(keys: []u8) -> bool {
     var dir : [IH_PATH_MAX]u8 = undefined;
     var path : [IH_PATH_MAX]u8 = undefined;
     var tmp : [IH_PATH_MAX]u8 = undefined;
-    if (!ih_friends_paths(dir[0..IH_PATH_MAX], path[0..IH_PATH_MAX], tmp[0..IH_PATH_MAX])) { return false; }
+    if (!ih_friends_paths(dir[0..IH_PATH_MAX], path[0..IH_PATH_MAX], tmp[0..IH_PATH_MAX])) { return IH_FK_FAIL; }
     var t : [1108]u8 = undefined;
-    var ex : [1]u8 = undefined;
-    if (ih_friends_read(path[0..IH_PATH_MAX], t[0..FT_LEN], keys[0..FK_LEN], ex[0..1]) != FT_OK) {
+    var ex : [2]u8 = undefined;
+    if (ih_friends_read(path[0..IH_PATH_MAX], t[0..FT_LEN], keys[0..FK_LEN], ex[0..2]) != FT_OK) {
         i = 0;
         while (i < FK_LEN) {
             keys[i] = 0;
             i = i + 1;
         }
-        return false;
+        return IH_FK_FAIL;
     }
-    return true;
+    return @as(u32, ex[1]);
 }
 
 /// Store a friend's proven key: it must hash to fp (else PIN_BAD), fp must be in the friends file (else

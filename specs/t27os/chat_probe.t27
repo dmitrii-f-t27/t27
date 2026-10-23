@@ -97,6 +97,8 @@ use t27os::chat_host::chm_stat;
 use t27os::chat_host::chm_send;
 use t27os::chat_host::chm_open;
 use t27os::chat_host::chm_tick;
+use t27os::chat_host::chm_held;
+use t27os::chat_host::chm_saved;
 use t27os::chat_host::CHM_K_DROP;
 use t27os::chat_host::CHM_E_DIRTY;
 use t27os::chat_host::CHM_TX_FRAMES;
@@ -254,7 +256,7 @@ fn chp_side(is_a: bool) -> bool {
     ok = ckh_check("identity handed to the session", cs_identity(s[0..166528], id[ID_OFF_PUB..ID_OFF_PUB + 65], id[ID_OFF_PRIV..ID_OFF_PRIV + 97])) and ok;
     cs_set(s[0..166528], CS_K_CALLING_MS, CH_CALLING_MS);
     cs_set(s[0..166528], CS_K_SILENT_MS, CH_SILENT_MS);
-    var m : [256]u8 = undefined;
+    var m : [384]u8 = undefined;
     chm_init(m[0..CHM_LEN], ffp[0..10], ckh_env_num("CHP_PEER", 2130706433), ckh_env_num("CHP_PEER_PORT", 47802));
     chm_set(m[0..CHM_LEN], CHM_K_DROP, ckh_env_num("CHP_DROP", 0));
     var t : [2000]u8 = undefined;
@@ -279,10 +281,12 @@ fn chp_side(is_a: bool) -> bool {
         if (now - t0 > limit) { break; }
         const ev : u32 = chm_tick(m[0..CHM_LEN], s[0..166528], log[0..L], asm[0..CA_LEN], friends[0..FT_LEN], fp[0..10], now);
         if ((ev & CHM_E_DIRTY) != 0) { dirty = true; }
-        if (dirty and now - last_save >= 1000) {
-            chh_save(log[0..L], buf[0..CF_MAX]);
+        // lines that came in are ACKed once saved: they are written at once
+        if (dirty and (now - last_save >= 1000 or chm_held(m[0..CHM_LEN]) > 0)) {
+            const saved : bool = chh_save(log[0..L], buf[0..CF_MAX]);
+            chm_saved(m[0..CHM_LEN], s[0..166528], saved);
             last_save = now;
-            dirty = false;
+            dirty = saved == false;
         }
         const got_in : u32 = cl_count_dir(log[0..L], CH_DIR_IN);
         if (!opened and got_in == nin) {

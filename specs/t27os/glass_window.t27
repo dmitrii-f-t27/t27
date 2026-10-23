@@ -731,6 +731,8 @@ use t27os::chat_host::chm_ringing;
 use t27os::chat_host::chm_send;
 use t27os::chat_host::chm_open;
 use t27os::chat_host::chm_tick;
+use t27os::chat_host::chm_held;
+use t27os::chat_host::chm_saved;
 use t27os::chat_host::chm_stat;
 use t27os::chat_core::cl_init;
 use t27os::chat_core::cl_state;
@@ -755,6 +757,11 @@ use t27os::peer_identity::ft_remove;
 use t27os::peer_identity::PIN_NEW;
 use t27os::peer_identity::FA_OK;
 use t27os::peer_identity_host::ih_friends_keys;
+use t27os::peer_identity_host::ih_friends_keys_n;
+use t27os::peer_identity_host::IH_FK_FAIL;
+use t27os::peer_identity_host::IH_IOERR;
+use t27os::peer_identity_host::IH_LOADED;
+use t27os::peer_identity_host::IH_CREATED;
 use t27os::call_session::cs_id_state;
 use t27os::call_session::CS_ID_VERIFIED;
 use t27os::call_session::CS_ID_REFUSED;
@@ -786,6 +793,7 @@ use t27os::friends_view::FR_AGO;
 use t27os::friends_view::FR_IP;
 use t27os::friends_view::FR_PORT;
 use t27os::friends_view::fv_get32;
+use t27os::friends_view::fv_put32;
 use t27os::call_session::CS_EV_ENDED;
 use t27os::call_session::CS_EV_FAILED;
 use t27os::friends_engine::FE_FT;
@@ -879,6 +887,14 @@ use t27os::trust::tru_count;
 use t27os::trust::tru_refused;
 use t27os::trust::tru_refuse;
 use t27os::trust::tru_line_for;
+use t27os::trust::tru_at;
+use t27os::trust::tru_last;
+use t27os::trust::tru_seal;
+use t27os::trust::tru_check;
+use t27os::trust::TRU_OK;
+use t27os::trust::TRR_FP;
+use t27os::trust::TRR_REASON;
+use t27os::trust::TRR_COUNT;
 use t27os::peer_identity_host::ih_invites_save;
 use t27os::peer_identity_host::ih_pin_put;
 use t27os::friends_engine::fe_accept;
@@ -12949,7 +12965,13 @@ pub const CHW_SAY_N : usize = 9;
 /// verdict until the next session) never clears a refusal that came after it.
 pub const CHW_RF_CALL : usize = 10;
 pub const CHW_RF_MSG : usize = 11;
-pub const CHW_N : usize = 12;
+/// trust.t27 is there and could not be read (no permission, busy): 1 while it is never written over; the warnings of
+/// this run wait in memory and are merged into the file's once a read goes through.
+pub const CHW_TR_HELD : usize = 12;
+/// How many stored keys of the friends file did not hash to their friend's fingerprint at the last read (+ 1, 0 =
+/// none said yet): one line on stderr when it changes.
+pub const CHW_FK_BAD : usize = 13;
+pub const CHW_N : usize = 14;
 /// The test aid sends one line this often.
 pub const CH_SAY_MS : u64 = 1000;
 /// At most this many lines from the test aid.
@@ -12958,6 +12980,21 @@ pub const CH_SAY_MAX : u64 = 99;
 pub const CH_RELAYOUT_MS : u64 = 30000;
 /// A changed log is written this long after its first change (a burst of ACKs is one write); a sent line at once.
 pub const CH_SAVE_MS : u64 = 1000;
+/// A save that failed is tried again after CH_SAVE_RETRY_MS; the ACKs of the lines it holds wait for it.
+pub const CH_SAVE_RETRY_MS : u64 = 1000;
+
+/// How long a dirty log waits for its save: at once while incoming lines wait for it (their ACKs are held), else
+/// CH_SAVE_MS so a burst is written once.
+pub fn ch_save_gap(held: u64) -> u64 {
+    if (held > 0) { return 0; }
+    return CH_SAVE_MS;
+}
+
+/// The next save after one at now: none when it was written, a retry when it failed.
+pub fn ch_save_next(saved: bool, now: u64) -> u64 {
+    if (saved) { return 0; }
+    return now + CH_SAVE_RETRY_MS;
+}
 
 /// The open log belongs to friend fp (chat_core keeps the friend's fingerprint at byte 28 of the log).
 fn ch_log_is(log: []const u8, fp: []const u8) -> bool {
@@ -13105,27 +13142,107 @@ pub fn ch_trust_from_keys(cl: []const u8, v: []u8, keys: []const u8, tt: []const
     }
 }
 
-/// Read the friends file's keys (public keys only; none is printed) into the trust table.
+/// Read the friends file's keys (public keys only; none is printed) into the trust table. A stored key that does not
+/// hash to its friend's fingerprint is dropped by the read (that friend reads not verified); one line says how many.
 pub fn ch_trust_load(cl: []const u8, v: []u8, w: []u64, tt: []const u8) -> void {
     var keys : [2400]u8 = undefined;
-    ih_friends_keys(keys[0..FK_LEN]);
+    var bad : u32 = ih_friends_keys_n(keys[0..FK_LEN]);
+    if (bad == IH_FK_FAIL) { bad = 0; }
+    if (w.len > CHW_FK_BAD and @as(u64, bad) + 1 != w[CHW_FK_BAD]) {
+        if (bad > 0 or w[CHW_FK_BAD] > 1) {
+            var line : [96]u8 = undefined;
+            var n : usize = put_bytes(line[0..96], 0, "FRIENDS every stored key hashes to its fingerprint again");
+            if (bad > 0) {
+                n = put_bytes(line[0..96], 0, "FRIENDS ");
+                n = put_dec(line[0..96], n, @as(u64, bad));
+                n = put_bytes(line[0..96], n, " stored key(s) do not hash to the fingerprint, dropped: not verified");
+            }
+            sys_write(2, line[0..n], @as(u64, n));
+            sys_write(2, "\n", 1);
+        }
+        w[CHW_FK_BAD] = @as(u64, bad) + 1;
+    }
     ch_trust_from_keys(cl, v, keys[0..FK_LEN], tt);
     w[CHW_TR_N] = @as(u64, ft_count(cl[FE_FT .. FE_FT + FT_LEN])) + 1;
     w[CHW_TR_AT] = ckh_ms();
 }
 
 /// Launch: the key mismatch warnings from ~/.t27os/trust.t27 (a damaged file is kept aside as trust.t27.bad and the
-/// table starts empty); one line on stderr with how many friends carry one.
-pub fn ch_trust_boot(tt: []u8) -> void {
+/// table starts empty; a file that is there and cannot be read is left as it is and held: ch_trust_held); one line on
+/// stderr with how many friends carry one. The open's IH_* status.
+pub fn ch_trust_boot(tt: []u8) -> u32 {
     const r : u32 = ih_trust_open(tt);
     if ((r & 255) != 2 and (r & 255) != 1) { tru_init(tt); }
-    var line : [64]u8 = undefined;
-    var n : usize = put_bytes(line[0..64], 0, "TRUST loaded ");
-    n = put_dec(line[0..64], n, @as(u64, tru_count(tt)));
-    n = put_bytes(line[0..64], n, " key mismatch warning(s)");
-    if ((r & 255) == 3) { n = put_bytes(line[0..64], n, ", damaged file kept"); }
+    var line : [96]u8 = undefined;
+    var n : usize = put_bytes(line[0..96], 0, "TRUST loaded ");
+    n = put_dec(line[0..96], n, @as(u64, tru_count(tt)));
+    n = put_bytes(line[0..96], n, " key mismatch warning(s)");
+    if ((r & 255) == 3) { n = put_bytes(line[0..96], n, ", damaged file kept"); }
+    if ((r & 255) == IH_IOERR) { n = put_bytes(line[0..96], n, ", file unreadable: kept as is, not written"); }
     sys_write(2, line[0..n], @as(u64, n));
     sys_write(2, "\n", 1);
+    return r;
+}
+
+/// After the launch's open (IH_*): 1 when trust.t27 must not be written until it reads (it could not be read).
+pub fn ch_trust_held(r: u32) -> u64 {
+    if ((r & 255) == IH_IOERR) { return 1; }
+    return 0;
+}
+
+/// The warnings of this run (tt) folded into the file's table f: a friend's refusals add up, the latest time and
+/// reason win, the latest refusal ends on top. A warning the file holds stays (a check that cleared one while the file
+/// could not be read clears nothing on file: the next good check clears it).
+pub fn ch_trust_merge(f: []u8, tt: []const u8) -> void {
+    var i : usize = tru_count(tt);
+    while (i > 0) {
+        i = i - 1;
+        const a : usize = tru_at(i);
+        const fp : []const u8 = tt[a + TRR_FP .. a + TRR_FP + 10];
+        const had : u64 = @as(u64, tru_refused(f, fp));
+        var last : u64 = tru_last(tt, fp);
+        if (tru_last(f, fp) > last) { last = tru_last(f, fp); }
+        if (tru_refuse(f, fp, tt[a + TRR_REASON], last)) {
+            var c : u64 = had + @as(u64, tru_refused(tt, fp));
+            if (c > 4294967295) { c = 4294967295; }
+            fv_put32(f, tru_at(tru_find(f, fp)) + TRR_COUNT, c);
+            tru_seal(f);
+        }
+    }
+}
+
+/// May trust.t27 be written now? Not held: yes. Held: f is the file read again (fr its IH_* status); still unreadable
+/// -> no, and tt keeps this run's warnings; read (or moved aside as damaged, f empty) -> tt becomes the file's
+/// warnings with this run's merged in, the hold ends, yes.
+pub fn ch_trust_gate(w: []u64, tt: []u8, f: []u8, fr: u32) -> bool {
+    if (w[CHW_TR_HELD] == 0) { return true; }
+    if ((fr & 255) == IH_IOERR) { return false; }
+    if ((fr & 255) != IH_LOADED) { tru_init(f); }
+    ch_trust_merge(f, tt);
+    var i : usize = 0;
+    while (i < TRU_LEN) {
+        tt[i] = f[i];
+        i = i + 1;
+    }
+    w[CHW_TR_HELD] = 0;
+    return true;
+}
+
+/// Write trust.t27 when the gate allows it (a held file is read again first); one line when it is held.
+fn ch_trust_write(w: []u64, tt: []u8) -> bool {
+    var f : [1556]u8 = undefined;
+    var fr : u32 = IH_LOADED;
+    if (w[CHW_TR_HELD] != 0) { fr = ih_trust_open(f[0..TRU_LEN]); }
+    if (!ch_trust_gate(w, tt, f[0..TRU_LEN], fr)) {
+        var line : [96]u8 = undefined;
+        var n : usize = put_bytes(line[0..96], 0, "TRUST file unreadable, not written; ");
+        n = put_dec(line[0..96], n, @as(u64, tru_count(tt)));
+        n = put_bytes(line[0..96], n, " warning(s) kept in memory");
+        sys_write(2, line[0..n], @as(u64, n));
+        sys_write(2, "\n", 1);
+        return false;
+    }
+    return ih_trust_save(tt);
 }
 
 /// The verdict of one session (a call or the message session) on its peer's trust: a refused key is a mismatch, a
@@ -13203,7 +13320,7 @@ pub fn ch_trust_session(cl: []const u8, v: []u8, w: []u64, tt: []u8, s: []const 
     if (id == CS_ID_STORED and (chv_tr_get(v, fp[0..10]) & FV_TB_PIN) == 0 and now >= w[CHW_TR_AT] + CH_TR_READ_MS) { ch_trust_load(cl, v, w, tt); }
     const r : u32 = ch_trust_apply(v, w, tt, fp[0..10], id, ch_sid(s), call, now);
     if (r == TRU_S_NONE) { return; }
-    ih_trust_save(tt);
+    ch_trust_write(w, tt);
     ch_trust_log(fp[0..10], r, tru_refused(tt, fp[0..10]));
 }
 
@@ -13453,7 +13570,7 @@ pub fn ch_tick_at(cl: []u8, v: []u8, s: []u8, m: []u8, log: []u8, asm: []u8, buf
         const shown : bool = chv_mode(v) == CHV_M_CHAT and chv_is(v, lf[0..10]);
         if ((ev & CHM_E_NEW) != 0 and shown) { chm_open(m, log); }
         if ((ev & (CHM_E_NEW | CHM_E_STATUS | CHM_E_DIRTY)) != 0) { v[CHV_DIRTY] = 1; }
-        if ((ev & CHM_E_DIRTY) != 0 and w[CHW_SAVE_AT] == 0) { w[CHW_SAVE_AT] = now + CH_SAVE_MS; }
+        if ((ev & CHM_E_DIRTY) != 0 and w[CHW_SAVE_AT] == 0) { w[CHW_SAVE_AT] = now + ch_save_gap(chm_held(m)); }
         chv_unr_set(v, lf[0..10], cl_unread(log));
         if ((ev & CHM_E_OTHER) != 0 and shown == false and cl_pending(log) == 0) {
             var of : [10]u8 = undefined;
@@ -13462,9 +13579,12 @@ pub fn ch_tick_at(cl: []u8, v: []u8, s: []u8, m: []u8, log: []u8, asm: []u8, buf
     }
     // a message session refused for its key ended and was dismissed in this pass: its verdict before the next one rings
     ch_trust_session(cl, v, w, tt, s, false, now);
+    // the save, then the ACKs of the lines it put on disk; a failed save sends none and is tried again
     if (w[CHW_LOADED] != 0 and w[CHW_SAVE_AT] != 0 and now >= w[CHW_SAVE_AT]) {
-        w[CHW_SAVE_AT] = 0;
-        if (chh_save(log, buf) == false) { v[CHV_NOTE] = @as(u8, @intCast(CHV_N_NOSAVE)); }
+        const saved : bool = chh_save(log, buf);
+        w[CHW_SAVE_AT] = ch_save_next(saved, now);
+        chm_saved(m, s, saved);
+        if (saved == false) { v[CHV_NOTE] = @as(u8, @intCast(CHV_N_NOSAVE)); }
     }
     if (chv_mode(v) == CHV_M_CHAT and w[CHW_LOADED] != 0 and ch_log_is(log, v[CHV_FP .. CHV_FP + 10])) {
         const hh : f64 = chv_hist_h(h);
@@ -15727,7 +15847,7 @@ pub fn main() -> void {
     // IV. the invitations (invites.t27): ~/.t27os/invites.t27, read once at launch, written on every change
     ih_invites_open(tbv[TBO_IV .. TBO_IV + IV_LEN]);
     // TR. the key mismatch warnings (trust.t27): ~/.t27os/trust.t27, read once at launch, written on every change
-    ch_trust_boot(tbv[TBO_TRU .. TBO_TRU + TRU_LEN]);
+    const trboot : u32 = ch_trust_boot(tbv[TBO_TRU .. TBO_TRU + TRU_LEN]);
     // P. the PROFILE panel: closed at launch; the profile file is read and the picture decoded once, here, never in draw()
     var pfp : bool = false;
     pf_boot(tbv[TBO_PF .. TBO_PF + PF_CAP], tgv[0..256]);
@@ -15755,9 +15875,9 @@ pub fn main() -> void {
     var chlog : [1016040]u8 = undefined;
     var chbuf : [1008041]u8 = undefined;
     var chasm : [8064]u8 = undefined;
-    var chm : [256]u8 = undefined;
+    var chm : [384]u8 = undefined;
     var chs : [166528]u8 = undefined;
-    var chw : [12]u64 = undefined;
+    var chw : [14]u64 = undefined;
     // GR. the open group: its block, its log's assembly and its log (GX_GRM | GX_ASM | GX_LOG)
     var gxb : [1024360]u8 = undefined;
     clz = 0;
@@ -15797,6 +15917,7 @@ pub fn main() -> void {
     const bkopen : bool = bk_boot(tbv[TBO_BK .. TBO_BK + BK_CAP]);
     cl_boot(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN * 3]);
     ch_boot(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_CH .. TBO_CH + CHV_CAP], chs[0..CS_LEN], chlog[0..CH_LOG_LEN], chbuf[0..CH_BUF_LEN], chw[0..CHW_N], tbv[TBO_TRU .. TBO_TRU + TRU_LEN]);
+    chw[CHW_TR_HELD] = ch_trust_held(trboot);
     gw_boot(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_GV .. TBO_GV + GV_CAP], gxb[0..GX_LEN], chbuf[0..CH_BUF_LEN]);
     // QC. SCAN: the grey copy and the reader's work buffer, the T27OS_QR_FRAME file read once (a test aid), the camera's
     // answer so a refused camera draws SCAN off from the start
@@ -20225,7 +20346,7 @@ test the_footer_update_item_follows_the_friends_offer_before_the_self_updater {
 test ch_the_chat_region_follows_the_call_region_and_mains_buffers_have_their_sizes {
     assert TBO_CH == TBO_CL + CL_CAP and TBO_CH + CHV_CAP == TBO_IV and TBO_IV + IV_LEN == TBO_BK and TBO_BK + BK_CAP == TBO_GV and TBO_GV + GV_CAP == TBO_QC and TBO_QC + QC_CAP == TB_SIZE;
     assert CH_LOG_LEN == cl_bytes(CL_KEEP) and CH_BUF_LEN == CF_MAX + 1;
-    assert CS_LEN == 166528 and CA_LEN == 8064 and CHM_LEN == 256 and CHW_AID < CHW_N;
+    assert CS_LEN == 166528 and CA_LEN == 8064 and CHM_LEN == 384 and CHW_AID < CHW_N;
     // the voice-call byte stands after the cabinet's bytes and before the friends snapshot, inside the folded bytes
     assert CL_NOCAM >= AC_END and CL_NOCAM < FV_BASE and CL_NOCAM < CL_KEY_N;
 }
@@ -20462,11 +20583,11 @@ test ch_messages_are_served_with_the_panel_shut_and_after_a_call_that_ended {
         cs[i] = 0;
         i = i + 1;
     }
-    var m : [256]u8 = undefined;
+    var m : [384]u8 = undefined;
     var asm : [8064]u8 = undefined;
     var log : [8192]u8 = undefined;
     var buf : [16]u8 = undefined;
-    var w : [12]u64 = undefined;
+    var w : [14]u64 = undefined;
     i = 0;
     while (i < CHW_N) {
         w[i] = 0;
@@ -20489,7 +20610,7 @@ test ch_messages_are_served_with_the_panel_shut_and_after_a_call_that_ended {
     cs[1] = @as(u8, @intCast(CK_ENDED));
     assert cs_state(cs[0..CS_LEN]) == CK_ENDED and cl[CL_OPEN] == 0 and chv_mode(v[0..8192]) == CHV_M_OFF;
     // a's log is open and one line of a's came in (as the session would hand it over)
-    assert cl_init(log[0..8192], a[0..10], 4) and chm_init(m[0..256], a[0..10], 0, 0);
+    assert cl_init(log[0..8192], a[0..10], 4) and chm_init(m[0..384], a[0..10], 0, 0);
     w[CHW_LOADED] = 1;
     var p : [720]u8 = undefined;
     const pn : usize = ch_put_text(p[0..720], 1, 0, 1000, "hi");
@@ -20499,19 +20620,19 @@ test ch_messages_are_served_with_the_panel_shut_and_after_a_call_that_ended {
     assert iv_init(ivx[0..IV_LEN]);
     var ttx : [1556]u8 = undefined;
     assert tru_init(ttx[0..TRU_LEN]);
-    ch_tick_at(cl[0..8192], v[0..8192], s[0..CS_LEN], m[0..256], log[0..cl_bytes(4)], asm[0..8064], buf[0..16], w[0..CHW_N], cs[0..CS_LEN], ivx[0..IV_LEN], ivx[0..0], ivx[0..0], CHV_TZ_BIAS, 400.0, 5000, ttx[0..TRU_LEN]);
+    ch_tick_at(cl[0..8192], v[0..8192], s[0..CS_LEN], m[0..384], log[0..cl_bytes(4)], asm[0..8064], buf[0..16], w[0..CHW_N], cs[0..CS_LEN], ivx[0..IV_LEN], ivx[0..0], ivx[0..0], CHV_TZ_BIAS, 400.0, 5000, ttx[0..TRU_LEN]);
     assert chv_unr_get(v[0..8192], a[0..10]) == 1;
-    assert chm_stat(m[0..256], 4) == 0 and cl_state(log[0..8192], 0) != CH_S_READ;
+    assert chm_stat(m[0..384], 4) == 0 and cl_state(log[0..8192], 0) != CH_S_READ;
     // the same during a call that is up
     cs[1] = @as(u8, @intCast(CK_ACTIVE));
-    ch_tick_at(cl[0..8192], v[0..8192], s[0..CS_LEN], m[0..256], log[0..cl_bytes(4)], asm[0..8064], buf[0..16], w[0..CHW_N], cs[0..CS_LEN], ivx[0..IV_LEN], ivx[0..0], ivx[0..0], CHV_TZ_BIAS, 400.0, 5000, ttx[0..TRU_LEN]);
-    assert chv_unr_get(v[0..8192], a[0..10]) == 1 and chm_stat(m[0..256], 4) == 0;
+    ch_tick_at(cl[0..8192], v[0..8192], s[0..CS_LEN], m[0..384], log[0..cl_bytes(4)], asm[0..8064], buf[0..16], w[0..CHW_N], cs[0..CS_LEN], ivx[0..IV_LEN], ivx[0..0], ivx[0..0], CHV_TZ_BIAS, 400.0, 5000, ttx[0..TRU_LEN]);
+    assert chv_unr_get(v[0..8192], a[0..10]) == 1 and chm_stat(m[0..384], 4) == 0;
     // opening the chat is what makes the line READ (sent with the next session): unread 0, READ up to message 1
     cs[1] = @as(u8, @intCast(CK_IDLE));
     chv_open_card(v[0..8192], a[0..10]);
-    ch_message_at(cl[0..8192], v[0..8192], s[0..CS_LEN], m[0..256], log[0..cl_bytes(4)], buf[0..16], w[0..CHW_N], 6000);
+    ch_message_at(cl[0..8192], v[0..8192], s[0..CS_LEN], m[0..384], log[0..cl_bytes(4)], buf[0..16], w[0..CHW_N], 6000);
     w[CHW_SAVE_AT] = 0;
-    assert chv_unr_get(v[0..8192], a[0..10]) == 0 and chm_stat(m[0..256], 4) == 1 and cl_state(log[0..8192], 0) == CH_S_READ;
+    assert chv_unr_get(v[0..8192], a[0..10]) == 0 and chm_stat(m[0..384], 4) == 1 and cl_state(log[0..8192], 0) == CH_S_READ;
     // the test aid T27OS_CHAT_SAY: 1..99 only, its lines read "say k of n"
     assert ch_say_parse("5", 1) == 5 and ch_say_parse("99", 2) == 99 and ch_say_parse("0", 1) == 0;
     assert ch_say_parse("x", 1) == 0 and ch_say_parse("100", 3) == 0 and ch_say_parse("", 0) == 0;
@@ -20749,4 +20870,49 @@ test a_test_aid_that_stands_in_for_a_person_acts_only_with_t27os_qa {
     assert qa_note(false, false, false, false, l[0..128]) == 0;
     // the reason of a call refused by the attempt limit has its own line
     assert cl_reason_text(CS_R_RATE).len > 0;
+}
+
+test a_trust_file_that_could_not_be_read_is_never_written_over_and_this_run_s_warnings_are_kept {
+    // only a file that is there and did not read is held; a missing, good or damaged one (moved aside) is not
+    assert ch_trust_held(IH_IOERR) == 1 and ch_trust_held(IH_LOADED) == 0 and ch_trust_held(IH_CREATED) == 0;
+    assert ch_trust_held(3 | (6 << 8)) == 0;
+    const a : [10]u8 = [11, 12, 13, 14, 15, 16, 17, 18, 19, 20];
+    const b : [10]u8 = [21, 22, 23, 24, 25, 26, 27, 28, 29, 30];
+    var tt : [1556]u8 = undefined;
+    assert tru_init(tt[0..TRU_LEN]);
+    var w : [14]u64 = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    w[CHW_TR_HELD] = 1;
+    // this run: a refused twice
+    assert tru_refuse(tt[0..TRU_LEN], a[0..10], TRU_R_CALL, 1000) and tru_refuse(tt[0..TRU_LEN], a[0..10], TRU_R_MESSAGE, 2000);
+    // the file is read again and still cannot be: no write, the hold and the warnings stay
+    var f : [1556]u8 = undefined;
+    assert tru_init(f[0..TRU_LEN]);
+    assert ch_trust_gate(w[0..14], tt[0..TRU_LEN], f[0..TRU_LEN], IH_IOERR) == false;
+    assert w[CHW_TR_HELD] == 1 and tru_refused(tt[0..TRU_LEN], a[0..10]) == 2 and tru_count(tt[0..TRU_LEN]) == 1;
+    // now it reads: b once, a three times, both older; the write goes with both and the counts added up
+    assert tru_refuse(f[0..TRU_LEN], b[0..10], TRU_R_CALL, 500);
+    assert tru_refuse(f[0..TRU_LEN], a[0..10], TRU_R_CALL, 100) and tru_refuse(f[0..TRU_LEN], a[0..10], TRU_R_CALL, 200);
+    assert tru_refuse(f[0..TRU_LEN], a[0..10], TRU_R_CALL, 300);
+    assert ch_trust_gate(w[0..14], tt[0..TRU_LEN], f[0..TRU_LEN], IH_LOADED);
+    assert w[CHW_TR_HELD] == 0 and tru_check(tt[0..TRU_LEN]) == TRU_OK and tru_count(tt[0..TRU_LEN]) == 2;
+    assert tru_refused(tt[0..TRU_LEN], a[0..10]) == 5 and tru_last(tt[0..TRU_LEN], a[0..10]) == 2000;
+    assert tru_refused(tt[0..TRU_LEN], b[0..10]) == 1 and tru_find(tt[0..TRU_LEN], a[0..10]) == 0;
+    // not held: the write goes at once, whatever a read would say
+    assert ch_trust_gate(w[0..14], tt[0..TRU_LEN], f[0..TRU_LEN], IH_IOERR);
+    // a file found damaged on the read again (moved aside): this run's warnings alone are written
+    w[CHW_TR_HELD] = 1;
+    var g : [1556]u8 = undefined;
+    assert tru_init(g[0..TRU_LEN]);
+    g[0] = 0;
+    var t2 : [1556]u8 = undefined;
+    assert tru_init(t2[0..TRU_LEN]) and tru_refuse(t2[0..TRU_LEN], b[0..10], TRU_R_MESSAGE, 9);
+    assert ch_trust_gate(w[0..14], t2[0..TRU_LEN], g[0..TRU_LEN], 3 | (3 << 8));
+    assert tru_check(t2[0..TRU_LEN]) == TRU_OK and tru_count(t2[0..TRU_LEN]) == 1 and tru_refused(t2[0..TRU_LEN], b[0..10]) == 1;
+}
+
+test a_failed_log_save_is_tried_again_and_held_lines_are_saved_at_once {
+    assert ch_save_next(true, 5000) == 0;
+    assert ch_save_next(false, 5000) == 5000 + CH_SAVE_RETRY_MS and CH_SAVE_RETRY_MS > 0;
+    assert ch_save_gap(0) == CH_SAVE_MS and ch_save_gap(1) == 0;
+    assert CHW_TR_HELD < CHW_N and CHW_FK_BAD < CHW_N;
 }

@@ -90,6 +90,10 @@ use t27os::chat_core::ch_put_ack;
 use t27os::chat_core::ch_put_read;
 use t27os::chat_core::ch_rx_text;
 use t27os::chat_core::ch_rx_acks;
+use t27os::chat_core::CH_PHDR;
+use t27os::chat_core::CH_RX_PART;
+use t27os::chat_core::CH_RX_FULL;
+use t27os::chat_core::ch_parts;
 use t27os::chat_core::ch_rx_ack;
 use t27os::chat_core::ch_rx_read;
 use t27os::chat_core::ch_idle_close;
@@ -383,8 +387,9 @@ fn ck_eq10(a: []const u8, ao: usize, b: []const u8) -> bool {
 
 // ---------------------------------------------------------------- the session driver
 
-/// The driver's block: CHM_LEN bytes of u64 slots (u64 k at 8 k), then the friend's fingerprint.
-pub const CHM_LEN : usize = 256;
+/// The driver's block: CHM_LEN bytes of u64 slots (u64 k at 8 k), the friend's fingerprint at M_FP, the ACKs held
+/// for the log's save from M_HELD.
+pub const CHM_LEN : usize = 384;
 const M_IP : usize = 0;
 const M_PORT : usize = 1;
 const M_LAST : usize = 2;
@@ -421,6 +426,30 @@ pub const CHM_INFO_KEPT : u32 = 28;
 pub const CHM_INFO_HAVE : u32 = 29;
 pub const CHM_INFO_REFUSED : u32 = 30;
 pub const CHM_INFO_WHY : u32 = 31;
+/// The ACKs of incoming messages wait for the log's save: a message that came in is acknowledged only once the line is
+/// on disk, so a crash before the save leaves it unacknowledged and the sender sends it again under the same number.
+/// M_HELD: how many are held (internal); then the counters (chm_stat): ACKs held, ACKs sent after a save, holds that
+/// found the queue full (that ACK is not sent; the sender's resend is ACKed after the save). Each held entry is one
+/// u64 at M_OWED + k: the message number | its part count << 32.
+const M_HELD : usize = 32;
+pub const CHM_ACK_HELD : u32 = 33;
+pub const CHM_ACK_SAVED : u32 = 34;
+pub const CHM_ACK_FULL : u32 = 35;
+const M_OWED : usize = 36;
+pub const CHM_OWED_MAX : usize = 8;
+
+/// What the receiver does with the ACK of one TEXT result: nothing (refused, or no room), send it now (a part kept for
+/// later lives in memory only, and a new session drops it: the sender sends every part again), or hold it until the
+/// log is saved (a message that became a line; a duplicate while any line waits for its save).
+pub const CHM_ACK_NONE : u32 = 0;
+pub const CHM_ACK_NOW : u32 = 1;
+pub const CHM_ACK_HOLD : u32 = 2;
+pub fn chm_ack_plan(r: u32, held: u64) -> u32 {
+    if (!ch_rx_acks(r)) { return CHM_ACK_NONE; }
+    if (r == CH_RX_NEW) { return CHM_ACK_HOLD; }
+    if (r == CH_RX_DUP and held > 0) { return CHM_ACK_HOLD; }
+    return CHM_ACK_NOW;
+}
 
 /// chm_tick says what moved (bits): a new incoming line, a status of a line, the log needs saving.
 pub const CHM_E_NEW : u32 = 1;
@@ -486,8 +515,78 @@ pub fn chm_ringing(s: []const u8, fp: []u8) -> bool {
 }
 
 pub fn chm_stat(m: []const u8, k: u32) -> u64 {
-    if (@as(usize, k) * 8 + 8 > M_FP and (k < CHM_INFO_TX or k > CHM_INFO_WHY)) { return 0; }
+    if (@as(usize, k) * 8 + 8 > M_FP and (k < CHM_INFO_TX or k > CHM_INFO_WHY) and (k < CHM_ACK_HELD or k > CHM_ACK_FULL)) { return 0; }
     return mg(m, @as(usize, k));
+}
+
+/// How many incoming messages wait for the log's save before their ACK.
+pub fn chm_held(m: []const u8) -> u64 {
+    if (m.len < CHM_LEN) { return 0; }
+    return mg(m, M_HELD);
+}
+
+/// Hold the ACK of message msg (parts parts) until the save; one entry per message. False when the queue is full.
+pub fn chm_hold(m: []u8, msg: u32, parts: u32) -> bool {
+    if (m.len < CHM_LEN or msg == 0 or parts == 0) { return false; }
+    const n : usize = @as(usize, mg(m, M_HELD));
+    var k : usize = 0;
+    while (k < n) {
+        if ((mg(m, M_OWED + k) & 4294967295) == @as(u64, msg)) {
+            ma(m, CHM_ACK_HELD);
+            return true;
+        }
+        k = k + 1;
+    }
+    if (n >= CHM_OWED_MAX) {
+        ma(m, CHM_ACK_FULL);
+        return false;
+    }
+    mp(m, M_OWED + n, @as(u64, msg) | (@as(u64, parts) << 32));
+    mp(m, M_HELD, @as(u64, n + 1));
+    ma(m, CHM_ACK_HELD);
+    return true;
+}
+
+/// The log's save ended (ok: written). Written: the ACK of every part of every held message is laid out in out (CH_PHDR
+/// bytes each, as many as fit) and the queue empties; their count. Not written: nothing goes out and the queue stays,
+/// for the save that is tried again.
+pub fn chm_saved_acks(m: []u8, ok: bool, out: []u8) -> usize {
+    if (!ok or m.len < CHM_LEN) { return 0; }
+    const n : usize = @as(usize, mg(m, M_HELD));
+    var c : usize = 0;
+    var k : usize = 0;
+    while (k < n) {
+        const e : u64 = mg(m, M_OWED + k);
+        const msg : u32 = @as(u32, @intCast(e & 4294967295));
+        const parts : u32 = @as(u32, @intCast(e >> 32));
+        var p : u32 = 0;
+        while (p < parts and (c + 1) * CH_PHDR <= out.len) {
+            ch_put_ack(out[c * CH_PHDR .. (c + 1) * CH_PHDR], msg, p);
+            c = c + 1;
+            p = p + 1;
+        }
+        mp(m, M_OWED + k, 0);
+        k = k + 1;
+    }
+    mp(m, M_HELD, 0);
+    return c;
+}
+
+/// chm_saved_acks sent over the session (an ACK that cannot go now is not kept: the sender's resend is a duplicate,
+/// ACKed at once once nothing is held). The ACKs sent.
+pub fn chm_saved(m: []u8, s: []u8, ok: bool) -> u32 {
+    var a : [3200]u8 = undefined;
+    const c : usize = chm_saved_acks(m, ok, a[0..3200]);
+    var sent : u32 = 0;
+    var i : usize = 0;
+    while (i < c) {
+        if (cs_state(s) == CK_ACTIVE and chm_tx(m, s, a[i * CH_PHDR .. (i + 1) * CH_PHDR])) {
+            ma(m, CHM_ACK_SAVED);
+            sent = sent + 1;
+        }
+        i = i + 1;
+    }
+    return sent;
 }
 
 pub fn chm_set(m: []u8, k: u32, v: u64) -> bool {
@@ -854,7 +953,13 @@ pub fn chm_tick_g(m: []u8, s: []u8, log: []u8, asm: []u8, friends: []const u8, m
                     ev = ev | CHM_E_NEW | CHM_E_DIRTY;
                 }
                 if (r == CH_RX_DUP) { ma(m, CHM_RX_DUP); }
-                if (ch_rx_acks(r)) {
+                // a line is ACKed only once it is on disk (chm_saved after the window's save); a part kept, at once
+                const plan : u32 = chm_ack_plan(r, mg(m, M_HELD));
+                if (plan == CHM_ACK_HOLD) {
+                    chm_hold(m, ch_msg(pt[0..n]), ch_parts(pt[0..n]));
+                    ev = ev | CHM_E_DIRTY;
+                }
+                if (plan == CHM_ACK_NOW) {
                     var a : [20]u8 = undefined;
                     ch_put_ack(a[0..20], ch_msg(pt[0..n]), ch_part(pt[0..n]));
                     if (chm_tx(m, s, a[0..20])) { ma(m, CHM_ACK_TX); }
@@ -916,6 +1021,7 @@ pub fn chm_tick_g(m: []u8, s: []u8, log: []u8, asm: []u8, friends: []const u8, m
         if (upto > mg(m, M_READ_SENT)) { waiting = waiting + 1; }
         if (pidx != GR_NOBODY) { waiting = waiting + gl_pending_for(glog, pidx); }
         waiting = waiting + ghm_owed(m, t, own, me_fp);
+        waiting = waiting + @as(u32, @intCast(mg(m, M_HELD)));
         if (ch_idle_close(now, mg(m, M_LAST), waiting)) {
             ma(m, CHM_IDLE_CLOSED);
             cs_hangup(s);
@@ -954,15 +1060,15 @@ test the_log_path_is_the_chat_folder_and_the_fingerprint {
     assert out[f + 1] == 98;
     assert chh_path(home[0..10], 10, fp[0..9], 1, out[0..256]) == 0;
     assert chh_path(home[0..10], 10, fp[0..10], 1, out[0..60]) == 0;
-    var m : [256]u8 = undefined;
-    assert chm_init(m[0..256], fp[0..10], 2130706433, 47800);
-    assert chm_stat(m[0..256], CHM_SESSIONS) == 0;
-    assert chm_set(m[0..256], CHM_K_DROP, 5) and chm_stat(m[0..256], CHM_K_DROP) == 5;
-    assert chm_set(m[0..256], CHM_SESSIONS, 5) == false;
-    assert chm_stat(m[0..256], 40) == 0;
+    var m : [384]u8 = undefined;
+    assert chm_init(m[0..384], fp[0..10], 2130706433, 47800);
+    assert chm_stat(m[0..384], CHM_SESSIONS) == 0;
+    assert chm_set(m[0..384], CHM_K_DROP, 5) and chm_stat(m[0..384], CHM_K_DROP) == 5;
+    assert chm_set(m[0..384], CHM_SESSIONS, 5) == false;
+    assert chm_stat(m[0..384], 40) == 0;
     // a new address keeps the counters
-    chm_addr(m[0..256], 3232235786, 47728);
-    assert chm_stat(m[0..256], CHM_K_DROP) == 5 and mg(m[0..256], M_IP) == 3232235786 and mg(m[0..256], M_PORT) == 47728;
+    chm_addr(m[0..384], 3232235786, 47728);
+    assert chm_stat(m[0..384], CHM_K_DROP) == 5 and mg(m[0..384], M_IP) == 3232235786 and mg(m[0..384], M_PORT) == 47728;
     assert CHM_E_OTHER != CHM_E_NEW and CHM_E_OTHER != CHM_E_STATUS and CHM_E_OTHER != CHM_E_DIRTY;
 }
 
@@ -987,20 +1093,20 @@ test a_stranger_is_answered_for_its_invitation_unless_declined_this_hour_and_its
 }
 
 test the_counter_slots_store_and_add_one_without_touching_the_neighbours {
-    var m : [256]u8 = undefined;
+    var m : [384]u8 = undefined;
     const fp : [10]u8 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-    assert chm_init(m[0..256], fp[0..10], 1, 2);
-    mp(m[0..256], CHM_ACK_TX, 4294967296);
-    assert mg(m[0..256], CHM_ACK_TX) == 4294967296 and chm_stat(m[0..256], CHM_ACK_TX) == 4294967296;
-    assert mg(m[0..256], CHM_ACK_TX - 1) == 0 and mg(m[0..256], CHM_ACK_TX + 1) == 0;
-    ma(m[0..256], CHM_ACK_TX);
-    assert chm_stat(m[0..256], CHM_ACK_TX) == 4294967297;
-    ma(m[0..256], CHM_DROPPED);
-    ma(m[0..256], CHM_DROPPED);
-    assert chm_stat(m[0..256], CHM_DROPPED) == 2 and chm_stat(m[0..256], CHM_ACK_TX) == 4294967297;
+    assert chm_init(m[0..384], fp[0..10], 1, 2);
+    mp(m[0..384], CHM_ACK_TX, 4294967296);
+    assert mg(m[0..384], CHM_ACK_TX) == 4294967296 and chm_stat(m[0..384], CHM_ACK_TX) == 4294967296;
+    assert mg(m[0..384], CHM_ACK_TX - 1) == 0 and mg(m[0..384], CHM_ACK_TX + 1) == 0;
+    ma(m[0..384], CHM_ACK_TX);
+    assert chm_stat(m[0..384], CHM_ACK_TX) == 4294967297;
+    ma(m[0..384], CHM_DROPPED);
+    ma(m[0..384], CHM_DROPPED);
+    assert chm_stat(m[0..384], CHM_DROPPED) == 2 and chm_stat(m[0..384], CHM_ACK_TX) == 4294967297;
     // the last counter slot is addressable, the fingerprint area is not a counter
-    ma(m[0..256], CHM_SEND_ERR);
-    assert chm_stat(m[0..256], CHM_SEND_ERR) == 1 and chm_stat(m[0..256], 24) == 0 and chm_stat(m[0..256], 23) == 0;
+    ma(m[0..384], CHM_SEND_ERR);
+    assert chm_stat(m[0..384], CHM_SEND_ERR) == 1 and chm_stat(m[0..384], 24) == 0 and chm_stat(m[0..384], 23) == 0;
     assert m[M_FP] == 1 and m[M_FP + 9] == 10;
 }
 
@@ -1043,44 +1149,44 @@ test chm_ringing_names_the_peer_only_while_a_session_rings_from_a_known_address 
 
 test chm_peer_is_matches_only_the_whole_fingerprint_of_this_driver {
     var s : [1300]u8 = undefined;
-    var m : [256]u8 = undefined;
+    var m : [384]u8 = undefined;
     const same : [10]u8 = [50, 51, 52, 53, 54, 55, 56, 57, 58, 59];
     t_ses(s[0..1300], 2, 99);
-    assert chm_init(m[0..256], same[0..10], 1, 2);
-    assert chm_peer_is(m[0..256], s[0..1300]);
+    assert chm_init(m[0..384], same[0..10], 1, 2);
+    assert chm_peer_is(m[0..384], s[0..1300]);
     // the first and the last byte each decide
     const first : [10]u8 = [51, 51, 52, 53, 54, 55, 56, 57, 58, 59];
     const last : [10]u8 = [50, 51, 52, 53, 54, 55, 56, 57, 58, 60];
-    assert chm_init(m[0..256], first[0..10], 1, 2);
-    assert chm_peer_is(m[0..256], s[0..1300]) == false;
-    assert chm_init(m[0..256], last[0..10], 1, 2);
-    assert chm_peer_is(m[0..256], s[0..1300]) == false;
+    assert chm_init(m[0..384], first[0..10], 1, 2);
+    assert chm_peer_is(m[0..384], s[0..1300]) == false;
+    assert chm_init(m[0..384], last[0..10], 1, 2);
+    assert chm_peer_is(m[0..384], s[0..1300]) == false;
     // an idle session has no peer
-    assert chm_init(m[0..256], same[0..10], 1, 2);
+    assert chm_init(m[0..384], same[0..10], 1, 2);
     t_ses(s[0..1300], 0, 99);
-    assert chm_peer_is(m[0..256], s[0..1300]) == false;
+    assert chm_peer_is(m[0..384], s[0..1300]) == false;
 }
 
 test chm_send_queues_a_message_and_marks_the_log_dirty_only_when_accepted {
-    var m : [256]u8 = undefined;
+    var m : [384]u8 = undefined;
     var log : [2072]u8 = undefined;
     const fp : [10]u8 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-    assert chm_init(m[0..256], fp[0..10], 1, 2);
+    assert chm_init(m[0..384], fp[0..10], 1, 2);
     assert cl_init(log[0..2072], fp[0..10], 1);
     const empty : [1]u8 = [0];
-    assert chm_send(m[0..256], log[0..2072], empty[0..0], 5) == 0;
-    assert mg(m[0..256], M_DIRTY) == 0 and cl_count(log[0..2072]) == 0;
+    assert chm_send(m[0..384], log[0..2072], empty[0..0], 5) == 0;
+    assert mg(m[0..384], M_DIRTY) == 0 and cl_count(log[0..2072]) == 0;
     // broken UTF-8 (a lone continuation byte) is refused
     const bad : [2]u8 = [104, 128];
-    assert chm_send(m[0..256], log[0..2072], bad[0..2], 5) == 0;
-    assert mg(m[0..256], M_DIRTY) == 0;
+    assert chm_send(m[0..384], log[0..2072], bad[0..2], 5) == 0;
+    assert mg(m[0..384], M_DIRTY) == 0;
     // Cyrillic is accepted and numbered from 1
     const ru : [4]u8 = [208, 159, 209, 128];
-    assert chm_send(m[0..256], log[0..2072], ru[0..4], 6) == 1;
-    assert mg(m[0..256], M_DIRTY) == 1 and cl_count(log[0..2072]) == 1 and cl_pending(log[0..2072]) == 1;
+    assert chm_send(m[0..384], log[0..2072], ru[0..4], 6) == 1;
+    assert mg(m[0..384], M_DIRTY) == 1 and cl_count(log[0..2072]) == 1 and cl_pending(log[0..2072]) == 1;
     // the cap of 1 line: the next message drops the oldest and takes number 2
     const hi : [2]u8 = [104, 105];
-    assert chm_send(m[0..256], log[0..2072], hi[0..2], 7) == 2;
+    assert chm_send(m[0..384], log[0..2072], hi[0..2], 7) == 2;
     assert cl_count(log[0..2072]) == 1 and cl_msg(log[0..2072], 0) == 2;
     // too long for one message
     var big : [3000]u8 = undefined;
@@ -1089,13 +1195,13 @@ test chm_send_queues_a_message_and_marks_the_log_dirty_only_when_accepted {
         big[i] = 97;
         i = i + 1;
     }
-    mp(m[0..256], M_DIRTY, 0);
-    assert chm_send(m[0..256], log[0..2072], big[0..3000], 8) == 0;
-    assert mg(m[0..256], M_DIRTY) == 0 and cl_msg(log[0..2072], 0) == 2;
+    mp(m[0..384], M_DIRTY, 0);
+    assert chm_send(m[0..384], log[0..2072], big[0..3000], 8) == 0;
+    assert mg(m[0..384], M_DIRTY) == 0 and cl_msg(log[0..2072], 0) == 2;
 }
 
 test chm_open_reads_incoming_lines_once_and_keeps_the_highest_read_number {
-    var m : [256]u8 = undefined;
+    var m : [384]u8 = undefined;
     var la : [2072]u8 = undefined;
     var lb : [16296]u8 = undefined;
     var asm : [8064]u8 = undefined;
@@ -1106,12 +1212,12 @@ test chm_open_reads_incoming_lines_once_and_keeps_the_highest_read_number {
     }
     const fa : [10]u8 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
     const fb : [10]u8 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 11];
-    assert chm_init(m[0..256], fb[0..10], 1, 2);
+    assert chm_init(m[0..384], fb[0..10], 1, 2);
     assert cl_init(la[0..2072], fb[0..10], 1);
     assert cl_init(lb[0..16296], fa[0..10], 8);
     // nothing incoming: nothing to read, no dirty mark
-    assert chm_open(m[0..256], lb[0..16296]) == false;
-    assert mg(m[0..256], M_READ_UPTO) == 0 and mg(m[0..256], M_DIRTY) == 0;
+    assert chm_open(m[0..384], lb[0..16296]) == false;
+    assert mg(m[0..384], M_READ_UPTO) == 0 and mg(m[0..384], M_DIRTY) == 0;
     // two incoming lines arrive (messages 1 and 2 of the sender)
     const x : [1]u8 = [120];
     var k : u32 = 0;
@@ -1122,19 +1228,19 @@ test chm_open_reads_incoming_lines_once_and_keeps_the_highest_read_number {
         assert ch_rx_text(lb[0..16296], asm[0..8064], p[0..pn]) == CH_RX_NEW;
         k = k + 1;
     }
-    assert chm_open(m[0..256], lb[0..16296]);
-    assert mg(m[0..256], M_READ_UPTO) == 2 and mg(m[0..256], M_DIRTY) == 1;
+    assert chm_open(m[0..384], lb[0..16296]);
+    assert mg(m[0..384], M_READ_UPTO) == 2 and mg(m[0..384], M_DIRTY) == 1;
     // opened again: nothing new, the number stays
-    mp(m[0..256], M_DIRTY, 0);
-    assert chm_open(m[0..256], lb[0..16296]) == false;
-    assert mg(m[0..256], M_READ_UPTO) == 2 and mg(m[0..256], M_DIRTY) == 0;
+    mp(m[0..384], M_DIRTY, 0);
+    assert chm_open(m[0..384], lb[0..16296]) == false;
+    assert mg(m[0..384], M_READ_UPTO) == 2 and mg(m[0..384], M_DIRTY) == 0;
     // a stored higher number is never lowered by a lower one
-    mp(m[0..256], M_READ_UPTO, 9);
+    mp(m[0..384], M_READ_UPTO, 9);
     var p3 : [720]u8 = undefined;
     const n3 : usize = ch_put_text(p3[0..720], 3, 0, 10, x[0..1]);
     assert ch_rx_text(lb[0..16296], asm[0..8064], p3[0..n3]) == CH_RX_NEW;
-    assert chm_open(m[0..256], lb[0..16296]);
-    assert mg(m[0..256], M_READ_UPTO) == 9;
+    assert chm_open(m[0..384], lb[0..16296]);
+    assert mg(m[0..384], M_READ_UPTO) == 9;
 }
 
 test a_group_log_and_the_groups_file_have_their_own_names {
@@ -1193,28 +1299,61 @@ test the_announces_owed_follow_the_groups_this_device_made_and_the_info_counters
         own[i] = 0;
         i = i + 1;
     }
-    var m : [256]u8 = undefined;
-    assert chm_init(m[0..256], ab[10..20], 1, 2);
+    var m : [384]u8 = undefined;
+    assert chm_init(m[0..384], ab[10..20], 1, 2);
     // nothing owed until a session with B comes up; then A's own group owes B its ANNOUNCE, B's group owes nothing
-    assert ghm_owed(m[0..256], t[0..GT_LEN], own[0..32], ab[0..10]) == 0;
-    ghm_session(m[0..256], t[0..GT_LEN], own[0..32], ab[0..10]);
+    assert ghm_owed(m[0..384], t[0..GT_LEN], own[0..32], ab[0..10]) == 0;
+    ghm_session(m[0..384], t[0..GT_LEN], own[0..32], ab[0..10]);
     assert own[0] == 2 and own[1] == 0;
-    assert ghm_owed(m[0..256], t[0..GT_LEN], own[0..32], ab[0..10]) == 1;
+    assert ghm_owed(m[0..384], t[0..GT_LEN], own[0..32], ab[0..10]) == 1;
     // an owed bit on a group this device did not make counts for nothing
     own[1] = 1;
-    assert ghm_owed(m[0..256], t[0..GT_LEN], own[0..32], ab[0..10]) == 1;
+    assert ghm_owed(m[0..384], t[0..GT_LEN], own[0..32], ab[0..10]) == 1;
     // C's driver: C is in no group A made
-    assert chm_init(m[0..256], bc[10..20], 1, 2);
-    assert ghm_owed(m[0..256], t[0..GT_LEN], own[0..32], ab[0..10]) == 0;
+    assert chm_init(m[0..384], bc[10..20], 1, 2);
+    assert ghm_owed(m[0..384], t[0..GT_LEN], own[0..32], ab[0..10]) == 0;
     // no table, no owed block: nothing
-    assert ghm_owed(m[0..256], t[0..10], own[0..32], ab[0..10]) == 0 and ghm_owed(m[0..256], t[0..GT_LEN], own[0..4], ab[0..10]) == 0;
+    assert ghm_owed(m[0..384], t[0..10], own[0..32], ab[0..10]) == 0 and ghm_owed(m[0..384], t[0..GT_LEN], own[0..4], ab[0..10]) == 0;
     // the GROUP_INFO counters sit after the fingerprint and read back; the time slot is not a counter
-    mp(m[0..256], @as(usize, CHM_INFO_WHY), 11);
-    ma(m[0..256], @as(usize, CHM_INFO_KEPT));
-    assert chm_stat(m[0..256], CHM_INFO_WHY) == 11 and chm_stat(m[0..256], CHM_INFO_KEPT) == 1 and chm_stat(m[0..256], CHM_INFO_TX) == 0;
-    mp(m[0..256], M_INFO_AT, 5);
-    assert chm_stat(m[0..256], 26) == 0 and chm_stat(m[0..256], 32) == 0;
+    mp(m[0..384], @as(usize, CHM_INFO_WHY), 11);
+    ma(m[0..384], @as(usize, CHM_INFO_KEPT));
+    assert chm_stat(m[0..384], CHM_INFO_WHY) == 11 and chm_stat(m[0..384], CHM_INFO_KEPT) == 1 and chm_stat(m[0..384], CHM_INFO_TX) == 0;
+    mp(m[0..384], M_INFO_AT, 5);
+    assert chm_stat(m[0..384], 26) == 0 and chm_stat(m[0..384], 32) == 0;
     assert M_INFO_AT * 8 >= M_FP + 10 and @as(usize, CHM_INFO_WHY) * 8 + 8 <= CHM_LEN;
     assert m[M_FP] == 200 and m[M_FP + 9] == 9;
     assert (CHM_E_GINFO & (CHM_E_NEW | CHM_E_STATUS | CHM_E_DIRTY | CHM_E_OTHER | CHM_E_INVITE | CHM_E_STRANGER | CHM_E_GNEW | CHM_E_GSTATUS | CHM_E_GDIRTY)) == 0;
+}
+
+test an_incoming_line_is_acked_only_after_the_log_is_saved_and_a_failed_save_sends_nothing {
+    // a part kept for later is ACKed at once; a message that became a line, or a duplicate while one waits, is held
+    assert chm_ack_plan(CH_RX_PART, 0) == CHM_ACK_NOW and chm_ack_plan(CH_RX_DUP, 0) == CHM_ACK_NOW;
+    assert chm_ack_plan(CH_RX_NEW, 0) == CHM_ACK_HOLD and chm_ack_plan(CH_RX_NEW, 3) == CHM_ACK_HOLD;
+    assert chm_ack_plan(CH_RX_DUP, 1) == CHM_ACK_HOLD;
+    assert chm_ack_plan(CH_RX_BAD, 0) == CHM_ACK_NONE and chm_ack_plan(CH_RX_FULL, 1) == CHM_ACK_NONE;
+    var m : [384]u8 = undefined;
+    const fp : [10]u8 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    assert chm_init(m[0..384], fp[0..10], 1, 2);
+    assert chm_hold(m[0..384], 5, 3) and chm_hold(m[0..384], 6, 1);
+    // the sender resends message 5 while the save is pending: still one entry
+    assert chm_hold(m[0..384], 5, 3);
+    assert chm_held(m[0..384]) == 2 and chm_stat(m[0..384], CHM_ACK_HELD) == 3;
+    // the write failed: no ACK, the queue stays for the retry
+    var a : [400]u8 = undefined;
+    assert chm_saved_acks(m[0..384], false, a[0..400]) == 0 and chm_held(m[0..384]) == 2;
+    // the write went through: every part of 5 and the one part of 6, then nothing is held
+    assert chm_saved_acks(m[0..384], true, a[0..400]) == 4 and chm_held(m[0..384]) == 0;
+    assert ch_kind(a[0..20]) == CH_K_ACK and ch_msg(a[0..20]) == 5 and ch_part(a[0..20]) == 0;
+    assert ch_msg(a[40..60]) == 5 and ch_part(a[40..60]) == 2;
+    assert ch_msg(a[60..80]) == 6 and ch_part(a[60..80]) == 0;
+    assert chm_saved_acks(m[0..384], true, a[0..400]) == 0;
+    // the queue is bounded: the ninth message is not held, counted, and its resend is ACKed after the save
+    var k : u32 = 1;
+    while (k <= 8) {
+        assert chm_hold(m[0..384], k + 10, 1);
+        k = k + 1;
+    }
+    assert chm_hold(m[0..384], 99, 1) == false and chm_stat(m[0..384], CHM_ACK_FULL) == 1 and chm_held(m[0..384]) == 8;
+    // the slots of the queue sit after the group counters and inside the block
+    assert (M_OWED + CHM_OWED_MAX) * 8 <= CHM_LEN and M_HELD > @as(usize, CHM_INFO_WHY);
 }
