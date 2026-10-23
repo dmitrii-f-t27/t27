@@ -679,6 +679,7 @@ use t27os::chat_core::cl_state;
 use t27os::chat_core::ch_put_text;
 use t27os::chat_core::ch_rx_text;
 use t27os::chat_core::CH_RX_NEW;
+use t27os::friends_view::fv_eq;
 use t27os::call_session::CS_AUDIO_NONE;
 use t27os::call_session::CS_K_CALLING_MS;
 use t27os::call_session::CS_K_SILENT_MS;
@@ -10968,12 +10969,14 @@ fn draw_account_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, 
 //   - one log is open at a time: another friend's session is answered by opening that friend's log, when nothing waits
 //     in the open one and its chat is not on screen; while a call is up the message session is not run.
 //   - T27OS_CHAT=card or =chat (a test aid, off by default): the first friend's card, or chat, once the list is known.
+//   - T27OS_CHAT_SAY=n (a test aid, off by default, 1..99): with that chat open, n lines "say k of n" are typed and
+//     sent one a second, the way Return sends what the person typed.
 // ======================================================================================================
 pub const TBO_CH : usize = 85504;
 /// The open log (chat_core cl_bytes(CL_KEEP)) and the file scratch (chat_core CF_MAX + 1), as main declares them.
 pub const CH_LOG_LEN : usize = 1016040;
 pub const CH_BUF_LEN : usize = 1008041;
-/// The window's chat clock (main's [8]u64): a log is open, when it is written next (0 = clean), when the history was
+/// The window's chat clock (main's [10]u64): a log is open, when it is written next (0 = clean), when the history was
 /// laid out, the history's height then, the test aid still to apply (1 card, 2 chat).
 pub const CHW_LOADED : usize = 0;
 pub const CHW_SAVE_AT : usize = 1;
@@ -10983,7 +10986,15 @@ pub const CHW_AID : usize = 4;
 /// The trust table: the friend count it was read for (+ 1, 0 = never read) and when the friends file was last read.
 pub const CHW_TR_N : usize = 5;
 pub const CHW_TR_AT : usize = 6;
-pub const CHW_N : usize = 8;
+/// T27OS_CHAT_SAY (a test aid): the lines still to send, when the next goes, how many in all.
+pub const CHW_SAY : usize = 7;
+pub const CHW_SAY_AT : usize = 8;
+pub const CHW_SAY_N : usize = 9;
+pub const CHW_N : usize = 10;
+/// The test aid sends one line this often.
+pub const CH_SAY_MS : u64 = 1000;
+/// At most this many lines from the test aid.
+pub const CH_SAY_MAX : u64 = 99;
 /// The history is laid out again at least this often ("today" turns into a date after midnight).
 pub const CH_RELAYOUT_MS : u64 = 30000;
 /// A changed log is written this long after its first change (a burst of ACKs is one write); a sent line at once.
@@ -11031,6 +11042,9 @@ pub fn ch_boot(cl: []u8, v: []u8, s: []u8, log: []u8, buf: []u8, w: []u64) -> vo
     const en : usize = cl_env("T27OS_CHAT", e[0..8]);
     if (en == 4 and e[0] == 99 and e[1] == 97 and e[2] == 114 and e[3] == 100) { w[CHW_AID] = 1; }
     if (en == 4 and e[0] == 99 and e[1] == 104 and e[2] == 97 and e[3] == 116) { w[CHW_AID] = 2; }
+    var se : [8]u8 = undefined;
+    w[CHW_SAY_N] = ch_say_parse(se[0..8], cl_env("T27OS_CHAT_SAY", se[0..8]));
+    w[CHW_SAY] = w[CHW_SAY_N];
     ch_trust_load(cl, v, w);
     if (cl[CL_UP] == 0) { return; }
     const port : u64 = chv_chat_port(cl_me_port(cl));
@@ -11050,6 +11064,28 @@ pub fn ch_boot(cl: []u8, v: []u8, s: []u8, log: []u8, buf: []u8, w: []u64) -> vo
         }
         i = i + 1;
     }
+}
+
+/// T27OS_CHAT_SAY's value: its decimal digits as a count, 0 when it is not a number from 1 to CH_SAY_MAX.
+pub fn ch_say_parse(e: []const u8, n: usize) -> u64 {
+    if (n == 0 or n > 2) { return 0; }
+    var r : u64 = 0;
+    var i : usize = 0;
+    while (i < n) {
+        if (e[i] < 48 or e[i] > 57) { return 0; }
+        r = r * 10 + @as(u64, e[i] - 48);
+        i = i + 1;
+    }
+    if (r > CH_SAY_MAX) { return 0; }
+    return r;
+}
+
+/// The test aid's line k of n: "say k of n".
+pub fn ch_say_text(out: []u8, k: u64, n: u64) -> usize {
+    var at : usize = put_bytes(out, 0, "say ");
+    at = put_dec(out, at, k);
+    at = put_bytes(out, at, " of ");
+    return put_dec(out, at, n);
 }
 
 /// The message session goes, whatever its state (a ringing one is declined, a live one hung up).
@@ -11289,6 +11325,15 @@ pub fn ch_tick_at(cl: []u8, v: []u8, s: []u8, m: []u8, log: []u8, asm: []u8, buf
         ch_card(cl, v, 0);
         if (w[CHW_AID] == 2) { ch_message_at(cl, v, s, m, log, buf, w, now); }
         w[CHW_AID] = 0;
+    }
+    // the test aid T27OS_CHAT_SAY: once the chat is open, one numbered line a second through the field and ch_send
+    if (w[CHW_SAY] != 0 and w[CHW_AID] == 0 and chv_mode(v) == CHV_M_CHAT and now >= w[CHW_SAY_AT]) {
+        var st : [32]u8 = undefined;
+        const sn : usize = ch_say_text(st[0..32], w[CHW_SAY_N] - w[CHW_SAY] + 1, w[CHW_SAY_N]);
+        chv_type_bytes(v, st[0..32], sn);
+        ch_send(cl, v, s, m, log, buf, w);
+        w[CHW_SAY] = w[CHW_SAY] - 1;
+        w[CHW_SAY_AT] = now + CH_SAY_MS;
     }
     // trust: the list changed (a friend added or removed) -> read the keys again; each session's verdict on its peer
     if (w[CHW_TR_N] != @as(u64, ft_count(cl[FE_FT .. FE_FT + FT_LEN])) + 1) { ch_trust_load(cl, v, w); }
@@ -13045,7 +13090,7 @@ pub fn main() -> void {
     var chasm : [8064]u8 = undefined;
     var chm : [256]u8 = undefined;
     var chs : [166528]u8 = undefined;
-    var chw : [8]u64 = undefined;
+    var chw : [10]u64 = undefined;
     clz = 0;
     while (clz < CA_LEN) {
         chasm[clz] = 0;
@@ -17134,7 +17179,7 @@ test ch_messages_are_served_with_the_panel_shut_and_after_a_call_that_ended {
     var asm : [8064]u8 = undefined;
     var log : [8192]u8 = undefined;
     var buf : [16]u8 = undefined;
-    var w : [8]u64 = undefined;
+    var w : [10]u64 = undefined;
     i = 0;
     while (i < CHW_N) {
         w[i] = 0;
@@ -17176,4 +17221,10 @@ test ch_messages_are_served_with_the_panel_shut_and_after_a_call_that_ended {
     ch_message_at(cl[0..8192], v[0..8192], s[0..CS_LEN], m[0..256], log[0..cl_bytes(4)], buf[0..16], w[0..CHW_N], 6000);
     w[CHW_SAVE_AT] = 0;
     assert chv_unr_get(v[0..8192], a[0..10]) == 0 and chm_stat(m[0..256], 4) == 1 and cl_state(log[0..8192], 0) == CH_S_READ;
+    // the test aid T27OS_CHAT_SAY: 1..99 only, its lines read "say k of n"
+    assert ch_say_parse("5", 1) == 5 and ch_say_parse("99", 2) == 99 and ch_say_parse("0", 1) == 0;
+    assert ch_say_parse("x", 1) == 0 and ch_say_parse("100", 3) == 0 and ch_say_parse("", 0) == 0;
+    var o : [32]u8 = undefined;
+    assert fv_eq(o[0..32], ch_say_text(o[0..32], 3, 5), "say 3 of 5");
+    assert CHW_SAY_N < CHW_N and CHW_SAY != CHW_TR_AT;
 }
