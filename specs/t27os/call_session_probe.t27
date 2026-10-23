@@ -8,6 +8,11 @@
 //                          sides, ACTIVE, CS_FRAMES frames each way with the caller muted for 50 of them, a forged
 //                          plain BYE ignored, hang-up, IDLE), a person who says differ, a decline, a cancel while
 //                          ringing, a hang-up while the codes are shown.
+//   CS_V6=1 (no CS_ROLE)   the same two sessions on the dual-stack socket (call_ip6.t27), bound to :: on 47753 / 47754,
+//                          the IPv6 loopback allowed (CS_K_LOOP6, a test aid): a full call to [::1]:47754 (family v6,
+//                          every redundant audio copy sent and taken as a datagram of its own, none too big for
+//                          IPv6), then a call to 127.0.0.1:47754 on the same sockets (family v4-mapped, no copies alone),
+//                          and the refusals (multicast, the loopback without the test aid).
 //   CS_ROLE=caller|callee  one side in its own process. CS_BIND / CS_PORT (default 127.0.0.1, caller 47761,
 //                          callee 47762), CS_PEER / CS_PEER_PORT (the caller dials there; default 127.0.0.1 and the
 //                          other port), CS_FRAMES (200: the caller hangs up once it sent and received that many),
@@ -73,6 +78,25 @@ use t27os::callback_probe::cbp_fin;
 use t27os::callback_probe::cbp_fout;
 use t27os::call_session::cs_open;
 use t27os::call_session::cs_call;
+use t27os::call_session::cs_call6;
+use t27os::call_session::cs_net;
+use t27os::call_session::cs_peer_ep;
+use t27os::call_session::cs_probe_send6;
+use t27os::call_session::cs_nat;
+use t27os::call_session::CS_K_LOOP6;
+use t27os::call_session::CS_NET_FAM;
+use t27os::call_session::CS_NET_SOCK6;
+use t27os::call_session::CS_NET_BIG;
+use t27os::call_session::CS_NET_COPY_TX;
+use t27os::call_session::CS_NET_COPY_RX;
+use t27os::call_session::CS_NET_CLOEXEC;
+use t27os::call_session::CS_N_P6;
+use t27os::call_session::CS_N_P6TX;
+use t27os::call_session::CS_PEER_V6;
+use t27os::call_ip6::ip6_parse;
+use t27os::call_ip6::ip6_same;
+use t27os::call_ip6::IP6_F_V6;
+use t27os::call_ip6::IP6_F_MAPPED;
 use t27os::call_session::cs_poll;
 use t27os::call_session::cs_state;
 use t27os::call_session::cs_incoming;
@@ -371,6 +395,122 @@ fn csp_forge_bye(a: []const u8, port_b: u64) -> bool {
     const r : i64 = ckh_sendto(fd, h[0..52], 52, 0, to[0..16], 16);
     sys_close(fd);
     return r == 52;
+}
+
+/// CS_V6=1: two sessions in this process on the dual-stack socket, over the IPv6 loopback.
+fn csp_inproc6() -> bool {
+    var all : bool = true;
+    var fa : [10]u8 = undefined;
+    var fb : [10]u8 = undefined;
+    ckh_fps(fa[0..10], fb[0..10]);
+    var a : [166528]u8 = undefined;
+    var b : [166528]u8 = undefined;
+    var da : [128]u8 = undefined;
+    var db : [128]u8 = undefined;
+    ck_wipe(da[0..D_LEN]);
+    ck_wipe(db[0..D_LEN]);
+    dp(da[0..D_LEN], 6, 65);
+    dp(db[0..D_LEN], 6, 66);
+    const frames : u64 = ckh_env_num("CS_FRAMES", 200);
+    dp(da[0..D_LEN], 4, frames);
+    dp(db[0..D_LEN], 4, frames);
+    const oa : bool = cs_open(a[0..CS_LEN], fa[0..10], 0, 47753, CS_AUDIO_TEST);
+    const ob : bool = cs_open(b[0..CS_LEN], fb[0..10], 0, 47754, CS_AUDIO_TEST);
+    all = ckh_check("6 open: two dual-stack sessions on [::]:47753 and :47754", oa and ob and cs_net(a[0..CS_LEN], CS_NET_SOCK6) == 1 and cs_net(b[0..CS_LEN], CS_NET_SOCK6) == 1) and all;
+    all = ckh_check("6 both call sockets are closed in a process the window starts (FD_CLOEXEC)", cs_net(a[0..CS_LEN], CS_NET_CLOEXEC) == 1 and cs_net(b[0..CS_LEN], CS_NET_CLOEXEC) == 1) and all;
+    if (!oa or !ob) { return false; }
+    cs_set(a[0..CS_LEN], CS_K_VERIFY_MS, 5000);
+    cs_set(b[0..CS_LEN], CS_K_VERIFY_MS, 5000);
+    var lo : [18]u8 = undefined;
+    var mc : [18]u8 = undefined;
+    ip6_parse("[::1]:47754", 11, lo[0..18]);
+    ip6_parse("[ff02::1]:47754", 15, mc[0..18]);
+    all = ckh_check("6 the loopback ::1 is refused without the test aid, multicast always", !cs_call6(a[0..CS_LEN], lo[0..18], fb[0..10]) and cs_state(a[0..CS_LEN]) == CK_IDLE and !cs_probe_send6(a[0..CS_LEN], lo[0..18])) and all;
+    cs_set(a[0..CS_LEN], CS_K_LOOP6, 1);
+    cs_set(b[0..CS_LEN], CS_K_LOOP6, 1);
+    all = ckh_check("6 multicast is refused with the test aid too", !cs_call6(a[0..CS_LEN], mc[0..18], fb[0..10]) and !cs_probe_send6(a[0..CS_LEN], mc[0..18])) and all;
+    // a probe over IPv6 is counted on the other side, by family
+    all = ckh_check("6 a probe to [::1]:47754 goes out", cs_probe_send6(a[0..CS_LEN], lo[0..18])) and all;
+    ckh_usleep(20000);
+    cs_poll(b[0..CS_LEN]);
+    all = ckh_check("6 B counted one probe from an IPv6 sender, A one sent to one", cs_nat(b[0..CS_LEN], CS_N_P6) == 1 and cs_nat(a[0..CS_LEN], CS_N_P6TX) == 1) and all;
+
+    ckh_line("--- 6 full call over [::1]: ring, answer, same code, ACTIVE, frames both ways, hang-up\n");
+    dp(da[0..D_LEN], 0, P_HANGUP_N);
+    dp(db[0..D_LEN], 0, P_ANSWER);
+    all = ckh_check("6 cs_call6 to [::1]:47754 accepted, A CALLING", cs_call6(a[0..CS_LEN], lo[0..18], fb[0..10])) and all;
+    var fam_a : u64 = 0;
+    var fam_b : u64 = 0;
+    var pip : u64 = 0;
+    var pep : [18]u8 = undefined;
+    var pep_ok : bool = false;
+    const t0 : u64 = ckh_ms();
+    while (ckh_ms() - t0 < 30000 and !(dg(da[0..D_LEN], 5) != 0 and dg(db[0..D_LEN], 5) != 0)) {
+        var ev : u32 = cs_poll(a[0..CS_LEN]);
+        while (ev != CS_EV_NONE) { csp_react(a[0..CS_LEN], da[0..D_LEN], ev); ev = cs_poll(a[0..CS_LEN]); }
+        csp_tick(a[0..CS_LEN], da[0..D_LEN]);
+        ev = cs_poll(b[0..CS_LEN]);
+        while (ev != CS_EV_NONE) { csp_react(b[0..CS_LEN], db[0..D_LEN], ev); ev = cs_poll(b[0..CS_LEN]); }
+        csp_tick(b[0..CS_LEN], db[0..D_LEN]);
+        if (cs_state(b[0..CS_LEN]) == CK_ACTIVE and fam_b == 0) {
+            fam_a = cs_net(a[0..CS_LEN], CS_NET_FAM);
+            fam_b = cs_net(b[0..CS_LEN], CS_NET_FAM);
+            var fp : [10]u8 = undefined;
+            pip = cs_peer(b[0..CS_LEN], fp[0..10]);
+            pep_ok = cs_peer_ep(b[0..CS_LEN], pep[0..18]);
+        }
+        ckh_usleep(1000);
+    }
+    ckh_line("  code A: ");
+    sys_write(1, da[96..102], 6);
+    ckh_line("   code B: ");
+    sys_write(1, db[96..102], 6);
+    ckh_line("\n");
+    ckh_num("  A copies alone sent: ", cs_net(a[0..CS_LEN], CS_NET_COPY_TX));
+    ckh_num("  B copies alone taken: ", cs_net(b[0..CS_LEN], CS_NET_COPY_RX));
+    all = ckh_check("6 events A: CALLING, CODE, ACTIVE, ENDED, IDLE in this order", dg(da[0..D_LEN], 2) == csp_seq(CS_EV_CALLING, CS_EV_CODE, CS_EV_ACTIVE, CS_EV_ENDED, CS_EV_IDLE) and dg(da[0..D_LEN], 3) == 5) and all;
+    all = ckh_check("6 events B: RINGING, CODE, ACTIVE, ENDED, IDLE in this order", dg(db[0..D_LEN], 2) == csp_seq(CS_EV_RINGING, CS_EV_CODE, CS_EV_ACTIVE, CS_EV_ENDED, CS_EV_IDLE) and dg(db[0..D_LEN], 3) == 5) and all;
+    all = ckh_check("6 both screens showed the same 6 digits", da[96] >= 48 and ck_same(da[96..102], db[96..102])) and all;
+    all = ckh_check("6 the family is v6 on both sides", fam_a == @as(u64, IP6_F_V6) and fam_b == @as(u64, IP6_F_V6)) and all;
+    var lo3 : [18]u8 = undefined;
+    ip6_parse("[::1]:47753", 11, lo3[0..18]);
+    all = ckh_check("6 B's peer is [::1]:47753 (cs_peer_ep), cs_peer says not an IPv4", pep_ok and ip6_same(pep[0..18], lo3[0..18]) and pip == CS_PEER_V6) and all;
+    all = ckh_check("6 each side sent and accepted at least CS_FRAMES sealed frames", dg(da[0..D_LEN], 9) >= frames and dg(da[0..D_LEN], 10) >= frames and dg(db[0..D_LEN], 9) >= frames and dg(db[0..D_LEN], 10) >= frames) and all;
+    all = ckh_check("6 nothing lost on ::1: accepted = highest index + 1, 0 wrong content", cs_stat(a[0..CS_LEN], CS_ST_ACCEPTED) == cs_stat(a[0..CS_LEN], CS_ST_HI_INDEX) and cs_stat(b[0..CS_LEN], CS_ST_ACCEPTED) == cs_stat(b[0..CS_LEN], CS_ST_HI_INDEX) and cs_stat(a[0..CS_LEN], CS_ST_BAD_CONTENT) == 0 and cs_stat(b[0..CS_LEN], CS_ST_BAD_CONTENT) == 0) and all;
+    const ca : u64 = cs_net(a[0..CS_LEN], CS_NET_COPY_TX);
+    const cb : u64 = cs_net(b[0..CS_LEN], CS_NET_COPY_RX);
+    all = ckh_check("6 every frame but the first had its copy sent alone, and the other side took them all", ca + 1 >= cs_stat(a[0..CS_LEN], CS_ST_SENT) and ca > 0 and cb == cs_net(a[0..CS_LEN], CS_NET_COPY_TX) and cs_net(a[0..CS_LEN], CS_NET_COPY_RX) == cs_net(b[0..CS_LEN], CS_NET_COPY_TX)) and all;
+    all = ckh_check("6 no datagram too big for IPv6 on either side, 0 AEAD failures", cs_net(a[0..CS_LEN], CS_NET_BIG) == 0 and cs_net(b[0..CS_LEN], CS_NET_BIG) == 0 and cs_stat(a[0..CS_LEN], CS_ST_REJ_AEAD) == 0 and cs_stat(b[0..CS_LEN], CS_ST_REJ_AEAD) == 0) and all;
+    all = ckh_check("6 reasons: A hung up, B heard the sealed BYE; both IDLE", dg(da[0..D_LEN], 8) == CS_R_HANGUP and dg(db[0..D_LEN], 8) == CS_R_PEER_BYE and cs_state(a[0..CS_LEN]) == CK_IDLE and cs_state(b[0..CS_LEN]) == CK_IDLE) and all;
+
+    ckh_line("--- 7 the same sockets carry an IPv4 call: 127.0.0.1 as v4-mapped\n");
+    csp_new_call(da[0..D_LEN]);
+    csp_new_call(db[0..D_LEN]);
+    dp(da[0..D_LEN], 0, P_HANGUP_N);
+    dp(db[0..D_LEN], 0, P_ANSWER);
+    all = ckh_check("7 cs_call to 127.0.0.1:47754 accepted", cs_call(a[0..CS_LEN], 2130706433, 47754, fb[0..10])) and all;
+    var fam4 : u64 = 0;
+    var pip4 : u64 = 0;
+    const t1 : u64 = ckh_ms();
+    while (ckh_ms() - t1 < 30000 and !(dg(da[0..D_LEN], 5) != 0 and dg(db[0..D_LEN], 5) != 0)) {
+        var ev : u32 = cs_poll(a[0..CS_LEN]);
+        while (ev != CS_EV_NONE) { csp_react(a[0..CS_LEN], da[0..D_LEN], ev); ev = cs_poll(a[0..CS_LEN]); }
+        csp_tick(a[0..CS_LEN], da[0..D_LEN]);
+        ev = cs_poll(b[0..CS_LEN]);
+        while (ev != CS_EV_NONE) { csp_react(b[0..CS_LEN], db[0..D_LEN], ev); ev = cs_poll(b[0..CS_LEN]); }
+        csp_tick(b[0..CS_LEN], db[0..D_LEN]);
+        if (cs_state(b[0..CS_LEN]) == CK_ACTIVE and fam4 == 0) {
+            fam4 = cs_net(b[0..CS_LEN], CS_NET_FAM);
+            var fp : [10]u8 = undefined;
+            pip4 = cs_peer(b[0..CS_LEN], fp[0..10]);
+        }
+        ckh_usleep(1000);
+    }
+    all = ckh_check("7 ACTIVE and ended on both, family v4-mapped, B's peer is 127.0.0.1", dg(db[0..D_LEN], 11) != 0 and fam4 == @as(u64, IP6_F_MAPPED) and pip4 == 2130706433 and cs_state(a[0..CS_LEN]) == CK_IDLE and cs_state(b[0..CS_LEN]) == CK_IDLE) and all;
+    all = ckh_check("7 over IPv4 the copy rides with the frame: no copy alone", cs_net(a[0..CS_LEN], CS_NET_COPY_TX) == 0 and cs_net(b[0..CS_LEN], CS_NET_COPY_RX) == 0 and dg(da[0..D_LEN], 9) >= frames and dg(db[0..D_LEN], 10) >= frames) and all;
+    cs_close(a[0..CS_LEN]);
+    cs_close(b[0..CS_LEN]);
+    return all;
 }
 
 fn csp_inproc() -> bool {
@@ -698,6 +838,9 @@ pub fn main() -> void {
         ok = csp_side(false);
     } else if (rn == 5 and ck_same(rb[0..5], "relay")) {
         ok = csp_relay();
+    } else if (rn == 0 and ckh_env("CS_V6", rb[0..32]) == 1 and rb[0] == 49) {
+        ckh_line("T27 OS call session probe: two sessions in this process, test pattern, IPv6 loopback\n");
+        ok = csp_inproc6();
     } else if (rn == 0) {
         ckh_line("T27 OS call session probe: two sessions in this process, test pattern, 127.0.0.1\n");
         ok = csp_inproc();

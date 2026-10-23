@@ -244,6 +244,28 @@ use t27os::call_nat::cn_punch_ok;
 use t27os::call_nat::CN_TXID;
 use t27os::call_nat::CN_STUN_HDR;
 use t27os::call_nat::CN_PROBE_LEN;
+use t27os::call_ip6::ip6_ep_v4;
+use t27os::call_ip6::ip6_v4of;
+use t27os::call_ip6::ip6_mapped;
+use t27os::call_ip6::ip6_port;
+use t27os::call_ip6::ip6_is_set;
+use t27os::call_ip6::ip6_copy;
+use t27os::call_ip6::ip6_clear;
+use t27os::call_ip6::ip6_fits;
+use t27os::call_ip6::ip6_audio_split;
+use t27os::call_ip6::ip6_from_ok;
+use t27os::call_ip6::ip6_punch_ok;
+use t27os::call_ip6::ip6_fam;
+use t27os::call_ip6::ip6_sa_for;
+use t27os::call_ip6::ip6_sa_take;
+use t27os::call_ip6::ip6_bind_sa;
+use t27os::call_ip6::IP6_EP;
+use t27os::call_ip6::IP6_SA6;
+use t27os::call_ip6::IP6_UDP_MAX;
+use t27os::call_ip6::IP6_F_V6;
+use t27os::call_ip6::IP6_F_V4;
+use t27os::call_ip6::IP6_F_MAPPED;
+use t27os::call_ip6::ip6_same;
 use t27os::call_view::CV_D_OK;
 use t27os::call_core::CK_INVITE_LEN;
 use t27os::call_core::CK_ANSWER_LEN;
@@ -379,6 +401,28 @@ pub const CS_VCAM : usize = 140928;
 /// signature of this call and the sealed IDENT kept for resends.
 pub const CS_ID : usize = 165504;
 pub const CS_ID_LEN : usize = 1024;
+/// The peer's address in full (owner, 2026-10-23, IPv6; call_ip6.t27), in the last 256 bytes of the identity region,
+/// so cs_fresh clears it with the rest of the last peer: the sockaddr the socket sends to (sockaddr_in6, or
+/// sockaddr_in on an IPv4 socket), its length, then the endpoint (16 bytes of address, the port). CS_PADDR is no
+/// longer used: an IPv6 sockaddr is 28 bytes.
+pub const CS_NET : usize = 166272;
+const CN6_SA : usize = 0;
+const CN6_SALEN : usize = 28;
+const CN6_EP : usize = 32;
+/// The per-call net slots: datagrams not sent because they were bigger than IPv6 carries (IP6_UDP_MAX), in the
+/// group region's per-call part (LG 3); INVITEs refused for their sender (ip6_from_ok), per link (LG 28).
+const LG_BIG6 : u32 = 3;
+const LG_FROM6 : u32 = 28;
+/// cs_net(s, k).
+pub const CS_NET_FAM : u32 = 0;
+pub const CS_NET_SOCK6 : u32 = 1;
+pub const CS_NET_BIG : u32 = 2;
+pub const CS_NET_NOFROM : u32 = 3;
+pub const CS_NET_COPY_TX : u32 = 4;
+pub const CS_NET_COPY_RX : u32 = 5;
+pub const CS_NET_CLOEXEC : u32 = 6;
+/// What cs_peer gives for a native IPv6 peer: not an IPv4 (2^32), never 0 while there is a call.
+pub const CS_PEER_V6 : u64 = 4294967296;
 pub const CS_LEN : usize = 166528;
 const CI_ON : usize = 0;
 const CI_PIN : usize = 1;
@@ -421,6 +465,9 @@ pub const CS_ST_NONZERO_RX : u32 = 15;
 /// Sum and peak of |sample| (16-bit LE) over every received frame: mean loudness = sum / (480 * frames).
 pub const CS_ST_ABS_SUM : u32 = 16;
 pub const CS_ST_ABS_PEAK : u32 = 17;
+/// Over IPv6 (call_ip6 ip6_audio_split): the redundant copies sent and taken as datagrams of their own.
+pub const CS_ST_COPY_TX : u32 = 18;
+pub const CS_ST_COPY_RX : u32 = 19;
 const CS_FD : u32 = 20;
 const CS_MODE : u32 = 21;
 const CS_MUTED : u32 = 22;
@@ -468,6 +515,10 @@ const CS_K_VENC : u32 = 53;
 /// 1 = a public address in a group's member list may be called (the window sets it from T27OS_ALLOW_PUBLIC=1, the
 /// same explicit allow the typed address needs); 0 = only a private network or this machine.
 pub const CS_K_ALLOW_PUB : u32 = 57;
+/// Test aid (T27OS_QA=1): 1 = the IPv6 loopback ::1 may call and be called (call_ip6 ip6_from_ok). 0 by default.
+pub const CS_K_LOOP6 : u32 = 62;
+/// 1 when the socket is the dual-stack AF_INET6 one, 0 when cs_open fell back to an IPv4 socket.
+const CS_SOCK6 : u32 = 63;
 
 pub const CS_AUDIO_DEV : u32 = 1;
 pub const CS_AUDIO_TEST : u32 = 2;
@@ -583,6 +634,9 @@ const G_NAT_RX : u32 = 85;
 const G_NAT_BAD : u32 = 86;
 const G_NAT_PROBES : u32 = 87;
 const G_NAT_PFROM : u32 = 88;
+/// Probes received from a native IPv6 sender (also counted in G_NAT_PROBES); probes sent to one.
+const G_NAT_P6 : u32 = 89;
+const G_NAT_P6TX : u32 = 90;
 /// What cs_nat reads.
 pub const CS_N_PUB : u32 = 0;
 pub const CS_N_AT : u32 = 1;
@@ -591,6 +645,8 @@ pub const CS_N_BAD : u32 = 3;
 pub const CS_N_PROBES : u32 = 4;
 pub const CS_N_PFROM : u32 = 5;
 pub const CS_N_SRV : u32 = 6;
+pub const CS_N_P6 : u32 = 7;
+pub const CS_N_P6TX : u32 = 8;
 
 /// Set by cs_open, cleared by cs_close: the block is a live session.
 const CS_MAGIC_V : u64 = 3472328519473427298;
@@ -816,9 +872,35 @@ fn cs_sync(s: []u8) -> void {
 
 fn cs_fd(s: []const u8) -> i32 { return @as(i32, @intCast(cs_g(s, CS_FD))) - 1; }
 
+fn cs_sock6(s: []const u8) -> bool { return cs_g(s, CS_SOCK6) != 0; }
+
+/// setsockopt(2), fixed arity (an int option).
+fn cs_setsockopt(fd: i32, level: i32, name: i32, v: []const u8, n: u32) -> i32 { return @extern("setsockopt"); }
+
+/// The peer of this call is ep: its sockaddr for this socket and its address for cs_peer. False (nothing kept) when
+/// this socket cannot reach it (a native IPv6 on an IPv4 socket).
+fn cs_set_peer(s: []u8, ep: []const u8) -> bool {
+    var sa : [28]u8 = undefined;
+    const n : usize = ip6_sa_for(cs_sock6(s), ep, sa[0..28]);
+    if (n == 0) { return false; }
+    ck_put(s, CS_NET + CN6_SA, sa[0..n]);
+    s[CS_NET + CN6_SALEN] = @as(u8, @intCast(n));
+    ip6_copy(s[CS_NET + CN6_EP..CS_NET + CN6_EP + IP6_EP], ep);
+    if (ip6_mapped(ep)) { cs_p(s, CS_PEER_IP, ip6_v4of(ep) / 65536); } else { cs_p(s, CS_PEER_IP, CS_PEER_V6); }
+    return true;
+}
+
+/// One datagram to the peer. A datagram bigger than the path carries (call_ip6 ip6_room: 1232 bytes to a native IPv6
+/// peer) is not sent: it would be dropped on the way, and counted here instead.
 fn cs_send(s: []u8, b: []const u8) -> bool {
-    const r : i64 = ckh_sendto(cs_fd(s), b, @as(u64, b.len), 0, s[CS_PADDR..CS_PADDR + 16], 16);
-    if (r != @as(i64, @intCast(b.len))) {
+    const sn : usize = @as(usize, s[CS_NET + CN6_SALEN]);
+    if (!ip6_fits(s[CS_NET + CN6_EP..CS_NET + CN6_EP + IP6_EP], b.len)) {
+        cgp(s, LG_BIG6, cg(s, LG_BIG6) + 1);
+        cs_add(s, CS_ST_SEND_ERR, 1);
+        return false;
+    }
+    const r : i64 = ckh_sendto(cs_fd(s), b, @as(u64, b.len), 0, s[CS_NET + CN6_SA..CS_NET + CN6_SA + sn], @as(u32, @intCast(sn)));
+    if (sn == 0 or r != @as(i64, @intCast(b.len))) {
         cs_add(s, CS_ST_SEND_ERR, 1);
         return false;
     }
@@ -858,20 +940,43 @@ pub fn cs_open(s: []u8, me_fp: []const u8, bind_ip: u64, port: u64, audio: u32) 
     ck_wipe(s[0..CS_LEN]);
     ck_put(s, EP_ME, me_fp);
     s[1] = @as(u8, @intCast(CK_IDLE));
-    var a : [16]u8 = undefined;
-    ckh_addr4(a[0..16], bind_ip, port);
-    const fd : i32 = sys_socket(2, 2, 0);
-    if (fd < 0) { return false; }
-    if (sys_bind(fd, a[0..16], 16) != 0) {
+    // one dual-stack socket (call_ip6.t27): AF_INET6 with IPV6_V6ONLY off takes IPv4 friends as v4-mapped addresses
+    // and IPv6 friends as they are; the stable address is preferred as the source (IPV6_PREFER_TEMPADDR 0), so the
+    // address the cabinet shows is the one a friend sees. When the system gives no such socket: IPv4 as before.
+    var a : [28]u8 = undefined;
+    var off : [4]u8 = undefined;
+    off[0] = 0; off[1] = 0; off[2] = 0; off[3] = 0;
+    var six : bool = true;
+    var fd : i32 = sys_socket(30, 2, 0);
+    if (fd >= 0 and cs_setsockopt(fd, 41, 27, off[0..4], 4) != 0) {
         sys_close(fd);
-        return false;
+        fd = -1;
     }
+    if (fd >= 0) {
+        cs_setsockopt(fd, 41, 63, off[0..4], 4);
+        const an : usize = ip6_bind_sa(bind_ip, port, a[0..28]);
+        if (an == 0 or sys_bind(fd, a[0..an], @as(u32, @intCast(an))) != 0) {
+            sys_close(fd);
+            return false;
+        }
+    } else {
+        six = false;
+        ckh_addr4(a[0..16], bind_ip, port);
+        fd = sys_socket(2, 2, 0);
+        if (fd < 0) { return false; }
+        if (sys_bind(fd, a[0..16], 16) != 0) {
+            sys_close(fd);
+            return false;
+        }
+    }
+    // FD_CLOEXEC: a process the window starts (the update server, a pane) must not keep the call port
     const fl : i32 = ckh_fcntl(fd, 3, 0);
-    if (fl < 0 or ckh_fcntl(fd, 4, @as(u64, @intCast(fl | 4))) != 0) {
+    if (fl < 0 or ckh_fcntl(fd, 4, @as(u64, @intCast(fl | 4))) != 0 or ckh_fcntl(fd, 2, 1) != 0) {
         sys_close(fd);
         return false;
     }
     cs_p(s, CS_FD, @as(u64, @intCast(fd)) + 1);
+    if (six) { cs_p(s, CS_SOCK6, 1); }
     cs_p(s, CS_MODE, @as(u64, audio));
     cs_p(s, CS_SEEN, @as(u64, CK_IDLE));
     cs_p(s, CS_MAGIC, CS_MAGIC_V);
@@ -919,6 +1024,7 @@ fn cs_link_copy(s: []u8, a: usize) -> void {
         }
         j = j + 1;
     }
+    put_u64(s, a + CS_SLOTS + @as(usize, CS_SOCK6) * 8, cs_g(s, CS_SOCK6));
 }
 
 fn cs_live(s: []const u8) -> bool { return s.len >= CS_LEN and cs_g(s, CS_MAGIC) == CS_MAGIC_V; }
@@ -934,7 +1040,7 @@ pub fn cs_set(s: []u8, k: u32, v: u64) -> bool {
         if (v != 0 and v < cs_g(s, CS_K_JB_MAX)) { ok = true; }
     } else if (k == CS_K_JB_MAX) {
         if (v > cs_g(s, CS_K_JB_TARGET) and v + CBP_F_TX < CBP_F_JB) { ok = true; }
-    } else if (k == CS_K_GSTATS or k == CS_K_GAUTO or k == CS_K_VIDEO or k == CS_K_ALLOW_PUB) {
+    } else if (k == CS_K_GSTATS or k == CS_K_GAUTO or k == CS_K_VIDEO or k == CS_K_ALLOW_PUB or k == CS_K_LOOP6) {
         if (v <= 1) { ok = true; }
     } else if (k == CS_K_VDROP or k == CS_K_VLIMIT) {
         if (v <= 4294967295) { ok = true; }
@@ -973,7 +1079,19 @@ fn cs_fresh(s: []u8) -> void {
 
 /// Dial ip:port, the peer known by its fingerprint.
 pub fn cs_call(s: []u8, ip: u64, port: u64, peer_fp: []const u8) -> bool {
-    if (!cs_live(s) or peer_fp.len != 10 or ip == 0 or ip > 4294967295 or port == 0 or port > 65535) { return false; }
+    if (ip == 0 or ip > 4294967295 or port == 0 or port > 65535) { return false; }
+    var ep : [18]u8 = undefined;
+    ip6_ep_v4(ip, port, ep[0..18]);
+    return cs_call6(s, ep[0..18], peer_fp);
+}
+
+/// Dial the endpoint ep (call_ip6.t27: an IPv4 as v4-mapped, or an IPv6), the peer known by its fingerprint. A native
+/// IPv6 is dialled only when the socket is the dual-stack one and the address is one a call may go to (global or
+/// unique local; ::1 only with CS_K_LOOP6): the window has already asked the person (ip6_dial_step).
+pub fn cs_call6(s: []u8, ep: []const u8, peer_fp: []const u8) -> bool {
+    if (!cs_live(s) or peer_fp.len != 10 or ep.len < IP6_EP or ip6_port(ep) == 0) { return false; }
+    if (ip6_mapped(ep) and ip6_v4of(ep) / 65536 == 0) { return false; }
+    if (!ip6_mapped(ep) and (!cs_sock6(s) or !ip6_from_ok(ep, cs_g(s, CS_K_LOOP6) != 0))) { return false; }
     const st : u32 = ckh_state(s[0..EP_LEN]);
     if (st != CK_IDLE and st != CK_ENDED and st != CK_FAILED) { return false; }
     if (cs_rate_refuses(s, ckh_ms())) { return false; }
@@ -981,8 +1099,7 @@ pub fn cs_call(s: []u8, ip: u64, port: u64, peer_fp: []const u8) -> bool {
     s[EP_ROLE] = 1;
     ck_put(s, EP_PEER, peer_fp);
     cs_id_load(s);
-    ckh_addr4(s[CS_PADDR..CS_PADDR + 16], ip, port);
-    cs_p(s, CS_PEER_IP, ip);
+    if (!cs_set_peer(s, ep)) { return false; }
     const n : usize = ckh_invite(s[0..EP_LEN], s[CS_L1..CS_L1 + 256]);
     if (n == 0) { return false; }
     cs_p(s, CS_N1, @as(u64, n));
@@ -1001,6 +1118,41 @@ pub fn cs_peer(s: []const u8, fp_out: []u8) -> u64 {
     if (st == CK_IDLE or fp_out.len < 10) { return 0; }
     ck_put(fp_out, 0, s[EP_PEER..EP_PEER + 10]);
     return cs_g(s, CS_PEER_IP);
+}
+
+/// The other party's endpoint (call_ip6.t27, 18 bytes) into out; false when there is no call.
+pub fn cs_peer_ep(s: []const u8, out: []u8) -> bool {
+    if (s.len < CS_LEN or out.len < IP6_EP or ckh_state(s[0..EP_LEN]) == CK_IDLE) { return false; }
+    if (!ip6_is_set(s[CS_NET + CN6_EP..CS_NET + CN6_EP + IP6_EP])) { return false; }
+    return ip6_copy(out, s[CS_NET + CN6_EP..CS_NET + CN6_EP + IP6_EP]);
+}
+
+/// The fingerprint and endpoint of the current call or, once it ended, of the last one (kept until the next call
+/// starts); false when no call was made or taken on this block since it opened.
+pub fn cs_last_ep(s: []const u8, fp_out: []u8, ep_out: []u8) -> bool {
+    if (!cs_live(s) or fp_out.len < 10 or ep_out.len < IP6_EP) { return false; }
+    if (!ip6_is_set(s[CS_NET + CN6_EP..CS_NET + CN6_EP + IP6_EP])) { return false; }
+    ck_put(fp_out, 0, s[EP_PEER..EP_PEER + 10]);
+    return ip6_copy(ep_out, s[CS_NET + CN6_EP..CS_NET + CN6_EP + IP6_EP]);
+}
+
+/// The network side of the call: CS_NET_FAM (call_ip6 IP6_F_*: v4, v6 or v4-mapped; 0 with no peer), CS_NET_SOCK6
+/// (1 = the dual-stack socket), CS_NET_BIG (datagrams too big for IPv6, not sent, this call), CS_NET_NOFROM (INVITEs
+/// refused for their IPv6 sender), CS_NET_COPY_TX / RX (the redundant copies sent and taken alone over IPv6),
+/// CS_NET_CLOEXEC (1 = the socket is closed in any process the window starts: F_GETFD has FD_CLOEXEC).
+pub fn cs_net(s: []const u8, k: u32) -> u64 {
+    if (!cs_live(s)) { return 0; }
+    if (k == CS_NET_FAM) { return @as(u64, ip6_fam(cs_sock6(s), s[CS_NET + CN6_EP..CS_NET + CN6_EP + IP6_EP])); }
+    if (k == CS_NET_SOCK6) { return cs_g(s, CS_SOCK6); }
+    if (k == CS_NET_BIG) { return cg(s, LG_BIG6); }
+    if (k == CS_NET_NOFROM) { return cg(s, LG_FROM6); }
+    if (k == CS_NET_COPY_TX) { return cs_g(s, CS_ST_COPY_TX); }
+    if (k == CS_NET_COPY_RX) { return cs_g(s, CS_ST_COPY_RX); }
+    if (k == CS_NET_CLOEXEC) {
+        const f : i32 = ckh_fcntl(cs_fd(s), 1, 0);
+        if (f >= 0 and (f & 1) != 0) { return 1; }
+    }
+    return 0;
 }
 
 pub fn cs_code(s: []const u8, out: []u8) -> bool {
@@ -1290,7 +1442,9 @@ fn cs_tone_tick(s: []u8) -> void {
 }
 
 /// Seal and send, on this link, every captured frame of the microphone ring (the ring of link 0) from this link's
-/// cursor up to w, each with the previous one as its redundant copy. Link 0 numbers its frames by the ring index, the
+/// cursor up to w, each with the previous one as its redundant copy; to a native IPv6 peer the two do not fit one
+/// datagram (call_ip6 ip6_audio_split), so the frame goes alone and the copy of the one before follows as a datagram of
+/// its own (flags 2: "a redundant copy only"). Link 0 numbers its frames by the ring index, the
 /// others by their own count from 0, as the receiver's jitter buffer starts at 0 on every link. The cursor of link 0
 /// is the ring's (header slot 3), so a one to one call sends exactly as before. Returns the new cursor.
 fn cs_send_media(s: []u8, pm: u64, w: u64) -> u64 {
@@ -1310,10 +1464,12 @@ fn cs_send_media(s: []u8, pm: u64, w: u64) -> u64 {
             cs_add(s, CS_ST_MUTED_SENT, 1);
         }
         if (!slave) { q = k; }
+        const split : bool = ip6_audio_split(s[CS_NET + CN6_EP..CS_NET + CN6_EP + IP6_EP], CS_SEALED);
+        const red : bool = q >= 1 and k >= 1;
         var pkt : [1928]u8 = undefined;
-        const n : usize = cs_pkt_head(pkt[0..1928], q, q >= 1 and k >= 1);
+        const n : usize = cs_pkt_head(pkt[0..1928], q, red and !split);
         sys_peek(pkt[8..968], slot, 960);
-        if (q >= 1 and k >= 1) { sys_peek(pkt[968..1928], pm + CBP_F_TXD + ((k - 1) % CBP_F_TX) * 960, 960); }
+        if (red and !split) { sys_peek(pkt[968..1928], pm + CBP_F_TXD + ((k - 1) % CBP_F_TX) * 960, 960); }
         var f : [1996]u8 = undefined;
         const m : usize = ckh_seal(s[0..EP_LEN], CK_T_MEDIA, pkt[0..n], f[0..1996]);
         if (m > 0) {
@@ -1323,6 +1479,13 @@ fn cs_send_media(s: []u8, pm: u64, w: u64) -> u64 {
             }
         } else {
             cs_add(s, CS_ST_SEND_ERR, 1);
+        }
+        if (red and split) {
+            cs_pkt_head(pkt[0..1928], q - 1, false);
+            pkt[6] = 2;
+            sys_peek(pkt[8..968], pm + CBP_F_TXD + ((k - 1) % CBP_F_TX) * 960, 960);
+            const mc : usize = ckh_seal(s[0..EP_LEN], CK_T_MEDIA, pkt[0..968], f[0..1996]);
+            if (mc > 0 and cs_send(s, f[0..mc])) { cs_add(s, CS_ST_COPY_TX, 1); }
         }
         k = k + 1;
         q = q + 1;
@@ -1408,6 +1571,13 @@ fn cs_take_media(s: []u8, pt: []const u8) -> void {
         cs_add(s, CS_ST_REJ_OTHER, 1);
         return;
     }
+    if ((pt[6] & 2) != 0) {
+        // a redundant copy alone (over IPv6, cs_send_media): it only fills a hole the frame left
+        cs_add(s, CS_ST_COPY_RX, 1);
+        if (cs_g(s, CS_MODE) == @as(u64, CS_AUDIO_TEST)) { return; }
+        if (cbp_fstore(cs_aud(s), cs_pkt_index(pt), pt[8..968], 2) == 1) { cbp_inc(cs_aud(s) + 208, 1); }
+        return;
+    }
     cs_add(s, CS_ST_ACCEPTED, 1);
     const q : u64 = cs_pkt_index(pt);
     if (q + 1 > cs_g(s, CS_ST_HI_INDEX)) { cs_p(s, CS_ST_HI_INDEX, q + 1); }
@@ -1468,11 +1638,21 @@ fn cs_on_packet(s: []u8, m: []const u8, from: []const u8) -> void {
         if ((st == CK_IDLE or st == CK_ENDED or st == CK_FAILED) and m.len == CK_INVITE_LEN) {
             // a new call for me: the caller is whoever this INVITE names as sender, answered where it came from
             if (!ck_hdr_admit(m, s[EP_ME..EP_ME + 10], m[0..0], m[0..0])) { cs_add(s, CS_ST_REJ_OTHER, 1); return; }
+            // answered only where a call may go back to (call_ip6 ip6_from_ok): an IPv4 as before, an IPv6 that is
+            // global or unique local
+            var fe : [18]u8 = undefined;
+            if (!ip6_sa_take(from, from.len, fe[0..18]) or !ip6_from_ok(fe[0..18], cs_g(s, CS_K_LOOP6) != 0)) {
+                cgp(s, LG_FROM6, cg(s, LG_FROM6) + 1);
+                cs_add(s, CS_ST_REJ_OTHER, 1);
+                return;
+            }
             cs_fresh(s);
             s[EP_ROLE] = 0;
             ck_put(s, EP_PEER, m[8..18]);
-            ck_put(s, CS_PADDR, from[0..16]);
-            cs_p(s, CS_PEER_IP, (@as(u64, from[4]) << 24) | (@as(u64, from[5]) << 16) | (@as(u64, from[6]) << 8) | @as(u64, from[7]));
+            if (!cs_set_peer(s, fe[0..18])) {
+                cs_add(s, CS_ST_REJ_OTHER, 1);
+                return;
+            }
             if (!ckh_on_invite(ep, m)) {
                 cs_add(s, CS_ST_REJ_OTHER, 1);
             } else if (cs_rate_refuses(s, ckh_ms())) {
@@ -1874,7 +2054,7 @@ fn csg_free_link(s: []const u8, nl: usize) -> usize {
 }
 
 /// A slot of the STUN lookup and the probes: a finished group leaves it alone.
-fn cs_nat_slot(k: u32) -> bool { return k >= G_NAT_TX0 and k <= G_NAT_PFROM; }
+fn cs_nat_slot(k: u32) -> bool { return k >= G_NAT_TX0 and k <= G_NAT_P6TX; }
 
 /// Forget a finished group: the member table and the group counters (not the link or audio bookkeeping).
 fn csg_reset(s: []u8) -> void {
@@ -2888,12 +3068,19 @@ fn cs_link_tick(s: []u8, now: u64) -> void {
 
 // ---------------------------------------------------------------- beyond the home network (call_nat.t27)
 
-/// The sender of a datagram (a sockaddr_in) as ip * 65536 + port.
+/// The sender of a datagram (a sockaddr_in, or a sockaddr_in6 from the dual-stack socket) as ip * 65536 + port when it
+/// is an IPv4; the port alone for a native IPv6 sender; 0 for what is neither.
 pub fn cs_from_addr(from: []const u8) -> u64 {
-    if (from.len < 8) { return 0; }
-    const port : u64 = (@as(u64, from[2]) << 8) | @as(u64, from[3]);
-    const ip : u64 = (@as(u64, from[4]) << 24) | (@as(u64, from[5]) << 16) | (@as(u64, from[6]) << 8) | @as(u64, from[7]);
-    return ip * 65536 + port;
+    var ep : [18]u8 = undefined;
+    if (!ip6_sa_take(from, from.len, ep[0..18])) { return 0; }
+    if (ip6_mapped(ep[0..18])) { return ip6_v4of(ep[0..18]); }
+    return ip6_port(ep[0..18]);
+}
+
+/// The sender is a native IPv6 one.
+fn cs_from_v6(from: []const u8) -> bool {
+    var ep : [18]u8 = undefined;
+    return ip6_sa_take(from, from.len, ep[0..18]) and !ip6_mapped(ep[0..18]);
 }
 
 /// The transaction id the lookup asked with, back from its two slots.
@@ -2916,6 +3103,7 @@ fn cs_nat_take(s: []u8, pk: []const u8, from: []const u8, now: u64) -> void {
     if (cn_probe_is(pk)) {
         cgp(s, G_NAT_PROBES, cg(s, G_NAT_PROBES) + 1);
         cgp(s, G_NAT_PFROM, fa);
+        if (cs_from_v6(from)) { cgp(s, G_NAT_P6, cg(s, G_NAT_P6) + 1); }
         return;
     }
     var t : [12]u8 = undefined;
@@ -2948,25 +3136,40 @@ pub fn cs_stun_send(s: []u8, txid: []const u8, srv_ip: u64, srv_port: u64) -> bo
     cgp(s, G_NAT_TX0, get_u64(b[0..16], 0));
     cgp(s, G_NAT_TX1, get_u64(b[0..16], 8));
     cgp(s, G_NAT_SRV, srv_ip * 65536 + srv_port);
-    var to : [16]u8 = undefined;
-    ckh_addr4(to[0..16], srv_ip, srv_port);
-    return ckh_sendto(cs_fd(s), q[0..20], 20, 0, to[0..16], 16) == 20;
+    var ep : [18]u8 = undefined;
+    ip6_ep_v4(srv_ip, srv_port, ep[0..18]);
+    var to : [28]u8 = undefined;
+    const tn : usize = ip6_sa_for(cs_sock6(s), ep[0..18], to[0..28]);
+    return tn > 0 and ckh_sendto(cs_fd(s), q[0..20], 20, 0, to[0..tn], @as(u32, @intCast(tn))) == 20;
 }
 
 /// One probe from this device's fingerprint (the block's own) to a (call_nat cn_punch_ok). False when refused.
 pub fn cs_probe_send(s: []u8, a: u64) -> bool {
     if (!cs_live(s) or !cn_punch_ok(a)) { return false; }
+    var ep : [18]u8 = undefined;
+    ip6_ep_v4(a / 65536, a % 65536, ep[0..18]);
+    return cs_probe_send6(s, ep[0..18]);
+}
+
+/// One probe to the endpoint ep (call_ip6 ip6_punch_ok: an IPv4 by call_nat's rule, a global or unique local IPv6;
+/// ::1 only with CS_K_LOOP6). False when refused or the socket cannot reach it.
+pub fn cs_probe_send6(s: []u8, ep: []const u8) -> bool {
+    if (!cs_live(s) or !ip6_punch_ok(ep, cs_g(s, CS_K_LOOP6) != 0)) { return false; }
     var p : [16]u8 = undefined;
     if (cn_probe(s[EP_ME..EP_ME + 10], p[0..16]) != CN_PROBE_LEN) { return false; }
-    var to : [16]u8 = undefined;
-    ckh_addr4(to[0..16], a / 65536, a % 65536);
-    return ckh_sendto(cs_fd(s), p[0..16], 16, 0, to[0..16], 16) == 16;
+    var to : [28]u8 = undefined;
+    const tn : usize = ip6_sa_for(cs_sock6(s), ep, to[0..28]);
+    if (tn == 0 or ckh_sendto(cs_fd(s), p[0..16], 16, 0, to[0..tn], @as(u32, @intCast(tn))) != 16) { return false; }
+    if (!ip6_mapped(ep)) { cgp(s, G_NAT_P6TX, cg(s, G_NAT_P6TX) + 1); }
+    return true;
 }
 
 /// The lookup's and the probes' state: CS_N_PUB (ip * 65536 + port, 0 = none yet), CS_N_AT (ms), CS_N_RX, CS_N_BAD,
 /// CS_N_PROBES, CS_N_PFROM, CS_N_SRV; 0 for anything else or a block that is not open.
 pub fn cs_nat(s: []const u8, k: u32) -> u64 {
-    if (!cs_live(s) or k > CS_N_SRV) { return 0; }
+    if (!cs_live(s) or k > CS_N_P6TX) { return 0; }
+    if (k == CS_N_P6) { return cg(s, G_NAT_P6); }
+    if (k == CS_N_P6TX) { return cg(s, G_NAT_P6TX); }
     if (k == CS_N_PUB) { return cg(s, G_NAT_PUB); }
     if (k == CS_N_AT) { return cg(s, G_NAT_AT); }
     if (k == CS_N_RX) { return cg(s, G_NAT_RX); }
@@ -2980,25 +3183,27 @@ pub fn cs_poll(s: []u8) -> u32 {
     if (!cs_live(s)) { return CS_EV_NONE; }
     const nl : usize = cs_links(s);
     var rx : [2048]u8 = undefined;
-    var from : [16]u8 = undefined;
+    var from : [28]u8 = undefined;
     var fl : [4]u8 = undefined;
     var got : u32 = 0;
     while (got < 256) {
-        ck_wipe(from[0..16]);
-        fl[0] = 16; fl[1] = 0; fl[2] = 0; fl[3] = 0;
-        const r : i64 = ckh_recvfrom(cs_fd(s), rx[0..2048], 2048, 0, sys_addr(from[0..16], from[0..16], 0), sys_addr(fl[0..4], fl[0..4], 0));
+        ck_wipe(from[0..28]);
+        fl[0] = 28; fl[1] = 0; fl[2] = 0; fl[3] = 0;
+        const r : i64 = ckh_recvfrom(cs_fd(s), rx[0..2048], 2048, 0, sys_addr(from[0..28], from[0..28], 0), sys_addr(fl[0..4], fl[0..4], 0));
         if (r <= 0) { break; }
+        var fn6 : usize = @as(usize, fl[0]);
+        if (fn6 > 28) { fn6 = 28; }
         const pk : []const u8 = rx[0..@as(usize, @intCast(r))];
         if (cn_stun_looks(pk) or cn_probe_is(pk)) {
             // the lookup's answer or a punch probe (call_nat.t27): taken off here, never a call frame
-            cs_nat_take(s, pk, from[0..16], ckh_ms());
+            cs_nat_take(s, pk, from[0..fn6], ckh_ms());
         } else {
             const k : usize = cs_route(s, pk);
             if (k == 0) {
-                cs_on_packet(s, pk, from[0..16]);
+                cs_on_packet(s, pk, from[0..fn6]);
                 cs_sync(s);
             } else {
-                cs_on_packet(s[k * CS_LEN..(k + 1) * CS_LEN], pk, from[0..16]);
+                cs_on_packet(s[k * CS_LEN..(k + 1) * CS_LEN], pk, from[0..fn6]);
                 cs_sync(s[k * CS_LEN..(k + 1) * CS_LEN]);
             }
         }
@@ -3044,7 +3249,7 @@ test the_block_holds_its_parts_without_overlap {
     assert CS_GRP + CS_GBODY + GR_LIST_MAX <= CS_GRP + CS_GRP_LEN;
     assert G_MEM + 3 * 3 <= 96;
     // the lookup's slots sit past the member table and inside the 96 group slots
-    assert G_MEM + 3 * 3 <= G_NAT_TX0 and G_NAT_PFROM < 96 and G_MIX_UNDER < G_MEM;
+    assert G_MEM + 3 * 3 <= G_NAT_TX0 and G_NAT_PFROM < G_NAT_P6 and G_NAT_P6TX < 96 and G_MIX_UNDER < G_MEM;
     assert 96 * 8 <= CS_GBODY;
     assert CS_K_JB_MAX < 64;
     // the text queue of a message session sits in the audio block, past every slot the audio code writes
@@ -3906,4 +4111,204 @@ test a_closed_block_keeps_no_session_key_identity_key_or_plaintext {
     assert t_zero(s[CS_ID..CS_ID + CS_ID_LEN]);
     assert t_zero(s[CS_AUD..CS_GRP]);
     assert t_zero(s[CS_VASM..CS_VCAM + CS_VBUF]);
+}
+
+/// A live block as cs_open leaves it on a dual-stack socket (sock6) or an IPv4 one, with no socket (fd -1).
+fn t6_block(s: []u8, sock6: bool) -> void {
+    ck_wipe(s[0..CS_LEN]);
+    const fp : [10]u8 = [7, 7, 7, 7, 7, 7, 7, 7, 7, 7];
+    ck_put(s, EP_ME, fp[0..10]);
+    s[1] = @as(u8, @intCast(CK_IDLE));
+    cs_p(s, CS_MAGIC, CS_MAGIC_V);
+    cs_p(s, CS_MODE, @as(u64, CS_AUDIO_TEST));
+    if (sock6) { cs_p(s, CS_SOCK6, 1); }
+}
+
+/// The 16 bytes of 2804:18:1917:f34e::ff78, then a port.
+fn t6_ep(ep: []u8, port: u64) -> void {
+    const a : [16]u8 = [40, 4, 0, 24, 25, 23, 243, 78, 0, 0, 0, 0, 0, 0, 255, 120];
+    var i : usize = 0;
+    while (i < 16) {
+        ep[i] = a[i];
+        i = i + 1;
+    }
+    ep[16] = @as(u8, @intCast((port >> 8) & 255));
+    ep[17] = @as(u8, @intCast(port & 255));
+}
+
+test an_ipv6_peer_is_kept_in_full_and_only_what_ipv6_carries_is_sent_to_it {
+    var s : [166528]u8 = undefined;
+    t6_block(s[0..CS_LEN], true);
+    var ep : [18]u8 = undefined;
+    t6_ep(ep[0..18], 47727);
+    assert cs_set_peer(s[0..CS_LEN], ep[0..18]);
+    // the sockaddr_in6 the socket sends to, its length, the endpoint; cs_peer says "not an IPv4"
+    assert s[CS_NET + CN6_SA] == 28 and s[CS_NET + CN6_SA + 1] == 30 and s[CS_NET + CN6_SA + 2] == 186 and s[CS_NET + CN6_SA + 3] == 111;
+    assert s[CS_NET + CN6_SA + 8] == 40 and s[CS_NET + CN6_SA + 23] == 120 and s[CS_NET + CN6_SALEN] == 28;
+    assert cs_g(s[0..CS_LEN], CS_PEER_IP) == CS_PEER_V6 and cs_net(s[0..CS_LEN], CS_NET_FAM) == @as(u64, IP6_F_V6);
+    // more than 1232 bytes never leaves for an IPv6 peer: counted, not sent
+    var big : [1996]u8 = undefined;
+    ck_wipe(big[0..1996]);
+    assert cs_send(s[0..CS_LEN], big[0..1233]) == false and cs_net(s[0..CS_LEN], CS_NET_BIG) == 1;
+    assert cs_send(s[0..CS_LEN], big[0..1996]) == false and cs_net(s[0..CS_LEN], CS_NET_BIG) == 2;
+    // 1232 bytes is what the size rule lets through to it (the send itself is a host call: call_session_probe CS_V6=1)
+    assert ip6_fits(s[CS_NET + CN6_EP..CS_NET + CN6_EP + IP6_EP], 1232) and cs_g(s[0..CS_LEN], CS_ST_SEND_ERR) == 2;
+    // an IPv4 friend on the dual-stack socket: its v4-mapped sockaddr_in6, its IPv4 for cs_peer, the IPv4 path's size
+    var v4 : [18]u8 = undefined;
+    ip6_ep_v4(3232235786, 47728, v4[0..18]);
+    assert cs_set_peer(s[0..CS_LEN], v4[0..18]);
+    assert s[CS_NET + CN6_SALEN] == 28 and s[CS_NET + CN6_SA + 1] == 30 and s[CS_NET + CN6_SA + 18] == 255 and s[CS_NET + CN6_SA + 20] == 192 and s[CS_NET + CN6_SA + 23] == 10;
+    assert cs_g(s[0..CS_LEN], CS_PEER_IP) == 3232235786 and cs_net(s[0..CS_LEN], CS_NET_FAM) == @as(u64, IP6_F_MAPPED);
+    assert ip6_fits(s[CS_NET + CN6_EP..CS_NET + CN6_EP + IP6_EP], 1996);
+    // an IPv4 socket (no dual-stack one was given): a sockaddr_in, family v4, and no IPv6 peer at all
+    t6_block(s[0..CS_LEN], false);
+    assert cs_set_peer(s[0..CS_LEN], v4[0..18]) and s[CS_NET + CN6_SALEN] == 16 and s[CS_NET + CN6_SA + 1] == 2 and s[CS_NET + CN6_SA + 4] == 192;
+    assert cs_net(s[0..CS_LEN], CS_NET_FAM) == @as(u64, IP6_F_V4) and cs_net(s[0..CS_LEN], CS_NET_SOCK6) == 0;
+    t6_block(s[0..CS_LEN], false);
+    assert cs_set_peer(s[0..CS_LEN], ep[0..18]) == false and s[CS_NET + CN6_SALEN] == 0 and cs_net(s[0..CS_LEN], CS_NET_FAM) == 0;
+    // a new call forgets the last peer's address with the rest of it (cs_fresh clears the last peer: cs_id_fresh)
+    t6_block(s[0..CS_LEN], true);
+    assert cs_set_peer(s[0..CS_LEN], ep[0..18]);
+    cs_id_fresh(s[0..CS_LEN]);
+    assert s[CS_NET + CN6_SALEN] == 0 and cs_net(s[0..CS_LEN], CS_NET_FAM) == 0;
+    assert CS_ID + CI_MSG + CK_HDR + CK_IDENT_PT + CK_TAG <= CS_NET and CS_NET + CN6_EP + IP6_EP <= CS_ID + CS_ID_LEN and CS_ID + CI_PEER < CS_NET;
+}
+
+test an_ipv6_call_goes_only_where_a_call_may_go {
+    var s : [166528]u8 = undefined;
+    t6_block(s[0..CS_LEN], true);
+    const fp : [10]u8 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    var ep : [18]u8 = undefined;
+    // multicast, link-local, the loopback without the test aid, port 0: refused before anything changes
+    var bad : [18]u8 = undefined;
+    ck_wipe(bad[0..18]);
+    bad[0] = 255;
+    bad[1] = 2;
+    bad[15] = 1;
+    bad[17] = 1;
+    assert cs_call6(s[0..CS_LEN], bad[0..18], fp[0..10]) == false;
+    bad[0] = 254;
+    bad[1] = 128;
+    assert cs_call6(s[0..CS_LEN], bad[0..18], fp[0..10]) == false;
+    ck_wipe(bad[0..18]);
+    bad[15] = 1;
+    bad[17] = 1;
+    assert cs_call6(s[0..CS_LEN], bad[0..18], fp[0..10]) == false;
+    t6_ep(ep[0..18], 0);
+    assert cs_call6(s[0..CS_LEN], ep[0..18], fp[0..10]) == false;
+    assert cs_state(s[0..CS_LEN]) == CK_IDLE and s[CS_NET + CN6_SALEN] == 0;
+    // an IPv4 0.0.0.0, and any native IPv6 on an IPv4 socket
+    var z4 : [18]u8 = undefined;
+    ip6_ep_v4(0, 47727, z4[0..18]);
+    assert cs_call6(s[0..CS_LEN], z4[0..18], fp[0..10]) == false;
+    t6_block(s[0..CS_LEN], false);
+    t6_ep(ep[0..18], 47727);
+    assert cs_call6(s[0..CS_LEN], ep[0..18], fp[0..10]) == false and cs_state(s[0..CS_LEN]) == CK_IDLE;
+    // the test aid lets the loopback through the rule (the probe dials it for real)
+    t6_block(s[0..CS_LEN], true);
+    cs_p(s[0..CS_LEN], CS_K_LOOP6, 1);
+    assert cs_set(s[0..CS_LEN], CS_K_LOOP6, 1) and cs_set(s[0..CS_LEN], CS_K_LOOP6, 2) == false;
+}
+
+test an_invite_over_ipv6_is_taken_only_from_an_address_a_call_may_go_back_to {
+    var s : [166528]u8 = undefined;
+    t6_block(s[0..CS_LEN], true);
+    const me : [10]u8 = [7, 7, 7, 7, 7, 7, 7, 7, 7, 7];
+    const peer : [10]u8 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    var sid : [16]u8 = undefined;
+    ck_wipe(sid[0..16]);
+    sid[0] = 9;
+    var m : [149]u8 = undefined;
+    ck_wipe(m[0..149]);
+    ck_put_header(m[0..52], CK_T_INVITE, peer[0..10], me[0..10], sid[0..16], 0);
+    // from fe80::1 (link-local): refused, counted, nothing rings
+    var ll : [18]u8 = undefined;
+    ck_wipe(ll[0..18]);
+    ll[0] = 254;
+    ll[1] = 128;
+    ll[15] = 1;
+    ll[16] = 186;
+    ll[17] = 111;
+    var sa : [28]u8 = undefined;
+    assert ip6_sa_for(true, ll[0..18], sa[0..28]) == 28;
+    cs_on_packet(s[0..CS_LEN], m[0..149], sa[0..28]);
+    assert cs_state(s[0..CS_LEN]) == CK_IDLE and cs_net(s[0..CS_LEN], CS_NET_NOFROM) == 1 and s[CS_NET + CN6_SALEN] == 0;
+    // a sender address that is not a sockaddr at all: refused too
+    cs_on_packet(s[0..CS_LEN], m[0..149], sa[0..10]);
+    assert cs_state(s[0..CS_LEN]) == CK_IDLE and cs_net(s[0..CS_LEN], CS_NET_NOFROM) == 2;
+    // a global sender passes the rule (it then rings: call_session_probe CS_V6=1 takes a whole call over ::1); the peer
+    // the window reads back is the one kept, and stays after the call for the chat (cs_last_ep)
+    var g : [18]u8 = undefined;
+    t6_ep(g[0..18], 47727);
+    assert ip6_sa_for(true, g[0..18], sa[0..28]) == 28;
+    var fe : [18]u8 = undefined;
+    assert ip6_sa_take(sa[0..28], 28, fe[0..18]) and ip6_from_ok(fe[0..18], false);
+    assert cs_set_peer(s[0..CS_LEN], fe[0..18]);
+    ck_put(s[0..CS_LEN], EP_PEER, peer[0..10]);
+    s[1] = @as(u8, @intCast(CK_RINGING));
+    var fp : [10]u8 = undefined;
+    var back : [18]u8 = undefined;
+    assert cs_peer(s[0..CS_LEN], fp[0..10]) == CS_PEER_V6 and cs_peer_ep(s[0..CS_LEN], back[0..18]) and ip6_same(back[0..18], g[0..18]);
+    s[1] = @as(u8, @intCast(CK_IDLE));
+    assert cs_peer_ep(s[0..CS_LEN], back[0..18]) == false;
+    assert cs_last_ep(s[0..CS_LEN], fp[0..10], back[0..18]) and ip6_same(back[0..18], g[0..18]) and ck_same(fp[0..10], peer[0..10]);
+    t6_block(s[0..CS_LEN], true);
+    assert cs_last_ep(s[0..CS_LEN], fp[0..10], back[0..18]) == false;
+}
+
+test over_ipv6_a_copy_alone_only_fills_a_hole_and_is_counted_apart {
+    var s : [166528]u8 = undefined;
+    t6_block(s[0..CS_LEN], true);
+    var pt : [968]u8 = undefined;
+    ck_wipe(pt[0..968]);
+    assert cs_pkt_head(pt[0..968], 5, false) == 968;
+    pt[6] = 2;
+    cs_take_media(s[0..CS_LEN], pt[0..968]);
+    assert cs_g(s[0..CS_LEN], CS_ST_COPY_RX) == 1 and cs_g(s[0..CS_LEN], CS_ST_ACCEPTED) == 0 and cs_g(s[0..CS_LEN], CS_ST_HI_INDEX) == 0;
+    assert cs_net(s[0..CS_LEN], CS_NET_COPY_RX) == 1 and cs_net(s[0..CS_LEN], CS_NET_COPY_TX) == 0;
+    // flags 1 (the copy rides with the frame) is no copy alone
+    assert cs_pkt_head(pt[0..968], 5, true) == CS_PKT and pt[6] == 1;
+}
+
+test the_sender_of_a_probe_or_an_answer_reads_from_either_sockaddr {
+    var s : [166528]u8 = undefined;
+    t6_block(s[0..CS_LEN], true);
+    var sa : [28]u8 = undefined;
+    var v4 : [18]u8 = undefined;
+    ip6_ep_v4(1249770113, 19302, v4[0..18]);
+    assert ip6_sa_for(true, v4[0..18], sa[0..28]) == 28 and cs_from_addr(sa[0..28]) == 1249770113 * 65536 + 19302 and cs_from_v6(sa[0..28]) == false;
+    var g : [18]u8 = undefined;
+    t6_ep(g[0..18], 51234);
+    assert ip6_sa_for(true, g[0..18], sa[0..28]) == 28 and cs_from_addr(sa[0..28]) == 51234 and cs_from_v6(sa[0..28]);
+    assert cs_from_addr(sa[0..27]) == 0;
+    // a probe from an IPv6 sender is counted with the others and apart
+    const fp : [10]u8 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    var p : [16]u8 = undefined;
+    assert cn_probe(fp[0..10], p[0..16]) == 16;
+    cs_nat_take(s[0..CS_LEN], p[0..16], sa[0..28], 1000);
+    assert cs_nat(s[0..CS_LEN], CS_N_PROBES) == 1 and cs_nat(s[0..CS_LEN], CS_N_P6) == 1 and cs_nat(s[0..CS_LEN], CS_N_PFROM) == 51234;
+    assert ip6_sa_for(true, v4[0..18], sa[0..28]) == 28;
+    cs_nat_take(s[0..CS_LEN], p[0..16], sa[0..28], 2000);
+    assert cs_nat(s[0..CS_LEN], CS_N_PROBES) == 2 and cs_nat(s[0..CS_LEN], CS_N_P6) == 1;
+    // a probe to a refused IPv6 goes nowhere
+    var ll : [18]u8 = undefined;
+    ck_wipe(ll[0..18]);
+    ll[0] = 254;
+    ll[1] = 128;
+    ll[17] = 1;
+    assert cs_probe_send6(s[0..CS_LEN], ll[0..18]) == false and cs_nat(s[0..CS_LEN], CS_N_P6TX) == 0;
+    // a finished group forgets its members, never these counters
+    csg_reset(s[0..CS_LEN]);
+    assert cs_nat(s[0..CS_LEN], CS_N_P6) == 1;
+}
+
+test every_datagram_of_a_one_to_one_call_fits_what_ipv6_carries {
+    // one audio frame alone; the copy alone; a JPEG part; a chat part; the handshake; the identity proof; a probe
+    assert CK_HDR + 968 + CK_TAG <= IP6_UDP_MAX;
+    assert CK_HDR + VC_PT_MAX + CK_TAG <= IP6_UDP_MAX;
+    assert CK_HDR + CS_TXT_MAX + CK_TAG <= IP6_UDP_MAX;
+    assert CK_INVITE_LEN <= IP6_UDP_MAX and CK_ANSWER_LEN <= IP6_UDP_MAX and CK_REVEAL_LEN <= IP6_UDP_MAX;
+    assert CK_HDR + CK_IDENT_PT + CK_TAG <= IP6_UDP_MAX and CN_PROBE_LEN <= IP6_UDP_MAX and CN_STUN_HDR <= IP6_UDP_MAX;
+    // the frame with its copy does not: that is why it splits over IPv6
+    assert CS_SEALED > IP6_UDP_MAX;
 }
