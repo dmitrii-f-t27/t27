@@ -400,6 +400,90 @@ use t27os::call_session::CS_V_GEN;
 use t27os::call_session::CS_V_TXFRAMES;
 use t27os::call_session::cs_vstat;
 use t27os::call_session::cs_vlen;
+use t27os::call_session::cs_video_h264;
+use t27os::call_session::cs_vh_mode;
+use t27os::call_session::cs_vh_stat;
+use t27os::call_session::cs_vh_live;
+use t27os::call_session::CS_H_RX_FPS;
+use t27os::call_session::CS_H_RX_KBPS;
+use t27os::call_session::CS_H_TX_FPS;
+use t27os::call_session::CS_H_TX_KBPS;
+use t27os::call_session::CS_H_WIRE_KBPS;
+use t27os::call_session::CS_H_RX_W;
+use t27os::call_session::CS_H_RX_H;
+use t27os::call_session::CS_H_TX_W;
+use t27os::call_session::CS_H_TX_H;
+use t27os::call_session::CS_H_MODE;
+use t27os::call_session::CS_H_RUNG;
+use t27os::call_session::CS_H_KBPS;
+use t27os::call_session::CS_H_RX_KEYS;
+use t27os::call_session::CS_H_TX_KEYS;
+use t27os::call_session::CS_H_RX_DONE;
+use t27os::call_session::CS_H_RX_LOST;
+use t27os::call_session::CS_H_RX_HELD;
+use t27os::call_session::CS_H_KREQ_TX;
+use t27os::call_session::CS_H_KREQ_RX;
+use t27os::call_session::CS_H_FORCED;
+use t27os::call_session::CS_H_REP_TX;
+use t27os::call_session::CS_H_REP_RX;
+use t27os::call_session::CS_H_HELLO_TX;
+use t27os::call_session::CS_H_HELLO_RX;
+use t27os::call_session::CS_H_STALE;
+use t27os::call_session::CS_H_PARTS_TX;
+use t27os::call_session::CS_H_HOLD;
+use t27os::call_session::CS_H_DEC_ERR;
+use t27os::call_session::CS_H_BUSY;
+use t27os::call_session::CS_H_TX_FRAMES;
+use t27os::call_session::CS_H_RX_PARTS;
+use t27os::call_session::CS_H_RX_REFUSED;
+use t27os::call_session::CS_H_PEER_FPS;
+use t27os::call_session::CS_H_STEPS;
+use t27os::call_session::CS_H_SEND_ERR;
+use t27os::call_session::CS_H_RX_DROPPED;
+use t27os::call_h264::VN_WAIT;
+use t27os::call_h264::VN_H264;
+use t27os::call_h264::VN_JPEG_OLD;
+use t27os::call_h264::VN_JPEG_HERE;
+use t27os::call_h264::VN_JPEG_PEER;
+use t27os::call_h264::vn_note;
+use t27os::call_h264::vh_side_text;
+use t27os::call_vt::vte_new;
+use t27os::call_vt::vte_stat;
+use t27os::call_vt::vtd_new;
+use t27os::call_vt::vtd_take;
+use t27os::call_vt::vtd_close;
+use t27os::call_vt::vtd_stat;
+use t27os::call_vt::vtd_depth;
+use t27os::call_vt::vt_pb_release;
+use t27os::call_vt::vt_pb_surface;
+use t27os::call_vt::VE_CFAIL;
+use t27os::call_vt::VE_OUT;
+use t27os::call_vt::VE_KEYS;
+use t27os::call_vt::VE_DROP;
+use t27os::call_vt::VE_ERR;
+use t27os::call_vt::VE_OVER;
+use t27os::call_vt::VE_BIG;
+use t27os::call_vt::VE_LAT_MAX;
+use t27os::call_vt::VE_LAT_SUM;
+use t27os::call_vt::VE_LAT_N;
+use t27os::call_vt::VE_CALL_MAX;
+use t27os::call_vt::VE_LOWLAT;
+use t27os::call_vt::VE_KBPS;
+use t27os::call_vt::VE_CREATES;
+use t27os::call_vt::VE_SRCW;
+use t27os::call_vt::VE_SRCH;
+use t27os::call_vt::VDK_OUT;
+use t27os::call_vt::VDK_BAD;
+use t27os::call_vt::VDK_DERR;
+use t27os::call_vt::VDK_CREATES;
+use t27os::call_vt::VDK_LAT_MAX;
+use t27os::call_vt::VDK_LAT_SUM;
+use t27os::call_vt::VDK_LAT_N;
+use t27os::call_vt::VDK_CALL_MAX;
+use t27os::call_vt::VDK_POST_MAX;
+use t27os::call_vt::VDK_REPL;
+use t27os::call_vt::VDK_BUSY;
+use t27os::call_vt::VDK_DROPPED;
 use t27os::call_session::cs_vlive;
 use t27os::call_session::csg_on;
 use t27os::call_session::csg_vlink;
@@ -417,6 +501,10 @@ use t27os::call_view::cv_self_x;
 use t27os::call_view::cv_self_y;
 use t27os::call_view::cv_self_label;
 use t27os::call_view::cv_self_off_text;
+use t27os::call_view::cv_vbox_top;
+use t27os::call_view::cv_vbox_h;
+use t27os::call_view::cv_vbox_w;
+use t27os::call_view::cv_layer_y;
 use t27os::call_view::CV_SELF_NONE;
 use t27os::call_view::CV_SELF_PIP;
 use t27os::call_view::CV_SELF_WAIT;
@@ -1318,6 +1406,9 @@ use t27os::call_video::cvl_scan_new;
 use t27os::call_video::cvl_take_grey;
 use t27os::call_video::cvl_auth;
 use t27os::call_video::cvl_small;
+use t27os::call_video::cvl_codec;
+use t27os::call_video::cvl_take_self;
+use t27os::call_video::CVS_LIVE;
 use t27os::qr_cam::QC_CAP;
 use t27os::qr_cam::QC_CAM;
 use t27os::qr_cam::QC_SRC;
@@ -10309,6 +10400,47 @@ pub const CL_VENC : usize = 161;
 /// account block, wraps; a new frame redraws). Released when the call is over.
 pub const CL_SELF : usize = 800;
 pub const CL_SELF_N : usize = 229;
+/// H.264 (owner, 2026-10-23; call_h264.t27, call_vt.t27), drawn and folded into the frame key (they change once a
+/// second at most): the video this side sends (VN_*), frames a second received and sent, 1 while the remote picture is
+/// H.264 (a 16:9 box), the received and the sent picture size, kbit/s received and sent (u16 each, little endian),
+/// 1 once the remote and the own picture layers showed a picture in this call, the note's mode (VN_JPEG_* or 0).
+pub const CL_VH_MODE : usize = 808;
+pub const CL_VH_RXFPS : usize = 809;
+pub const CL_VH_TXFPS : usize = 810;
+pub const CL_VH_RWIDE : usize = 811;
+pub const CL_VH_RXW : usize = 812;
+pub const CL_VH_RXH : usize = 814;
+pub const CL_VH_TXW : usize = 816;
+pub const CL_VH_TXH : usize = 818;
+pub const CL_VH_RXK : usize = 820;
+pub const CL_VH_TXK : usize = 822;
+pub const CL_VH_RPIC : usize = 824;
+pub const CL_VH_SPIC : usize = 825;
+pub const CL_VH_NOTE : usize = 826;
+pub const CL_VH_KEY_END : usize = 828;
+/// Not drawn: the encoder and decoder blocks (kept for the app's life), the remote picture's layer, the own picture's
+/// layer and its YOU label, what the remote layer holds (a CVPixelBuffer or a CGImage of the old JPEG: kind 1 / 2) and
+/// what the own layer holds, a JPEG picture waiting for the layer, the JPEG serial last taken, pictures put on the two
+/// layers, 1 while the layers are shown, 1 while this call used the decoder, the frame the layers stand at (x, y, w, h
+/// in quarter points), the camera's callbacks at the last second.
+pub const CL_VH_ENC : usize = 832;
+pub const CL_VH_DEC : usize = 840;
+pub const CL_VH_LR : usize = 848;
+pub const CL_VH_LS : usize = 856;
+pub const CL_VH_LT : usize = 864;
+pub const CL_VH_RPB : usize = 872;
+pub const CL_VH_SPB : usize = 880;
+pub const CL_VH_PIMG : usize = 888;
+pub const CL_VH_JSER : usize = 896;
+pub const CL_VH_RXN : usize = 900;
+pub const CL_VH_SXN : usize = 904;
+pub const CL_VH_RKIND : usize = 908;
+pub const CL_VH_VIS : usize = 909;
+pub const CL_VH_OPEN : usize = 910;
+pub const CL_VH_GEOM : usize = 912;
+pub const CL_VH_CAMCB : usize = 928;
+pub const CL_VH_CAMFPS : usize = 932;
+pub const CL_VH_END : usize = 936;
 /// Not drawn: 1 while the call started by CALL on a friend's card (a voice call) runs: no camera, no video sent; back to
 /// 0 (and video as launched) once the call block is idle again (ch_tick).
 pub const CL_NOCAM : usize = 228;
@@ -10416,6 +10548,24 @@ pub fn cl_cursor_due(live: bool, want: u64, last: u64, now: u64, at: u64) -> boo
     if (!live or want != last or now < at) { return true; }
     return now - at >= CL_CURSOR_MS;
 }
+
+/// Two u32 (low then high) as one address.
+pub fn cl_get64(cl: []const u8, at: usize) -> u64 { return cl_get32(cl, at) | (cl_get32(cl, at + 4) << 32); }
+
+pub fn cl_put64(cl: []u8, at: usize, v: u64) -> void {
+    cl_put32(cl, at, v & 4294967295);
+    cl_put32(cl, at + 4, v >> 32);
+}
+
+/// A u16 field of the region (little endian), capped.
+pub fn cl_put16(cl: []u8, at: usize, v: u64) -> void {
+    var x : u64 = v;
+    if (x > 65535) { x = 65535; }
+    cl[at] = @as(u8, @intCast(x & 255));
+    cl[at + 1] = @as(u8, @intCast(x >> 8));
+}
+
+pub fn cl_get16(cl: []const u8, at: usize) -> u64 { return @as(u64, cl[at]) | (@as(u64, cl[at + 1]) << 8); }
 
 pub fn cl_get32(cl: []const u8, at: usize) -> u64 {
     return @as(u64, cl[at]) | (@as(u64, cl[at + 1]) << 8) | (@as(u64, cl[at + 2]) << 16) | (@as(u64, cl[at + 3]) << 24);
@@ -11104,6 +11254,80 @@ fn cl_stats_line(cl: []u8, s: []u8, secs: u64) -> void {
     cl_stat_num(" cammax100=", cvl_stat(cp, 9));
     cl_stat_num(" camw=", cvl_stat(cp, 10));
     cl_stat_num(" camh=", cvl_stat(cp, 11));
+    cl_stat_num(" camfps=", cl_get32(cl, CL_VH_CAMFPS));
+    cl_stat_num(" cam30=", cvl_stat(cp, 19));
+    cl_stat_num(" campreset=", cvl_stat(cp, 20));
+    cl_stat_num(" camh264=", cvl_stat(cp, 16));
+    cl_stat_num(" camh264fail=", cvl_stat(cp, 17));
+    // H.264: what this side sends (mode, rung, the ladder's bitrate) and what arrives, the codec's own numbers
+    cl_stat_num(" vmode=", cs_vh_stat(s, CS_H_MODE));
+    cl_stat_num(" vrung=", cs_vh_stat(s, CS_H_RUNG));
+    cl_stat_num(" vkbps_target=", cs_vh_stat(s, CS_H_KBPS));
+    cl_stat_num(" vrx_fps=", cs_vh_stat(s, CS_H_RX_FPS));
+    cl_stat_num(" vrx_kbps=", cs_vh_stat(s, CS_H_RX_KBPS));
+    cl_stat_num(" vrx_w=", cs_vh_stat(s, CS_H_RX_W));
+    cl_stat_num(" vrx_h=", cs_vh_stat(s, CS_H_RX_H));
+    cl_stat_num(" vrx_done=", cs_vh_stat(s, CS_H_RX_DONE));
+    cl_stat_num(" vrx_keys=", cs_vh_stat(s, CS_H_RX_KEYS));
+    cl_stat_num(" vrx_lost=", cs_vh_stat(s, CS_H_RX_LOST));
+    cl_stat_num(" vrx_dropped=", cs_vh_stat(s, CS_H_RX_DROPPED));
+    cl_stat_num(" vrx_held=", cs_vh_stat(s, CS_H_RX_HELD));
+    cl_stat_num(" vrx_parts=", cs_vh_stat(s, CS_H_RX_PARTS));
+    cl_stat_num(" vrx_refused=", cs_vh_stat(s, CS_H_RX_REFUSED));
+    cl_stat_num(" vtx_fps=", cs_vh_stat(s, CS_H_TX_FPS));
+    cl_stat_num(" vtx_kbps=", cs_vh_stat(s, CS_H_TX_KBPS));
+    cl_stat_num(" vwire_kbps=", cs_vh_stat(s, CS_H_WIRE_KBPS));
+    cl_stat_num(" vtx_w=", cs_vh_stat(s, CS_H_TX_W));
+    cl_stat_num(" vtx_h=", cs_vh_stat(s, CS_H_TX_H));
+    cl_stat_num(" vtx_frames=", cs_vh_stat(s, CS_H_TX_FRAMES));
+    cl_stat_num(" vtx_keys=", cs_vh_stat(s, CS_H_TX_KEYS));
+    cl_stat_num(" vtx_parts=", cs_vh_stat(s, CS_H_PARTS_TX));
+    cl_stat_num(" vtx_stale=", cs_vh_stat(s, CS_H_STALE));
+    cl_stat_num(" vtx_hold=", cs_vh_stat(s, CS_H_HOLD));
+    cl_stat_num(" vtx_senderr=", cs_vh_stat(s, CS_H_SEND_ERR));
+    cl_stat_num(" vkreq_tx=", cs_vh_stat(s, CS_H_KREQ_TX));
+    cl_stat_num(" vkreq_rx=", cs_vh_stat(s, CS_H_KREQ_RX));
+    cl_stat_num(" vforced=", cs_vh_stat(s, CS_H_FORCED));
+    cl_stat_num(" vrep_tx=", cs_vh_stat(s, CS_H_REP_TX));
+    cl_stat_num(" vrep_rx=", cs_vh_stat(s, CS_H_REP_RX));
+    cl_stat_num(" vhello_tx=", cs_vh_stat(s, CS_H_HELLO_TX));
+    cl_stat_num(" vhello_rx=", cs_vh_stat(s, CS_H_HELLO_RX));
+    cl_stat_num(" vpeer_fps=", cs_vh_stat(s, CS_H_PEER_FPS));
+    cl_stat_num(" vsteps=", cs_vh_stat(s, CS_H_STEPS));
+    cl_stat_num(" vdec_err=", cs_vh_stat(s, CS_H_DEC_ERR));
+    cl_stat_num(" vdec_busy=", cs_vh_stat(s, CS_H_BUSY));
+    const ve : u64 = cl_get64(cl, CL_VH_ENC);
+    const vd : u64 = cl_get64(cl, CL_VH_DEC);
+    cl_stat_num(" enc_out=", vte_stat(ve, VE_OUT));
+    cl_stat_num(" enc_keys=", vte_stat(ve, VE_KEYS));
+    cl_stat_num(" enc_drop=", vte_stat(ve, VE_DROP));
+    cl_stat_num(" enc_err=", vte_stat(ve, VE_ERR) + vte_stat(ve, VE_BIG) + vte_stat(ve, VE_CFAIL));
+    cl_stat_num(" enc_ringfull=", vte_stat(ve, VE_OVER));
+    cl_stat_num(" enc_lat_max_us=", vte_stat(ve, VE_LAT_MAX));
+    var elm : u64 = 0;
+    if (vte_stat(ve, VE_LAT_N) > 0) { elm = vte_stat(ve, VE_LAT_SUM) / vte_stat(ve, VE_LAT_N); }
+    cl_stat_num(" enc_lat_mean_us=", elm);
+    cl_stat_num(" enc_call_max_us=", vte_stat(ve, VE_CALL_MAX));
+    cl_stat_num(" enc_lowlat=", vte_stat(ve, VE_LOWLAT));
+    cl_stat_num(" enc_kbps=", vte_stat(ve, VE_KBPS));
+    cl_stat_num(" enc_sessions=", vte_stat(ve, VE_CREATES));
+    cl_stat_num(" enc_srcw=", vte_stat(ve, VE_SRCW));
+    cl_stat_num(" enc_srch=", vte_stat(ve, VE_SRCH));
+    cl_stat_num(" dec_out=", vtd_stat(vd, VDK_OUT));
+    cl_stat_num(" dec_bad=", vtd_stat(vd, VDK_BAD) + vtd_stat(vd, VDK_DERR));
+    cl_stat_num(" dec_sessions=", vtd_stat(vd, VDK_CREATES));
+    cl_stat_num(" dec_lat_max_us=", vtd_stat(vd, VDK_LAT_MAX));
+    var dlm : u64 = 0;
+    if (vtd_stat(vd, VDK_LAT_N) > 0) { dlm = vtd_stat(vd, VDK_LAT_SUM) / vtd_stat(vd, VDK_LAT_N); }
+    cl_stat_num(" dec_lat_mean_us=", dlm);
+    cl_stat_num(" dec_job_max_us=", vtd_stat(vd, VDK_CALL_MAX));
+    cl_stat_num(" dec_post_max_us=", vtd_stat(vd, VDK_POST_MAX));
+    cl_stat_num(" dec_replaced=", vtd_stat(vd, VDK_REPL));
+    cl_stat_num(" dec_dropped=", vtd_stat(vd, VDK_DROPPED));
+    cl_stat_num(" dec_depth=", vtd_depth(vd));
+    cl_stat_num(" lay_rx=", cl_get32(cl, CL_VH_RXN));
+    cl_stat_num(" lay_self=", cl_get32(cl, CL_VH_SXN));
+    cl_stat_num(" lay_vis=", @as(u64, cl[CL_VH_VIS]));
     sys_write(2, "\n", 1);
 }
 
@@ -11145,22 +11369,34 @@ pub fn cl_camera(cl: []u8, s: []u8) -> void {
     cvl_small(cp, csg_on(s));
     const cs : u32 = cvl_tick(cp);
     cl[CL_CAMSTATE] = @as(u8, @intCast(cs));
+    // H.264 once both ends agreed on it (call_session cs_vh_mode), into this window's encoder; the JPEG otherwise
+    const henc : u64 = cl_vh_enc_use(cl, s);
+    cvl_codec(cp, cs_vh_mode(s) == VN_H264 and henc != 0, henc);
     const res : u64 = cvl_stat(cp, 14);
     if (res != 0) { cl[CL_CAMST] = @as(u8, @intCast(res & 255)); }
     if (!cvs_use_camera(cs, 1)) { return; }
     var jpeg : [24000]u8 = undefined;
     const n : usize = cvl_take(cp, jpeg[0..24000]);
-    if (cvs_use_camera(cs, @as(u64, n))) {
-        cs_video_feed(s, jpeg[0..n]);
-        // the user's own picture for the self-view, one to one calls only
-        if (!csg_on(s)) {
-            const own : u64 = vid_decode(jpeg[0..n]);
-            if (own != 0) {
-                cl_self_set(cl, own);
-                cl[CL_SELF_N] = @as(u8, @intCast((@as(u64, cl[CL_SELF_N]) + 1) & 255));
-            }
-        }
-    }
+    // the user's own picture for the inset comes straight from the camera (cl_layers), not from this JPEG
+    if (cvs_use_camera(cs, @as(u64, n))) { cs_video_feed(s, jpeg[0..n]); }
+}
+
+/// The encoder block the session may use now: this window's, while a one to one call sends video from a live camera
+/// and the encoder could make its sessions; 0 otherwise (the session then sends the JPEG of the camera or the test
+/// picture, as before).
+pub fn cl_vh_enc_use(cl: []const u8, s: []const u8) -> u64 {
+    const e : u64 = cl_get64(cl, CL_VH_ENC);
+    if (e == 0 or cl[CL_VSEND] == 0 or cl[CL_CAMOFF] != 0 or cl[CL_NOCAM] != 0 or csg_on(s)) { return 0; }
+    if (@as(u32, cl[CL_CAMSTATE]) != CVS_LIVE or vte_stat(e, VE_CFAIL) != 0) { return 0; }
+    return e;
+}
+
+/// The note under the numbers: why the picture is small (an older build on the other side, no decoder there, no
+/// encoder here) or nothing. Pure.
+pub fn cl_vh_note_of(mode: u32, enc_failed: bool) -> u32 {
+    if (mode == VN_JPEG_OLD or mode == VN_JPEG_PEER) { return mode; }
+    if (mode == VN_JPEG_HERE and enc_failed) { return mode; }
+    return 0;
 }
 
 /// The video line names a camera that gave up (FAILED) while the call goes on with the generator.
@@ -11201,6 +11437,7 @@ pub fn cl_video(cl: []u8, s: []u8, now: u64) -> void {
     }
     cl_gvideo_clear(cl);
     if (st != CK_ACTIVE) {
+        cl_vh_end(cl);
         cl_self_set(cl, 0);
         const old : u64 = cl_vimg(cl);
         if (old != 0) {
@@ -11213,22 +11450,223 @@ pub fn cl_video(cl: []u8, s: []u8, now: u64) -> void {
         cl_put32(cl, CL_VSKIP, 0);
         return;
     }
+    // the encoder and the decoder, made once for the app's life; the session learns which it may use each pass
+    if (cl_get64(cl, CL_VH_ENC) == 0) { cl_put64(cl, CL_VH_ENC, vte_new()); }
+    if (cl_get64(cl, CL_VH_DEC) == 0) { cl_put64(cl, CL_VH_DEC, vtd_new()); }
+    cs_video_h264(s, cl_vh_enc_use(cl, s), cl_get64(cl, CL_VH_DEC));
+    cl[CL_VH_OPEN] = 1;
+    // the JPEG of an older build (or of the first moments of a call): its picture goes to the layer, which shows it
+    // without redrawing the window (cl_layers takes CL_VH_PIMG)
     const ser : u64 = cs_vstat(s, CS_V_SERIAL);
-    if (ser != cl_get32(cl, CL_VSER)) {
+    if (ser != cl_get32(cl, CL_VH_JSER)) {
         const n : usize = cs_vlen(s);
-        if (n > 0) {
+        if (n > 0 and !cs_vh_live(s, now)) {
             const img : u64 = vid_decode(s[CS_VLAST .. CS_VLAST + n]);
             if (img != 0) {
-                const old : u64 = cl_vimg(cl);
+                const old : u64 = cl_get64(cl, CL_VH_PIMG);
                 if (old != 0) { vid_release_image(old); }
-                cl_vimg_set(cl, img);
+                cl_put64(cl, CL_VH_PIMG, img);
             }
         }
-        cl_put32(cl, CL_VSER, ser);
-        cl_put32(cl, CL_VSHOWN, cs_vstat(s, CS_V_SHOWN));
-        cl_put32(cl, CL_VSKIP, cs_vstat(s, CS_V_SKIPPED));
+        cl_put32(cl, CL_VH_JSER, ser);
     }
-    if (cs_vlive(s, now)) { cl[CL_VLIVE] = 1; } else { cl[CL_VLIVE] = 0; }
+    if (cs_vlive(s, now) or cs_vh_live(s, now)) { cl[CL_VLIVE] = 1; } else { cl[CL_VLIVE] = 0; }
+}
+
+/// The end of a call's video: the decoder's queue drains and its session goes, the layers' pictures are released and
+/// hidden, the numbers go. Only once per call.
+fn cl_vh_end(cl: []u8) -> void {
+    if (cl[CL_VH_OPEN] == 0) { return; }
+    cl[CL_VH_OPEN] = 0;
+    vtd_close(cl_get64(cl, CL_VH_DEC));
+    const lr : u64 = cl_get64(cl, CL_VH_LR);
+    const ls : u64 = cl_get64(cl, CL_VH_LS);
+    const lt : u64 = cl_get64(cl, CL_VH_LT);
+    if (lr != 0) {
+        msg_flag(lr, sel("setHidden:"), true);
+        msg1(lr, sel("setContents:"), 0);
+    }
+    if (ls != 0) {
+        msg_flag(ls, sel("setHidden:"), true);
+        msg1(ls, sel("setContents:"), 0);
+    }
+    if (lt != 0) { msg_flag(lt, sel("setHidden:"), true); }
+    cl_vh_hold_remote(cl, 0, 0);
+    const sp : u64 = cl_get64(cl, CL_VH_SPB);
+    if (sp != 0) { vt_pb_release(sp); }
+    cl_put64(cl, CL_VH_SPB, 0);
+    const pi : u64 = cl_get64(cl, CL_VH_PIMG);
+    if (pi != 0) { vid_release_image(pi); }
+    cl_put64(cl, CL_VH_PIMG, 0);
+    cl[CL_VH_VIS] = 0;
+    var i : usize = CL_VH_MODE;
+    while (i < CL_VH_KEY_END) {
+        cl[i] = 0;
+        i = i + 1;
+    }
+    cl_put32(cl, CL_VH_JSER, 0);
+    cl_put32(cl, CL_VH_GEOM, 0);
+    cl_put32(cl, CL_VH_GEOM + 4, 0);
+    cl_put32(cl, CL_VH_GEOM + 8, 0);
+    cl_put32(cl, CL_VH_GEOM + 12, 0);
+}
+
+/// What the remote layer holds from now on (kind 1 a CVPixelBuffer, 2 a CGImage, 0 nothing); the old one is released.
+fn cl_vh_hold_remote(cl: []u8, obj: u64, kind: u8) -> void {
+    const old : u64 = cl_get64(cl, CL_VH_RPB);
+    if (old != 0 and old != obj) {
+        if (cl[CL_VH_RKIND] == 1) { vt_pb_release(old); }
+        if (cl[CL_VH_RKIND] == 2) { vid_release_image(old); }
+    }
+    cl_put64(cl, CL_VH_RPB, obj);
+    cl[CL_VH_RKIND] = kind;
+}
+
+/// The numbers of the H.264 video for the panel (once a second, with the other counters).
+fn cl_vh_numbers(cl: []u8, s: []u8) -> void {
+    const mode : u32 = cs_vh_mode(s);
+    cl[CL_VH_MODE] = @as(u8, @intCast(mode & 255));
+    var rx : u64 = cs_vh_stat(s, CS_H_RX_FPS);
+    if (rx > 255) { rx = 255; }
+    cl[CL_VH_RXFPS] = @as(u8, @intCast(rx));
+    var tx : u64 = cs_vh_stat(s, CS_H_TX_FPS);
+    if (tx > 255) { tx = 255; }
+    cl[CL_VH_TXFPS] = @as(u8, @intCast(tx));
+    if (rx > 0) { cl[CL_VH_RWIDE] = 1; } else if (cs_vstat(s, CS_V_SHOWN) > 0 and !cs_vh_live(s, ckh_ms())) { cl[CL_VH_RWIDE] = 0; }
+    cl_put16(cl, CL_VH_RXW, cs_vh_stat(s, CS_H_RX_W));
+    cl_put16(cl, CL_VH_RXH, cs_vh_stat(s, CS_H_RX_H));
+    cl_put16(cl, CL_VH_TXW, cs_vh_stat(s, CS_H_TX_W));
+    cl_put16(cl, CL_VH_TXH, cs_vh_stat(s, CS_H_TX_H));
+    cl_put16(cl, CL_VH_RXK, cs_vh_stat(s, CS_H_RX_KBPS));
+    cl_put16(cl, CL_VH_TXK, cs_vh_stat(s, CS_H_WIRE_KBPS));
+    const e : u64 = cl_get64(cl, CL_VH_ENC);
+    cl[CL_VH_NOTE] = @as(u8, @intCast(cl_vh_note_of(mode, e == 0 or vte_stat(e, VE_CFAIL) != 0) & 255));
+    cl_put32(cl, CL_VSHOWN, cs_vstat(s, CS_V_SHOWN) + cs_vh_stat(s, CS_H_RX_DONE));
+    cl_put32(cl, CL_VSKIP, cs_vstat(s, CS_V_SKIPPED) + cs_vh_stat(s, CS_H_RX_LOST));
+    const cp : u64 = cl_camp(cl);
+    const cb : u64 = cvl_stat(cp, 0);
+    if (cb >= cl_get32(cl, CL_VH_CAMCB)) { cl_put32(cl, CL_VH_CAMFPS, cb - cl_get32(cl, CL_VH_CAMCB)); }
+    cl_put32(cl, CL_VH_CAMCB, cb);
+}
+
+/// The pictures of a one to one call on two layers over the CALL panel's box (owner, 2026-10-23): the remote one (the
+/// decoder's newest CVPixelBuffer on its IOSurface, or the old JPEG's CGImage) and the user's own camera, mirrored, in
+/// its corner with the YOU label. Every pass takes what is new and sets it as the layer's contents: 30 pictures a second
+/// without redrawing the window. `vis`: the CALL panel is the one shown. The layers are made the first time and stay.
+pub fn cl_layers(cl: []u8, s: []u8, parent: u64, sw: f64, sh: f64, vis: bool) -> void {
+    if (parent == 0 or cl[CL_UP] == 0) { return; }
+    const active : bool = cs_state(s) == CK_ACTIVE and !csg_on(s) and cl[CL_VIEW] == @as(u8, @intCast(CV_ACTIVE));
+    if (!active and cl[CL_VH_VIS] == 0) { return; }
+    const tx : u64 = cls("CATransaction");
+    msg0(tx, sel("begin"));
+    msg_flag(tx, sel("setDisableActions:"), true);
+    var lr : u64 = cl_get64(cl, CL_VH_LR);
+    var ls : u64 = cl_get64(cl, CL_VH_LS);
+    var lt : u64 = cl_get64(cl, CL_VH_LT);
+    if (lr == 0) {
+        lr = msg0(msg0(cls("CALayer"), sel("alloc")), sel("init"));
+        msg1(lr, sel("setContentsGravity:"), cf("resizeAspect"));
+        msg1(lr, sel("setBackgroundColor:"), cg_color(0.0, 0.0, 0.0, 1.0));
+        msg_flag(lr, sel("setMasksToBounds:"), true);
+        msg_flag(lr, sel("setHidden:"), true);
+        msg1(parent, sel("addSublayer:"), lr);
+        ls = msg0(msg0(cls("CALayer"), sel("alloc")), sel("init"));
+        msg1(ls, sel("setContentsGravity:"), cf("resizeAspectFill"));
+        msg1(ls, sel("setBackgroundColor:"), cg_color(0.0, 0.0, 0.0, 0.55));
+        msg_flag(ls, sel("setMasksToBounds:"), true);
+        msg_f(ls, sel("setBorderWidth:"), 1.0);
+        msg1(ls, sel("setBorderColor:"), cg_color(1.0, 1.0, 1.0, 0.85));
+        // mirrored like a mirror: [-1 0 0 1 0 0] (48 bytes, passed by reference)
+        var m : [48]u8 = undefined;
+        var mi : usize = 0;
+        while (mi < 48) { m[mi] = 0; mi = mi + 1; }
+        put_u64(m[0..48], 0, 13830554455654793216);
+        put_u64(m[0..48], 24, 4607182418800017408);
+        msg1(ls, sel("setAffineTransform:"), sys_addr(m[0..48], m[0..48], 0));
+        msg_flag(ls, sel("setHidden:"), true);
+        msg1(parent, sel("addSublayer:"), ls);
+        lt = msg0(msg0(cls("CATextLayer"), sel("alloc")), sel("init"));
+        msg1(lt, sel("setString:"), cf(cv_self_label()));
+        msg1(lt, sel("setFont:"), cf("Helvetica-Bold"));
+        msg_f(lt, sel("setFontSize:"), 9.0);
+        msg_f(lt, sel("setContentsScale:"), RETINA);
+        msg1(lt, sel("setForegroundColor:"), cg_color(1.0, 1.0, 1.0, 0.9));
+        msg_flag(lt, sel("setHidden:"), true);
+        msg1(parent, sel("addSublayer:"), lt);
+        cl_put64(cl, CL_VH_LR, lr);
+        cl_put64(cl, CL_VH_LS, ls);
+        cl_put64(cl, CL_VH_LT, lt);
+    }
+    // the newest remote picture: H.264 from the decoder, else a JPEG picture waiting
+    const pb : u64 = vtd_take(cl_get64(cl, CL_VH_DEC));
+    if (pb != 0) {
+        const surf : u64 = vt_pb_surface(pb);
+        if (surf != 0) {
+            msg1(lr, sel("setContents:"), surf);
+            cl_vh_hold_remote(cl, pb, 1);
+            cl_put32(cl, CL_VH_RXN, cl_get32(cl, CL_VH_RXN) + 1);
+            cl[CL_VH_RPIC] = 1;
+        } else {
+            vt_pb_release(pb);
+        }
+    } else if (cl_get64(cl, CL_VH_PIMG) != 0) {
+        const img : u64 = cl_get64(cl, CL_VH_PIMG);
+        cl_put64(cl, CL_VH_PIMG, 0);
+        msg1(lr, sel("setContents:"), img);
+        cl_vh_hold_remote(cl, img, 2);
+        cl_put32(cl, CL_VH_RXN, cl_get32(cl, CL_VH_RXN) + 1);
+        cl[CL_VH_RPIC] = 1;
+    }
+    // the own picture, straight from the camera, while the call sends it
+    const own_ok : bool = cv_self_mode(CV_ACTIVE, false, cl[CL_VSEND] != 0, cl[CL_CAMOFF] != 0, cl[CL_NOCAM] != 0, cl_cam_unavailable(cl), true) == CV_SELF_PIP;
+    const op : u64 = cvl_take_self(cl_camp(cl));
+    if (op != 0) {
+        const os : u64 = vt_pb_surface(op);
+        if (own_ok and os != 0) {
+            msg1(ls, sel("setContents:"), os);
+            const old : u64 = cl_get64(cl, CL_VH_SPB);
+            if (old != 0) { vt_pb_release(old); }
+            cl_put64(cl, CL_VH_SPB, op);
+            cl_put32(cl, CL_VH_SXN, cl_get32(cl, CL_VH_SXN) + 1);
+            cl[CL_VH_SPIC] = 1;
+        } else {
+            vt_pb_release(op);
+        }
+    }
+    // where the box stands now (the same numbers draw_cl_video uses)
+    const l : f64 = qp_left(sw);
+    const x : f64 = l + QP_PAD;
+    const bw : f64 = QP_W - 2.0 * QP_PAD;
+    const top : f64 = cv_vbox_top(WS_TOP + CV_HINT_Y + 90.0);
+    const room : f64 = sh - top - 16.0;
+    const wide : bool = cl[CL_VH_RWIDE] != 0;
+    const w : f64 = cv_vbox_w(bw, room, wide);
+    const h : f64 = cv_vbox_h(bw, room, wide);
+    const show : bool = active and vis and h >= 24.0;
+    const show_r : bool = show and cl[CL_VH_RPIC] != 0;
+    const show_s : bool = show and own_ok and cl[CL_VH_SPIC] != 0 and cv_self_fits(w, h);
+    const qx : u64 = @as(u64, @intFromFloat(x * 4.0));
+    const qy : u64 = @as(u64, @intFromFloat(top * 4.0));
+    const qw : u64 = @as(u64, @intFromFloat(w * 4.0));
+    const qh : u64 = @as(u64, @intFromFloat(h * 4.0)) | (@as(u64, @intFromFloat(sh)) << 16);
+    if (qx != cl_get32(cl, CL_VH_GEOM) or qy != cl_get32(cl, CL_VH_GEOM + 4) or qw != cl_get32(cl, CL_VH_GEOM + 8) or qh != cl_get32(cl, CL_VH_GEOM + 12)) {
+        cl_put32(cl, CL_VH_GEOM, qx);
+        cl_put32(cl, CL_VH_GEOM + 4, qy);
+        cl_put32(cl, CL_VH_GEOM + 8, qw);
+        cl_put32(cl, CL_VH_GEOM + 12, qh);
+        msg_rect(lr, sel("setFrame:"), x, cv_layer_y(sh, top, h), w, h);
+        const iw : f64 = cv_self_w(w);
+        const ih : f64 = iw * 0.75;
+        const ix : f64 = cv_self_x(x, w, iw);
+        const iy : f64 = cv_self_y(top, h, iw);
+        msg_rect(ls, sel("setFrame:"), ix, cv_layer_y(sh, iy, ih), iw, ih);
+        msg_rect(lt, sel("setFrame:"), ix + 4.0, cv_layer_y(sh, iy + 2.0, 12.0), 30.0, 12.0);
+    }
+    msg_flag(lr, sel("setHidden:"), !show_r);
+    msg_flag(ls, sel("setHidden:"), !show_s);
+    msg_flag(lt, sel("setHidden:"), !show_s);
+    if (show_r or show_s) { cl[CL_VH_VIS] = 1; } else { cl[CL_VH_VIS] = 0; }
+    msg0(tx, sel("commit"));
 }
 
 /// The decoded picture of tile i, 0 when none.
@@ -11341,6 +11779,7 @@ pub fn cl_snapshot(cl: []u8, s: []u8, w: []u64, now: u64) -> void {
         cl_put32(cl, CL_UNDER, cs_stat(s, 1004));
         cl_put32(cl, CL_OVER, cs_stat(s, 1005));
         cl_put32(cl, CL_TXO, cs_stat(s, 1007));
+        if (st == CK_ACTIVE and !csg_on(s)) { cl_vh_numbers(cl, s); }
         if (cl[CL_STATS] != 0 and st == CK_ACTIVE) { cl_stats_line(cl, s, secs); }
     }
     w[CLW_PREV] = @as(u64, st);
@@ -11826,28 +12265,38 @@ fn draw_cl_video(c: u64, kit: [48]u64, x: f64, right: f64, y: f64, sh: f64, cl: 
         draw_cl_gvideo(c, kit, x, right, y, sh, cl);
         return;
     }
-    var line : [96]u8 = undefined;
+    var line : [120]u8 = undefined;
     const live : bool = cl[CL_VLIVE] != 0;
     draw_cl_dot(c, kit, x, y - 8.0, live);
     var n : usize = 0;
-    if (live) { n = put_bytes(line[0..96], 0, "VIDEO ON"); } else { n = put_bytes(line[0..96], 0, "NO VIDEO"); }
-    n = put_bytes(line[0..96], n, "   frames ");
-    n = put_dec(line[0..96], n, cl_get32(cl, CL_VSHOWN));
-    n = put_bytes(line[0..96], n, "   skipped ");
-    n = put_dec(line[0..96], n, cl_get32(cl, CL_VSKIP));
-    if (cl_cam_unavailable(cl)) { n = put_bytes(line[0..96], n, "   camera unavailable"); }
+    if (live) { n = put_bytes(line[0..120], 0, "VIDEO ON  "); } else { n = put_bytes(line[0..120], 0, "NO VIDEO  "); }
+    // what arrives and what leaves: frames a second, size, kbit/s (call_h264 vh_side_text: "-" for nothing)
+    n = vh_side_text(line[0..120], n, "in", @as(u64, cl[CL_VH_RXFPS]), cl_get16(cl, CL_VH_RXW), cl_get16(cl, CL_VH_RXH), cl_get16(cl, CL_VH_RXK));
     cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
-    draw_fit(c, kit, line[0..96], n, x + 14.0, y, 9.5, WEIGHT_SEMIBOLD, true, right);
-    const top : f64 = y + 10.0;
-    var w : f64 = right - x;
-    var h : f64 = w * 0.75;
-    const room : f64 = sh - top - 16.0;
-    if (room < h) {
-        h = room;
-        w = h * 4.0 / 3.0;
+    draw_fit(c, kit, line[0..120], n, x + 14.0, y, 9.5, WEIGHT_SEMIBOLD, true, right);
+    n = vh_side_text(line[0..120], 0, "out", @as(u64, cl[CL_VH_TXFPS]), cl_get16(cl, CL_VH_TXW), cl_get16(cl, CL_VH_TXH), cl_get16(cl, CL_VH_TXK));
+    n = put_bytes(line[0..120], n, "   frames ");
+    n = put_dec(line[0..120], n, cl_get32(cl, CL_VSHOWN));
+    n = put_bytes(line[0..120], n, " lost ");
+    n = put_dec(line[0..120], n, cl_get32(cl, CL_VSKIP));
+    draw_fit(c, kit, line[0..120], n, x + 14.0, y + 12.0, 9.5, 0.0, true, right);
+    // why the picture is small, or that the camera gave up
+    const note : u32 = @as(u32, cl[CL_VH_NOTE]);
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+    if (note != 0) {
+        const nt : []const u8 = vn_note(note);
+        draw_fit(c, kit, nt, nt.len, x + 14.0, y + 24.0, 9.0, 0.0, true, right);
+    } else if (cl_cam_unavailable(cl)) {
+        draw_fit(c, kit, "camera unavailable", 18, x + 14.0, y + 24.0, 9.0, 0.0, true, right);
     }
+    const top : f64 = cv_vbox_top(y);
+    const room : f64 = sh - top - 16.0;
+    const wide : bool = cl[CL_VH_RWIDE] != 0;
+    const w : f64 = cv_vbox_w(right - x, room, wide);
+    const h : f64 = cv_vbox_h(right - x, room, wide);
     if (h < 24.0) { return; }
-    draw_cl_pic(c, kit, x, top, w, h, cl_vimg(cl), right);
+    // the picture itself is the remote layer over this box (cl_layers); the box and its word show until it comes
+    draw_cl_pic(c, kit, x, top, w, h, 0, right, cl[CL_VH_RPIC] != 0);
     draw_cl_self(c, kit, x, top, w, h, cl);
 }
 
@@ -11855,7 +12304,7 @@ fn draw_cl_video(c: u64, kit: [48]u64, x: f64, right: f64, y: f64, sh: f64, cl: 
 /// named YOU; an empty inset before the first frame; "camera off" when there is no camera picture to show.
 fn draw_cl_self(c: u64, kit: [48]u64, rx: f64, ry: f64, rw: f64, rh: f64, cl: []const u8) -> void {
     const mode : u32 = cv_self_mode(CV_ACTIVE, cl[CL_GV] != 0, cl[CL_VSEND] != 0, cl[CL_CAMOFF] != 0, cl[CL_NOCAM] != 0,
-        cl_cam_unavailable(cl), cl_self_img(cl) != 0);
+        cl_cam_unavailable(cl), cl[CL_VH_SPIC] != 0);
     if (mode == CV_SELF_NONE) { return; }
     if (mode == CV_SELF_OFF) {
         cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
@@ -11867,15 +12316,10 @@ fn draw_cl_self(c: u64, kit: [48]u64, rx: f64, ry: f64, rw: f64, rh: f64, cl: []
     const sh : f64 = sw * 0.75;
     const sx : f64 = cv_self_x(rx, rw, sw);
     const sy : f64 = cv_self_y(ry, rh, sw);
+    // the own picture is a layer over this inset (cl_layers): drawn here only the empty inset before its first frame
+    if (mode == CV_SELF_PIP) { return; }
     cg_fill_rgba(c, 0.0, 0.0, 0.0, 0.55);
     cg_fill_rect(c, sx, sy, sw, sh);
-    if (mode == CV_SELF_PIP) {
-        cg_save(c);
-        cg_translate(c, sx + sw, sy + sh);
-        cg_scale(c, -1.0, -1.0);
-        cg_draw_image(c, 0.0, 0.0, sw, sh, cl_self_img(cl));
-        cg_restore(c);
-    }
     cg_fill_rgba(c, 1.0, 1.0, 1.0, 0.85);
     cg_fill_rect(c, sx, sy, sw, HAIR);
     cg_fill_rect(c, sx, sy + sh - HAIR, sw, HAIR);
@@ -11886,10 +12330,12 @@ fn draw_cl_self(c: u64, kit: [48]u64, rx: f64, ry: f64, rw: f64, rh: f64, cl: []
 }
 
 /// A picture in a box of w x h at (x, top), drawn upright, with a hairline frame; a dark box with a word without one.
-fn draw_cl_pic(c: u64, kit: [48]u64, x: f64, top: f64, w: f64, h: f64, img: u64, right: f64) -> void {
+fn draw_cl_pic(c: u64, kit: [48]u64, x: f64, top: f64, w: f64, h: f64, img: u64, right: f64, layered: bool) -> void {
     cg_fill_rgba(c, 0.0, 0.0, 0.0, 0.45);
     cg_fill_rect(c, x, top, w, h);
-    if (img != 0) {
+    if (layered) {
+        // a layer shows the picture over this box
+    } else if (img != 0) {
         cg_save(c);
         cg_translate(c, x, top + h);
         cg_scale(c, 1.0, -1.0);
@@ -11937,7 +12383,7 @@ fn draw_cl_gvideo(c: u64, kit: [48]u64, x: f64, right: f64, y: f64, sh: f64, cl:
     while (i < tiles) {
         const tx : f64 = cv_strip_x(i, x, tw);
         const iu : usize = @as(usize, i);
-        draw_cl_pic(c, kit, tx, top, tw, th, cl_gvimg(cl, iu), tx + tw);
+        draw_cl_pic(c, kit, tx, top, tw, th, cl_gvimg(cl, iu), tx + tw, false);
         if (i < n) {
             var tag : [16]u8 = undefined;
             const tn : usize = cl_hex2(tag[0..16], cl[CL_GV_TAG + 2 * iu], cl[CL_GV_TAG + 2 * iu + 1]);
@@ -16458,7 +16904,7 @@ pub fn main() -> void {
     var clring : bool = false;
     // A. the wheel over the cabinet's friends: trackpad travel gathers here until it makes one row
     var acwheel : f64 = 0.0;
-    var csv : [499584]u8 = undefined;
+    var csv : [898944]u8 = undefined;
     var clw : [10]u64 = undefined;
     var clz : usize = 0;
     while (clz < 74368) {
@@ -16476,7 +16922,7 @@ pub fn main() -> void {
     var chbuf : [1008041]u8 = undefined;
     var chasm : [8064]u8 = undefined;
     var chm : [384]u8 = undefined;
-    var chs : [166528]u8 = undefined;
+    var chs : [299648]u8 = undefined;
     var chw : [14]u64 = undefined;
     // GR. the open group: its block, its log's assembly and its log (GX_GRM | GX_ASM | GX_LOG)
     var gxb : [1024360]u8 = undefined;
@@ -18849,6 +19295,12 @@ pub fn main() -> void {
             fk = fg_mix(fk, @as(u64, tbv[TBO_CL + fkc]));
             fkc = fkc + 1;
         }
+        // CL. the H.264 numbers and the layers' first pictures (once a second at most: cl_vh_numbers)
+        fkc = CL_VH_MODE;
+        while (fkc < CL_VH_KEY_END) {
+            fk = fg_mix(fk, @as(u64, tbv[TBO_CL + fkc]));
+            fkc = fkc + 1;
+        }
         // CN. the PUBLIC line and where this Mac listens (call_nat.t27)
         fkc = CL_N_ST;
         while (fkc < CL_N_KEY_END) {
@@ -18966,6 +19418,9 @@ pub fn main() -> void {
         if (fdraw) { vt_clean(tst[0..32]); }
         // CL. once more after the frame: a slow draw does not leave the call's socket and audio ring unread
         if (cl_tick(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN * 3], clw[0..10])) { clring = true; }
+        // CL. the call's pictures on their layers, every pass (30 a second without a redraw), where the CALL panel is
+        const clvis : bool = tbv[TBO_CL + CL_OPEN] != 0 and !qp and !dp and !kyp and tbv[TBO_PF + PF_OPEN] == 0 and !ac_shown(tbv[TBO_CL .. TBO_CL + CL_CAP]) and fvis;
+        cl_layers(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN * 3], layer, sw, sh, clvis);
         // K. keep what the window shows: write it once a change has held still (window_keep.t27)
         const wk_fl : u64 = wk_flags(collapsed, dash, qp, god, dp, auto_open);
         const wk_k : u64 = fg_mix(wk_key(state, shown, task, space, ss, sp, cur, wk_fl, evn), @as(u64, hs));
@@ -20486,6 +20941,27 @@ test the_call_region_ends_the_text_store_and_draw_reads_only_folded_bytes {
     assert CL_GV_SER + VG_SHOW <= CL_GV_LIVE and CL_GV_LIVE < FV_BASE;
     assert FV_END <= CL_GVIMG and CL_GVIMG + 8 * VG_SHOW <= CL_GVSER and CL_GVSER + 4 * VG_SHOW <= CL_GVLINK and CL_GVLINK + VG_SHOW <= FE_ID;
     assert CL_PTRIED < FV_BASE and CL_PTRIED < CL_KEY_N;
+    // the H.264 bytes stand past the self-view's picture and before the friends engine: the drawn ones first (folded
+    // on their own), then the addresses and the counters
+    assert CL_SELF + 8 <= CL_VH_MODE and CL_VH_TXK + 2 <= CL_VH_RPIC and CL_VH_NOTE < CL_VH_KEY_END and CL_VH_KEY_END <= CL_VH_ENC;
+    assert CL_VH_ENC + 8 <= CL_VH_DEC and CL_VH_DEC + 8 <= CL_VH_LR and CL_VH_LT + 8 <= CL_VH_RPB and CL_VH_PIMG + 8 <= CL_VH_JSER;
+    assert CL_VH_SXN + 4 <= CL_VH_RKIND and CL_VH_OPEN < CL_VH_GEOM and CL_VH_GEOM + 16 <= CL_VH_CAMCB and CL_VH_CAMFPS + 4 <= CL_VH_END;
+    assert CL_VH_END <= FE_ID;
+}
+
+test the_note_names_an_older_build_or_a_missing_codec_never_a_camera_that_is_starting {
+    assert cl_vh_note_of(VN_H264, false) == 0 and cl_vh_note_of(VN_WAIT, true) == 0;
+    assert cl_vh_note_of(VN_JPEG_OLD, false) == VN_JPEG_OLD and cl_vh_note_of(VN_JPEG_PEER, false) == VN_JPEG_PEER;
+    // no encoder handed in because the camera is not live yet: no note; the encoder failed: the note
+    assert cl_vh_note_of(VN_JPEG_HERE, false) == 0 and cl_vh_note_of(VN_JPEG_HERE, true) == VN_JPEG_HERE;
+    var cl : [1024]u8 = undefined;
+    var i : usize = 0;
+    while (i < 1024) { cl[i] = 0; i = i + 1; }
+    cl_put64(cl[0..1024], CL_VH_ENC, 12345678901234);
+    assert cl_get64(cl[0..1024], CL_VH_ENC) == 12345678901234;
+    cl_put16(cl[0..1024], CL_VH_RXW, 1280);
+    cl_put16(cl[0..1024], CL_VH_RXK, 70000);
+    assert cl_get16(cl[0..1024], CL_VH_RXW) == 1280 and cl_get16(cl[0..1024], CL_VH_RXK) == 65535;
 }
 
 test a_taken_call_port_is_said_in_the_panel_and_the_cabinet {
@@ -21105,7 +21581,7 @@ test up_qa_line_names_the_updater_state_and_its_signature_moves_with_it {
 test ch_the_chat_region_follows_the_call_region_and_mains_buffers_have_their_sizes {
     assert TBO_CH == TBO_CL + CL_CAP and TBO_CH + CHV_CAP == TBO_IV and TBO_IV + IV_LEN == TBO_BK and TBO_BK + BK_CAP == TBO_GV and TBO_GV + GV_CAP == TBO_QC and TBO_QC + QC_CAP == TB_SIZE;
     assert CH_LOG_LEN == cl_bytes(CL_KEEP) and CH_BUF_LEN == CF_MAX + 1;
-    assert CS_LEN == 166528 and CA_LEN == 8064 and CHM_LEN == 384 and CHW_AID < CHW_N;
+    assert CS_LEN == 299648 and CA_LEN == 8064 and CHM_LEN == 384 and CHW_AID < CHW_N;
     // the voice-call byte stands after the cabinet's bytes and before the friends snapshot, inside the folded bytes
     assert CL_NOCAM >= AC_END and CL_NOCAM < FV_BASE and CL_NOCAM < CL_KEY_N;
 }
@@ -21335,8 +21811,8 @@ test ch_messages_are_served_with_the_panel_shut_and_after_a_call_that_ended {
         v[i] = 0;
         i = i + 1;
     }
-    var s : [166528]u8 = undefined;
-    var cs : [166528]u8 = undefined;
+    var s : [299648]u8 = undefined;
+    var cs : [299648]u8 = undefined;
     i = 0;
     while (i < CS_LEN) {
         s[i] = 0;

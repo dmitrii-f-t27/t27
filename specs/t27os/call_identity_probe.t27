@@ -171,10 +171,10 @@ fn cip_main() -> bool {
     all = ckh_check("three P-256 identities made in memory, fingerprints derived", ks_gen_pair(ka[0..97], pa[0..65]) and ks_gen_pair(kb[0..97], pb[0..65]) and ks_gen_pair(kc[0..97], pc[0..65]) and ih_fingerprint(pa[0..65], fa[0..10]) and ih_fingerprint(pb[0..65], fb[0..10])) and all;
     var t : [1108]u8 = undefined;
     all = ckh_check("friends file: A and B, no stored key", cip_friends(t[0..FT_LEN], fa[0..10], fb[0..10])) and all;
-    var a : [166528]u8 = undefined;
-    var b : [166528]u8 = undefined;
-    var ma : [166528]u8 = undefined;
-    var mb : [166528]u8 = undefined;
+    var a : [299648]u8 = undefined;
+    var b : [299648]u8 = undefined;
+    var ma : [299648]u8 = undefined;
+    var mb : [299648]u8 = undefined;
     var da : [64]u8 = undefined;
     var db : [64]u8 = undefined;
     const lo : u64 = 2130706433;
@@ -246,7 +246,7 @@ fn cip_main() -> bool {
 
     // 8 C is not a friend: its message session to B ends as an invitation on B's side
     var fc : [10]u8 = undefined;
-    var mc : [166528]u8 = undefined;
+    var mc : [299648]u8 = undefined;
     var dc : [64]u8 = undefined;
     all = ckh_check("8 C's message session opens on 47775", ih_fingerprint(pc[0..65], fc[0..10]) and cs_open(mc[0..CS_LEN], fc[0..10], lo, 47775, CS_AUDIO_NONE) and cs_identity(mc[0..CS_LEN], pc[0..65], kc[0..97])) and all;
     cs_set(mc[0..CS_LEN], CS_K_VERIFY_MS, 8000);

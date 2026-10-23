@@ -134,7 +134,7 @@ fn tp_session(impostor: bool) -> bool {
     var fa : [10]u8 = undefined;
     var fb : [10]u8 = undefined;
     all = ckh_check("identities read (A for its fingerprint, B as this side)", tp_id(true, ida[0..208], fa[0..10]) and tp_id(false, idb[0..208], fb[0..10])) and all;
-    var m : [166528]u8 = undefined;
+    var m : [299648]u8 = undefined;
     all = ckh_check("message session open on 127.0.0.1:47811 as B", cs_open(m[0..CS_LEN], fb[0..10], TP_LO, TP_MY_PORT, CS_AUDIO_NONE) and cs_identity(m[0..CS_LEN], idb[ID_OFF_PUB .. ID_OFF_PUB + 65], idb[ID_OFF_PRIV .. ID_OFF_PRIV + 97])) and all;
     if (impostor) {
         var pc : [65]u8 = undefined;

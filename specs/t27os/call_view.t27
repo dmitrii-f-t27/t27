@@ -441,6 +441,40 @@ pub fn cv_self_x(rx: f64, rw: f64, sw: f64) -> f64 { return rx + rw - sw - CV_SE
 /// The top of the inset: the bottom edge of the remote picture less the inset's height and the gap.
 pub fn cv_self_y(ry: f64, rh: f64, sw: f64) -> f64 { return ry + rh - cv_strip_h(sw) - CV_SELF_PAD; }
 
+// The picture of a one to one call (owner, 2026-10-23): two lines of numbers over it (what arrives, what leaves: frames
+// a second, size, kbit/s) and a third for a note (an older T27 OS on the other side ..), then the remote picture in the
+// width of the panel, 16:9 while H.264 arrives (the camera's 1280x720) and 4:3 for the JPEG of an older build, as high
+// as the room under it allows. The window draws the lines and an empty box; the picture itself is a layer over the box
+// at the same place (cv_vbox_*), so 30 pictures a second never redraw the window.
+pub const CV_VLINES_H : f64 = 36.0;
+
+/// The top of the picture under the video lines that start at y.
+pub fn cv_vbox_top(y: f64) -> f64 { return y + CV_VLINES_H; }
+
+/// The height of the picture box in a width w with `room` of height left: 9/16 (wide) or 3/4 of w, never past room.
+pub fn cv_vbox_h(w: f64, room: f64, wide: bool) -> f64 {
+    var h : f64 = w * 0.75;
+    if (wide) { h = w * 9.0 / 16.0; }
+    if (room < h) { h = room; }
+    if (h < 0.0) { h = 0.0; }
+    return h;
+}
+
+/// The width of the picture box: w, or less when the room cut its height (the aspect is kept).
+pub fn cv_vbox_w(w: f64, room: f64, wide: bool) -> f64 {
+    const h : f64 = cv_vbox_h(w, room, wide);
+    if (wide) {
+        if (h < w * 9.0 / 16.0) { return h * 16.0 / 9.0; }
+        return w;
+    }
+    if (h < w * 0.75) { return h * 4.0 / 3.0; }
+    return w;
+}
+
+/// The bottom edge of a box at `top` (h high) in the coordinates of a layer whose origin is the view's bottom-left
+/// corner (the view is vh high); the window draws from the top-left.
+pub fn cv_layer_y(vh: f64, top: f64, h: f64) -> f64 { return vh - top - h; }
+
 pub fn cv_self_label() -> str { return "YOU"; }
 pub fn cv_self_off_text() -> str { return "camera off"; }
 
@@ -1410,4 +1444,17 @@ test cv_self_view_sits_in_the_bottom_right_corner_and_never_covers_more_than_a_q
     assert cv_self_fits(300.0, 225.0) and cv_self_fits(120.0, 90.0);
     // too small a picture: the inset would take more than half of it, so it is not drawn
     assert cv_self_fits(60.0, 45.0) == false and cv_self_fits(300.0, 60.0) == false;
+}
+
+test cv_the_call_picture_is_16_by_9_for_h264_and_4_by_3_for_the_old_jpeg_and_fits_the_room {
+    assert cv_vbox_top(400.0) == 436.0;
+    // the panel's 268 points: 150.75 high for H.264, 201 for the JPEG
+    assert cv_vbox_h(268.0, 500.0, true) == 150.75 and cv_vbox_w(268.0, 500.0, true) == 268.0;
+    assert cv_vbox_h(268.0, 500.0, false) == 201.0 and cv_vbox_w(268.0, 500.0, false) == 268.0;
+    // a short window: the height is the room, the width keeps the aspect
+    assert cv_vbox_h(268.0, 90.0, true) == 90.0 and cv_vbox_w(268.0, 90.0, true) == 160.0;
+    assert cv_vbox_h(268.0, 90.0, false) == 90.0 and cv_vbox_w(268.0, 90.0, false) == 120.0;
+    assert cv_vbox_h(268.0, -5.0, true) == 0.0;
+    // a box 150 high whose top is 400 points from the top of an 800-point view stands 250 above its bottom
+    assert cv_layer_y(800.0, 400.0, 150.0) == 250.0;
 }

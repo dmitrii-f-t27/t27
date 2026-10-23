@@ -181,6 +181,99 @@ use t27os::call_core::VR_AT;
 use t27os::call_core::VR_LAST;
 use t27os::call_core::vr_take;
 use t27os::call_core::vr_get;
+use t27os::call_core::CK_T_H264;
+use t27os::call_core::CK_T_VCTL;
+use t27os::call_h264::VH_FRAME_MAX;
+use t27os::call_h264::VH_PART;
+use t27os::call_h264::VH_HDR;
+use t27os::call_h264::VH_COMPLETE;
+use t27os::call_h264::VA_LEN;
+use t27os::call_h264::VA_SIZE;
+use t27os::call_h264::VA_LAST;
+use t27os::call_h264::VA_DONE;
+use t27os::call_h264::VA_LOST;
+use t27os::call_h264::VA_DROPPED;
+use t27os::call_h264::VA_BYTES;
+use t27os::call_h264::VA_SEEN;
+use t27os::call_h264::VA_KEYS;
+use t27os::call_h264::VA_AT;
+use t27os::call_h264::VA_PARTS;
+use t27os::call_h264::VA_REFUSED;
+use t27os::call_h264::VD_HELD;
+use t27os::call_h264::VD_LASTDEC;
+use t27os::call_h264::VS_LEN;
+use t27os::call_h264::VS_KEYS;
+use t27os::call_h264::VS_FRAMES;
+use t27os::call_h264::VN_PVER;
+use t27os::call_h264::VN_PCAPS;
+use t27os::call_h264::VN_HELLO_AT;
+use t27os::call_h264::VN_T0;
+use t27os::call_h264::VN_PHEARD;
+use t27os::call_h264::VN_SAIDHEARD;
+use t27os::call_h264::vx_heard;
+use t27os::call_h264::VN_WAIT;
+use t27os::call_h264::VN_H264;
+use t27os::call_h264::VL_RUNG;
+use t27os::call_h264::VL_KBPS;
+use t27os::call_h264::VL_720;
+use t27os::call_h264::VF_LEN;
+use t27os::call_h264::VX_HELLO;
+use t27os::call_h264::VX_KEYREQ;
+use t27os::call_h264::VX_REPORT;
+use t27os::call_h264::VC_CAP_DEC;
+use t27os::call_h264::VC_CAP_ENC;
+use t27os::call_h264::VP_PASS_MAX;
+use t27os::call_h264::vh_take;
+use t27os::call_h264::vh_parts;
+use t27os::call_h264::vh_cut;
+use t27os::call_h264::vh_part;
+use t27os::call_h264::vh_is_key;
+use t27os::call_h264::va_get;
+use t27os::call_h264::va_reset;
+use t27os::call_h264::vd_gate;
+use t27os::call_h264::vd_error;
+use t27os::call_h264::vk_due;
+use t27os::call_h264::vk_sent;
+use t27os::call_h264::vk_on_request;
+use t27os::call_h264::vs_number;
+use t27os::call_h264::vs_get;
+use t27os::call_h264::vq_stale;
+use t27os::call_h264::vp_refill;
+use t27os::call_h264::vp_take;
+use t27os::call_h264::vl_init;
+use t27os::call_h264::vl_step;
+use t27os::call_h264::vl_rung;
+use t27os::call_h264::vl_kbps;
+use t27os::call_h264::vx_hello;
+use t27os::call_h264::vx_keyreq;
+use t27os::call_h264::vx_report;
+use t27os::call_h264::vx_ok;
+use t27os::call_h264::vx_kind;
+use t27os::call_h264::vx_u32;
+use t27os::call_h264::vx_u16;
+use t27os::call_h264::vn_take;
+use t27os::call_h264::vn_mode;
+use t27os::call_h264::vn_hello_due;
+use t27os::call_h264::vf_note;
+use t27os::call_h264::vf_fps;
+use t27os::call_h264::vf_kbps;
+use t27os::call_vt::VDK_W;
+use t27os::call_vt::VDK_H;
+use t27os::call_vt::VE_W;
+use t27os::call_vt::VE_H;
+use t27os::call_vt::vte_force;
+use t27os::call_vt::vte_want;
+use t27os::call_vt::vte_ready;
+use t27os::call_vt::vte_waiting;
+use t27os::call_vt::vte_len;
+use t27os::call_vt::vte_meta;
+use t27os::call_vt::vte_at;
+use t27os::call_vt::vte_read;
+use t27os::call_vt::vte_pop;
+use t27os::call_vt::vte_stat;
+use t27os::call_vt::vtd_post;
+use t27os::call_vt::vtd_errors;
+use t27os::call_vt::vtd_stat;
 use t27os::call_vid::vid_make;
 use t27os::call_vid::vid_make_of;
 use t27os::call_vid::vgq_kick_of;
@@ -379,7 +472,11 @@ pub const CS_VCAM : usize = 140928;
 /// signature of this call and the sealed IDENT kept for resends.
 pub const CS_ID : usize = 165504;
 pub const CS_ID_LEN : usize = 1024;
-pub const CS_LEN : usize = 166528;
+/// After the identity: the H.264 video of a one to one call (owner, 2026-10-23; call_h264.t27, section "H.264 video"
+/// below): the receiver's and the sender's state, the meters, the slots, and the assembly buffer of VH_FRAME_MAX bytes.
+/// Only link 0 uses it.
+pub const CS_VH : usize = 166528;
+pub const CS_LEN : usize = 299648;
 const CI_ON : usize = 0;
 const CI_PIN : usize = 1;
 const CI_GOT : usize = 2;
@@ -468,6 +565,10 @@ const CS_K_VENC : u32 = 53;
 /// 1 = a public address in a group's member list may be called (the window sets it from T27OS_ALLOW_PUBLIC=1, the
 /// same explicit allow the typed address needs); 0 = only a private network or this machine.
 pub const CS_K_ALLOW_PUB : u32 = 57;
+/// The window's H.264 encoder and decoder blocks (call_vt.t27 vte_new / vtd_new), set by cs_video_h264, kept across
+/// calls; 0 = none (this side then sends the JPEG and cannot show H.264).
+const CS_K_VHENC : u32 = 58;
+const CS_K_VHDEC : u32 = 59;
 
 pub const CS_AUDIO_DEV : u32 = 1;
 pub const CS_AUDIO_TEST : u32 = 2;
@@ -962,6 +1063,7 @@ fn cs_fresh(s: []u8) -> void {
     ck_wipe(s[CS_GRP..CS_GRP + 16 * 8]);
     ck_wipe(s[CS_GRP + CS_GBODY..CS_GRP + CS_GRP_LEN]);
     ck_wipe(s[CS_VID..CS_VID + CS_VSLOTS]);
+    cs_vh_fresh(s);
     cs_id_fresh(s);
     cs_p(s, CS_CODE_SAID, 0);
     cs_p(s, CS_REASON, 0);
@@ -1117,6 +1219,7 @@ fn cs_wipe_secrets(b: []u8) -> void {
     ck_wipe(b[CS_ID..CS_ID + CS_ID_LEN]);
     ck_wipe(b[CS_AUD..CS_GRP]);
     ck_wipe(b[CS_VASM..CS_VCAM + CS_VBUF]);
+    ck_wipe(b[CS_VH..CS_VH + CS_VH_LEN]);
 }
 
 // ---------------------------------------------------------------- audio
@@ -1559,7 +1662,12 @@ fn cs_on_packet(s: []u8, m: []const u8, from: []const u8) -> void {
         cs_add(s, CS_ST_REJ_STATE, 1);
         return;
     }
-    if (typ == CK_T_MEDIA or typ == CK_T_BYE or typ == CK_T_VIDEO or typ == CK_T_TEXT) {
+    // H.264 rides a call with sound only (never a message session)
+    if ((typ == CK_T_H264 or typ == CK_T_VCTL) and cs_g(s, CS_MODE) == @as(u64, CS_AUDIO_NONE)) {
+        cs_add(s, CS_ST_REJ_STATE, 1);
+        return;
+    }
+    if (typ == CK_T_MEDIA or typ == CK_T_BYE or typ == CK_T_VIDEO or typ == CK_T_TEXT or typ == CK_T_H264 or typ == CK_T_VCTL) {
         var pt : [1928]u8 = undefined;
         const o : i64 = ckh_open(ep, m, pt[0..1928]);
         if (o == -2) { cs_add(s, CS_ST_REJ_STATE, 1); return; }
@@ -1573,6 +1681,14 @@ fn cs_on_packet(s: []u8, m: []const u8, from: []const u8) -> void {
         }
         if (typ == CK_T_VIDEO) {
             cs_take_video(s, pt[0..@as(usize, @intCast(o))]);
+            return;
+        }
+        if (typ == CK_T_H264) {
+            cs_take_h264(s, pt[0..@as(usize, @intCast(o))]);
+            return;
+        }
+        if (typ == CK_T_VCTL) {
+            cs_take_vctl(s, pt[0..@as(usize, @intCast(o))]);
             return;
         }
         if (typ == CK_T_TEXT) {
@@ -2547,7 +2663,10 @@ fn cs_vtick(s: []u8, now: u64) -> void {
         csg_video(s, now);
         return;
     }
-    if (cs_g(s, CS_K_VIDEO) == 0 or ckh_state(s[0..EP_LEN]) != CK_ACTIVE or cs_n_active(s) != 1) { return; }
+    if (ckh_state(s[0..EP_LEN]) != CK_ACTIVE or cs_n_active(s) != 1) { return; }
+    // H.264 when both ends agreed on it (cs_vh_tick also keeps the control messages going for the video received)
+    if (cs_vh_tick(s, now)) { return; }
+    if (cs_g(s, CS_K_VIDEO) == 0) { return; }
     if (!vc_due(now, cvg(s, VT_LAST_MS))) { return; }
     cvp(s, VT_LAST_MS, now);
     const f : u64 = cvg(s, VT_FRAMES) + 1;
@@ -2607,6 +2726,407 @@ fn cs_vtick(s: []u8, now: u64) -> void {
     }
     const took : u64 = ckh_ms() - now;
     if (took > cvg(s, VT_MAKE_MAX)) { cvp(s, VT_MAKE_MAX, took); }
+}
+
+// ---------------------------------------------------------------- H.264 video of a one to one call (owner, 2026-10-23)
+
+// call_h264.t27 decides, call_vt.t27 codes; this joins them to the sealed channel. The window hands in its encoder and
+// decoder blocks (cs_video_h264). While a one to one call is ACTIVE each pass: a HELLO goes out every 500 ms until the
+// peer said something (its caps: this side decodes when it has a decoder, encodes when it has an encoder and sends
+// video); a key frame request goes out when the gate needs one; a REPORT of the last second goes out once a second
+// while H.264 arrives. When the peer's word says it decodes (vn_mode H264) and this side sends video, the coded frames
+// leave the encoder's ring part by part through the bucket (at most VP_PASS_MAX parts a pass, after the sound of the
+// pass); a frame that waited too long is dropped and a key frame forced. Otherwise the JPEG of cs_vtick goes as before.
+// Received parts are put together in the region's buffer; a complete frame the gate lets through is queued for the
+// decoder, whose picture the window takes from its mailbox. A REPORT from the peer moves this side's ladder, and the
+// encoder follows the rung and the bitrate (vte_want); a KEYREQ the sender follows forces a key frame (vte_force).
+// The region: the receiver's state (VA_LEN), the sender's (VS_LEN), three meters (frames received, frames sent, parts'
+// bytes sent), u64 slots VX_*, then the assembly buffer of VH_FRAME_MAX bytes. Link 0 only.
+const VX_CUR_F : usize = 0;
+const VX_CUR_LEN : usize = 1;
+const VX_CUR_K : usize = 2;
+const VX_CUR_KEY : usize = 3;
+const VX_CUR_RUNG : usize = 4;
+const VX_HELLO_TX : usize = 5;
+const VX_HELLO_RX : usize = 6;
+const VX_KREQ_TX : usize = 7;
+const VX_KREQ_RX : usize = 8;
+const VX_REP_TX : usize = 9;
+const VX_REP_RX : usize = 10;
+const VX_REP_AT : usize = 11;
+const VX_M_DONE : usize = 12;
+const VX_M_LOST : usize = 13;
+const VX_M_BYTES : usize = 14;
+const VX_M_UNDER : usize = 15;
+const VX_M_HELD : usize = 16;
+const VX_PARTS_TX : usize = 17;
+const VX_SEND_ERR : usize = 18;
+const VX_STALE : usize = 19;
+const VX_DECERR : usize = 20;
+const VX_BUSY : usize = 21;
+const VX_MODE : usize = 22;
+const VX_CTL_BAD : usize = 23;
+const VX_HOLD : usize = 24;
+const VX_PEER_FPS : usize = 25;
+const VX_PEER_LOST : usize = 26;
+const VX_STEPS : usize = 27;
+const VX_CUR_US : usize = 28;
+const VX_WANTED : usize = 29;
+const VX_DEC_NO : usize = 30;
+const VX_FORCED_TX : usize = 31;
+pub const CS_VH_RX : usize = 0;
+pub const CS_VH_SS : usize = 256;
+pub const CS_VH_MRX : usize = 768;
+pub const CS_VH_MTX : usize = 808;
+pub const CS_VH_MPB : usize = 848;
+pub const CS_VH_X : usize = 1024;
+pub const CS_VH_BUF : usize = 2048;
+pub const CS_VH_LEN : usize = 133120;
+
+fn cs_cfnow() -> f64 { return @extern("CFAbsoluteTimeGetCurrent"); }
+/// The clock of the encoder's ring (call_vt), in microseconds.
+fn cs_us() -> u64 { return @as(u64, @intFromFloat(cs_cfnow() * 1000000.0)); }
+
+fn cvx(s: []const u8, k: usize) -> u64 { return get_u64(s, CS_VH + CS_VH_X + k * 8); }
+fn cvxp(s: []u8, k: usize, v: u64) -> void { put_u64(s, CS_VH + CS_VH_X + k * 8, v); }
+fn cvxa(s: []u8, k: usize, by: u64) -> void { cvxp(s, k, cvx(s, k) + by); }
+
+/// A new call: nothing assembled (a key frame needed), the sender, meters and slots at zero; the buffer stays.
+fn cs_vh_fresh(s: []u8) -> void {
+    ck_wipe(s[CS_VH..CS_VH + CS_VH_BUF]);
+    va_reset(s[CS_VH + CS_VH_RX..CS_VH + CS_VH_RX + VA_LEN]);
+}
+
+/// This side's caps (call_h264 VC_CAP_*): it decodes with a decoder block, encodes with an encoder block while it sends
+/// video. Pure.
+pub fn cs_vh_caps(dec: u64, enc: u64, video_on: bool) -> u8 {
+    var c : u8 = 0;
+    if (dec != 0) { c = c | VC_CAP_DEC; }
+    if (enc != 0 and video_on) { c = c | VC_CAP_ENC; }
+    return c;
+}
+
+/// Hand in the window's encoder and decoder blocks (call_vt vte_new / vtd_new); 0 for either turns that side off. Kept
+/// across calls (cs_open clears them). False for a slice that is not a live session.
+pub fn cs_video_h264(s: []u8, enc: u64, dec: u64) -> bool {
+    if (!cs_live(s)) { return false; }
+    cs_p(s, CS_K_VHENC, enc);
+    cs_p(s, CS_K_VHDEC, dec);
+    return true;
+}
+
+/// The video this side sends now (call_h264 VN_*); VN_WAIT outside an ACTIVE one to one call.
+pub fn cs_vh_mode(s: []const u8) -> u32 {
+    if (s.len < CS_LEN) { return VN_WAIT; }
+    return @as(u32, @intCast(cvx(s, VX_MODE)));
+}
+
+fn cs_vh_seal_send(s: []u8, typ: u32, pt: []const u8) -> bool {
+    var fr : [1260]u8 = undefined;
+    const m : usize = ckh_seal(s[0..EP_LEN], typ, pt, fr[0..1260]);
+    if (m == 0 or !cs_send(s, fr[0..m])) {
+        cvxa(s, VX_SEND_ERR, 1);
+        return false;
+    }
+    return true;
+}
+
+/// One opened H.264 part: put together; a complete frame through the gate goes to the decoder's queue.
+fn cs_take_h264(s: []u8, pt: []const u8) -> void {
+    const now : u64 = ckh_ms();
+    const r : u32 = vh_take(s[CS_VH + CS_VH_RX..CS_VH + CS_VH_RX + VA_LEN], s[CS_VH + CS_VH_BUF..CS_VH + CS_VH_BUF + VH_FRAME_MAX], pt, now);
+    if (r != VH_COMPLETE) { return; }
+    const n : usize = @as(usize, @intCast(va_get(s[CS_VH + CS_VH_RX..CS_VH + CS_VH_RX + VA_LEN], VA_SIZE)));
+    const f : u64 = va_get(s[CS_VH + CS_VH_RX..CS_VH + CS_VH_RX + VA_LEN], VA_LAST);
+    vf_note(s[CS_VH + CS_VH_MRX..CS_VH + CS_VH_MRX + VF_LEN], now, @as(u64, n));
+    const key : bool = vh_is_key(s[CS_VH + CS_VH_BUF..CS_VH + CS_VH_BUF + n]);
+    if (!vd_gate(s[CS_VH + CS_VH_RX..CS_VH + CS_VH_RX + VA_LEN], f, key)) { return; }
+    const dec : u64 = cs_g(s, CS_K_VHDEC);
+    if (dec == 0) { return; }
+    const v : u32 = vtd_post(dec, s[CS_VH + CS_VH_BUF..CS_VH + CS_VH_BUF + n]);
+    if (v != 0) {
+        // not queued (the decoder is behind, or the frame does not parse): the chain is broken, a key frame is needed
+        if (v == 2) { cvxa(s, VX_BUSY, 1); } else { cvxa(s, VX_DEC_NO, 1); }
+        vd_error(s[CS_VH + CS_VH_RX..CS_VH + CS_VH_RX + VA_LEN]);
+    }
+}
+
+/// One opened video control message from the peer.
+fn cs_take_vctl(s: []u8, pt: []const u8) -> void {
+    if (!vx_ok(pt)) {
+        cvxa(s, VX_CTL_BAD, 1);
+        return;
+    }
+    vn_take(s[CS_VH + CS_VH_SS..CS_VH + CS_VH_SS + VS_LEN], pt);
+    const kind : u8 = vx_kind(pt);
+    const now : u64 = ckh_ms();
+    if (kind == VX_HELLO) { cvxa(s, VX_HELLO_RX, 1); }
+    if (kind == VX_KEYREQ) {
+        cvxa(s, VX_KREQ_RX, 1);
+        if (vk_on_request(s[CS_VH + CS_VH_SS..CS_VH + CS_VH_SS + VS_LEN], vx_u32(pt, 4), now)) {
+            vte_force(cs_g(s, CS_K_VHENC));
+            cvxa(s, VX_FORCED_TX, 1);
+        }
+    }
+    if (kind == VX_REPORT) {
+        cvxa(s, VX_REP_RX, 1);
+        cvxp(s, VX_PEER_FPS, vx_u32(pt, 24));
+        cvxp(s, VX_PEER_LOST, cvx(s, VX_PEER_LOST) + vx_u32(pt, 12));
+        if (cs_vh_mode(s) == VN_H264) {
+            const tx : u64 = vf_fps(s[CS_VH + CS_VH_MTX..CS_VH + CS_VH_MTX + VF_LEN], now);
+            const a : u32 = vl_step(s[CS_VH + CS_VH_SS..CS_VH + CS_VH_SS + VS_LEN], vx_u32(pt, 8), vx_u32(pt, 12), vx_u16(pt, 20), vx_u32(pt, 24), tx, now);
+            if (a != 0) {
+                cvxa(s, VX_STEPS, 1);
+                vte_want(cs_g(s, CS_K_VHENC), vl_rung(s[CS_VH + CS_VH_SS..CS_VH + CS_VH_SS + VS_LEN]), vl_kbps(s[CS_VH + CS_VH_SS..CS_VH + CS_VH_SS + VS_LEN]));
+            }
+        }
+    }
+}
+
+/// The control side of a pass: HELLO, key frame request, the second's REPORT, decoder refusals into the gate.
+fn cs_vh_control(s: []u8, now: u64, caps: u8) -> void {
+    var b : [32]u8 = undefined;
+    const ss : []u8 = s[CS_VH + CS_VH_SS..CS_VH + CS_VH_SS + VS_LEN];
+    const pver : u64 = vs_get(ss, VN_PVER);
+    const heard : bool = pver != 0;
+    if (vn_hello_due(pver, vs_get(ss, VN_PHEARD), vs_get(ss, VN_SAIDHEARD), vs_get(ss, VN_HELLO_AT), now)) {
+        put_u64(ss, VN_HELLO_AT * 8, now);
+        vx_hello(b[0..32], caps, vl_rung(ss));
+        vx_heard(b[0..32], heard);
+        if (cs_vh_seal_send(s, CK_T_VCTL, b[0..32])) {
+            cvxa(s, VX_HELLO_TX, 1);
+            if (heard) { put_u64(ss, VN_SAIDHEARD * 8, 1); }
+        }
+    }
+    const dec : u64 = cs_g(s, CS_K_VHDEC);
+    const errs : u64 = vtd_errors(dec);
+    if (errs > cvx(s, VX_DECERR)) {
+        cvxp(s, VX_DECERR, errs);
+        vd_error(s[CS_VH + CS_VH_RX..CS_VH + CS_VH_RX + VA_LEN]);
+    }
+    if (vk_due(s[CS_VH + CS_VH_RX..CS_VH + CS_VH_RX + VA_LEN], now)) {
+        vk_sent(s[CS_VH + CS_VH_RX..CS_VH + CS_VH_RX + VA_LEN], now);
+        vx_keyreq(b[0..32], caps, va_get(s[CS_VH + CS_VH_RX..CS_VH + CS_VH_RX + VA_LEN], VA_SEEN), va_get(s[CS_VH + CS_VH_RX..CS_VH + CS_VH_RX + VA_LEN], VD_LASTDEC));
+        vx_heard(b[0..32], heard);
+        if (cs_vh_seal_send(s, CK_T_VCTL, b[0..32])) { cvxa(s, VX_KREQ_TX, 1); }
+    }
+    // once a second, while H.264 arrives: what came, what was lost, the sound's underruns
+    const at : u64 = cvx(s, VX_REP_AT);
+    if (at == 0) { cvxp(s, VX_REP_AT, now); }
+    if (at != 0 and now >= at + 1000 and va_get(s[CS_VH + CS_VH_RX..CS_VH + CS_VH_RX + VA_LEN], VA_SEEN) != 0) {
+        var rep : [7]u64 = undefined;
+        const done : u64 = va_get(s[CS_VH + CS_VH_RX..CS_VH + CS_VH_RX + VA_LEN], VA_DONE);
+        const lost : u64 = va_get(s[CS_VH + CS_VH_RX..CS_VH + CS_VH_RX + VA_LEN], VA_LOST) + va_get(s[CS_VH + CS_VH_RX..CS_VH + CS_VH_RX + VA_LEN], VA_DROPPED);
+        const bytes : u64 = va_get(s[CS_VH + CS_VH_RX..CS_VH + CS_VH_RX + VA_LEN], VA_BYTES);
+        const under : u64 = cs_stat(s, 1004);
+        const held : u64 = va_get(s[CS_VH + CS_VH_RX..CS_VH + CS_VH_RX + VA_LEN], VD_HELD);
+        rep[0] = now - at;
+        rep[1] = done - cvx(s, VX_M_DONE);
+        rep[2] = lost - cvx(s, VX_M_LOST);
+        rep[3] = bytes - cvx(s, VX_M_BYTES);
+        rep[4] = under - cvx(s, VX_M_UNDER);
+        rep[5] = held - cvx(s, VX_M_HELD);
+        rep[6] = vf_fps(s[CS_VH + CS_VH_MRX..CS_VH + CS_VH_MRX + VF_LEN], now);
+        cvxp(s, VX_M_DONE, done);
+        cvxp(s, VX_M_LOST, lost);
+        cvxp(s, VX_M_BYTES, bytes);
+        cvxp(s, VX_M_UNDER, under);
+        cvxp(s, VX_M_HELD, held);
+        cvxp(s, VX_REP_AT, now);
+        vx_report(b[0..32], caps, rep[0..7]);
+        vx_heard(b[0..32], heard);
+        if (cs_vh_seal_send(s, CK_T_VCTL, b[0..32])) { cvxa(s, VX_REP_TX, 1); }
+    } else if (at != 0 and now >= at + 1000) {
+        cvxp(s, VX_REP_AT, now);
+    }
+}
+
+/// The sending side of a pass: the frame on its way goes on, the next one is taken from the ring, the bucket and
+/// VP_PASS_MAX bound the pass.
+fn cs_vh_send(s: []u8, now: u64) -> void {
+    const enc : u64 = cs_g(s, CS_K_VHENC);
+    if (enc == 0) { return; }
+    const us : u64 = cs_us();
+    vp_refill(s[CS_VH + CS_VH_SS..CS_VH + CS_VH_SS + VS_LEN], us, vl_kbps(s[CS_VH + CS_VH_SS..CS_VH + CS_VH_SS + VS_LEN]));
+    var parts : u64 = 0;
+    var cut : [1160]u8 = undefined;
+    var pt : [1176]u8 = undefined;
+    while (parts < VP_PASS_MAX) {
+        if (cvx(s, VX_CUR_F) == 0) {
+            // the next frame: drop those that waited too long (and force a key frame in their place)
+            var fresh : bool = false;
+            while (vte_ready(enc) and !fresh) {
+                const at : u64 = vte_at(enc);
+                var age : u64 = 0;
+                if (us > at) { age = (us - at) / 1000; }
+                if (vq_stale(age, vte_waiting(enc) - 1)) {
+                    vte_pop(enc);
+                    vte_force(enc);
+                    cvxa(s, VX_STALE, 1);
+                } else {
+                    fresh = true;
+                }
+            }
+            if (!fresh) { return; }
+            const len : u64 = vte_len(enc);
+            const meta : u64 = vte_meta(enc);
+            const key : bool = (meta & 1) != 0;
+            if (len == 0 or vh_parts(@as(usize, len)) == 0) {
+                vte_pop(enc);
+                vte_force(enc);
+                continue;
+            }
+            cvxp(s, VX_CUR_F, vs_number(s[CS_VH + CS_VH_SS..CS_VH + CS_VH_SS + VS_LEN], key));
+            cvxp(s, VX_CUR_LEN, len);
+            cvxp(s, VX_CUR_K, 0);
+            if (key) { cvxp(s, VX_CUR_KEY, 1); } else { cvxp(s, VX_CUR_KEY, 0); }
+            cvxp(s, VX_CUR_RUNG, (meta >> 8) & 255);
+            cvxp(s, VX_CUR_US, us);
+        }
+        const total : usize = @as(usize, @intCast(cvx(s, VX_CUR_LEN)));
+        const k : usize = @as(usize, @intCast(cvx(s, VX_CUR_K)));
+        const n : usize = vh_parts(total);
+        const c : usize = vh_cut(total, k);
+        if (!vp_take(s[CS_VH + CS_VH_SS..CS_VH + CS_VH_SS + VS_LEN], @as(u64, c + VH_HDR + 68))) {
+            cvxa(s, VX_HOLD, 1);
+            return;
+        }
+        if (!vte_read(enc, @as(u64, k * VH_PART), cut[0..c])) {
+            // the ring entry went away (the call's end): forget the frame
+            cvxp(s, VX_CUR_F, 0);
+            return;
+        }
+        const pn : usize = vh_part(pt[0..1176], cvx(s, VX_CUR_F), total, k, cvx(s, VX_CUR_KEY) != 0, @as(u32, @intCast(cvx(s, VX_CUR_RUNG))), cut[0..c]);
+        if (pn > 0 and cs_vh_seal_send(s, CK_T_H264, pt[0..pn])) {
+            cvxa(s, VX_PARTS_TX, 1);
+            vf_note(s[CS_VH + CS_VH_MPB..CS_VH + CS_VH_MPB + VF_LEN], now, @as(u64, pn + 68));
+        }
+        parts = parts + 1;
+        if (k + 1 >= n) {
+            vf_note(s[CS_VH + CS_VH_MTX..CS_VH + CS_VH_MTX + VF_LEN], now, @as(u64, total));
+            vte_pop(enc);
+            cvxp(s, VX_CUR_F, 0);
+        } else {
+            cvxp(s, VX_CUR_K, @as(u64, k + 1));
+        }
+    }
+}
+
+/// The H.264 part of a pass of an ACTIVE one to one call: control, then the frames when both ends agreed on H.264.
+/// True when this pass sends H.264 (so the JPEG sender stays quiet).
+fn cs_vh_tick(s: []u8, now: u64) -> bool {
+    const video_on : bool = cs_g(s, CS_K_VIDEO) != 0;
+    const caps : u8 = cs_vh_caps(cs_g(s, CS_K_VHDEC), cs_g(s, CS_K_VHENC), video_on);
+    if (vs_get(s[CS_VH + CS_VH_SS..CS_VH + CS_VH_SS + VS_LEN], VN_T0) == 0) {
+        put_u64(s, CS_VH + CS_VH_SS + VN_T0 * 8, now);
+        vl_init(s[CS_VH + CS_VH_SS..CS_VH + CS_VH_SS + VS_LEN], VL_720);
+    }
+    cs_vh_control(s, now, caps);
+    const ss : []u8 = s[CS_VH + CS_VH_SS..CS_VH + CS_VH_SS + VS_LEN];
+    const mode : u32 = vn_mode(caps, vs_get(ss, VN_PVER), vs_get(ss, VN_PCAPS), now - vs_get(ss, VN_T0));
+    if (@as(u64, mode) != cvx(s, VX_MODE)) {
+        cvxp(s, VX_MODE, @as(u64, mode));
+        if (mode == VN_H264) {
+            // a new stream: the encoder at the ladder's rung and bitrate, its first frame a key frame
+            vte_want(cs_g(s, CS_K_VHENC), vl_rung(ss), vl_kbps(ss));
+            vte_force(cs_g(s, CS_K_VHENC));
+        }
+    }
+    if (mode != VN_H264 or !video_on) { return false; }
+    cs_vh_send(s, now);
+    return true;
+}
+
+/// Counters of the H.264 video (cs_vh_stat): received frames a second and kbit/s, sent frames a second and kbit/s (the
+/// coded frames) and the parts' kbit/s on the wire; the picture the decoder last made and the one the encoder makes;
+/// the mode, the rung and the bitrate; key frames, lost and held frames, requests and forced key frames, reports,
+/// HELLOs, frames dropped as stale, parts sent and held by the bucket, decoder refusals and frames it could not take.
+pub const CS_H_RX_FPS : u32 = 0;
+pub const CS_H_RX_KBPS : u32 = 1;
+pub const CS_H_TX_FPS : u32 = 2;
+pub const CS_H_TX_KBPS : u32 = 3;
+pub const CS_H_WIRE_KBPS : u32 = 4;
+pub const CS_H_RX_W : u32 = 5;
+pub const CS_H_RX_H : u32 = 6;
+pub const CS_H_TX_W : u32 = 7;
+pub const CS_H_TX_H : u32 = 8;
+pub const CS_H_MODE : u32 = 9;
+pub const CS_H_RUNG : u32 = 10;
+pub const CS_H_KBPS : u32 = 11;
+pub const CS_H_RX_KEYS : u32 = 12;
+pub const CS_H_TX_KEYS : u32 = 13;
+pub const CS_H_RX_DONE : u32 = 14;
+pub const CS_H_RX_LOST : u32 = 15;
+pub const CS_H_RX_HELD : u32 = 16;
+pub const CS_H_KREQ_TX : u32 = 17;
+pub const CS_H_KREQ_RX : u32 = 18;
+pub const CS_H_FORCED : u32 = 19;
+pub const CS_H_REP_TX : u32 = 20;
+pub const CS_H_REP_RX : u32 = 21;
+pub const CS_H_HELLO_TX : u32 = 22;
+pub const CS_H_HELLO_RX : u32 = 23;
+pub const CS_H_STALE : u32 = 24;
+pub const CS_H_PARTS_TX : u32 = 25;
+pub const CS_H_HOLD : u32 = 26;
+pub const CS_H_DEC_ERR : u32 = 27;
+pub const CS_H_BUSY : u32 = 28;
+pub const CS_H_TX_FRAMES : u32 = 29;
+pub const CS_H_RX_PARTS : u32 = 30;
+pub const CS_H_RX_REFUSED : u32 = 31;
+pub const CS_H_PEER_FPS : u32 = 32;
+pub const CS_H_STEPS : u32 = 33;
+pub const CS_H_SEND_ERR : u32 = 34;
+pub const CS_H_RX_DROPPED : u32 = 35;
+
+pub fn cs_vh_stat(s: []const u8, k: u32) -> u64 {
+    if (s.len < CS_LEN) { return 0; }
+    var now : u64 = 0;
+    if (k <= CS_H_WIRE_KBPS) { now = ckh_ms(); }
+    const va : []const u8 = s[CS_VH + CS_VH_RX..CS_VH + CS_VH_RX + VA_LEN];
+    const ss : []const u8 = s[CS_VH + CS_VH_SS..CS_VH + CS_VH_SS + VS_LEN];
+    if (k == CS_H_RX_FPS) { return vf_fps(s[CS_VH + CS_VH_MRX..CS_VH + CS_VH_MRX + VF_LEN], now); }
+    if (k == CS_H_RX_KBPS) { return vf_kbps(s[CS_VH + CS_VH_MRX..CS_VH + CS_VH_MRX + VF_LEN], now); }
+    if (k == CS_H_TX_FPS) { return vf_fps(s[CS_VH + CS_VH_MTX..CS_VH + CS_VH_MTX + VF_LEN], now); }
+    if (k == CS_H_TX_KBPS) { return vf_kbps(s[CS_VH + CS_VH_MTX..CS_VH + CS_VH_MTX + VF_LEN], now); }
+    if (k == CS_H_WIRE_KBPS) { return vf_kbps(s[CS_VH + CS_VH_MPB..CS_VH + CS_VH_MPB + VF_LEN], now); }
+    if (k == CS_H_RX_W) { return vtd_stat(cs_g(s, CS_K_VHDEC), VDK_W); }
+    if (k == CS_H_RX_H) { return vtd_stat(cs_g(s, CS_K_VHDEC), VDK_H); }
+    if (k == CS_H_TX_W) { return vte_stat(cs_g(s, CS_K_VHENC), VE_W); }
+    if (k == CS_H_TX_H) { return vte_stat(cs_g(s, CS_K_VHENC), VE_H); }
+    if (k == CS_H_MODE) { return cvx(s, VX_MODE); }
+    if (k == CS_H_RUNG) { return vs_get(ss, VL_RUNG); }
+    if (k == CS_H_KBPS) { return vs_get(ss, VL_KBPS); }
+    if (k == CS_H_RX_KEYS) { return va_get(va, VA_KEYS); }
+    if (k == CS_H_TX_KEYS) { return vs_get(ss, VS_KEYS); }
+    if (k == CS_H_RX_DONE) { return va_get(va, VA_DONE); }
+    if (k == CS_H_RX_LOST) { return va_get(va, VA_LOST); }
+    if (k == CS_H_RX_HELD) { return va_get(va, VD_HELD); }
+    if (k == CS_H_KREQ_TX) { return cvx(s, VX_KREQ_TX); }
+    if (k == CS_H_KREQ_RX) { return cvx(s, VX_KREQ_RX); }
+    if (k == CS_H_FORCED) { return cvx(s, VX_FORCED_TX); }
+    if (k == CS_H_REP_TX) { return cvx(s, VX_REP_TX); }
+    if (k == CS_H_REP_RX) { return cvx(s, VX_REP_RX); }
+    if (k == CS_H_HELLO_TX) { return cvx(s, VX_HELLO_TX); }
+    if (k == CS_H_HELLO_RX) { return cvx(s, VX_HELLO_RX); }
+    if (k == CS_H_STALE) { return cvx(s, VX_STALE); }
+    if (k == CS_H_PARTS_TX) { return cvx(s, VX_PARTS_TX); }
+    if (k == CS_H_HOLD) { return cvx(s, VX_HOLD); }
+    if (k == CS_H_DEC_ERR) { return cvx(s, VX_DECERR) + cvx(s, VX_DEC_NO); }
+    if (k == CS_H_BUSY) { return cvx(s, VX_BUSY); }
+    if (k == CS_H_TX_FRAMES) { return vs_get(ss, VS_FRAMES); }
+    if (k == CS_H_RX_PARTS) { return va_get(va, VA_PARTS); }
+    if (k == CS_H_RX_REFUSED) { return va_get(va, VA_REFUSED); }
+    if (k == CS_H_PEER_FPS) { return cvx(s, VX_PEER_FPS); }
+    if (k == CS_H_STEPS) { return cvx(s, VX_STEPS); }
+    if (k == CS_H_SEND_ERR) { return cvx(s, VX_SEND_ERR); }
+    if (k == CS_H_RX_DROPPED) { return va_get(va, VA_DROPPED); }
+    return 0;
+}
+
+/// An H.264 frame came within the last second.
+pub fn cs_vh_live(s: []const u8, now: u64) -> bool {
+    if (s.len < CS_LEN) { return false; }
+    return vc_live(now, va_get(s[CS_VH + CS_VH_RX..CS_VH + CS_VH_RX + VA_LEN], VA_AT));
 }
 
 // ---------------------------------------------------------------- group video (owner, 2026-10-23)
@@ -3035,7 +3555,10 @@ test the_block_holds_its_parts_without_overlap {
     assert CS_GRP + CS_GRP_LEN == CS_VID;
     assert CS_VID + CS_VSLOTS == CS_VASM;
     assert CS_VASM + CS_VBUF == CS_VLAST and CS_VLAST + CS_VBUF == CS_VCAM and CS_VCAM + CS_VBUF == CS_ID;
-    assert CS_ID + CS_ID_LEN == CS_LEN;
+    assert CS_ID + CS_ID_LEN == CS_VH and CS_VH + CS_VH_LEN == CS_LEN;
+    assert CS_VH_RX + VA_LEN <= CS_VH_SS and CS_VH_SS + VS_LEN <= CS_VH_MRX and CS_VH_MRX + VF_LEN <= CS_VH_MTX;
+    assert CS_VH_MTX + VF_LEN <= CS_VH_MPB and CS_VH_MPB + VF_LEN <= CS_VH_X and CS_VH_X + 32 * 8 <= CS_VH_BUF;
+    assert CS_VH_BUF + VH_FRAME_MAX == CS_VH_LEN;
     assert CI_MSGN + 2 <= CI_PUB and CI_PUB + 65 <= CI_PRIV and CI_PRIV + 97 <= CI_PEER and CI_PEER + 65 <= CI_RX;
     assert CI_RX + 65 <= CI_MSG and CI_MSG + CK_HDR + CK_IDENT_PT + CK_TAG <= CS_ID_LEN;
     assert CS_VBUF >= VC_JPEG_MAX;
@@ -3055,7 +3578,7 @@ test the_block_holds_its_parts_without_overlap {
 }
 
 test the_lookup_answer_and_the_probes_are_taken_off_the_socket_and_nothing_else {
-    var s : [166528]u8 = undefined;
+    var s : [299648]u8 = undefined;
     ck_wipe(s[0..CS_LEN]);
     // the RFC 5769 sample answer (call_nat.t27) to transaction b7e7a701 bc34d686 fa87dfae, from 74.125.250.129:19302
     const v : [80]u8 = [1, 1, 0, 60, 33, 18, 164, 66, 183, 231, 167, 1, 188, 52, 214, 134, 250, 135, 223, 174, 128, 34, 0, 11, 116, 101, 115, 116, 32, 118, 101, 99, 116, 111, 114, 32, 0, 32, 0, 8, 0, 1, 161, 71, 225, 18, 166, 67, 0, 8, 0, 20, 43, 145, 245, 153, 253, 158, 144, 17, 156, 31, 138, 82, 63, 243, 254, 57, 200, 181, 253, 150, 128, 40, 0, 4, 192, 125, 76, 150];
@@ -3243,7 +3766,7 @@ test two_members_of_three_never_add_up_past_the_ceiling {
 test a_window_slice_holds_one_to_three_links_and_a_member_survives_the_table {
     var a : [10]u8 = undefined;
     ck_fill_session(a[0..10], 3);
-    var blk : [166528]u8 = undefined;
+    var blk : [299648]u8 = undefined;
     ck_wipe(blk[0..CS_LEN]);
     assert cs_links(blk[0..CS_LEN]) == 1;
     // the member table keeps fingerprint, address and port in two words
@@ -3282,7 +3805,7 @@ fn cs_t_live(s: []u8) -> void {
 }
 
 test a_block_that_is_not_open_refuses_every_action {
-    var s : [166528]u8 = undefined;
+    var s : [299648]u8 = undefined;
     ck_wipe(s[0..CS_LEN]);
     var fp : [10]u8 = undefined;
     ck_fill_session(fp[0..10], 9);
@@ -3314,7 +3837,7 @@ test a_block_that_is_not_open_refuses_every_action {
 }
 
 test a_message_session_queues_text_and_a_call_refuses_it {
-    var s : [166528]u8 = undefined;
+    var s : [299648]u8 = undefined;
     cs_t_live(s[0..CS_LEN]);
     var pt : [720]u8 = undefined;
     var out : [720]u8 = undefined;
@@ -3355,7 +3878,7 @@ test a_message_session_queues_text_and_a_call_refuses_it {
 }
 
 test the_window_reads_state_peer_code_reason_mute_and_counters {
-    var s : [166528]u8 = undefined;
+    var s : [299648]u8 = undefined;
     cs_t_live(s[0..CS_LEN]);
     var fp : [10]u8 = undefined;
     var out : [10]u8 = undefined;
@@ -3401,7 +3924,7 @@ test the_window_reads_state_peer_code_reason_mute_and_counters {
 }
 
 test the_tunables_take_only_their_ranges_and_never_during_media {
-    var s : [166528]u8 = undefined;
+    var s : [299648]u8 = undefined;
     cs_t_live(s[0..CS_LEN]);
     const z : []u8 = s[0..CS_LEN];
     assert cs_set(z, CS_K_CALLING_MS, 999) == false;
@@ -3431,7 +3954,7 @@ test the_tunables_take_only_their_ranges_and_never_during_media {
 }
 
 test an_action_out_of_its_state_is_refused_and_moves_nothing {
-    var s : [166528]u8 = undefined;
+    var s : [299648]u8 = undefined;
     cs_t_live(s[0..CS_LEN]);
     const z : []u8 = s[0..CS_LEN];
     var fp : [10]u8 = undefined;
@@ -3475,7 +3998,7 @@ test an_action_out_of_its_state_is_refused_and_moves_nothing {
 }
 
 test the_group_and_video_counters_read_their_own_slots {
-    var s : [166528]u8 = undefined;
+    var s : [299648]u8 = undefined;
     cs_t_live(s[0..CS_LEN]);
     const z : []u8 = s[0..CS_LEN];
     assert csg_state(z) == GR_NONE;
@@ -3574,7 +4097,7 @@ test the_parts_of_a_frame_are_cut_as_before_whoever_made_its_jpeg {
 }
 
 test the_encoder_block_is_kept_across_calls_and_refused_without_a_session {
-    var s : [166528]u8 = undefined;
+    var s : [299648]u8 = undefined;
     ck_wipe(s[0..CS_LEN]);
     assert cs_video_encoder(s[0..CS_LEN], 4096) == false and cs_g(s[0..CS_LEN], CS_K_VENC) == 0;
     cs_t_live(s[0..CS_LEN]);
@@ -3591,7 +4114,7 @@ test the_encoder_block_is_kept_across_calls_and_refused_without_a_session {
 }
 
 test a_message_session_never_takes_a_persons_match_and_a_refused_peer_takes_none {
-    var s : [166528]u8 = undefined;
+    var s : [299648]u8 = undefined;
     cs_t_live(s[0..CS_LEN]);
     s[1] = @as(u8, @intCast(CK_VERIFY));
     s[EP_HAVE_CODE] = 1;
@@ -3615,7 +4138,7 @@ test a_message_session_never_takes_a_persons_match_and_a_refused_peer_takes_none
 }
 
 test a_new_call_forgets_the_last_peers_proof_and_keeps_the_own_identity {
-    var s : [166528]u8 = undefined;
+    var s : [299648]u8 = undefined;
     cs_t_live(s[0..CS_LEN]);
     s[CS_ID + CI_ON] = 1;
     ck_fill_session(s[CS_ID + CI_PUB..CS_ID + CI_PUB + 65], 4);
@@ -3664,7 +4187,7 @@ test a_strangers_message_session_ends_as_an_invitation_with_its_proven_key_and_n
     assert cs_id_why(true, true, false, PID_CODE, true) == CS_R_NONE;
     assert cs_id_why(true, false, false, PID_CODE, false) == CS_R_UNVERIFIED;
     // the proven key is handed out only after CS_R_INVITE, only for a stranger, only for a proof that checked
-    var s : [166528]u8 = undefined;
+    var s : [299648]u8 = undefined;
     var fp : [10]u8 = undefined;
     var k : [65]u8 = undefined;
     cs_t_live(s[0..CS_LEN]);
@@ -3692,7 +4215,7 @@ test a_strangers_message_session_ends_as_an_invitation_with_its_proven_key_and_n
 }
 
 test cs_identity_refuses_a_key_pair_that_does_not_fit_before_it_stores_anything {
-    var s : [333056]u8 = undefined;
+    var s : [599296]u8 = undefined;
     cs_t_live(s[0..CS_LEN]);
     ck_wipe(s[CS_LEN..2 * CS_LEN]);
     var pubk : [65]u8 = undefined;
@@ -3719,7 +4242,7 @@ test cs_identity_refuses_a_key_pair_that_does_not_fit_before_it_stores_anything 
     priv2[64] = priv2[64] ^ 1;
     assert !cs_identity(s[0..2 * CS_LEN], pubk[0..65], priv2[0..97]);
     // a block that is not open
-    var dead : [166528]u8 = undefined;
+    var dead : [299648]u8 = undefined;
     ck_wipe(dead[0..CS_LEN]);
     assert !cs_identity(dead[0..CS_LEN], pubk[0..65], priv[0..97]);
     // nothing was stored in either link
@@ -3728,7 +4251,7 @@ test cs_identity_refuses_a_key_pair_that_does_not_fit_before_it_stores_anything 
 }
 
 test the_group_video_counters_read_each_links_own_slots {
-    var s : [333056]u8 = undefined;
+    var s : [599296]u8 = undefined;
     cs_t_live(s[0..CS_LEN]);
     var i : usize = CS_LEN;
     while (i < 2 * CS_LEN) {
@@ -3784,7 +4307,7 @@ fn csg_t_list(out: []u8, n: usize) -> usize {
 }
 
 test a_list_is_kept_only_from_the_trusted_friend_that_called_this_link {
-    var s : [166528]u8 = undefined;
+    var s : [299648]u8 = undefined;
     cs_t_live(s[0..CS_LEN]);
     var l : [72]u8 = undefined;
     const n : usize = csg_t_list(l[0..72], 3);
@@ -3843,7 +4366,7 @@ test a_listed_address_passes_the_rule_of_a_typed_one {
 }
 
 test five_failed_codes_refuse_the_next_call_for_a_minute_and_a_match_clears_them {
-    var s : [166528]u8 = undefined;
+    var s : [299648]u8 = undefined;
     cs_t_live(s[0..CS_LEN]);
     const t : u64 = 1000000;
     cs_p(s[0..CS_LEN], CS_REASON, @as(u64, CS_R_PEER_SAID_DIFFER));
@@ -3881,7 +4404,7 @@ test five_failed_codes_refuse_the_next_call_for_a_minute_and_a_match_clears_them
 }
 
 test a_closed_block_keeps_no_session_key_identity_key_or_plaintext {
-    var s : [166528]u8 = undefined;
+    var s : [299648]u8 = undefined;
     cs_t_live(s[0..CS_LEN]);
     cs_p(s[0..CS_LEN], CS_MODE, @as(u64, CS_AUDIO_NONE));
     // a message session that is up: keys of both directions, the private key, an identity, text in the queue, a JPEG
@@ -3890,6 +4413,8 @@ test a_closed_block_keeps_no_session_key_identity_key_or_plaintext {
     s[EP_STATE] = @as(u8, @intCast(CK_ACTIVE));
     kfill(s[CS_ID..CS_ID + CS_ID_LEN], 5);
     kfill(s[CS_VASM..CS_VCAM + CS_VBUF], 3);
+    // an H.264 frame in assembly and the state around it
+    kfill(s[CS_VH..CS_VH + CS_VH_LEN], 4);
     var pt : [20]u8 = undefined;
     kfill(pt[0..20], 65);
     cs_take_text(s[0..CS_LEN], pt[0..20]);
@@ -3906,4 +4431,20 @@ test a_closed_block_keeps_no_session_key_identity_key_or_plaintext {
     assert t_zero(s[CS_ID..CS_ID + CS_ID_LEN]);
     assert t_zero(s[CS_AUD..CS_GRP]);
     assert t_zero(s[CS_VASM..CS_VCAM + CS_VBUF]);
+    assert t_zero(s[CS_VH..CS_VH + CS_VH_LEN]);
+}
+
+test this_side_decodes_with_a_decoder_and_encodes_only_while_it_sends_video {
+    assert cs_vh_caps(0, 0, true) == 0;
+    assert cs_vh_caps(7, 0, true) == VC_CAP_DEC;
+    assert cs_vh_caps(7, 9, false) == VC_CAP_DEC;
+    assert cs_vh_caps(7, 9, true) == VC_CAP_DEC | VC_CAP_ENC;
+    assert cs_vh_caps(0, 9, true) == VC_CAP_ENC;
+    var s : [299648]u8 = undefined;
+    cs_t_live(s[0..CS_LEN]);
+    // a new call: a key frame needed, nothing seen, the mode not decided (JPEG while waiting)
+    cs_vh_fresh(s[0..CS_LEN]);
+    assert cs_vh_mode(s[0..CS_LEN]) == VN_WAIT and cs_vh_stat(s[0..CS_LEN], CS_H_RX_DONE) == 0;
+    assert va_get(s[CS_VH + CS_VH_RX..CS_VH + CS_VH_RX + VA_LEN], 20) == 1;
+    assert !cs_vh_live(s[0..CS_LEN], 5000) and cs_vh_mode(s[0..10]) == VN_WAIT;
 }

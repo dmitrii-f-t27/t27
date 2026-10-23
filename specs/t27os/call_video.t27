@@ -27,6 +27,11 @@ use t27os::pty_proto::put_u64;
 use t27os::pty_proto::get_u64;
 use t27os::call_vid::vid_dims;
 use t27os::call_vid::vid_quality;
+use t27os::call_vt::vte_encode;
+use t27os::call_vt::vte_close;
+use t27os::call_vt::vtm_put;
+use t27os::call_vt::vtm_take;
+use t27os::call_vt::vt_pb_release;
 
 const CV_RTLD_DEFAULT : u64 = 18446744073709551614;
 /// kCVPixelFormatType_32BGRA, 'BGRA'.
@@ -614,6 +619,23 @@ const CVL_GREY : u64 = 28672;
 // CVL_G_PERIOD_US and encodes it as 160x120 at quality 0.3, the size a group call sends; 0 is the one to one 320x240.
 const CVL_SMALL : u64 = 248;
 const CVL_G_PERIOD_US : u64 = 190000;
+// H.264 (owner, 2026-10-23; call_vt.t27): with CVL_CODEC = 1 (cvl_codec) every camera frame goes to the encoder block
+// CVL_ENCB as it is (no JPEG, no 90 ms period); CVL_HENC counts the frames handed in, CVL_HFAIL those the encoder
+// refused. Every frame of a one to one call also goes to the self-view mailbox at CVL_SELFBOX (call_vt vtm_put: a lock
+// and a CVPixelBuffer), which the window takes for its inset: the user's own picture straight from the camera, never a
+// decoded JPEG. CVL_LQ is the camera's own queue (the encoder is closed on it, after the last frame). A call asks the
+// camera for 1280x720 (else 640x480) at 30 frames a second (CVL_FPS30 1 when the device took 1/30 as its frame
+// duration, 2 when its format cannot, 0 not tried); scan keeps 640x480.
+const CVL_CODEC : u64 = 249;
+const CVL_ENCB : u64 = 250;
+const CVL_HENC : u64 = 251;
+const CVL_HFAIL : u64 = 252;
+const CVL_LQ : u64 = 253;
+const CVL_SELFBOX : u64 = 254;
+const CVL_FPS30 : u64 = 256;
+const CVL_PRESET : u64 = 257;
+const CVL_FN_ECLOSE : u64 = 258;
+const CVL_CMT : u64 = 260;
 const CVL_SCAN_PERIOD_US : u64 = 100000;
 const CVL_ROW_MAX : u64 = 4096;
 
@@ -776,6 +798,21 @@ fn cvl_encode(st: u64, base: u64, w: u64, h: u64, row: u64) -> u64 {
 fn cvl_frame(st: u64, sbuf: u64) -> u64 {
     cv_put(st + CVL_CB * 8, cbp_get(st + CVL_CB * 8) + 1);
     const t : u64 = cv_us();
+    if (cbp_get(st + CVL_SCAN * 8) == 0) {
+        const hp : u64 = cv_sample_image(sbuf);
+        if (hp != 0) {
+            cv_put(st + CVL_W * 8, cv_pb_w(hp));
+            cv_put(st + CVL_H * 8, cv_pb_h(hp));
+            // the user's own picture for the inset of a one to one call
+            if (cbp_get(st + CVL_SMALL * 8) == 0) { vtm_put(st + CVL_SELFBOX * 8, hp); }
+            const enc : u64 = cbp_get(st + CVL_ENCB * 8);
+            if (cbp_get(st + CVL_CODEC * 8) == 1 and enc != 0 and cbp_get(st + CVL_SMALL * 8) == 0) {
+                if (vte_encode(enc, hp, t)) { cv_put(st + CVL_HENC * 8, cbp_get(st + CVL_HENC * 8) + 1); }
+                else { cv_put(st + CVL_HFAIL * 8, cbp_get(st + CVL_HFAIL * 8) + 1); }
+                return 0;
+            }
+        }
+    }
     const last : u64 = cbp_get(st + CVL_LAST_US * 8);
     const period : u64 = cvl_period(cbp_get(st + CVL_SCAN * 8) != 0, cbp_get(st + CVL_SMALL * 8) != 0);
     if (last != 0 and t - last < period) { return 0; }
@@ -827,12 +864,13 @@ fn cvl_make(dump: u64, scan: u64) -> u64 {
     cv_put(st + CVL_SCAN * 8, scan);
     cv_put(st + CVL_DUMP * 8, dump);
     // Never true: makes sure cv_frame, cv_granted and the queue jobs are emitted and exported for dlsym.
-    if (cbp_get(st + 72) == 99) { cv_frame(0, 0, 0, 0, 0); cv_granted(0, 0); cvl_setup_job(0); cvl_stop_job(0); }
+    if (cbp_get(st + 72) == 99) { cv_frame(0, 0, 0, 0, 0); cv_granted(0, 0); cvl_setup_job(0); cvl_stop_job(0); cvl_enc_close_job(0); }
     if (dump != 0 and !cv_private_dir("/tmp/camcall")) { cv_put(st + CVL_DUMP * 8, 0); }
     // the serial queue of the start and stop jobs, and their entry points, found once here
     cv_put(st + CVL_Q * 8, cv_queue("t27.callvideo.setup", 0));
     cv_put(st + CVL_FN_SETUP * 8, cv_dlsym(CV_RTLD_DEFAULT, "cvl_setup_job"));
     cv_put(st + CVL_FN_STOP * 8, cv_dlsym(CV_RTLD_DEFAULT, "cvl_stop_job"));
+    cv_put(st + CVL_FN_ECLOSE * 8, cv_dlsym(CV_RTLD_DEFAULT, "cvl_enc_close_job"));
     return st;
 }
 
@@ -847,7 +885,7 @@ pub fn cvl_start(st: u64) -> u32 {
         return 0;
     }
     cv_put(st + CVL_T0 * 8, cv_us());
-    cv_put(st + CVL_ENC0 * 8, cbp_get(st + CVL_ENC * 8));
+    cv_put(st + CVL_ENC0 * 8, cbp_get(st + CVL_ENC * 8) + cbp_get(st + CVL_HENC * 8));
     cv_put(st + CVL_STATE * 8, @as(u64, cvs_next(s, CVE_START)));
     const q : u64 = cbp_get(st + CVL_Q * 8);
     const f : u64 = cbp_get(st + CVL_FN_SETUP * 8);
@@ -872,7 +910,7 @@ pub fn cvl_tick(st: u64) -> u32 {
         cv_fence();
         if (cbp_get(st + CVL_RES * 8) != 0) { s = cvs_next(s, CVE_SETUP_FAIL); } else { s = cvs_next(s, CVE_SETUP_OK); }
     }
-    const frames : u64 = cbp_get(st + CVL_ENC * 8) - cbp_get(st + CVL_ENC0 * 8);
+    const frames : u64 = cbp_get(st + CVL_ENC * 8) + cbp_get(st + CVL_HENC * 8) - cbp_get(st + CVL_ENC0 * 8);
     if (frames > 0) { s = cvs_next(s, CVE_FRAME); }
     if (cvs_no_frames(s, cbp_get(st + CVL_T0 * 8), cv_us(), frames)) { s = cvs_next(s, CVE_TIMEOUT); }
     cv_put(st + CVL_STATE * 8, @as(u64, s));
@@ -896,7 +934,66 @@ pub fn cvl_stop_job(st: u64) -> u64 {
     if (cbp_get(st + CVL_RUN * 8) != 1) { return 0; }
     msg0(cbp_get(st + CVL_SESS * 8), cv_sel("stopRunning"));
     cv_put(st + CVL_RUN * 8, 0);
+    // the encoder's session goes on the camera's own queue, behind any frame still being handed in
+    const lq : u64 = cbp_get(st + CVL_LQ * 8);
+    if (lq != 0 and cbp_get(st + CVL_FN_ECLOSE * 8) != 0) { cv_sync(lq, st, cbp_get(st + CVL_FN_ECLOSE * 8)); }
+    const pb : u64 = vtm_take(st + CVL_SELFBOX * 8);
+    if (pb != 0) { vt_pb_release(pb); }
     return 0;
+}
+
+/// On the camera's queue: the encoder block of the call closes its session (call_vt vte_close).
+pub fn cvl_enc_close_job(st: u64) -> u64 {
+    if (st == 0 or cbp_get(st + 64) != CV_MAGIC) { return 0; }
+    const enc : u64 = cbp_get(st + CVL_ENCB * 8);
+    if (enc != 0) { vte_close(enc); }
+    return 0;
+}
+
+/// The codec of the camera's frames from the next frame on (main thread): H.264 into the encoder block enc, or the
+/// JPEG of cvl_encode. False for no block.
+pub fn cvl_codec(st: u64, h264: bool, enc: u64) -> bool {
+    if (st == 0 or cbp_get(st + 64) != CV_MAGIC) { return false; }
+    if (enc != cbp_get(st + CVL_ENCB * 8)) { cv_put(st + CVL_ENCB * 8, enc); }
+    var v : u64 = 0;
+    if (h264 and enc != 0) { v = 1; }
+    if (cbp_get(st + CVL_CODEC * 8) != v) { cv_put(st + CVL_CODEC * 8, v); }
+    return true;
+}
+
+/// The newest camera frame for the self-view, owned by the caller (call_vt vt_pb_release); 0 when none came since the
+/// last take.
+pub fn cvl_take_self(st: u64) -> u64 {
+    if (st == 0 or cbp_get(st + 64) != CV_MAGIC) { return 0; }
+    return vtm_take(st + CVL_SELFBOX * 8);
+}
+
+/// 1/30 s as the device's shortest and longest frame duration, when its active format allows 30 frames a second (the
+/// setup job, after the preset and the input; a duration the format does not allow would raise). 1 set, 2 not allowed,
+/// 3 the device could not be locked.
+fn cvl_fps30(st: u64, dev: u64) -> u64 {
+    const fmt : u64 = msg0(dev, cv_sel("activeFormat"));
+    if (fmt == 0) { return 2; }
+    const ranges : u64 = msg0(fmt, cv_sel("videoSupportedFrameRateRanges"));
+    if (ranges == 0) { return 2; }
+    const n : u64 = msg0(ranges, cv_sel("count"));
+    var ok : bool = false;
+    var i : u64 = 0;
+    while (i < n and i < 32) {
+        const r : u64 = msg1(ranges, cv_sel("objectAtIndex:"), i);
+        if (r != 0 and cv_msg_real(r, cv_sel("minFrameRate")) <= 30.0 and cv_msg_real(r, cv_sel("maxFrameRate")) >= 30.0) { ok = true; }
+        i = i + 1;
+    }
+    if (!ok) { return 2; }
+    if (!msg_test1(dev, cv_sel("lockForConfiguration:"), 0)) { return 3; }
+    // CMTime 1/30: value 1, timescale 30, flags 1 (valid), epoch 0; passed by reference (24 bytes)
+    cv_put(st + CVL_CMT * 8, 1);
+    cv_put(st + (CVL_CMT + 1) * 8, 30 | (@as(u64, 1) << 32));
+    cv_put(st + (CVL_CMT + 2) * 8, 0);
+    msg1(dev, cv_sel("setActiveVideoMinFrameDuration:"), st + CVL_CMT * 8);
+    msg1(dev, cv_sel("setActiveVideoMaxFrameDuration:"), st + CVL_CMT * 8);
+    msg0(dev, cv_sel("unlockForConfiguration"));
+    return 1;
 }
 
 fn cvl_setup(st: u64) -> u64 {
@@ -920,11 +1017,18 @@ fn cvl_setup(st: u64) -> u64 {
         const inp : u64 = msg2(cv_objc_class("AVCaptureDeviceInput"), cv_sel("deviceInputWithDevice:error:"), dev, 0);
         sess = msg0(msg0(cv_objc_class("AVCaptureSession"), cv_sel("alloc")), cv_sel("init"));
         if (inp == 0 or sess == 0) { return 3; }
-        var preset : u64 = cv_konst("AVCaptureSessionPreset320x240");
+        var preset : u64 = cv_konst("AVCaptureSessionPreset1280x720");
         if (cbp_get(st + CVL_SCAN * 8) != 0) { preset = cv_konst("AVCaptureSessionPreset640x480"); }
-        if (preset != 0 and msg_test1(sess, cv_sel("canSetSessionPreset:"), preset)) { msg1(sess, cv_sel("setSessionPreset:"), preset); }
         if (!msg_test1(sess, cv_sel("canAddInput:"), inp)) { return 3; }
         msg1(sess, cv_sel("addInput:"), inp);
+        if (preset != 0 and msg_test1(sess, cv_sel("canSetSessionPreset:"), preset)) {
+            msg1(sess, cv_sel("setSessionPreset:"), preset);
+            cv_put(st + CVL_PRESET * 8, 1);
+        } else {
+            const p2 : u64 = cv_konst("AVCaptureSessionPreset640x480");
+            if (p2 != 0 and msg_test1(sess, cv_sel("canSetSessionPreset:"), p2)) { msg1(sess, cv_sel("setSessionPreset:"), p2); cv_put(st + CVL_PRESET * 8, 2); }
+        }
+        if (cbp_get(st + CVL_SCAN * 8) == 0) { cv_put(st + CVL_FPS30 * 8, cvl_fps30(st, dev)); }
         const out : u64 = msg0(msg0(cv_objc_class("AVCaptureVideoDataOutput"), cv_sel("alloc")), cv_sel("init"));
         var kb : [8]u8 = undefined;
         var vb : [8]u8 = undefined;
@@ -938,7 +1042,9 @@ fn cvl_setup(st: u64) -> u64 {
         msg_flag(out, cv_sel("setAlwaysDiscardsLateVideoFrames:"), true);
         var del : u64 = cv_make_delegate(st);
         if (del == 0) { return 3; }
-        msg2(out, cv_sel("setSampleBufferDelegate:queue:"), del, cv_queue("t27.callvideo.live", 0));
+        const lq : u64 = cv_queue("t27.callvideo.live", 0);
+        cv_put(st + CVL_LQ * 8, lq);
+        msg2(out, cv_sel("setSampleBufferDelegate:queue:"), del, lq);
         if (!msg_test1(sess, cv_sel("canAddOutput:"), out)) { return 3; }
         msg1(sess, cv_sel("addOutput:"), out);
         cv_put(st + CVL_SESS * 8, sess);
@@ -1044,7 +1150,9 @@ pub fn cvl_take(st: u64, out: []u8) -> usize {
 /// Counters of the live block: 0 callbacks, 1 JPEG encoded, 2 encode failures, 3 too big, 4 authorization (0..3),
 /// 5 running, 6 frame mean brightness x100 (last), 7 mean of the means x100, 8 smallest mean x100, 9 largest, 10 width,
 /// 11 height, 12 starts, 13 answer of the prompt (1 allow, 2 refuse, 0 none), 14 result of the latest setup job (0 running
-/// or not finished, 1 restricted, 2 denied, 3 no camera), 15 capture state (CVS_*).
+/// or not finished, 1 restricted, 2 denied, 3 no camera), 15 capture state (CVS_*), 16 frames handed to the H.264
+/// encoder, 17 frames it refused, 18 the codec (1 H.264), 19 the 1/30 frame duration (1 set, 2 not allowed, 3 no lock,
+/// 0 not tried), 20 the preset (1 1280x720, 2 640x480, 0 the device's default).
 pub fn cvl_stat(st: u64, k: u32) -> u64 {
     if (st == 0 or cbp_get(st + 64) != CV_MAGIC) { return 0; }
     if (k == 0) { return cbp_get(st + CVL_CB * 8); }
@@ -1079,10 +1187,17 @@ pub fn cvl_stat(st: u64, k: u32) -> u64 {
         return cbp_get(st + CVL_RES * 8);
     }
     if (k == 15) { return cbp_get(st + CVL_STATE * 8); }
+    if (k == 16) { return cbp_get(st + CVL_HENC * 8); }
+    if (k == 17) { return cbp_get(st + CVL_HFAIL * 8); }
+    if (k == 18) { return cbp_get(st + CVL_CODEC * 8); }
+    if (k == 19) { return cbp_get(st + CVL_FPS30 * 8); }
+    if (k == 20) { return cbp_get(st + CVL_PRESET * 8); }
     return 0;
 }
 
 fn cv_async(q: u64, ctx: u64, f: u64) -> void { @extern("dispatch_async_f"); }
+fn cv_sync(q: u64, ctx: u64, f: u64) -> void { @extern("dispatch_sync_f"); }
+fn cv_msg_real(o: u64, s: u64) -> f64 { return @extern("objc_msgSend"); }
 fn cv_fence() -> void { @extern("OSMemoryBarrier"); }
 
 fn cv_copy(dst: u64, src: u64, n: u64) -> u64 { return @extern("memmove"); }
@@ -1205,6 +1320,15 @@ test a_group_call_takes_160_by_120_at_a_lower_quality_five_times_a_second {
     assert cvl_period(false, true) == CVL_G_PERIOD_US and CVL_G_PERIOD_US < 200000 and CVL_G_PERIOD_US > CVL_PERIOD_US;
     assert CVL_GFED < CVL_SMALL and CVL_SMALL * 8 + 8 <= CVL_BUF;
     assert cvl_small(0, true) == false;
+}
+
+test the_h264_slots_stand_apart_before_the_buffer {
+    assert CVL_SMALL < CVL_CODEC and CVL_CODEC < CVL_ENCB and CVL_ENCB < CVL_HENC and CVL_HENC < CVL_HFAIL and CVL_HFAIL < CVL_LQ;
+    // the mailbox is two slots (lock, picture)
+    assert CVL_LQ < CVL_SELFBOX and CVL_SELFBOX + 2 <= CVL_FPS30 and CVL_FPS30 < CVL_PRESET and CVL_PRESET < CVL_FN_ECLOSE;
+    // the frame duration (24 bytes) last, before the buffer
+    assert CVL_FN_ECLOSE < CVL_CMT and (CVL_CMT + 3) * 8 <= CVL_BUF;
+    assert !cvl_codec(0, true, 5) and cvl_take_self(0) == 0 and cvl_stat(0, 16) == 0;
 }
 
 test the_new_live_slots_stand_before_the_buffer {

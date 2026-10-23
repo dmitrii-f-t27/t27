@@ -50,11 +50,11 @@ use t27os::pty_proto::put_u64;
 use t27os::pty_proto::get_u64;
 use t27os::session_store::put_dec;
 use t27os::session_store::put_bytes;
+use t27os::call_core::CK_T_H264;
+use t27os::call_core::CK_T_VCTL;
 
 /// The video protocol version this build speaks; an older build sends no HELLO at all (version 0 to us).
 pub const VH_VERSION : u8 = 2;
-pub const CK_T_H264 : u32 = 35;
-pub const CK_T_VCTL : u32 = 36;
 
 // ---------------------------------------------------------------- parts
 
@@ -748,11 +748,21 @@ pub fn vx_report(out: []u8, caps: u8, rep: []const u64) -> usize {
     return VX_LEN;
 }
 
-/// A control message this build reads: its length, a known kind, a version, the unused bytes zero.
+/// Byte 28 of every control message: bit 0 = "I have heard you" (this side has a control message of the peer).
+pub const VX_F_HEARD : u8 = 1;
+
+/// Mark a built control message as sent by a side that has heard the peer (or not).
+pub fn vx_heard(out: []u8, heard: bool) -> void {
+    if (out.len < VX_LEN) { return; }
+    out[28] = 0;
+    if (heard) { out[28] = VX_F_HEARD; }
+}
+
+/// A control message this build reads: its length, a known kind, a version, no unknown flag, the unused bytes zero.
 pub fn vx_ok(pt: []const u8) -> bool {
     if (pt.len != VX_LEN or pt[1] < VH_VERSION) { return false; }
     if (pt[0] != VX_HELLO and pt[0] != VX_KEYREQ and pt[0] != VX_REPORT) { return false; }
-    return pt[28] == 0 and pt[29] == 0 and pt[30] == 0 and pt[31] == 0;
+    return (pt[28] & 254) == 0 and pt[29] == 0 and pt[30] == 0 and pt[31] == 0;
 }
 
 pub fn vx_kind(pt: []const u8) -> u8 { return pt[0]; }
@@ -764,11 +774,15 @@ pub fn vx_u16(pt: []const u8, at: usize) -> u64 { return vh_get16(pt, at); }
 // ---------------------------------------------------------------- which video the two ends agree on
 
 /// The negotiation's slots in the sender's state: the peer's version and caps (0 until its first control message),
-/// when this side last sent a HELLO, when the call became ACTIVE.
+/// when this side last sent a HELLO, when the call became ACTIVE, 1 once the peer said it heard this side, 1 once this
+/// side sent a HELLO saying it heard the peer. A control message sent before the other side is ACTIVE is refused there
+/// (call_core: media only while ACTIVE), so the HELLOs go on until both sides know that both heard.
 pub const VN_PVER : usize = 40;
 pub const VN_PCAPS : usize = 41;
 pub const VN_HELLO_AT : usize = 42;
 pub const VN_T0 : usize = 43;
+pub const VN_PHEARD : usize = 44;
+pub const VN_SAIDHEARD : usize = 45;
 pub const VN_HELLO_MS : u64 = 500;
 /// No word from the peer in this long: it is an older T27 OS.
 pub const VN_WAIT_MS : u64 = 3000;
@@ -784,6 +798,7 @@ pub fn vn_take(ss: []u8, pt: []const u8) -> void {
     if (ss.len < VS_LEN or !vx_ok(pt)) { return; }
     put_u64(ss, VN_PVER * 8, @as(u64, pt[1]));
     put_u64(ss, VN_PCAPS * 8, @as(u64, pt[2]));
+    if ((pt[28] & VX_F_HEARD) != 0) { put_u64(ss, VN_PHEARD * 8, 1); }
 }
 
 /// What this side sends: H.264 when it can encode and the peer said it decodes; until the peer said anything, the
@@ -799,9 +814,10 @@ pub fn vn_mode(my_caps: u8, peer_ver: u64, peer_caps: u64, since_ms: u64) -> u32
     return VN_H264;
 }
 
-/// A HELLO is due every VN_HELLO_MS until the peer has said something.
-pub fn vn_hello_due(peer_ver: u64, last_at: u64, now: u64) -> bool {
-    if (peer_ver != 0) { return false; }
+/// A HELLO is due every VN_HELLO_MS until the peer has said something, said it heard this side, and this side has said
+/// in a HELLO that it heard the peer. Then none: the REPORTs carry the caps from there on.
+pub fn vn_hello_due(peer_ver: u64, peer_heard: u64, said_heard: u64, last_at: u64, now: u64) -> bool {
+    if (peer_ver != 0 and peer_heard != 0 and said_heard != 0) { return false; }
     return last_at == 0 or now < last_at or now - last_at >= VN_HELLO_MS;
 }
 
@@ -936,7 +952,7 @@ test the_sealed_part_fits_one_datagram_and_the_largest_frame_fits_the_mask {
     assert CK_T_H264 == 35 and CK_T_VCTL == 36 and VH_VERSION == 2;
     // every slot stands inside its block
     assert VA_DROPPED * 8 + 8 <= VA_LEN and VK_SENT * 8 + 8 <= VA_LEN and VA_DROPPED < VD_NEED;
-    assert VS_STALE < VP_CREDIT and VP_AT < VL_RUNG and VL_RAISES < VN_PVER and VN_T0 * 8 + 8 <= VS_LEN;
+    assert VS_STALE < VP_CREDIT and VP_AT < VL_RUNG and VL_RAISES < VN_PVER and VN_SAIDHEARD * 8 + 8 <= VS_LEN;
 }
 
 test a_part_says_its_frame_index_count_total_key_and_rung {
@@ -1283,6 +1299,11 @@ test control_messages_carry_their_fields_and_an_old_or_odd_one_is_refused {
     b[0] = VX_REPORT;
     b[30] = 1;
     assert !vx_ok(b[0..32]);
+    b[30] = 0;
+    vx_heard(b[0..32], true);
+    assert vx_ok(b[0..32]);
+    vx_heard(b[0..32], false);
+    assert b[28] == 0;
     assert vx_hello(b[0..31], 1, 0) == 0 and vx_report(b[0..32], 1, rep[0..6]) == 0;
 }
 
@@ -1298,15 +1319,25 @@ test an_old_build_gets_the_jpeg_and_a_new_one_h264 {
     assert vn_mode(both, 2, 2, 100) == VN_JPEG_PEER;
     assert vn_note(VN_H264).len == 0 and vn_note(VN_WAIT).len == 0;
     assert vn_note(VN_JPEG_OLD).len > 20 and vn_note(VN_JPEG_HERE).len > 20 and vn_note(VN_JPEG_PEER).len > 20;
-    // the HELLO repeats every 500 ms until the peer answered
-    assert vn_hello_due(0, 0, 5) and !vn_hello_due(0, 1000, 1499) and vn_hello_due(0, 1000, 1500);
-    assert !vn_hello_due(2, 0, 5);
+    // the HELLO repeats every 500 ms until the peer answered, said it heard us, and we said we heard it
+    assert vn_hello_due(0, 0, 0, 0, 5) and !vn_hello_due(0, 0, 0, 1000, 1499) and vn_hello_due(0, 0, 0, 1000, 1500);
+    assert vn_hello_due(2, 0, 1, 1000, 1500) and vn_hello_due(2, 1, 0, 1000, 1500) and vn_hello_due(0, 1, 1, 1000, 1500);
+    assert !vn_hello_due(2, 1, 1, 0, 5);
     var ss : [512]u8 = undefined;
     t_zero(ss[0..512]);
     var b : [32]u8 = undefined;
     vx_hello(b[0..32], both, 0);
     vn_take(ss[0..512], b[0..32]);
-    assert vs_get(ss[0..512], VN_PVER) == 2 and vs_get(ss[0..512], VN_PCAPS) == 3;
+    assert vs_get(ss[0..512], VN_PVER) == 2 and vs_get(ss[0..512], VN_PCAPS) == 3 and vs_get(ss[0..512], VN_PHEARD) == 0;
+    // the peer heard us
+    vx_heard(b[0..32], true);
+    assert vx_ok(b[0..32]) and b[28] == VX_F_HEARD;
+    vn_take(ss[0..512], b[0..32]);
+    assert vs_get(ss[0..512], VN_PHEARD) == 1;
+    // an unknown flag is refused
+    b[28] = 2;
+    assert !vx_ok(b[0..32]);
+    b[28] = 0;
     // an odd message changes nothing
     b[0] = 7;
     vn_take(ss[0..512], b[0..32]);

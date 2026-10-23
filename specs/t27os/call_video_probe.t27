@@ -149,7 +149,7 @@ fn vp_side(caller: bool) -> bool {
         return false;
     }
     vp_n(caller, "video frames each side sends: ", frames);
-    var s : [166528]u8 = undefined;
+    var s : [299648]u8 = undefined;
     var me : [10]u8 = undefined;
     var peer : [10]u8 = undefined;
     var i : usize = 0;
