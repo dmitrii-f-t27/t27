@@ -562,3 +562,63 @@ fn qc_eq(a: []const u8, b: []const u8) -> bool {
     }
     return true;
 }
+
+test qc_u64_and_qc_set_u64_keep_eight_little_endian_bytes_and_leave_the_neighbours {
+    var q : [64]u8 = undefined;
+    qc_boot(q[0..64], false, false);
+    qc_set_u64(q[0..64], QC_IMG, 72623859790382856);
+    assert q[QC_IMG] == 8 and q[QC_IMG + 1] == 7 and q[QC_IMG + 7] == 1;
+    assert qc_u64(q[0..64], QC_IMG) == 72623859790382856;
+    // the fields on both sides are not touched
+    assert q[QC_IMG - 1] == 0 and qc_found_ms(q[0..64]) == 0 and qc_u64(q[0..64], QC_MSG_AT) == 0;
+    qc_set_u64(q[0..64], QC_IMG, 18446744073709551615);
+    assert qc_u64(q[0..64], QC_IMG) == 18446744073709551615 and qc_u64(q[0..64], QC_MSG_AT) == 0;
+    qc_set_u64(q[0..64], QC_IMG, 0);
+    assert qc_u64(q[0..64], QC_IMG) == 0;
+    // the last field of the block reads back too
+    qc_set_u64(q[0..64], QC_MISS, 3);
+    assert qc_u64(q[0..64], QC_MISS) == 3 and q[QC_CAP - 1] == 0;
+    // they read what the state machine wrote: the time of the key and of the message
+    qc_boot(q[0..64], false, false);
+    assert qc_press(q[0..64], 1000, false);
+    assert qc_tick(q[0..64], 1000, false, false, 0) == QC_A_TAKE;
+    assert qc_frame(q[0..64], 1250, 0);
+    assert qc_u64(q[0..64], QC_FOUND_AT) == 1250 and qc_u64(q[0..64], QC_T0) == 1000;
+}
+
+test qc_close_due_waits_one_and_a_half_seconds_and_a_clock_that_went_back_waits {
+    assert QC_CLOSE_MS == 1500;
+    assert !qc_close_due(1000, 1000) and !qc_close_due(1000, 2499) and qc_close_due(1000, 2500);
+    assert qc_close_due(1000, 18446744073709551615);
+    assert !qc_close_due(1000, 999) and !qc_close_due(18446744073709551615, 0);
+    assert !qc_close_due(18446744073709551615, 18446744073709551615);
+    assert qc_close_due(0, 1500) and !qc_close_due(0, 1499);
+}
+
+test qc_msg_clear_takes_the_note_away_only_when_the_preview_is_closed {
+    var q : [64]u8 = undefined;
+    qc_boot(q[0..64], false, false);
+    // a closed scan with its reason on the note line: the next click clears it, the state stays
+    assert qc_press(q[0..64], 5000, false);
+    assert qc_tick(q[0..64], 25000, false, false, 0) == QC_A_STOP;
+    assert qc_why(q[0..64]) == QC_W_NO_CODE;
+    qc_msg_clear(q[0..64]);
+    assert qc_why(q[0..64]) == QC_W_NONE and qc_state(q[0..64]) == QC_FAILED;
+    assert qc_eq(qc_text(qc_why(q[0..64])), "");
+    // an open preview keeps its line ("point the camera", then "key found")
+    assert qc_press(q[0..64], 30000, false);
+    qc_msg_clear(q[0..64]);
+    assert qc_why(q[0..64]) == QC_W_POINT and qc_state(q[0..64]) == QC_PREVIEW;
+    assert qc_tick(q[0..64], 30000, false, false, 0) == QC_A_TAKE;
+    assert qc_frame(q[0..64], 30000, 0);
+    qc_msg_clear(q[0..64]);
+    assert qc_why(q[0..64]) == QC_W_FOUND and qc_state(q[0..64]) == QC_FOUND;
+    // SCAN refused during a call: the reason goes with the next click
+    qc_boot(q[0..64], false, false);
+    assert !qc_press(q[0..64], 10, true);
+    assert qc_why(q[0..64]) == QC_W_IN_CALL;
+    qc_msg_clear(q[0..64]);
+    assert qc_why(q[0..64]) == QC_W_NONE and qc_state(q[0..64]) == QC_IDLE;
+    qc_msg_clear(q[0..64]);
+    assert qc_why(q[0..64]) == QC_W_NONE;
+}

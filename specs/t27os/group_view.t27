@@ -1274,3 +1274,139 @@ test gv_cmd_v_pastes_into_the_group_name_whole_sequences_only_up_to_32_bytes {
     // an empty paste changes nothing
     assert gv_name_paste(gv[0..GV_CAP], cut[0..2], 0) == 0 and gv[GV_NLEN] == 1;
 }
+
+test gv_get16_reads_two_bytes_little_endian_and_the_unread_count_saturates_at_65535 {
+    const b : [6]u8 = [52, 18, 255, 0, 0, 255];
+    assert gv_get16(b[0..6], 0) == 4660;
+    assert gv_get16(b[0..6], 2) == 255;
+    assert gv_get16(b[0..6], 4) == 65280;
+    // the pair at an odd offset straddles two values: 18 | 255 << 8
+    assert gv_get16(b[0..6], 1) == 65298;
+    // the unread counts are stored this way: 300 is [44, 1], a count past 16 bits stays at 65535
+    var gv : [4608]u8 = undefined;
+    t_region(gv[0..GV_CAP]);
+    gv_unr_set(gv[0..GV_CAP], 0, 300);
+    assert gv[GV_UNR] == 44 and gv[GV_UNR + 1] == 1 and gv_get16(gv[0..GV_CAP], GV_UNR) == 300;
+    gv_unr_set(gv[0..GV_CAP], 0, 70000);
+    assert gv_get16(gv[0..GV_CAP], GV_UNR) == 65535 and gv[GV_UNR + 2] == 0;
+    // the last group's count sits in the last pair of the unread block
+    gv_unr_set(gv[0..GV_CAP], 31, 513);
+    assert gv_get16(gv[0..GV_CAP], GV_UNR + 62) == 513 and GV_UNR + 64 <= GV_KEY_END;
+}
+
+test gv_the_empty_cabinet_row_tells_how_to_make_a_group_and_fits_the_part {
+    const s : str = gv_empty_row_text();
+    assert fv_eq(s, s.len, "No groups yet. Press + to make one.");
+    // the row points at the "+" the part draws, and is plain ASCII text with no line end
+    var plus : usize = 0;
+    var i : usize = 0;
+    while (i < s.len) {
+        assert s[i] >= 32 and s[i] < 127;
+        if (s[i] == 43) { plus = plus + 1; }
+        i = i + 1;
+    }
+    assert plus == 1;
+    // it differs from the empty chat's line, which is about messages
+    assert fv_eq(s, s.len, gv_chat_empty_text()) == false;
+}
+
+test gv_a_member_stands_under_its_nickname_else_its_short_key {
+    var ft : [1108]u8 = undefined;
+    t_friends(ft[0..FT_LEN], T_A[0..10]);
+    var o : [32]u8 = undefined;
+    // a friend with a nickname, a friend without one, someone who is not a friend (this device itself here)
+    assert fv_eq(o[0..32], gv_member_name(ft[0..FT_LEN], T_B[0..10], o[0..32]), "bob");
+    assert fv_eq(o[0..32], gv_member_name(ft[0..FT_LEN], T_D[0..10], o[0..32]), "d209-0909");
+    assert fv_eq(o[0..32], gv_member_name(ft[0..FT_LEN], T_A[0..10], o[0..32]), "0102-0304");
+    // a nickname is ASCII (peer_identity nick_ok): a Cyrillic one is refused and the old name stands
+    const bob : [6]u8 = [208, 145, 208, 190, 208, 177];
+    assert ft_set_nick(ft[0..FT_LEN], T_C[0..10], bob[0..6], 6) == false;
+    assert fv_eq(o[0..32], gv_member_name(ft[0..FT_LEN], T_C[0..10], o[0..32]), "carol");
+    // a nickname of all 24 bytes has no zero after it: all 24 are the name, nothing past them
+    var long : [24]u8 = undefined;
+    var i : usize = 0;
+    while (i < 24) {
+        long[i] = 65 + @as(u8, @intCast(i));
+        i = i + 1;
+    }
+    assert ft_set_nick(ft[0..FT_LEN], T_B[0..10], long[0..24], 24);
+    o[24] = 0;
+    assert gv_member_name(ft[0..FT_LEN], T_B[0..10], o[0..32]) == 24 and o[0] == 65 and o[23] == 88;
+    // an empty table: everyone is a short key
+    var empty : [1108]u8 = undefined;
+    ft_init(empty[0..FT_LEN]);
+    assert fv_eq(o[0..32], gv_member_name(empty[0..FT_LEN], T_C[0..10], o[0..32]), "c801-0203");
+}
+
+test gv_delivered_counts_the_other_members_with_every_part_acknowledged {
+    var log : [16296]u8 = undefined;
+    var fl : [32]u8 = undefined;
+    t_glog(log[0..cl_bytes(8)], fl[0..32]);
+    var oi : usize = 0;
+    while (cl_dir(log[0..cl_bytes(8)], oi) != CH_DIR_OUT) { oi = oi + 1; }
+    // nobody yet
+    assert gv_delivered(log[0..cl_bytes(8)], oi, 0, 3) == 0;
+    var a : [38]u8 = undefined;
+    gm_put_ack(a[0..38], T_GID[0..8], T_A[0..10], 1, 0);
+    assert gl_rx_ack(log[0..cl_bytes(8)], 1, a[0..GM_HDR]);
+    assert gv_delivered(log[0..cl_bytes(8)], oi, 0, 3) == 1;
+    // the count stops at n members: with n = 1 only this device is looked at, and it never counts
+    assert gv_delivered(log[0..cl_bytes(8)], oi, 0, 1) == 0;
+    assert gv_delivered(log[0..cl_bytes(8)], oi, 0, 0) == 0;
+    // the member taken for this device is skipped
+    assert gv_delivered(log[0..cl_bytes(8)], oi, 1, 3) == 0;
+    // C too: both others; a member count past GR_MEMBERS reads no further
+    assert gl_rx_ack(log[0..cl_bytes(8)], 2, a[0..GM_HDR]);
+    assert gv_delivered(log[0..cl_bytes(8)], oi, 0, 3) == 2;
+    assert gv_delivered(log[0..cl_bytes(8)], oi, 0, 100) == 2;
+    assert gv_delivered(log[0..cl_bytes(8)], oi, 0, 2) == 1;
+}
+
+test gv_closing_new_group_hides_it_and_opening_again_starts_empty {
+    var gv : [4608]u8 = undefined;
+    t_region(gv[0..GV_CAP]);
+    gv_new_open(gv[0..GV_CAP]);
+    gv_name_unit(gv[0..GV_CAP], 1046);
+    assert gv_pick_toggle(gv[0..GV_CAP], 1, 3);
+    gv_new_close(gv[0..GV_CAP]);
+    assert gv_new_shown(gv[0..GV_CAP]) == false and @as(u32, gv[GV_MODE]) == GV_M_OFF and gv[GV_FOCUS] == 0;
+    // the table is not touched
+    assert gv_count(gv[0..GV_CAP]) == 1;
+    // closing twice is the same as once
+    gv_new_close(gv[0..GV_CAP]);
+    assert gv_new_shown(gv[0..GV_CAP]) == false and gv[GV_FOCUS] == 0;
+    // "+" again: no name, no tick
+    gv_new_open(gv[0..GV_CAP]);
+    assert gv_new_shown(gv[0..GV_CAP]) and gv[GV_NLEN] == 0 and gv_picks(gv[0..GV_CAP]) == 0;
+    // a chat shown is not closed by it: the mode byte is NEW GROUP's only while it is open
+    gv[GV_MODE] = @as(u8, @intCast(GV_CHAT));
+    assert gv_new_shown(gv[0..GV_CAP]) == false;
+}
+
+test gv_new_group_arrows_stand_right_above_the_friends_and_the_hint_on_the_create_line {
+    const h : f64 = 505.0;
+    // the two arrows: down at the right pad, up 4 points left of it, both the panel's
+    assert gv_sdown_x(T_L, T_W) + AC_ARROW_W == T_L + T_W - QP_PAD;
+    assert gv_sup_x(T_L, T_W) + AC_ARROW_W + 4.0 == gv_sdown_x(T_L, T_W);
+    assert gv_sup_x(T_L, T_W) > T_L + QP_PAD;
+    // a wider panel moves them right by the same amount; another top does not
+    assert gv_sdown_x(T_L, T_W + 100.0) == gv_sdown_x(T_L, T_W) + 100.0;
+    assert gv_sup_x(T_L + 7.0, T_W) == gv_sup_x(T_L, T_W) + 7.0;
+    // their line: under the name field, ending above the first friend row
+    assert gv_sarrow_y(T_T) > T_T + GV_NAME_Y + CHV_FIELD_H;
+    assert gv_sarrow_y(T_T) + AC_ARROW_H <= gv_pick_y(T_T, 0);
+    assert gv_sarrow_y(T_T + 100.0) == gv_sarrow_y(T_T) + 100.0;
+    // they answer only when the friends do not all fit
+    const rows : usize = gv_pick_rows(h);
+    assert gv_new_hit(gv_sup_x(T_L, T_W) + 4.0, gv_sarrow_y(T_T) + 4.0, T_L, T_W, T_T, h, rows + 1, 0) == GV_S_UP;
+    assert gv_new_hit(gv_sdown_x(T_L, T_W) + 4.0, gv_sarrow_y(T_T) + 4.0, T_L, T_W, T_T, h, rows + 1, 0) == GV_S_DOWN;
+    assert gv_new_hit(gv_sdown_x(T_L, T_W) + 4.0, gv_sarrow_y(T_T) + 4.0, T_L, T_W, T_T, h, rows, 0) == GV_S_NONE;
+    // the gap between the arrows is neither
+    assert gv_new_hit(gv_sup_x(T_L, T_W) + AC_ARROW_W + 2.0, gv_sarrow_y(T_T) + 4.0, T_L, T_W, T_T, h, rows + 1, 0) == GV_S_NONE;
+    // the hint: on the line of CREATE, inside its height, above the panel's bottom, moving with the bottom
+    assert gv_hint_y(T_T, h) == gv_create_y(T_T, h) + GV_HINT_DY;
+    assert gv_hint_y(T_T, h) < gv_create_y(T_T, h) + CHV_FIELD_H;
+    assert gv_hint_y(T_T, h) < T_T + h;
+    assert gv_hint_y(T_T, h + 50.0) == gv_hint_y(T_T, h) + 50.0;
+    assert gv_hint_y(T_T + 50.0, h - 50.0) == gv_hint_y(T_T, h);
+}

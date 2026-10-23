@@ -2155,3 +2155,46 @@ test ac_a_click_on_the_code_grows_it_and_a_second_click_gives_the_friends_back {
     ac_qr_toggle(cl[0..256]);
     assert ac_qr_is_big(cl[0..256]) == false;
 }
+
+test ac_kp_uses_kh_takes_the_file_only_for_a_read_stored_key_the_panel_has_not_checked_later {
+    var recs : [32]u64 = undefined;
+    kh_clear(recs[0..32]);
+    kh_set(recs[0..32], 0, 200, 1000, 300, 1);
+    kh_set(recs[0..32], 1, 401, 2000, 90, 11);
+    kh_set(recs[0..32], 2, 200, 3000, 280, 34);
+    var f : [8]u64 = undefined;
+    var j : usize = 0;
+    while (j < 8) { f[j] = 0; j = j + 1; }
+    // no key stored, a list not read, a list that does not parse: the file says nothing for the row
+    f[6] = @as(u64, AC_KS_NONE);
+    assert ac_kp_uses_kh(0, f[0..8], recs[0..32]) == false and ac_kp_uses_kh(2, f[0..8], recs[0..32]) == false;
+    f[6] = @as(u64, AC_KS_UNREAD);
+    assert ac_kp_uses_kh(0, f[0..8], recs[0..32]) == false and ac_kp_uses_kh(2, f[0..8], recs[0..32]) == false;
+    f[6] = @as(u64, AC_KS_BAD);
+    assert ac_kp_uses_kh(1, f[0..8], recs[0..32]) == false;
+    // a stored key in every other state: the file
+    f[6] = @as(u64, AC_KS_UNCHECKED);
+    assert ac_kp_uses_kh(0, f[0..8], recs[0..32]);
+    f[6] = @as(u64, AC_KS_DEAD);
+    assert ac_kp_uses_kh(1, f[0..8], recs[0..32]);
+    f[6] = @as(u64, AC_KS_STALE);
+    assert ac_kp_uses_kh(2, f[0..8], recs[0..32]);
+    f[6] = @as(u64, AC_KS_LIVE);
+    // the KEYS panel checked OpenRouter or Z.ai later than the file: the panel; at the same second the file stays
+    f[3] = 1000;
+    assert ac_kp_uses_kh(0, f[0..8], recs[0..32]);
+    f[3] = 1001;
+    assert ac_kp_uses_kh(0, f[0..8], recs[0..32]) == false;
+    assert ac_kp_uses_kh(1, f[0..8], recs[0..32]);
+    f[3] = 2001;
+    assert ac_kp_uses_kh(1, f[0..8], recs[0..32]) == false;
+    // NVIDIA (row 2) has no panel check of its own: a later f[3] does not matter
+    f[3] = 18446744073709551615;
+    assert ac_kp_uses_kh(2, f[0..8], recs[0..32]);
+    // a row the file never checked (time 0): any panel check is later
+    kh_clear(recs[0..32]);
+    f[3] = 0;
+    assert ac_kp_uses_kh(1, f[0..8], recs[0..32]);
+    f[3] = 1;
+    assert ac_kp_uses_kh(1, f[0..8], recs[0..32]) == false;
+}

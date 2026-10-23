@@ -1392,3 +1392,102 @@ test cl_drop_oldest_moves_the_last_byte_of_a_full_length_line {
     assert cl_len(log[0..T_LOG], 0) == 2000 and cl_text(log[0..T_LOG], 0)[1999] == 122 and cl_text(log[0..T_LOG], 0)[0] == t[0];
     assert cl_len(log[0..T_LOG], 1) == 2000 and cl_text(log[0..T_LOG], 1)[1999] == 123;
 }
+
+test ch_put_part_frames_one_cut_part_as_ch_put_text_would_and_refuses_what_cannot_be_one {
+    var t : [1500]u8 = undefined;
+    t_fill(t[0..1500], 1500, 5);
+    var a : [720]u8 = undefined;
+    var b : [720]u8 = undefined;
+    // each part cut by hand is byte for byte the part ch_put_text cuts from the whole text
+    var k : u32 = 0;
+    while (k < 3) {
+        const from : usize = @as(usize, k) * CH_PART_MAX;
+        var n : usize = 1500 - from;
+        if (n > CH_PART_MAX) { n = CH_PART_MAX; }
+        const na : usize = ch_put_part(a[0..720], 11, k, 3, 1099511627781, t[from..from + n]);
+        const nb : usize = ch_put_text(b[0..720], 11, k, 1099511627781, t[0..1500]);
+        assert na == nb and na == CH_PHDR + n;
+        var i : usize = 0;
+        while (i < na) { assert a[i] == b[i]; i = i + 1; }
+        assert ch_kind(a[0..na]) == CH_K_TEXT;
+        k = k + 1;
+    }
+    // Cyrillic bytes travel unchanged; the last part may be short
+    const ru : [12]u8 = [208, 191, 209, 128, 208, 184, 208, 178, 208, 181, 209, 130];
+    const nr : usize = ch_put_part(a[0..720], 4, 1, 2, 9, ru[0..12]);
+    assert nr == CH_PHDR + 12 and ch_kind(a[0..nr]) == CH_K_TEXT;
+    assert ch_msg(a[0..nr]) == 4 and ch_part(a[0..nr]) == 1 and ch_parts(a[0..nr]) == 2 and ch_time(a[0..nr]) == 9 and ch_len(a[0..nr]) == 12;
+    assert a[CH_PHDR] == 208 and a[CH_PHDR + 11] == 130;
+    // a short part before the last frames, but the reader refuses it: the cut is the caller's job
+    const ns : usize = ch_put_part(a[0..720], 4, 0, 2, 9, ru[0..12]);
+    assert ns == CH_PHDR + 12 and ch_kind(a[0..ns]) == 0;
+    // what cannot be a part: no message, no parts, more than three, a part past the end, no bytes, too many bytes
+    assert ch_put_part(a[0..720], 0, 0, 1, 9, ru[0..12]) == 0;
+    assert ch_put_part(a[0..720], 4, 0, 0, 9, ru[0..12]) == 0;
+    assert ch_put_part(a[0..720], 4, 0, 4, 9, t[0..700]) == 0;
+    assert ch_put_part(a[0..720], 4, 2, 2, 9, ru[0..12]) == 0;
+    assert ch_put_part(a[0..720], 4, 0, 1, 9, ru[0..0]) == 0;
+    assert ch_put_part(a[0..720], 4, 0, 1, 9, t[0..701]) == 0;
+    assert ch_put_part(a[0..720], 4, 0, 1, 9, t[0..700]) == CH_PAYLOAD_MAX;
+    // out must hold the header and every byte: one byte short is nothing, exactly enough is the part
+    assert ch_put_part(a[0..31], 4, 0, 1, 9, ru[0..12]) == 0;
+    assert ch_put_part(a[0..32], 4, 0, 1, 9, ru[0..12]) == 32;
+}
+
+test cl_set_floor_moves_what_counts_as_already_received_and_touches_nothing_else {
+    var log : [16296]u8 = undefined;
+    assert cl_init(log[0..T_LOG], T_A[0..10], T_CAP);
+    const a : [1]u8 = [97];
+    assert cl_out_add(log[0..T_LOG], a[0..1], 1) == 1;
+    assert cl_have_in(log[0..T_LOG], 9) == false;
+    cl_set_floor(log[0..T_LOG], 9);
+    assert cl_floor(log[0..T_LOG]) == 9 and cl_have_in(log[0..T_LOG], 9) and cl_have_in(log[0..T_LOG], 1);
+    assert cl_have_in(log[0..T_LOG], 10) == false;
+    assert cl_count(log[0..T_LOG]) == 1 and cl_cap(log[0..T_LOG]) == T_CAP and cl_last_out(log[0..T_LOG]) == 1;
+    // a group clears it back to 0 after a drop: nothing above 0 is known again
+    cl_set_floor(log[0..T_LOG], 0);
+    assert cl_floor(log[0..T_LOG]) == 0 and cl_have_in(log[0..T_LOG], 1) == false;
+    cl_set_floor(log[0..T_LOG], 4294967295);
+    assert cl_floor(log[0..T_LOG]) == 4294967295 and cl_have_in(log[0..T_LOG], 4294967295);
+    assert cl_count(log[0..T_LOG]) == 1 and cl_msg(log[0..T_LOG], 0) == 1;
+}
+
+test cl_line_at_is_where_the_readers_find_line_i {
+    assert cl_line_at(0) == CL_HDR and cl_line_at(1) == CL_HDR + CL_LINE;
+    // the end of the last line of a log of cap lines is the size that log needs
+    assert cl_line_at(@as(usize, T_CAP)) == cl_bytes(T_CAP) and cl_line_at(@as(usize, CL_KEEP)) == cl_bytes(CL_KEEP);
+    var log : [16296]u8 = undefined;
+    assert cl_init(log[0..T_LOG], T_A[0..10], T_CAP);
+    const x : [2]u8 = [120, 121];
+    const y : [3]u8 = [208, 175, 33];
+    assert cl_out_add(log[0..T_LOG], x[0..2], 1) == 1;
+    assert cl_out_add(log[0..T_LOG], y[0..3], 2) == 2;
+    assert log[cl_line_at(1) + CL_TEXT] == 208 and log[cl_line_at(1) + CL_TEXT + 2] == 33;
+    assert log[cl_line_at(0) + CL_TEXT + 1] == 121;
+    assert @as(u32, log[cl_line_at(1)]) == cl_dir(log[0..T_LOG], 1) and @as(u32, log[cl_line_at(1) + 1]) == cl_state(log[0..T_LOG], 1);
+}
+
+test cl_last_send_and_cl_restart_follow_each_send_and_a_restart_clears_the_tries {
+    var log : [16296]u8 = undefined;
+    assert cl_init(log[0..T_LOG], T_A[0..10], T_CAP);
+    const a : [1]u8 = [97];
+    const b : [1]u8 = [98];
+    assert cl_out_add(log[0..T_LOG], a[0..1], 7) == 1;
+    assert cl_out_add(log[0..T_LOG], b[0..1], 8) == 2;
+    // never sent: 0, so the first due check sends at once
+    assert cl_last_send(log[0..T_LOG], 0) == 0 and cl_due(log[0..T_LOG], 0, 1) == CH_R_SEND;
+    cl_mark_sent(log[0..T_LOG], 0, 5000);
+    assert cl_last_send(log[0..T_LOG], 0) == 5000 and cl_state(log[0..T_LOG], 0) == CH_S_SENT;
+    assert cl_due(log[0..T_LOG], 0, 6999) == CH_R_WAIT and cl_due(log[0..T_LOG], 0, 7000) == CH_R_SEND;
+    cl_mark_sent(log[0..T_LOG], 0, 72057594037927941);
+    assert cl_last_send(log[0..T_LOG], 0) == 72057594037927941 and cl_tries(log[0..T_LOG], 0) == 2;
+    // the other line is not touched
+    assert cl_last_send(log[0..T_LOG], 1) == 0 and cl_tries(log[0..T_LOG], 1) == 0;
+    // a restart: PENDING, no tries, never sent, the text and the number stay
+    set_state(log[0..T_LOG], 0, CH_S_FAILED);
+    cl_restart(log[0..T_LOG], 0);
+    assert cl_state(log[0..T_LOG], 0) == CH_S_PENDING and cl_tries(log[0..T_LOG], 0) == 0 and cl_last_send(log[0..T_LOG], 0) == 0;
+    assert cl_msg(log[0..T_LOG], 0) == 1 and cl_text(log[0..T_LOG], 0)[0] == 97 and cl_time(log[0..T_LOG], 0) == 7;
+    assert cl_due(log[0..T_LOG], 0, 1) == CH_R_SEND;
+    assert cl_state(log[0..T_LOG], 1) == CH_S_PENDING and cl_msg(log[0..T_LOG], 1) == 2;
+}
