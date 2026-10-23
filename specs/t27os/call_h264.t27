@@ -17,8 +17,11 @@
 //   CK_T_H264 (35), one part of one coded frame. Plaintext: VH_HDR (16) bytes then the cut:
 //     frame u32 LE (the stream's number, 1, 2, 3 .. given when the frame is sent), part u16 LE (0 ..),
 //     parts u16 LE (of this frame), total u32 LE (the frame's length), flags u8 (1 = a key frame), rung u8 (the
-//     picture size, VL_*), version u8 (VH_VERSION), 0; then bytes part * VH_PART .. min(total, part * VH_PART + VH_PART)
-//     of the frame. A sealed part is at most 52 + 16 + 1160 + 16 = 1244 bytes, under one Ethernet or Wi-Fi datagram.
+//     picture size, VL_*), version u8, 0; then bytes part * P .. min(total, part * P + P) of the frame, where the part
+//     size P follows the version (vh_psz): version 3 (this build) cuts at VH_PART = 1148, so a sealed part is at most
+//     52 + 16 + 1148 + 16 = 1232 bytes, the most an IPv6 datagram carries without fragments (1280 - 40 - 8); version
+//     2 (build 7136, the first with H.264) cut at VH_PART_V2 = 1160 (1244 bytes sealed). A receiver takes both; a
+//     sender cuts for the version the peer's HELLO named (vh_send_ver), so 7136 and this build keep their H.264.
 //   The frame itself is a run of NAL units, each a 4-byte big-endian length then the unit (the AVCC layout the
 //   encoder gives). A key frame starts with the sequence and picture parameter sets (NAL types 7 and 8), then the IDR
 //   picture (type 5); any other frame is the coded picture only. So every key frame carries all a decoder needs.
@@ -53,33 +56,56 @@ use t27os::session_store::put_bytes;
 use t27os::call_core::CK_T_H264;
 use t27os::call_core::CK_T_VCTL;
 
-/// The video protocol version this build speaks; an older build sends no HELLO at all (version 0 to us).
-pub const VH_VERSION : u8 = 2;
+/// The video protocol version this build speaks; an older build sends no HELLO at all (version 0 to us). Version 2
+/// (build 7136) is still read and spoken to a peer that names it.
+pub const VH_VERSION : u8 = 3;
+pub const VH_V2 : u8 = 2;
 
 // ---------------------------------------------------------------- parts
 
 pub const VH_HDR : usize = 16;
-pub const VH_PART : usize = 1160;
+pub const VH_PART : usize = 1148;
+pub const VH_PART_V2 : usize = 1160;
+/// The longest part plaintext of either version.
 pub const VH_PT_MAX : usize = 1176;
 /// The longest coded frame (a key frame of 720p at 2.5 Mbit/s is 40-90 KB); a longer one is not sent.
 pub const VH_FRAME_MAX : usize = 131072;
-/// 131072 / 1160 rounded up.
-pub const VH_PARTS_MAX : usize = 113;
+/// 131072 / 1148 rounded up (version 2: 113).
+pub const VH_PARTS_MAX : usize = 115;
 pub const VH_F_KEY : u8 = 1;
 
-/// The parts a frame of `total` bytes needs: 0 when it is empty or longer than VH_FRAME_MAX.
-pub fn vh_parts(total: usize) -> usize {
-    if (total == 0 or total > VH_FRAME_MAX) { return 0; }
-    return (total + VH_PART - 1) / VH_PART;
+/// The part size of a video version: VH_PART for 3 and later, VH_PART_V2 for 2, 0 for anything older.
+pub fn vh_psz(ver: u64) -> usize {
+    if (ver >= @as(u64, VH_VERSION)) { return VH_PART; }
+    if (ver == @as(u64, VH_V2)) { return VH_PART_V2; }
+    return 0;
 }
 
-/// The length of part k of a frame of `total` bytes, 0 when k is out of range.
-pub fn vh_cut(total: usize, k: usize) -> usize {
-    const n : usize = vh_parts(total);
-    if (n == 0 or k >= n) { return 0; }
-    if (k + 1 < n) { return VH_PART; }
-    return total - k * VH_PART;
+/// The version a sender cuts for: the peer's (its HELLO), never above this build's; this build's own when the peer
+/// named none.
+pub fn vh_send_ver(peer_ver: u64) -> u8 {
+    if (peer_ver == @as(u64, VH_V2)) { return VH_V2; }
+    return VH_VERSION;
 }
+
+/// The parts a frame of `total` bytes needs at part size psz: 0 when it is empty, longer than VH_FRAME_MAX, or psz
+/// is not a part size.
+pub fn vh_parts_of(total: usize, psz: usize) -> usize {
+    if (total == 0 or total > VH_FRAME_MAX or (psz != VH_PART and psz != VH_PART_V2)) { return 0; }
+    return (total + psz - 1) / psz;
+}
+
+/// The length of part k of a frame of `total` bytes at part size psz, 0 when k is out of range.
+pub fn vh_cut_of(total: usize, k: usize, psz: usize) -> usize {
+    const n : usize = vh_parts_of(total, psz);
+    if (n == 0 or k >= n) { return 0; }
+    if (k + 1 < n) { return psz; }
+    return total - k * psz;
+}
+
+/// The same at this build's own part size.
+pub fn vh_parts(total: usize) -> usize { return vh_parts_of(total, VH_PART); }
+pub fn vh_cut(total: usize, k: usize) -> usize { return vh_cut_of(total, k, VH_PART); }
 
 fn vh_put16(b: []u8, at: usize, v: u64) -> void {
     b[at] = @as(u8, @intCast(v & 255));
@@ -101,11 +127,17 @@ pub fn vh_get32(b: []const u8, at: usize) -> u64 {
     return @as(u64, b[at]) | (@as(u64, b[at + 1]) << 8) | (@as(u64, b[at + 2]) << 16) | (@as(u64, b[at + 3]) << 24);
 }
 
-/// The plaintext of part k of a frame of `total` bytes (number `frame`, key or not, picture rung `rung`) into out;
-/// `cut` is that part's bytes (vh_cut long). Its length, 0 on a bad part or a short out.
+/// The plaintext of part k of a frame of `total` bytes (number `frame`, key or not, picture rung `rung`) into out, at
+/// this build's version; `cut` is that part's bytes (vh_cut long). Its length, 0 on a bad part or a short out.
 pub fn vh_part(out: []u8, frame: u64, total: usize, k: usize, key: bool, rung: u32, cut: []const u8) -> usize {
-    const n : usize = vh_parts(total);
-    const len : usize = vh_cut(total, k);
+    return vh_part_v(out, frame, total, k, key, rung, VH_VERSION, cut);
+}
+
+/// The same for video version ver (its part size, vh_psz).
+pub fn vh_part_v(out: []u8, frame: u64, total: usize, k: usize, key: bool, rung: u32, ver: u8, cut: []const u8) -> usize {
+    const psz : usize = vh_psz(@as(u64, ver));
+    const n : usize = vh_parts_of(total, psz);
+    const len : usize = vh_cut_of(total, k, psz);
     if (n == 0 or len == 0 or cut.len != len or out.len < VH_HDR + len or frame == 0 or frame > 4294967295 or rung > 255) { return 0; }
     vh_put32(out, 0, frame);
     vh_put16(out, 4, @as(u64, k));
@@ -114,7 +146,7 @@ pub fn vh_part(out: []u8, frame: u64, total: usize, k: usize, key: bool, rung: u
     out[12] = 0;
     if (key) { out[12] = VH_F_KEY; }
     out[13] = @as(u8, @intCast(rung));
-    out[14] = VH_VERSION;
+    out[14] = ver;
     out[15] = 0;
     var i : usize = 0;
     while (i < len) {
@@ -124,14 +156,16 @@ pub fn vh_part(out: []u8, frame: u64, total: usize, k: usize, key: bool, rung: u
     return VH_HDR + len;
 }
 
-/// A well-formed part: a frame number, counts and length that agree, a known version, the reserved byte zero.
+/// A well-formed part: a frame number, counts and length that agree at its version's part size, a known version, the
+/// reserved byte zero.
 pub fn vh_ok(pt: []const u8) -> bool {
     if (pt.len < VH_HDR + 1 or pt.len > VH_PT_MAX) { return false; }
     const total : usize = @as(usize, @intCast(vh_get32(pt, 8)));
     const n : usize = @as(usize, @intCast(vh_get16(pt, 6)));
     const k : usize = @as(usize, @intCast(vh_get16(pt, 4)));
-    if (vh_get32(pt, 0) == 0 or n == 0 or k >= n or pt[14] < VH_VERSION or pt[15] != 0) { return false; }
-    return n == vh_parts(total) and pt.len == VH_HDR + vh_cut(total, k);
+    const psz : usize = vh_psz(@as(u64, pt[14]));
+    if (vh_get32(pt, 0) == 0 or n == 0 or k >= n or psz == 0 or pt[15] != 0) { return false; }
+    return n == vh_parts_of(total, psz) and pt.len == VH_HDR + vh_cut_of(total, k, psz);
 }
 
 pub fn vh_frame(pt: []const u8) -> u64 { return vh_get32(pt, 0); }
@@ -234,7 +268,7 @@ pub fn vh_take(st: []u8, buf: []u8, pt: []const u8, now: u64) -> u32 {
         va_add(st, VA_STALE, 1);
         return VH_OLD;
     }
-    const at : usize = k * VH_PART;
+    const at : usize = k * vh_psz(@as(u64, pt[14]));
     var i : usize = 0;
     while (i < pt.len - VH_HDR) {
         buf[at + i] = pt[VH_HDR + i];
@@ -767,7 +801,7 @@ pub fn vx_heard(out: []u8, heard: bool) -> void {
 
 /// A control message this build reads: its length, a known kind, a version, no unknown flag, the unused bytes zero.
 pub fn vx_ok(pt: []const u8) -> bool {
-    if (pt.len != VX_LEN or pt[1] < VH_VERSION) { return false; }
+    if (pt.len != VX_LEN or pt[1] < VH_V2) { return false; }
     if (pt[0] != VX_HELLO and pt[0] != VX_KEYREQ and pt[0] != VX_REPORT) { return false; }
     return (pt[28] & 254) == 0 and pt[29] == 0 and pt[30] == 0 and pt[31] == 0;
 }
@@ -954,14 +988,18 @@ fn t_send(st: []u8, buf: []u8, frame: u64, n: usize, seed: u64, key: bool, skip:
 }
 
 test the_sealed_part_fits_one_datagram_and_the_largest_frame_fits_the_mask {
-    assert VH_HDR + VH_PART == VH_PT_MAX;
-    // 52-byte header + plaintext + 16-byte tag stays under 1472 (1500 less IPv4 and UDP headers)
+    assert VH_HDR + VH_PART_V2 == VH_PT_MAX;
+    // version 3: the 52-byte header + plaintext + the 16-byte tag is exactly 1232, an IPv6 datagram without fragments
+    assert 52 + VH_HDR + VH_PART + 16 == 1232;
+    // version 2 (build 7136) still fits IPv4 over Ethernet or Wi-Fi (1500 less IPv4 and UDP headers)
     assert 52 + VH_PT_MAX + 16 <= 1472;
-    assert vh_parts(VH_FRAME_MAX) == VH_PARTS_MAX and VH_PARTS_MAX <= 128;
-    assert vh_parts(0) == 0 and vh_parts(VH_FRAME_MAX + 1) == 0;
-    assert vh_parts(1) == 1 and vh_parts(1160) == 1 and vh_parts(1161) == 2;
-    assert vh_cut(1161, 0) == 1160 and vh_cut(1161, 1) == 1 and vh_cut(1161, 2) == 0;
-    assert CK_T_H264 == 35 and CK_T_VCTL == 36 and VH_VERSION == 2;
+    assert vh_parts(VH_FRAME_MAX) == VH_PARTS_MAX and VH_PARTS_MAX <= 128 and vh_parts_of(VH_FRAME_MAX, VH_PART_V2) == 113;
+    assert vh_parts(0) == 0 and vh_parts(VH_FRAME_MAX + 1) == 0 and vh_parts_of(100, 1000) == 0;
+    assert vh_parts(1) == 1 and vh_parts(1148) == 1 and vh_parts(1149) == 2;
+    assert vh_cut(1149, 0) == 1148 and vh_cut(1149, 1) == 1 and vh_cut(1149, 2) == 0;
+    assert vh_cut_of(1161, 0, VH_PART_V2) == 1160 and vh_cut_of(1161, 1, VH_PART_V2) == 1;
+    assert vh_psz(3) == 1148 and vh_psz(4) == 1148 and vh_psz(2) == 1160 and vh_psz(1) == 0 and vh_psz(0) == 0;
+    assert CK_T_H264 == 35 and CK_T_VCTL == 36 and VH_VERSION == 3 and VH_V2 == 2;
     // every slot stands inside its block
     assert VA_DROPPED * 8 + 8 <= VA_LEN and VK_SENT * 8 + 8 <= VA_LEN and VA_DROPPED < VD_NEED;
     assert VS_STALE < VP_CREDIT and VP_AT < VL_RUNG and VL_RAISES < VN_PVER and VN_SAIDHEARD < VL_T0 and VL_T0 * 8 + 8 <= VS_LEN;
@@ -971,24 +1009,25 @@ test a_part_says_its_frame_index_count_total_key_and_rung {
     var src : [3000]u8 = undefined;
     t_fill(src[0..3000], 9);
     var pt : [1176]u8 = undefined;
-    const n : usize = vh_part(pt[0..1176], 77, 3000, 2, true, VL_480, src[2320..3000]);
-    assert n == VH_HDR + 680;
+    const n : usize = vh_part(pt[0..1176], 77, 3000, 2, true, VL_480, src[2296..3000]);
+    assert n == VH_HDR + 704;
     assert vh_ok(pt[0..n]);
     assert vh_frame(pt[0..n]) == 77 and vh_index(pt[0..n]) == 2 and vh_count(pt[0..n]) == 3 and vh_total(pt[0..n]) == 3000;
     assert vh_key(pt[0..n]) and vh_rung(pt[0..n]) == VL_480 and pt[14] == VH_VERSION;
-    assert pt[VH_HDR] == src[2320] and pt[n - 1] == src[2999];
-    // a cut of the wrong length, frame 0, a frame number past 32 bits, a short out: no part
-    assert vh_part(pt[0..1176], 77, 3000, 2, true, 0, src[2320..2999]) == 0;
-    assert vh_part(pt[0..1176], 0, 3000, 2, true, 0, src[2320..3000]) == 0;
-    assert vh_part(pt[0..1176], 4294967296, 3000, 2, true, 0, src[2320..3000]) == 0;
-    assert vh_part(pt[0..100], 77, 3000, 2, true, 0, src[2320..3000]) == 0;
+    assert pt[VH_HDR] == src[2296] and pt[n - 1] == src[2999];
+    // a cut of the wrong length, frame 0, a frame number past 32 bits, a short out, a version with no part size
+    assert vh_part(pt[0..1176], 77, 3000, 2, true, 0, src[2296..2999]) == 0;
+    assert vh_part(pt[0..1176], 0, 3000, 2, true, 0, src[2296..3000]) == 0;
+    assert vh_part(pt[0..1176], 4294967296, 3000, 2, true, 0, src[2296..3000]) == 0;
+    assert vh_part(pt[0..100], 77, 3000, 2, true, 0, src[2296..3000]) == 0;
+    assert vh_part_v(pt[0..1176], 77, 3000, 2, true, 0, 1, src[2296..3000]) == 0;
 }
 
 test a_malformed_part_is_refused {
     var src : [3000]u8 = undefined;
     t_fill(src[0..3000], 1);
     var pt : [1176]u8 = undefined;
-    const n : usize = vh_part(pt[0..1176], 5, 3000, 0, false, 0, src[0..1160]);
+    const n : usize = vh_part(pt[0..1176], 5, 3000, 0, false, 0, src[0..1148]);
     assert vh_ok(pt[0..n]);
     // one byte short, the count changed, an older version, the reserved byte set, an index past the count
     assert !vh_ok(pt[0..n - 1]);
@@ -996,6 +1035,9 @@ test a_malformed_part_is_refused {
     assert !vh_ok(pt[0..n]);
     pt[6] = 3;
     pt[14] = 1;
+    assert !vh_ok(pt[0..n]);
+    // version 2 cuts at 1160: this 1148-byte part does not add up as a version 2 part
+    pt[14] = VH_V2;
     assert !vh_ok(pt[0..n]);
     pt[14] = VH_VERSION;
     pt[15] = 1;
@@ -1047,7 +1089,7 @@ test a_frame_of_more_than_64_parts_uses_both_words_of_the_mask {
     var cut : [1160]u8 = undefined;
     const total : usize = 100000;
     const n : usize = vh_parts(total);
-    assert n == 87;
+    assert n == 88;
     var k : usize = 0;
     var v : u32 = VH_NO;
     while (k < n) {
@@ -1059,8 +1101,8 @@ test a_frame_of_more_than_64_parts_uses_both_words_of_the_mask {
         k = k + 1;
     }
     assert v == VH_COMPLETE and va_get(st[0..256], VA_SIZE) == 100000;
-    // part 86 landed at 86 * 1160
-    assert buf[86 * 1160] == cut[0];
+    // the last part (87) landed at 87 * 1148
+    assert buf[87 * 1148] == cut[0];
 }
 
 test a_duplicate_part_is_old_and_a_lost_part_drops_the_frame_when_the_next_one_starts {
@@ -1070,12 +1112,12 @@ test a_duplicate_part_is_old_and_a_lost_part_drops_the_frame_when_the_next_one_s
     var src : [3000]u8 = undefined;
     t_fill(src[0..3000], 5);
     var pt : [1176]u8 = undefined;
-    const len : usize = vh_part(pt[0..1176], 1, 3000, 0, true, 0, src[0..1160]);
+    const len : usize = vh_part(pt[0..1176], 1, 3000, 0, true, 0, src[0..1148]);
     assert vh_take(st[0..256], buf[0..131072], pt[0..len], 1) == VH_STORED;
     assert vh_take(st[0..256], buf[0..131072], pt[0..len], 1) == VH_OLD;
     // a frame completed is never taken twice: a copy of its part comes back stale
     assert t_send(st[0..256], buf[0..131072], 1, 3000, 5, true, 99) == VH_COMPLETE;
-    const again : usize = vh_part(pt[0..1176], 1, 3000, 1, true, 0, src[1160..2320]);
+    const again : usize = vh_part(pt[0..1176], 1, 3000, 1, true, 0, src[1148..2296]);
     assert vh_take(st[0..256], buf[0..131072], pt[0..again], 2) == VH_OLD and va_get(st[0..256], VA_DONE) == 1;
     // frame 2 loses its part 1; frame 3 arrives whole: frame 2 was dropped, never completed, and counts as lost
     t_send(st[0..256], buf[0..131072], 2, 3000, 6, false, 1);
@@ -1083,14 +1125,14 @@ test a_duplicate_part_is_old_and_a_lost_part_drops_the_frame_when_the_next_one_s
     assert va_get(st[0..256], VA_DROPPED) == 1 and va_get(st[0..256], VA_DONE) == 2 and va_get(st[0..256], VA_LAST) == 3;
     assert va_get(st[0..256], VA_LOST) == 1;
     // a late part of frame 2 is stale now
-    const late : usize = vh_part(pt[0..1176], 2, 3000, 1, false, 0, src[1160..2320]);
+    const late : usize = vh_part(pt[0..1176], 2, 3000, 1, false, 0, src[1148..2296]);
     assert vh_take(st[0..256], buf[0..131072], pt[0..late], 3) == VH_OLD;
     // frames 4 and 5 never come, 6 does: two more frames lost
     assert t_send(st[0..256], buf[0..131072], 6, 2000, 7, false, 99) == VH_COMPLETE;
     assert va_get(st[0..256], VA_LOST) == 3 and va_get(st[0..256], VA_SEEN) == 6;
     // a part whose total disagrees with the frame in assembly is refused
     t_send(st[0..256], buf[0..131072], 7, 3000, 8, false, 1);
-    const odd : usize = vh_part(pt[0..1176], 7, 2500, 1, false, 0, src[1160..2320]);
+    const odd : usize = vh_part(pt[0..1176], 7, 2500, 1, false, 0, src[1148..2296]);
     assert vh_take(st[0..256], buf[0..131072], pt[0..odd], 9) == VH_NO and va_get(st[0..256], VA_REFUSED) == 1;
 }
 
@@ -1310,6 +1352,9 @@ test control_messages_carry_their_fields_and_an_old_or_odd_one_is_refused {
     assert !vx_ok(b[0..31]);
     b[1] = 1;
     assert !vx_ok(b[0..32]);
+    // build 7136 speaks version 2: read
+    b[1] = VH_V2;
+    assert vx_ok(b[0..32]);
     b[1] = VH_VERSION;
     b[0] = 9;
     assert !vx_ok(b[0..32]);
@@ -1348,7 +1393,7 @@ test an_old_build_gets_the_jpeg_and_a_new_one_h264 {
     var b : [32]u8 = undefined;
     vx_hello(b[0..32], both, 0);
     vn_take(ss[0..512], b[0..32]);
-    assert vs_get(ss[0..512], VN_PVER) == 2 and vs_get(ss[0..512], VN_PCAPS) == 3 and vs_get(ss[0..512], VN_PHEARD) == 0;
+    assert vs_get(ss[0..512], VN_PVER) == @as(u64, VH_VERSION) and vs_get(ss[0..512], VN_PCAPS) == 3 and vs_get(ss[0..512], VN_PHEARD) == 0;
     // the peer heard us
     vx_heard(b[0..32], true);
     assert vx_ok(b[0..32]) and b[28] == VX_F_HEARD;
@@ -1455,4 +1500,31 @@ test the_panel_line_says_fps_size_and_kbits_and_nothing_made_up {
     assert same;
     // no room: nothing added
     assert vh_side_text(b[0..20], 0, "rx", 30, 1280, 720, 1150) == 0;
+}
+
+test build_7136_and_this_build_read_each_others_parts {
+    var src : [5000]u8 = undefined;
+    t_fill(src[0..5000], 11);
+    var st : [256]u8 = undefined;
+    var buf : [131072]u8 = undefined;
+    var pt : [1176]u8 = undefined;
+    // a version 2 sender (7136) cuts at 1160: five parts of 5000 bytes, put together here byte for byte
+    va_reset(st[0..256]);
+    var k : usize = 0;
+    var v : u32 = VH_NO;
+    while (k < vh_parts_of(5000, VH_PART_V2)) {
+        const c : usize = vh_cut_of(5000, k, VH_PART_V2);
+        const len : usize = vh_part_v(pt[0..1176], 3, 5000, k, true, 0, VH_V2, src[k * 1160..k * 1160 + c]);
+        assert len == VH_HDR + c and vh_ok(pt[0..len]) and pt[14] == VH_V2;
+        v = vh_take(st[0..256], buf[0..131072], pt[0..len], 1);
+        k = k + 1;
+    }
+    assert v == VH_COMPLETE and buf[4639] == src[4639] and buf[1160] == src[1160];
+    // this build sends a 7136 peer version 2 parts, any other peer (or none heard yet) version 3
+    assert vh_send_ver(2) == VH_V2 and vh_send_ver(3) == VH_VERSION and vh_send_ver(9) == VH_VERSION and vh_send_ver(0) == VH_VERSION;
+    // a version 3 part of 1148 is never taken for a version 2 one, nor the other way round
+    const p3 : usize = vh_part_v(pt[0..1176], 4, 5000, 0, false, 0, VH_VERSION, src[0..1148]);
+    assert p3 == VH_HDR + 1148 and vh_ok(pt[0..p3]);
+    pt[14] = VH_V2;
+    assert !vh_ok(pt[0..p3]);
 }

@@ -227,6 +227,12 @@ use t27os::call_h264::vh_take;
 use t27os::call_h264::vh_parts;
 use t27os::call_h264::vh_cut;
 use t27os::call_h264::vh_part;
+use t27os::call_h264::vh_part_v;
+use t27os::call_h264::vh_parts_of;
+use t27os::call_h264::vh_cut_of;
+use t27os::call_h264::vh_psz;
+use t27os::call_h264::vh_send_ver;
+use t27os::call_h264::VH_PART_V2;
 use t27os::call_h264::vh_is_key;
 use t27os::call_h264::va_get;
 use t27os::call_h264::va_reset;
@@ -2777,6 +2783,7 @@ const VX_WANTED : usize = 29;
 const VX_DEC_NO : usize = 30;
 const VX_FORCED_TX : usize = 31;
 const VX_LOST_TX : usize = 32;
+const VX_CUR_VER : usize = 33;
 pub const CS_VH_RX : usize = 0;
 pub const CS_VH_SS : usize = 256;
 pub const CS_VH_MRX : usize = 768;
@@ -2977,7 +2984,7 @@ fn cs_vh_send(s: []u8, now: u64) -> void {
             const len : u64 = vte_len(enc);
             const meta : u64 = vte_meta(enc);
             const key : bool = (meta & 1) != 0;
-            if (len == 0 or vh_parts(@as(usize, len)) == 0) {
+            if (len == 0 or vh_parts_of(@as(usize, len), VH_PART_V2) == 0) {
                 vte_pop(enc);
                 vte_force(enc);
                 continue;
@@ -2988,21 +2995,25 @@ fn cs_vh_send(s: []u8, now: u64) -> void {
             if (key) { cvxp(s, VX_CUR_KEY, 1); } else { cvxp(s, VX_CUR_KEY, 0); }
             cvxp(s, VX_CUR_RUNG, (meta >> 8) & 255);
             cvxp(s, VX_CUR_US, us);
+            // cut for the video version the peer named (build 7136: 1160-byte parts; this build: 1148)
+            cvxp(s, VX_CUR_VER, @as(u64, vh_send_ver(vs_get(s[CS_VH + CS_VH_SS..CS_VH + CS_VH_SS + VS_LEN], VN_PVER))));
         }
         const total : usize = @as(usize, @intCast(cvx(s, VX_CUR_LEN)));
         const k : usize = @as(usize, @intCast(cvx(s, VX_CUR_K)));
-        const n : usize = vh_parts(total);
-        const c : usize = vh_cut(total, k);
+        const ver : u8 = @as(u8, @intCast(cvx(s, VX_CUR_VER) & 255));
+        const psz : usize = vh_psz(@as(u64, ver));
+        const n : usize = vh_parts_of(total, psz);
+        const c : usize = vh_cut_of(total, k, psz);
         if (!vp_take(s[CS_VH + CS_VH_SS..CS_VH + CS_VH_SS + VS_LEN], @as(u64, c + VH_HDR + 68))) {
             cvxa(s, VX_HOLD, 1);
             return;
         }
-        if (!vte_read(enc, @as(u64, k * VH_PART), cut[0..c])) {
+        if (!vte_read(enc, @as(u64, k * psz), cut[0..c])) {
             // the ring entry went away (the call's end): forget the frame
             cvxp(s, VX_CUR_F, 0);
             return;
         }
-        const pn : usize = vh_part(pt[0..1176], cvx(s, VX_CUR_F), total, k, cvx(s, VX_CUR_KEY) != 0, @as(u32, @intCast(cvx(s, VX_CUR_RUNG))), cut[0..c]);
+        const pn : usize = vh_part_v(pt[0..1176], cvx(s, VX_CUR_F), total, k, cvx(s, VX_CUR_KEY) != 0, @as(u32, @intCast(cvx(s, VX_CUR_RUNG))), ver, cut[0..c]);
         const loss : u64 = cs_g(s, CS_K_VHLOSS);
         if (loss != 0 and (cvx(s, VX_PARTS_TX) + cvx(s, VX_LOST_TX) + 1) % loss == 0) {
             // the test aid: this part is lost on the way
@@ -3571,7 +3582,7 @@ test the_block_holds_its_parts_without_overlap {
     assert CS_VASM + CS_VBUF == CS_VLAST and CS_VLAST + CS_VBUF == CS_VCAM and CS_VCAM + CS_VBUF == CS_ID;
     assert CS_ID + CS_ID_LEN == CS_VH and CS_VH + CS_VH_LEN == CS_LEN;
     assert CS_VH_RX + VA_LEN <= CS_VH_SS and CS_VH_SS + VS_LEN <= CS_VH_MRX and CS_VH_MRX + VF_LEN <= CS_VH_MTX;
-    assert CS_VH_MTX + VF_LEN <= CS_VH_MPB and CS_VH_MPB + VF_LEN <= CS_VH_X and CS_VH_X + 33 * 8 <= CS_VH_BUF;
+    assert CS_VH_MTX + VF_LEN <= CS_VH_MPB and CS_VH_MPB + VF_LEN <= CS_VH_X and CS_VH_X + 34 * 8 <= CS_VH_BUF;
     assert CS_VH_BUF + VH_FRAME_MAX == CS_VH_LEN;
     assert CI_MSGN + 2 <= CI_PUB and CI_PUB + 65 <= CI_PRIV and CI_PRIV + 97 <= CI_PEER and CI_PEER + 65 <= CI_RX;
     assert CI_RX + 65 <= CI_MSG and CI_MSG + CK_HDR + CK_IDENT_PT + CK_TAG <= CS_ID_LEN;
