@@ -293,6 +293,10 @@ pub const CL_TEXT : usize = 32;
 pub const CL_KEEP : u32 = 500;
 /// "no such line"
 pub const CL_NONE : usize = 4294967295;
+/// Message numbers run from 1 to below CH_MSG_TOP (2^31). A number at or above it never comes from a sender that
+/// counts from 1, so it is refused on receipt and on read and never becomes the floor: a floor of 0xFFFFFFFF would
+/// make every later message of that friend a duplicate.
+pub const CH_MSG_TOP : u32 = 2147483648;
 const CL_VERSION : u32 = 1;
 
 const LN_DIR : usize = 0;
@@ -375,7 +379,7 @@ pub fn cl_find(log: []const u8, dir: u32, msg: u32) -> usize {
 pub fn cl_drop_oldest(log: []u8) -> bool {
     const n : usize = @as(usize, cl_count(log));
     if (n == 0) { return false; }
-    if (cl_dir(log, 0) == CH_DIR_IN and cl_msg(log, 0) > cl_floor(log)) { put32(log, 20, cl_msg(log, 0)); }
+    if (cl_dir(log, 0) == CH_DIR_IN and cl_msg(log, 0) > cl_floor(log) and cl_msg(log, 0) < CH_MSG_TOP) { put32(log, 20, cl_msg(log, 0)); }
     var b : usize = ln(0);
     const end : usize = ln(n - 1);
     while (b < end) {
@@ -423,7 +427,7 @@ pub fn cl_out_add(log: []u8, text: []const u8, now: u64) -> u32 {
     if (ch_parts_for(text.len) == 0 or !ch_utf8_ok(text)) { return 0; }
     var c : [2000]u8 = undefined;
     const n : usize = ch_clean(text, c[0..CH_MSG_MAX]);
-    if (n == 0) { return 0; }
+    if (n == 0 or cl_last_out(log) >= CH_MSG_TOP - 1) { return 0; }
     if (cl_count(log) >= cl_cap(log)) { cl_drop_oldest(log); }
     const msg : u32 = cl_last_out(log) + 1;
     put32(log, 16, msg);
@@ -499,6 +503,7 @@ pub fn ch_rx_text(log: []u8, asm: []u8, p: []const u8) -> u32 {
     const part : u32 = ch_part(p);
     const parts : u32 = ch_parts(p);
     const n : usize = ch_len(p);
+    if (msg >= CH_MSG_TOP) { return CH_RX_BAD; }
     if (cl_have_in(log, msg)) { return CH_RX_DUP; }
     if (parts == 1) {
         if (!ch_utf8_ok(p[CH_PHDR..CH_PHDR + n])) { return CH_RX_BAD; }
@@ -791,6 +796,7 @@ pub fn cf_decode(b: []const u8, log: []u8) -> u32 {
         if (b[24 + i] != log[28 + i]) { return CF_PEER; }
         i = i + 1;
     }
+    if (get32(b, 16) >= CH_MSG_TOP or get32(b, 20) >= CH_MSG_TOP) { return CF_BAD; }
     const n : usize = @as(usize, get32(b, 12));
     // walk once to check every record before anything is taken
     var at : usize = CF_HDR;
@@ -801,7 +807,7 @@ pub fn cf_decode(b: []const u8, log: []u8) -> u32 {
         const dir : u32 = @as(u32, b[at]);
         const st : u32 = @as(u32, b[at + 1]);
         if (len == 0 or len > CH_MSG_MAX or at + CF_REC + len > b.len - 4) { return CF_BAD; }
-        if ((dir != CH_DIR_OUT and dir != CH_DIR_IN) or st < CH_S_PENDING or st > CH_S_FAILED or get32(b, at + 4) == 0) { return CF_BAD; }
+        if ((dir != CH_DIR_OUT and dir != CH_DIR_IN) or st < CH_S_PENDING or st > CH_S_FAILED or get32(b, at + 4) == 0 or get32(b, at + 4) >= CH_MSG_TOP) { return CF_BAD; }
         at = at + CF_REC + len;
         i = i + 1;
     }
@@ -1467,6 +1473,56 @@ test cl_in_put_refuses_a_message_the_drop_for_room_just_put_below_the_floor {
     assert cl_in_put(log[0..4104], 4, 3, a[0..1]) == false;
     assert cl_floor(log[0..4104]) == 5 and cl_count(log[0..4104]) == 1 and cl_msg(log[0..4104], 0) == 7;
     assert cl_have_in(log[0..4104], 4);
+}
+
+test a_message_numbered_0xffffffff_never_becomes_the_floor_and_the_next_message_still_comes_in {
+    var log : [4104]u8 = undefined;
+    var asm : [8064]u8 = undefined;
+    ck_wipe(asm[0..CA_LEN]);
+    const a : [1]u8 = [97];
+    var f : [720]u8 = undefined;
+    // on receipt: 0xFFFFFFFF and 2^31 are refused (no ACK), 2^31 - 1 is the last number taken
+    assert cl_init(log[0..4104], T_A[0..10], 2);
+    var n : usize = ch_put_text(f[0..720], 4294967295, 0, 9, a[0..1]);
+    assert n > 0 and ch_rx_text(log[0..4104], asm[0..CA_LEN], f[0..n]) == CH_RX_BAD;
+    n = ch_put_text(f[0..720], CH_MSG_TOP, 0, 9, a[0..1]);
+    assert ch_rx_text(log[0..4104], asm[0..CA_LEN], f[0..n]) == CH_RX_BAD and cl_count(log[0..4104]) == 0;
+    n = ch_put_text(f[0..720], CH_MSG_TOP - 1, 0, 9, a[0..1]);
+    assert ch_rx_text(log[0..4104], asm[0..CA_LEN], f[0..n]) == CH_RX_NEW;
+    // a line numbered 0xFFFFFFFF that is pushed out (a log of one) leaves the floor where it was
+    assert cl_init(log[0..4104], T_A[0..10], 1);
+    assert cl_in_put(log[0..4104], 4294967295, 1, a[0..1]);
+    assert cl_in_put(log[0..4104], 3, 2, a[0..1]);
+    assert cl_floor(log[0..4104]) == 0 and cl_count(log[0..4104]) == 1 and cl_msg(log[0..4104], 0) == 3;
+    // and the friend's next normal message comes in
+    n = ch_put_text(f[0..720], 4, 0, 9, a[0..1]);
+    assert ch_rx_text(log[0..4104], asm[0..CA_LEN], f[0..n]) == CH_RX_NEW and cl_msg(log[0..4104], 0) == 4;
+    // a sender stops below 2^31 (no wrap to 0)
+    assert cl_init(log[0..4104], T_A[0..10], 2);
+    put32(log[0..4104], 16, CH_MSG_TOP - 2);
+    assert cl_out_add(log[0..4104], a[0..1], 5) == CH_MSG_TOP - 1;
+    assert cl_out_add(log[0..4104], a[0..1], 6) == 0;
+    put32(log[0..4104], 16, 4294967295);
+    assert cl_out_add(log[0..4104], a[0..1], 7) == 0;
+    // on read: a floor, a last number or a line number at or above 2^31 is a file that does not check
+    assert cl_init(log[0..4104], T_A[0..10], 2);
+    assert cl_in_put(log[0..4104], 6, 1, a[0..1]);
+    var b : [200]u8 = undefined;
+    const bn : usize = cf_encode(log[0..4104], b[0..200]);
+    var lc : [4104]u8 = undefined;
+    assert cl_init(lc[0..4104], T_A[0..10], 2) and cf_decode(b[0..bn], lc[0..4104]) == CF_OK;
+    var k : usize = 0;
+    while (k < 3) {
+        var g : [200]u8 = undefined;
+        copy(g[0..200], 0, b[0..200], 0, bn);
+        var at : usize = 20;
+        if (k == 0) { at = 16; }
+        if (k == 2) { at = CF_HDR + 4; }
+        put32(g[0..200], at, 4294967295);
+        put32(g[0..200], bn - 4, crc32(g[0..200], bn - 4));
+        assert cl_init(lc[0..4104], T_A[0..10], 2) and cf_decode(g[0..bn], lc[0..4104]) == CF_BAD;
+        k = k + 1;
+    }
 }
 
 test cl_drop_oldest_moves_the_last_byte_of_a_full_length_line {

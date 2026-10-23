@@ -114,6 +114,8 @@ use t27os::chat_core::cl_open_read;
 use t27os::chat_core::cf_encode;
 use t27os::chat_core::cf_decode;
 use t27os::chat_core::CF_OK;
+use t27os::chat_core::CF_BAD;
+use t27os::chat_core::CF_HDR;
 use t27os::chat_core::CA_LEN;
 use t27os::chat_core::CH_RX_PART;
 use t27os::chat_core::CH_RETRY_MS;
@@ -834,6 +836,18 @@ fn gl_make_room(log: []u8, floors: []u8) -> void {
     }
 }
 
+/// A group log read from its file checks when no incoming line of a member has sequence 0 (a sender counts from 1,
+/// and gl_after_load takes the floor just below the oldest line). False sends the file to its .bad (chat_host).
+pub fn gl_log_ok(log: []const u8) -> bool {
+    const n : usize = @as(usize, cl_count(log));
+    var i : usize = 0;
+    while (i < n) {
+        if (cl_dir(log, i) == CH_DIR_IN and cl_msg(log, i) / GM_SEQ < GR_MEMBERS and cl_msg(log, i) % GM_SEQ == 0) { return false; }
+        i = i + 1;
+    }
+    return true;
+}
+
 /// After a log was read from its file: the floors per sender (a log that was full may have lost its oldest lines:
 /// each sender's floor is just below its oldest line kept; a log that was not full lost nothing), and every outgoing
 /// line not yet DELIVERED goes to `rcpt` from the start (the ACKs are not in the file).
@@ -848,7 +862,7 @@ pub fn gl_after_load(log: []u8, floors: []u8, rcpt: u32) -> void {
         if (cl_dir(log, i) == CH_DIR_IN and full) {
             const s : u32 = cl_msg(log, i) / GM_SEQ;
             const m : u32 = cl_msg(log, i) % GM_SEQ;
-            if (s < GR_MEMBERS) {
+            if (s < GR_MEMBERS and m > 0) {
                 const bit : u32 = @as(u32, 1) << s;
                 if ((seen & bit) == 0 or m - 1 < gl_floor_of(floors, s)) { put32(floors, @as(usize, s) * 4, m - 1); }
                 seen = seen | bit;
@@ -1461,6 +1475,39 @@ test a_full_group_log_moves_the_floor_to_the_sender_of_the_dropped_line {
     gl_after_load(log[0..4104], fl[0..32], 3);
     assert gl_floor_of(fl[0..32], 0) == 0 and gl_floor_of(fl[0..32], 1) == 0;
     assert cl_msg(log[0..4104], 0) == gl_key(0, 1);
+}
+
+test a_group_log_file_with_a_line_of_sequence_0_is_refused_and_does_not_crash_the_floors {
+    var log : [4104]u8 = undefined;
+    var asm : [8064]u8 = undefined;
+    var fl : [32]u8 = undefined;
+    ck_wipe(asm[0..CA_LEN]);
+    ck_wipe(fl[0..32]);
+    var p : [10]u8 = undefined;
+    gl_peer(T_DIGEST[0..8], p[0..10]);
+    assert cl_init(log[0..4104], p[0..10], 2);
+    const x : [1]u8 = [120];
+    t_deliver(log[0..4104], asm[0..CA_LEN], fl[0..32], 2, T_B[0..10], 1, 1, 10, x[0..1]);
+    t_deliver(log[0..4104], asm[0..CA_LEN], fl[0..32], 2, T_A[0..10], 0, 1, 11, x[0..1]);
+    assert gl_log_ok(log[0..4104]);
+    // the file of this full log, its first line renumbered to member 1, sequence 0 (the CRC made right)
+    var f : [200]u8 = undefined;
+    const n : usize = cf_encode(log[0..4104], f[0..200]);
+    assert n > 0;
+    put32(f[0..200], CF_HDR + 4, gl_key(1, 0));
+    put32(f[0..200], n - 4, crc32(f[0..200], n - 4));
+    var lb : [4104]u8 = undefined;
+    assert cl_init(lb[0..4104], p[0..10], 2) and cf_decode(f[0..n], lb[0..4104]) == CF_OK;
+    assert cl_count(lb[0..4104]) == 2 and cl_msg(lb[0..4104], 0) == GM_SEQ;
+    // the lines do not check: chat_host moves such a file to its .bad
+    assert gl_log_ok(lb[0..4104]) == false;
+    // and the floors come out without m - 1 at 0: that member's floor stays 0, the other's is below its line
+    gl_after_load(lb[0..4104], fl[0..32], 3);
+    assert gl_floor_of(fl[0..32], 1) == 0 and gl_floor_of(fl[0..32], 0) == 0;
+    // member 0, sequence 0 is msg 0, refused by the file reader already; an outgoing line is not looked at
+    put32(f[0..200], CF_HDR + 4, 0);
+    put32(f[0..200], n - 4, crc32(f[0..200], n - 4));
+    assert cl_init(lb[0..4104], p[0..10], 2) and cf_decode(f[0..n], lb[0..4104]) == CF_BAD;
 }
 
 test the_group_info_frame_carries_the_roster_and_its_bounds_are_checked {

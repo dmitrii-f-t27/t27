@@ -161,6 +161,7 @@ use t27os::group_core::gm_put_ack;
 use t27os::group_core::gl_peer;
 use t27os::group_core::gl_name;
 use t27os::group_core::gl_after_load;
+use t27os::group_core::gl_log_ok;
 use t27os::group_core::gl_out_add;
 use t27os::group_core::gl_rx_text;
 use t27os::group_core::gl_rx_ack;
@@ -196,6 +197,8 @@ pub const CHH_LOADED : u32 = 2;
 /// cf_decode status.
 pub const CHH_MOVED : u32 = 3;
 pub const CHH_IOERR : u32 = 4;
+/// The status (next to CHH_MOVED) of a group log whose file checks but whose lines do not (gl_log_ok).
+pub const CHH_ST_GROUP : u32 = 7;
 
 /// kind 0 = <home>/.t27os/chat (the directory), 1 = the friend's log, 2 = its .tmp, 3 = its .bad; 4, 5, 6 the same for
 /// a group's log, fp being the log's peer (the group id first). NUL-terminated; the length, 0 when it does not fit.
@@ -246,6 +249,7 @@ fn chh_load_k(fp: []const u8, log: []u8, cap: u32, buf: []u8, base: u32) -> u32 
     if (got < 0) { return CHH_IOERR; }
     var st : u32 = 1;
     if (@as(usize, @intCast(got)) <= CF_MAX) { st = cf_decode(buf[0..@as(usize, @intCast(got))], log); }
+    if (st == CF_OK and base == 3 and !gl_log_ok(log)) { st = CHH_ST_GROUP; }
     if (st == CF_OK) { return CHH_LOADED; }
     cl_init(log, fp, cap);
     var bad : [256]u8 = undefined;

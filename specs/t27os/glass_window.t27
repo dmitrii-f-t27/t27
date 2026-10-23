@@ -12193,7 +12193,7 @@ fn draw_bk_sheet(c: u64, kit: [48]u64, l: f64, tf: f64, bk: []const u8, hit: u32
     var stars : [64]u8 = undefined;
     const sn : usize = bk_mask(@as(usize, bk[BK_PLEN]), stars[0..64]);
     const py : f64 = bk_pass_y(tf, m);
-    draw_cl_field(c, kit, x, py, bk_pass_w(QP_W), bk[BK_FOCUS] == @as(u8, @intCast(BK_F_PASS)), hit == BK_H_PASS, stars[0..64], sn, "password, 8 to 64 characters");
+    draw_cl_field(c, kit, x, py, bk_pass_w(QP_W), bk[BK_FOCUS] == @as(u8, @intCast(BK_F_PASS)), hit == BK_H_PASS, stars[0..64], sn, "password, 12 to 64 characters");
     draw_cl_btn(c, kit, bk_go_x(l, QP_W), py, BK_GO_W, bk_go_word(m), hit == BK_H_GO);
     const note : u32 = bk_note(bk);
     const nt : []const u8 = bk_note_text(note);

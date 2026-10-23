@@ -247,8 +247,9 @@ pub fn bk_open_verdict(file_st: u32, gcm_st: u64, pt_st: u32) -> u32 {
 /// The identity file is replaced only by an opening that checked AND a person who said yes.
 pub fn bk_may_replace(verdict: u32, confirmed: bool) -> bool { return verdict == BK_OK and confirmed; }
 
-/// A password: 8 to 64 printable ASCII characters. Empty is never allowed.
-pub const BK_PASS_MIN : usize = 8;
+/// A password: 12 to 64 printable ASCII characters. Empty is never allowed. 12, not 8: the key is AES-128 from
+/// PBKDF2, so the password, not the cipher, is what a guesser works against.
+pub const BK_PASS_MIN : usize = 12;
 pub const BK_PASS_MAX : usize = 64;
 pub fn bk_unit_ok(u: u32) -> bool { return u >= 32 and u <= 126; }
 pub fn bk_pass_ok(p: []const u8, n: usize) -> bool {
@@ -538,7 +539,7 @@ pub fn bk_note_of(st: u32) -> u32 {
 
 pub fn bk_note_text(note: u32) -> str {
     if (note == BK_N_SAVED) { return "Saved, mode 600. Keep it off this device:"; }
-    if (note == BK_N_PASS) { return "The password needs 8 to 64 characters."; }
+    if (note == BK_N_PASS) { return "The password needs 12 to 64 printable characters."; }
     if (note == BK_N_NO_ID) { return "No identity on this device to save."; }
     if (note == BK_N_WRITE) { return "Could not write to the Desktop. Nothing saved."; }
     if (note == BK_N_CRYPTO) { return "The system crypto failed. Nothing changed."; }
@@ -852,23 +853,27 @@ test bk_another_format_is_refused {
     assert bk_file_check(id[0..297], 207) == BK_SHORT and bk_file_check(id[0..297], 297) == BK_MAGIC;
 }
 
-test bk_the_password_is_8_to_64_printable_characters_and_never_empty {
+test bk_the_password_is_12_to_64_printable_characters_and_never_empty {
     const p : [65]u8 = [97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 32, 33, 126];
     assert bk_pass_ok(p[0..0], 0) == false;
     assert bk_pass_ok(p[0..65], 0) == false;
     assert bk_pass_ok(p[0..65], 7) == false;
-    assert bk_pass_ok(p[0..65], 8);
+    // 8 and 11 are too short now; 12 is the shortest taken
+    assert bk_pass_ok(p[0..65], 8) == false;
+    assert bk_pass_ok(p[0..65], 11) == false;
+    assert bk_pass_ok(p[0..65], 12);
     assert bk_pass_ok(p[0..65], 64);
     assert bk_pass_ok(p[0..65], 65) == false;
-    assert bk_pass_ok(p[0..7], 8) == false;
-    var q : [8]u8 = undefined;
-    bk_copy(q[0..8], 0, p[0..8], 0, 8);
+    assert bk_pass_ok(p[0..11], 12) == false;
+    var q : [12]u8 = undefined;
+    bk_copy(q[0..12], 0, p[0..12], 0, 12);
     q[4] = 9;
-    assert bk_pass_ok(q[0..8], 8) == false;
+    assert bk_pass_ok(q[0..12], 12) == false;
     q[4] = 127;
-    assert bk_pass_ok(q[0..8], 8) == false;
+    assert bk_pass_ok(q[0..12], 12) == false;
     q[4] = 32;
-    assert bk_pass_ok(q[0..8], 8);
+    assert bk_pass_ok(q[0..12], 12);
+    assert BK_PASS_MIN == 12 and BK_PASS_MAX == 64;
     assert bk_note_of(BK_PASS_BAD) == BK_N_PASS;
 }
 
@@ -932,7 +937,7 @@ test bk_the_panel_types_masks_and_forgets_the_password {
     assert bk_open_shown(b[0..1024]) == false and bk_typing(b[0..1024]) == false;
     bk_open(b[0..1024], BK_M_BACKUP);
     assert bk_mode(b[0..1024]) == BK_M_BACKUP and b[BK_FOCUS] == 2 and bk_typing(b[0..1024]);
-    const s : str = "Secret 9!";
+    const s : str = "Secret 9! ok";
     var i : usize = 0;
     while (i < s.len) {
         bk_type(b[0..1024], @as(u32, s[i]));
@@ -940,11 +945,11 @@ test bk_the_panel_types_masks_and_forgets_the_password {
     }
     bk_type(b[0..1024], 1046);
     bk_type(b[0..1024], 10);
-    assert b[BK_PLEN] == 9 and b[BK_PASS] == 83 and b[BK_PASS + 6] == 32;
-    assert bk_pass_ok(b[BK_PASS .. BK_PASS + 64], 9);
+    assert b[BK_PLEN] == 12 and b[BK_PASS] == 83 and b[BK_PASS + 6] == 32;
+    assert bk_pass_ok(b[BK_PASS .. BK_PASS + 64], 12);
     // the screen sees stars only; the frame key's bytes never hold the password
     var m : [64]u8 = undefined;
-    assert fv_eq(m[0..64], bk_mask(9, m[0..64]), "*********");
+    assert fv_eq(m[0..64], bk_mask(12, m[0..64]), "************");
     var k : usize = 0;
     var leak : bool = false;
     while (k + 6 <= BK_KEY_END) {
@@ -953,7 +958,7 @@ test bk_the_panel_types_masks_and_forgets_the_password {
     }
     assert leak == false;
     bk_back(b[0..1024]);
-    assert b[BK_PLEN] == 8 and b[BK_PASS + 8] == 0;
+    assert b[BK_PLEN] == 11 and b[BK_PASS + 11] == 0;
     // 64 characters at most
     i = 0;
     while (i < 80) {
