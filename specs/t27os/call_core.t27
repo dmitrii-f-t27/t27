@@ -350,40 +350,43 @@ pub fn ck_ident_sig_len(pt: []const u8) -> usize {
 
 // ---------------------------------------------------------------- attempt limit
 
-/// Failed attempts kept per peer, and the window they count in.
-pub const CK_MAX_FAILS : usize = 3;
-pub const CK_FAIL_WINDOW_S : u64 = 600;
+// Owner, 2026-10-23: a link that saw CK_MAX_FAILS failed code comparisons in a row (a "differ" said by either side, or
+// a key that did not match its commitment) takes no new attempt for CK_PAUSE_MS: a call out is refused and a call in
+// is declined, both with the reason "too many attempts". A matched code (the call became ACTIVE) clears the count.
+// The state is two u64 in the link's block in memory, never written anywhere: it is gone when the session closes.
 
-/// May a new attempt with this peer start at `now` (seconds): fewer than 3 failures in the last 10 minutes.
-/// `fails` holds 8-byte LE times of the last failures, 0 for an empty slot.
-pub fn ck_rate_ok(fails: []const u8, now: u64) -> bool {
-    if (fails.len < CK_MAX_FAILS * 8) { return false; }
-    var n : usize = 0;
-    var i : usize = 0;
-    while (i < CK_MAX_FAILS) {
-        const t : u64 = get_u64(fails, i * 8);
-        if (t != 0 and t <= now and now - t < CK_FAIL_WINDOW_S) { n = n + 1; }
-        i = i + 1;
-    }
-    return n < CK_MAX_FAILS;
+pub const CK_MAX_FAILS : u64 = 5;
+pub const CK_PAUSE_MS : u64 = 60000;
+pub const CK_RATE_LEN : usize = 16;
+
+/// May a new attempt start at `now` (ms)? `st` is the failures so far (u64 LE) then the end of the pause (u64 LE,
+/// 0 = none). A short block says no.
+pub fn ck_rate_ok(st: []const u8, now: u64) -> bool {
+    if (st.len < CK_RATE_LEN) { return false; }
+    return now >= get_u64(st, 8);
 }
 
-/// Record a failure at `now` over the oldest slot.
-pub fn ck_rate_note(fails: []u8, now: u64) -> void {
-    if (fails.len < CK_MAX_FAILS * 8) { return; }
-    var k : usize = 0;
-    var oldest : u64 = get_u64(fails, 0);
-    var i : usize = 1;
-    while (i < CK_MAX_FAILS) {
-        const t : u64 = get_u64(fails, i * 8);
-        if (t < oldest) {
-            oldest = t;
-            k = i;
-        }
-        i = i + 1;
+/// Record one failed comparison at `now`: the CK_MAX_FAILS-th starts the pause and the count starts again.
+pub fn ck_rate_note(st: []u8, now: u64) -> void {
+    if (st.len < CK_RATE_LEN) { return; }
+    const n : u64 = get_u64(st, 0) + 1;
+    if (n >= CK_MAX_FAILS) {
+        put_u64(st, 0, 0);
+        put_u64(st, 8, now + CK_PAUSE_MS);
+        return;
     }
-    put_u64(fails, k * 8, now);
+    put_u64(st, 0, n);
 }
+
+/// A matched code: the count of failures goes back to 0 (a pause already running is not cut short).
+pub fn ck_rate_reset(st: []u8) -> void {
+    if (st.len < CK_RATE_LEN) { return; }
+    put_u64(st, 0, 0);
+}
+
+/// Does a call that ended with this outcome count as a failed comparison? `differ` = a side said the codes differ,
+/// `commit` = the key did not match its commitment.
+pub fn ck_rate_counts(differ: bool, commit: bool) -> bool { return differ or commit; }
 
 // ---------------------------------------------------------------- replays and late frames
 
@@ -649,6 +652,41 @@ pub fn gr_list_reach(ip: u64, from: u64) -> u64 {
     if (ip == 0 or (ip >> 24) == 127) { return from; }
     return ip;
 }
+
+// Who may hand me a list (owner, 2026-10-23). A list makes this device call every address in it, so it is taken only
+// from the member that brought me into the group: the peer of a link that called me (it initiated that link), and
+// only when that peer is a trusted friend (its stored identity key proved in this call). A list from the side I
+// called, or from anyone not trusted, is refused and counted with its reason. A list names at most GR_LIST_CAP
+// members; a link has its list taken at most once per GR_LIST_GAP_MS (a newer one waits, the latest wins).
+
+pub const GR_LIST_CAP : usize = 8;
+pub const GR_LIST_GAP_MS : u64 = 2000;
+pub const GR_LR_OK : u32 = 0;
+pub const GR_LR_NOT_INITIATOR : u32 = 1;
+pub const GR_LR_UNTRUSTED : u32 = 2;
+pub const GR_LR_SIZE : u32 = 3;
+pub const GR_LR_FORM : u32 = 4;
+
+/// Looks like a list on the wire (marker and version), well formed or not: the bytes a sender meant as a list.
+pub fn gr_list_kind(b: []const u8) -> bool { return b.len >= GR_LIST_HDR and b[4] == GR_LIST_KIND and b[5] == 3; }
+
+/// The verdict on a list that arrived on a link: `peer_called_me` = the peer initiated this link, `trusted` = it is a
+/// friend whose stored key it proved in this call. Size first (a list past GR_LIST_CAP is refused whoever sends it).
+pub fn gr_list_admit(b: []const u8, peer_called_me: bool, trusted: bool) -> u32 {
+    if (!gr_list_kind(b)) { return GR_LR_FORM; }
+    if (@as(usize, b[6]) > GR_LIST_CAP) { return GR_LR_SIZE; }
+    if (!peer_called_me) { return GR_LR_NOT_INITIATOR; }
+    if (!trusted) { return GR_LR_UNTRUSTED; }
+    if (!gr_list_ok(b) or b.len > GR_LIST_MAX) { return GR_LR_FORM; }
+    return GR_LR_OK;
+}
+
+/// May a link's waiting list be taken at `now` (ms)? `last` is when its list was last taken (0 = never).
+pub fn gr_list_due(now: u64, last: u64) -> bool { return last == 0 or now >= last + GR_LIST_GAP_MS; }
+
+/// A trusted friend for a list: the identity proof verified and the key it proved is the one stored for that friend
+/// (stored before the call, or stored now after a matched code).
+pub fn gr_trusted(proof_ok: bool, same_as_stored: bool, stored_now: bool) -> bool { return proof_ok and (same_as_stored or stored_now); }
 
 // ---------------------------------------------------------------- video (owner, 2026-10-22)
 
@@ -1236,24 +1274,56 @@ test the_code_is_six_digits_from_the_first_four_bytes {
     assert ck_sas_input(d[0..31], si[0..64]) == 0;
 }
 
-test three_failed_attempts_in_ten_minutes_stop_new_ones {
-    var f : [24]u8 = undefined;
-    ck_wipe(f[0..24]);
-    assert ck_rate_ok(f[0..24], 1000);
-    ck_rate_note(f[0..24], 1000);
-    ck_rate_note(f[0..24], 1100);
-    assert ck_rate_ok(f[0..24], 1200);
-    ck_rate_note(f[0..24], 1200);
-    assert ck_rate_ok(f[0..24], 1300) == false;
-    // the first failure leaves the window at 1600; then two remain
-    assert ck_rate_ok(f[0..24], 1599) == false;
-    assert ck_rate_ok(f[0..24], 1600);
-    // a fourth failure replaces the oldest
-    ck_rate_note(f[0..24], 1650);
-    assert get_u64(f[0..24], 0) == 1650;
-    assert ck_rate_ok(f[0..24], 1690) == false;
-    assert ck_rate_ok(f[0..24], 1700);
-    assert ck_rate_ok(f[0..23], 5000) == false;
+test five_failed_codes_pause_the_link_for_a_minute_and_a_match_clears_the_count {
+    var f : [16]u8 = undefined;
+    ck_wipe(f[0..16]);
+    assert ck_rate_ok(f[0..16], 1000);
+    ck_rate_note(f[0..16], 1000);
+    ck_rate_note(f[0..16], 2000);
+    ck_rate_note(f[0..16], 3000);
+    ck_rate_note(f[0..16], 4000);
+    // four failures: still allowed
+    assert ck_rate_ok(f[0..16], 4500);
+    ck_rate_note(f[0..16], 5000);
+    // the fifth starts a pause of 60 s: the sixth attempt is refused for the whole minute
+    assert ck_rate_ok(f[0..16], 5000) == false;
+    assert ck_rate_ok(f[0..16], 5000 + CK_PAUSE_MS - 1) == false;
+    assert ck_rate_ok(f[0..16], 5000 + CK_PAUSE_MS);
+    // the count started again: four more do not pause
+    assert get_u64(f[0..16], 0) == 0;
+    ck_rate_note(f[0..16], 70000);
+    ck_rate_note(f[0..16], 71000);
+    ck_rate_note(f[0..16], 72000);
+    ck_rate_note(f[0..16], 73000);
+    assert ck_rate_ok(f[0..16], 73500);
+    // a matched code clears the count: two more failures after it do not pause
+    ck_rate_reset(f[0..16]);
+    ck_rate_note(f[0..16], 74000);
+    ck_rate_note(f[0..16], 75000);
+    assert ck_rate_ok(f[0..16], 75500);
+    assert get_u64(f[0..16], 0) == 2;
+    // a short block says no and is not written
+    assert ck_rate_ok(f[0..15], 900000) == false;
+    // what counts: a differ on either side, a broken commitment; nothing else
+    assert ck_rate_counts(true, false);
+    assert ck_rate_counts(false, true);
+    assert ck_rate_counts(false, false) == false;
+}
+
+test four_failures_and_a_match_never_pause {
+    var f : [16]u8 = undefined;
+    ck_wipe(f[0..16]);
+    var r : u32 = 0;
+    while (r < 3) {
+        ck_rate_note(f[0..16], 1000);
+        ck_rate_note(f[0..16], 1000);
+        ck_rate_note(f[0..16], 1000);
+        ck_rate_note(f[0..16], 1000);
+        ck_rate_reset(f[0..16]);
+        r = r + 1;
+    }
+    assert ck_rate_ok(f[0..16], 1000);
+    assert get_u64(f[0..16], 8) == 0;
 }
 
 test the_replay_window_takes_each_seq_once {
@@ -1509,6 +1579,63 @@ test the_member_list_round_trips_and_refuses_a_short_or_marked_wrong_body {
     l[4] = 193;
     l[6] = 0;
     assert gr_list_ok(l[0..72]) == false;
+}
+
+fn gr_test_list(out: []u8, n: usize) -> usize {
+    gr_list_init(out);
+    var f : [10]u8 = undefined;
+    var k : usize = 0;
+    while (k < 10) {
+        f[k] = @as(u8, @intCast(k + 1));
+        k = k + 1;
+    }
+    k = 0;
+    while (k < n) {
+        f[0] = @as(u8, @intCast(k + 1));
+        gr_list_add(out, f[0..10], 3232235777 + @as(u64, k), 47727);
+        k = k + 1;
+    }
+    return GR_LIST_HDR + gr_list_count(out) * GR_ENTRY;
+}
+
+test a_list_is_taken_only_from_the_trusted_friend_that_called_me {
+    var l : [72]u8 = undefined;
+    const n : usize = gr_test_list(l[0..72], 3);
+    assert gr_list_admit(l[0..n], true, true) == GR_LR_OK;
+    // from the side I called (not the initiator of the link): refused, trusted or not
+    assert gr_list_admit(l[0..n], false, true) == GR_LR_NOT_INITIATOR;
+    assert gr_list_admit(l[0..n], false, false) == GR_LR_NOT_INITIATOR;
+    // from the initiator that is not a trusted friend: refused
+    assert gr_list_admit(l[0..n], true, false) == GR_LR_UNTRUSTED;
+    // trusted: the proof verified and the key is the stored one (before the call, or stored now)
+    assert gr_trusted(true, true, false);
+    assert gr_trusted(true, false, true);
+    assert gr_trusted(true, false, false) == false;
+    assert gr_trusted(false, true, true) == false;
+    // a broken body or not a list at all
+    assert gr_list_admit(l[0..n - 1], true, true) == GR_LR_FORM;
+    l[4] = 192;
+    assert gr_list_admit(l[0..n], true, true) == GR_LR_FORM;
+}
+
+test a_list_of_nine_members_is_refused_whoever_sends_it {
+    var big : [160]u8 = undefined;
+    ck_wipe(big[0..160]);
+    gr_list_init(big[0..160]);
+    big[6] = 9;
+    assert gr_list_admit(big[0..152], true, true) == GR_LR_SIZE;
+    assert gr_list_admit(big[0..152], false, false) == GR_LR_SIZE;
+    // eight is the cap of the rule; past GR_MAX the table cannot hold it, so it is refused as a form
+    big[6] = 8;
+    assert gr_list_admit(big[0..136], true, true) == GR_LR_FORM;
+    assert GR_LIST_CAP == 8;
+}
+
+test a_link_has_its_list_taken_at_most_every_two_seconds {
+    assert gr_list_due(5000, 0);
+    assert gr_list_due(5000, 4000) == false;
+    assert gr_list_due(5999, 4000) == false;
+    assert gr_list_due(6000, 4000);
 }
 
 fn vc_fake(j: []u8, n: usize, seed: u8) -> void {

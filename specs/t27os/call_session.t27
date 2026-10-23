@@ -213,6 +213,22 @@ use t27os::call_core::gr_list_reach;
 use t27os::call_core::GR_LIST_MAX;
 use t27os::call_core::GR_ENTRY;
 use t27os::call_core::GR_LIST_HDR;
+use t27os::call_core::GR_LR_OK;
+use t27os::call_core::GR_LR_NOT_INITIATOR;
+use t27os::call_core::GR_LR_UNTRUSTED;
+use t27os::call_core::GR_LR_SIZE;
+use t27os::call_core::gr_list_kind;
+use t27os::call_core::gr_list_admit;
+use t27os::call_core::gr_list_due;
+use t27os::call_core::gr_trusted;
+use t27os::call_core::ck_rate_ok;
+use t27os::call_core::ck_rate_note;
+use t27os::call_core::ck_rate_reset;
+use t27os::call_core::ck_rate_counts;
+use t27os::call_core::CK_RATE_LEN;
+use t27os::call_core::CK_PAUSE_MS;
+use t27os::call_view::cv_dial_decide;
+use t27os::call_view::CV_D_OK;
 use t27os::call_core::CK_INVITE_LEN;
 use t27os::call_core::CK_ANSWER_LEN;
 use t27os::call_core::CK_REVEAL_LEN;
@@ -426,6 +442,9 @@ pub const CS_K_VLIMIT : u32 = 52;
 /// The address of the test picture's encoder block (call_vid.t27 vgq_new), set by cs_video_encoder, kept across calls;
 /// 0 = none, the generator's frame is then made inside the poll as before (probes and tests).
 const CS_K_VENC : u32 = 53;
+/// 1 = a public address in a group's member list may be called (the window sets it from T27OS_ALLOW_PUBLIC=1, the
+/// same explicit allow the typed address needs); 0 = only a private network or this machine.
+pub const CS_K_ALLOW_PUB : u32 = 57;
 
 pub const CS_AUDIO_DEV : u32 = 1;
 pub const CS_AUDIO_TEST : u32 = 2;
@@ -478,6 +497,8 @@ pub const CS_R_IDENTITY : u32 = 14;
 pub const CS_R_UNVERIFIED : u32 = 15;
 /// A message session from someone who is not a friend: it proved its key and waits as an invitation (invites.t27).
 pub const CS_R_INVITE : u32 = 16;
+/// Five failed code comparisons on this link: no new attempt for a minute (call_core ck_rate_*).
+pub const CS_R_RATE : u32 = 17;
 
 /// Slots of the group region (u64 k at CS_GRP + 8 k). 0..15 belong to one call of one link (cs_fresh clears them),
 /// 16..31 to the link for good, 32.. to the whole group and are used in the block of link 0 only.
@@ -490,6 +511,18 @@ const LG_SENTVER : u32 = 6;
 const LG_LIST_LEN : u32 = 7;
 const LG_SLAVE : u32 = 16;
 const LG_IDX : u32 = 17;
+/// The link's attempt limit (call_core ck_rate_*: failures, end of the pause), kept across its calls, in memory only.
+const LG_RATE : u32 = 18;
+/// The link's lists: taken, refused by reason (not the initiator, not trusted, too long, malformed), entries whose
+/// address was refused, when its list was last taken (ms), attempts refused by the pause.
+const LG_L_TAKEN : u32 = 20;
+const LG_L_NOINIT : u32 = 21;
+const LG_L_UNTRUST : u32 = 22;
+const LG_L_SIZE : u32 = 23;
+const LG_L_FORM : u32 = 24;
+const LG_L_ADDR : u32 = 25;
+const LG_L_LAST : u32 = 26;
+const LG_RATE_NO : u32 = 27;
 const G_ON : u32 = 32;
 const G_STARTED : u32 = 33;
 const G_NL : u32 = 34;
@@ -674,6 +707,36 @@ fn cs_pop(s: []u8) -> u32 {
     return @as(u32, s[CS_EVQ + @as(usize, @intCast(h % CS_EVQ_N))]);
 }
 
+/// The link's attempt limit (two u64 in the group region, kept across its calls; cs_open wipes it).
+fn cs_rate(s: []u8) -> []u8 { return s[CS_GRP + @as(usize, LG_RATE) * 8..CS_GRP + @as(usize, LG_RATE) * 8 + CK_RATE_LEN]; }
+
+/// A matched code (ACTIVE) clears the failures; a call that failed on the comparison counts one.
+fn cs_rate_follow(s: []u8, st: u32, now: u64) -> void {
+    if (st == CK_ACTIVE) { ck_rate_reset(cs_rate(s)); }
+    const r : u64 = cs_g(s, CS_REASON);
+    const differ : bool = r == @as(u64, CS_R_I_SAID_DIFFER) or r == @as(u64, CS_R_PEER_SAID_DIFFER);
+    if (st == CK_FAILED and ck_rate_counts(differ, r == @as(u64, CS_R_COMMITMENT))) { ck_rate_note(cs_rate(s), now); }
+}
+
+/// Is the link in its pause? Then the attempt is refused: counted and the reason set.
+fn cs_rate_paused(s: []u8, now: u64) -> bool {
+    if (ck_rate_ok(cs_rate(s), now)) { return false; }
+    cga(s, LG_RATE_NO, 1);
+    cs_p(s, CS_REASON, @as(u64, CS_R_RATE));
+    return true;
+}
+
+/// cs_rate_paused, and one stderr line when it refuses.
+fn cs_rate_refuses(s: []u8, now: u64) -> bool {
+    if (!cs_rate_paused(s, now)) { return false; }
+    var line : [96]u8 = undefined;
+    var n : usize = put_bytes(line[0..96], 0, "CALLRATE too many attempts: refused, ");
+    n = put_dec(line[0..96], n, (get_u64(s, CS_GRP + @as(usize, LG_RATE) * 8 + 8) - now + 999) / 1000);
+    n = put_bytes(line[0..96], n, " s of the pause left\n");
+    sys_write(2, line[0..n], @as(u64, n));
+    return true;
+}
+
 /// After anything that may have moved the call: one event per new state, the code event once, audio on entering
 /// ACTIVE and off on leaving it.
 fn cs_sync(s: []u8) -> void {
@@ -684,6 +747,7 @@ fn cs_sync(s: []u8) -> void {
         cs_p(s, CS_SEEN, @as(u64, st));
         cs_p(s, CS_T_STATE, now);
         if (was == CK_ACTIVE) { cs_audio_leave(s); }
+        cs_rate_follow(s, st, now);
         if (st == CK_ACTIVE) {
             cs_id_store(s);
             cs_p(s, CS_ST_MS_TO_ACTIVE, now - cs_g(s, CS_T_DIAL));
@@ -827,7 +891,7 @@ pub fn cs_set(s: []u8, k: u32, v: u64) -> bool {
         if (v != 0 and v < cs_g(s, CS_K_JB_MAX)) { ok = true; }
     } else if (k == CS_K_JB_MAX) {
         if (v > cs_g(s, CS_K_JB_TARGET) and v + CBP_F_TX < CBP_F_JB) { ok = true; }
-    } else if (k == CS_K_GSTATS or k == CS_K_GAUTO or k == CS_K_VIDEO) {
+    } else if (k == CS_K_GSTATS or k == CS_K_GAUTO or k == CS_K_VIDEO or k == CS_K_ALLOW_PUB) {
         if (v <= 1) { ok = true; }
     } else if (k == CS_K_VDROP or k == CS_K_VLIMIT) {
         if (v <= 4294967295) { ok = true; }
@@ -869,6 +933,7 @@ pub fn cs_call(s: []u8, ip: u64, port: u64, peer_fp: []const u8) -> bool {
     if (!cs_live(s) or peer_fp.len != 10 or ip == 0 or ip > 4294967295 or port == 0 or port > 65535) { return false; }
     const st : u32 = ckh_state(s[0..EP_LEN]);
     if (st != CK_IDLE and st != CK_ENDED and st != CK_FAILED) { return false; }
+    if (cs_rate_refuses(s, ckh_ms())) { return false; }
     cs_fresh(s);
     s[EP_ROLE] = 1;
     ck_put(s, EP_PEER, peer_fp);
@@ -1217,13 +1282,74 @@ fn cs_send_media(s: []u8, pm: u64, w: u64) -> u64 {
     return k;
 }
 
+/// A trusted friend for a list (call_core gr_trusted): its identity proof verified in this call and the key is the one
+/// stored for it.
+fn cs_trusted(s: []const u8) -> bool { return gr_trusted(s[CS_ID + CI_OK] != 0, s[CS_ID + CI_SAME] != 0, s[CS_ID + CI_STORED] != 0); }
+
+/// A member list arrived on this link: kept for the group manager (csg_tick, which owns the table) only when
+/// call_core gr_list_admit takes it (the trusted friend that called me); otherwise counted by reason, one stderr line.
+fn csg_list_in(s: []u8, pt: []const u8) -> void {
+    const why : u32 = csg_list_keep(s, pt);
+    if (why == GR_LR_OK) { return; }
+    var t : str = "malformed";
+    if (why == GR_LR_NOT_INITIATOR) { t = "not the initiator"; }
+    if (why == GR_LR_UNTRUSTED) { t = "not a trusted friend"; }
+    if (why == GR_LR_SIZE) { t = "more than 8 members"; }
+    var line : [96]u8 = undefined;
+    var n : usize = put_bytes(line[0..96], 0, "GROUPLIST refused from ");
+    n = csg_hex4(line[0..96], n, s[EP_PEER..EP_PEER + 10]);
+    n = put_bytes(line[0..96], n, ": ");
+    n = put_bytes(line[0..96], n, t);
+    n = put_bytes(line[0..96], n, "\n");
+    sys_write(2, line[0..n], @as(u64, n));
+}
+
+/// The verdict on a list (call_core GR_LR_*): kept when taken, else counted under its reason.
+fn csg_list_keep(s: []u8, pt: []const u8) -> u32 {
+    const why : u32 = gr_list_admit(pt, !ckh_caller(s[0..EP_LEN]), cs_trusted(s));
+    if (why == GR_LR_OK) {
+        // a newer list replaces one that waits for its turn (gr_list_due)
+        ck_put(s[CS_GRP + CS_GBODY..CS_GRP + CS_GRP_LEN], 0, pt);
+        cgp(s, LG_LIST_LEN, @as(u64, pt.len));
+        return why;
+    }
+    var k : u32 = LG_L_FORM;
+    if (why == GR_LR_NOT_INITIATOR) { k = LG_L_NOINIT; }
+    if (why == GR_LR_UNTRUSTED) { k = LG_L_UNTRUST; }
+    if (why == GR_LR_SIZE) { k = LG_L_SIZE; }
+    cga(s, k, 1);
+    return why;
+}
+
+/// May this device call a member a list names? `ip` is where the list says it is, `from` the address the list came
+/// from (call_core gr_list_reach: a sender's 127.x is the sender's machine), then the rule of a typed address
+/// (call_view cv_dial_decide): a private network or this machine, a public one only with the explicit allow.
+pub fn csg_entry_ok(ip: u64, port: u64, from: u64, allow_pub: bool) -> bool {
+    const at : u64 = gr_list_reach(ip, from);
+    if (at > 4294967295 or port == 0 or port > 65535) { return false; }
+    return cv_dial_decide(at * 65536 + port, allow_pub, 0) == CV_D_OK;
+}
+
+/// The list counters of the whole slice (k: 0 taken, 1 not the initiator, 2 not trusted, 3 too long, 4 malformed,
+/// 5 entries whose address was refused, 6 attempts refused by the pause).
+pub fn csg_list_stat(s: []const u8, k: u32) -> u64 {
+    if (k > 6 or s.len < CS_LEN) { return 0; }
+    var slot : u32 = LG_L_TAKEN + k;
+    if (k == 6) { slot = LG_RATE_NO; }
+    var sum : u64 = 0;
+    var j : usize = 0;
+    while (j < cs_links(s)) {
+        sum = sum + get_u64(s, j * CS_LEN + CS_GRP + @as(usize, slot) * 8);
+        j = j + 1;
+    }
+    return sum;
+}
+
 /// An opened media plaintext: count it, check it in TEST mode, feed the jitter buffer in DEV mode (primary, then
 /// the redundant copy of the frame before), with part F's counters.
 fn cs_take_media(s: []u8, pt: []const u8) -> void {
-    if (gr_list_ok(pt) and pt.len <= GR_LIST_MAX) {
-        // the other member's list of the group, kept for the group manager (csg_tick), which owns the table
-        ck_put(s[CS_GRP + CS_GBODY..CS_GRP + CS_GRP_LEN], 0, pt);
-        cgp(s, LG_LIST_LEN, @as(u64, pt.len));
+    if (gr_list_kind(pt)) {
+        csg_list_in(s, pt);
         return;
     }
     if (pt.len < 968 or pt[4] != 192 or pt[5] != 3) {
@@ -1295,7 +1421,16 @@ fn cs_on_packet(s: []u8, m: []const u8, from: []const u8) -> void {
             ck_put(s, EP_PEER, m[8..18]);
             ck_put(s, CS_PADDR, from[0..16]);
             cs_p(s, CS_PEER_IP, (@as(u64, from[4]) << 24) | (@as(u64, from[5]) << 16) | (@as(u64, from[6]) << 8) | @as(u64, from[7]));
-            if (!ckh_on_invite(ep, m)) { cs_add(s, CS_ST_REJ_OTHER, 1); } else { cs_id_load(s); }
+            if (!ckh_on_invite(ep, m)) {
+                cs_add(s, CS_ST_REJ_OTHER, 1);
+            } else if (cs_rate_refuses(s, ckh_ms())) {
+                // the link is in its pause: the call is declined at once, with the reason
+                cs_send_plain_bye(s);
+                ckh_go(ep, CK_EV_DECLINE);
+                cs_p(s, CS_REASON, @as(u64, CS_R_RATE));
+            } else {
+                cs_id_load(s);
+            }
             return;
         }
         // the same INVITE again after I answered: my ANSWER was lost
@@ -2024,6 +2159,16 @@ fn csg_stats(s: []u8, now: u64) -> void {
     n2 = put_dec(line[0..320], n2, csg_vstat(s, 3));
     n2 = put_bytes(line[0..320], n2, " vshow=");
     n2 = put_dec(line[0..320], n2, @as(u64, csg_vshow(s)));
+    n2 = put_bytes(line[0..320], n2, " lists=");
+    n2 = put_dec(line[0..320], n2, csg_list_stat(s, 0));
+    n2 = put_bytes(line[0..320], n2, " l_noinit=");
+    n2 = put_dec(line[0..320], n2, csg_list_stat(s, 1));
+    n2 = put_bytes(line[0..320], n2, " l_untrust=");
+    n2 = put_dec(line[0..320], n2, csg_list_stat(s, 2));
+    n2 = put_bytes(line[0..320], n2, " l_size=");
+    n2 = put_dec(line[0..320], n2, csg_list_stat(s, 3));
+    n2 = put_bytes(line[0..320], n2, " l_addr=");
+    n2 = put_dec(line[0..320], n2, csg_list_stat(s, 5));
     n2 = put_bytes(line[0..320], n2, "\n");
     sys_write(2, line[0..n2], @as(u64, n2));
 }
@@ -2040,7 +2185,10 @@ fn csg_tick(s: []u8, now: u64) -> void {
     while (j < nl) {
         const a : usize = j * CS_LEN;
         const ln : usize = @as(usize, @intCast(get_u64(s, a + CS_GRP + @as(usize, LG_LIST_LEN) * 8)));
-        if (ln > 0) {
+        const last : u64 = get_u64(s, a + CS_GRP + @as(usize, LG_L_LAST) * 8);
+        if (ln > 0 and ln <= GR_LIST_MAX and gr_list_due(now, last)) {
+            put_u64(s, a + CS_GRP + @as(usize, LG_L_LAST) * 8, now);
+            put_u64(s, a + CS_GRP + @as(usize, LG_L_TAKEN) * 8, get_u64(s, a + CS_GRP + @as(usize, LG_L_TAKEN) * 8) + 1);
             var lb : [72]u8 = undefined;
             var q : usize = 0;
             while (q < ln and q < 72) {
@@ -2054,8 +2202,16 @@ fn csg_tick(s: []u8, now: u64) -> void {
                 var i : usize = 0;
                 while (i < gr_list_count(lb[0..ln])) {
                     const at : usize = GR_LIST_HDR + i * GR_ENTRY;
-                    if (!ck_same(lb[at..at + 10], s[EP_ME..EP_ME + 10])) {
-                        csg_member(s, lb[at..at + 10], gr_list_reach(gr_list_ip(lb[0..ln], i), from), gr_list_port(lb[0..ln], i), false, now);
+                    const ip : u64 = gr_list_ip(lb[0..ln], i);
+                    const port : u64 = gr_list_port(lb[0..ln], i);
+                    // the sender itself is reached where its link already talks; every other name passes the address rule
+                    const sender : bool = ck_same(lb[at..at + 10], s[a + EP_PEER..a + EP_PEER + 10]);
+                    if (ck_same(lb[at..at + 10], s[EP_ME..EP_ME + 10])) {
+                        // myself
+                    } else if (sender or csg_entry_ok(ip, port, from, cs_g(s, CS_K_ALLOW_PUB) != 0)) {
+                        csg_member(s, lb[at..at + 10], gr_list_reach(ip, from), port, false, now);
+                    } else {
+                        put_u64(s, a + CS_GRP + @as(usize, LG_L_ADDR) * 8, get_u64(s, a + CS_GRP + @as(usize, LG_L_ADDR) * 8) + 1);
                     }
                     i = i + 1;
                 }
@@ -3414,4 +3570,114 @@ test the_group_video_counters_read_each_links_own_slots {
     z[1] = @as(u8, @intCast(CK_ACTIVE));
     cvkp(z, 0, VT_FIRST, 40);
     assert csg_vshow(z) == 0 | (1 << 8);
+}
+
+fn csg_t_list(out: []u8, n: usize) -> usize {
+    gr_list_init(out);
+    var f : [10]u8 = undefined;
+    ck_fill_session(f[0..10], 3);
+    var k : usize = 0;
+    while (k < n) {
+        f[0] = @as(u8, @intCast(k + 1));
+        gr_list_add(out, f[0..10], 3232235777 + @as(u64, k), 47727);
+        k = k + 1;
+    }
+    return GR_LIST_HDR + gr_list_count(out) * GR_ENTRY;
+}
+
+test a_list_is_kept_only_from_the_trusted_friend_that_called_this_link {
+    var s : [166528]u8 = undefined;
+    cs_t_live(s[0..CS_LEN]);
+    var l : [72]u8 = undefined;
+    const n : usize = csg_t_list(l[0..72], 3);
+    s[1] = @as(u8, @intCast(CK_ACTIVE));
+    s[CS_ID + CI_OK] = 1;
+    s[CS_ID + CI_SAME] = 1;
+    // I called this peer: its list is refused however trusted it is, and nothing is kept
+    s[EP_ROLE] = 1;
+    assert csg_list_keep(s[0..CS_LEN], l[0..n]) == GR_LR_NOT_INITIATOR;
+    assert cg(s[0..CS_LEN], LG_LIST_LEN) == 0 and cg(s[0..CS_LEN], LG_L_NOINIT) == 1;
+    // the peer called me but is not a trusted friend (no verified proof of the stored key): refused
+    s[EP_ROLE] = 0;
+    s[CS_ID + CI_OK] = 0;
+    assert csg_list_keep(s[0..CS_LEN], l[0..n]) == GR_LR_UNTRUSTED;
+    assert cg(s[0..CS_LEN], LG_LIST_LEN) == 0 and cg(s[0..CS_LEN], LG_L_UNTRUST) == 1;
+    s[CS_ID + CI_OK] = 1;
+    s[CS_ID + CI_SAME] = 0;
+    assert csg_list_keep(s[0..CS_LEN], l[0..n]) == GR_LR_UNTRUSTED;
+    assert cg(s[0..CS_LEN], LG_LIST_LEN) == 0 and cg(s[0..CS_LEN], LG_L_UNTRUST) == 2;
+    // nine members: refused before anything else
+    var big : [160]u8 = undefined;
+    ck_wipe(big[0..160]);
+    gr_list_init(big[0..160]);
+    big[6] = 9;
+    s[CS_ID + CI_SAME] = 1;
+    assert csg_list_keep(s[0..CS_LEN], big[0..152]) == GR_LR_SIZE;
+    assert cg(s[0..CS_LEN], LG_LIST_LEN) == 0 and cg(s[0..CS_LEN], LG_L_SIZE) == 1;
+    // the trusted friend that called me: kept for the group manager, and a refused list never counted as media
+    assert csg_list_keep(s[0..CS_LEN], l[0..n]) == GR_LR_OK;
+    assert cg(s[0..CS_LEN], LG_LIST_LEN) == @as(u64, n);
+    assert ck_same(s[CS_GRP + CS_GBODY..CS_GRP + CS_GBODY + n], l[0..n]);
+    // a key stored now after a matched code counts as trusted too
+    s[CS_ID + CI_SAME] = 0;
+    s[CS_ID + CI_STORED] = 1;
+    cgp(s[0..CS_LEN], LG_LIST_LEN, 0);
+    assert csg_list_keep(s[0..CS_LEN], l[0..n]) == GR_LR_OK;
+    assert cg(s[0..CS_LEN], LG_LIST_LEN) == @as(u64, n);
+    assert cs_g(s[0..CS_LEN], CS_ST_ACCEPTED) == 0 and cs_g(s[0..CS_LEN], CS_ST_REJ_OTHER) == 0;
+    assert csg_list_stat(s[0..CS_LEN], 1) == 1 and csg_list_stat(s[0..CS_LEN], 2) == 2 and csg_list_stat(s[0..CS_LEN], 3) == 1;
+}
+
+test a_listed_address_passes_the_rule_of_a_typed_one {
+    // a private network: called; a public one: only with the explicit allow
+    assert csg_entry_ok(3232235777, 47727, 3232235784, false);
+    assert csg_entry_ok(134744072, 47727, 3232235784, false) == false;
+    assert csg_entry_ok(134744072, 47727, 3232235784, true);
+    // never: multicast, broadcast, link-local, 0.0.0.0/8 past the sender's own name, a port 0
+    assert csg_entry_ok(3758096385, 47727, 3232235784, true) == false;
+    assert csg_entry_ok(4294967295, 47727, 3232235784, true) == false;
+    assert csg_entry_ok(2851995649, 47727, 3232235784, true) == false;
+    assert csg_entry_ok(3232235777, 0, 3232235784, true) == false;
+    // 127.x from a sender on another machine is that machine; from this machine it stays this machine
+    assert csg_entry_ok(2130706433, 47736, 3232235784, false);
+    assert csg_entry_ok(2130706433, 47736, 134744072, false) == false;
+    assert csg_entry_ok(2130706433, 47736, 2130706433, false);
+}
+
+test five_failed_codes_refuse_the_next_call_for_a_minute_and_a_match_clears_them {
+    var s : [166528]u8 = undefined;
+    cs_t_live(s[0..CS_LEN]);
+    const t : u64 = 1000000;
+    cs_p(s[0..CS_LEN], CS_REASON, @as(u64, CS_R_PEER_SAID_DIFFER));
+    var k : u32 = 0;
+    while (k < 4) {
+        cs_rate_follow(s[0..CS_LEN], CK_FAILED, t);
+        k = k + 1;
+    }
+    // other ends do not count, a match clears the four
+    cs_p(s[0..CS_LEN], CS_REASON, @as(u64, CS_R_HANGUP));
+    cs_rate_follow(s[0..CS_LEN], CK_FAILED, t);
+    cs_rate_follow(s[0..CS_LEN], CK_ENDED, t);
+    assert get_u64(s[0..CS_LEN], CS_GRP + @as(usize, LG_RATE) * 8) == 4;
+    cs_rate_follow(s[0..CS_LEN], CK_ACTIVE, t);
+    assert get_u64(s[0..CS_LEN], CS_GRP + @as(usize, LG_RATE) * 8) == 0;
+    // five in a row (differ on either side, a broken commitment): the pause starts
+    cs_p(s[0..CS_LEN], CS_REASON, @as(u64, CS_R_I_SAID_DIFFER));
+    cs_rate_follow(s[0..CS_LEN], CK_FAILED, t);
+    cs_rate_follow(s[0..CS_LEN], CK_FAILED, t);
+    cs_p(s[0..CS_LEN], CS_REASON, @as(u64, CS_R_COMMITMENT));
+    cs_rate_follow(s[0..CS_LEN], CK_FAILED, t);
+    cs_rate_follow(s[0..CS_LEN], CK_FAILED, t);
+    cs_p(s[0..CS_LEN], CS_REASON, @as(u64, CS_R_PEER_SAID_DIFFER));
+    cs_rate_follow(s[0..CS_LEN], CK_FAILED, t);
+    // the sixth attempt (a call out, a call in) is refused with the reason "too many attempts", nothing else moves
+    cs_p(s[0..CS_LEN], CS_REASON, 0);
+    assert cs_rate_paused(s[0..CS_LEN], t + 1000);
+    assert cs_reason(s[0..CS_LEN]) == CS_R_RATE and cs_state(s[0..CS_LEN]) == CK_IDLE;
+    assert csg_list_stat(s[0..CS_LEN], 6) == 1;
+    // the pause ends 60 s after the fifth failure; it lives in the block only (cs_open wipes it)
+    assert get_u64(s[0..CS_LEN], CS_GRP + @as(usize, LG_RATE) * 8 + 8) == t + CK_PAUSE_MS;
+    assert cs_rate_paused(s[0..CS_LEN], t + CK_PAUSE_MS - 1);
+    assert cs_rate_paused(s[0..CS_LEN], t + CK_PAUSE_MS) == false;
+    assert csg_list_stat(s[0..CS_LEN], 6) == 2;
 }

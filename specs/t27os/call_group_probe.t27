@@ -9,6 +9,9 @@
 //   ld -arch arm64 -platform_version macos 11.0 $(xcrun --show-sdk-version) -syslibroot $(xcrun --show-sdk-path) \
 //      -e _main -lSystem -lffi -framework CoreFoundation -framework Security -framework AudioToolbox -o cgp cgp.o
 // Test identities only (fixed fingerprints), 127.0.0.1:47771..47773. Refs gHashTag/t27#11560.
+// Since 2026-10-23 a member list is taken only from a trusted friend that called the link (call_core gr_list_admit).
+// This probe hands in no identity keys, so B and C refuse A's list ("not a trusted friend") and check 1 fails: the mesh
+// is now shown by the app with pinned friends (T27OS_QA=1 run), and this probe shows the refusal.
 module T27osCallGroupProbe;
 
 use t27os::pty_sys::sys_exit;
@@ -158,7 +161,9 @@ fn cgp_main() -> bool {
         if (csg_state(a[0..GL]) == GR_FULL and csg_state(b[0..GL]) == GR_FULL and csg_state(c[0..GL]) == GR_FULL) { whole = ckh_ms(); }
         ckh_usleep(1000);
     }
-    ckh_num("ms until all three are in the group at once ", whole - t0);
+    var took : u64 = 0;
+    if (whole != 0) { took = whole - t0; }
+    ckh_num("ms until all three are in the group at once ", took);
     all = ckh_check("1 all three members in state FULL at the same moment", whole != 0) and all;
     all = ckh_check("1 A went through WAITING and PARTIAL on the way", seen_waiting and seen_partial) and all;
     // let it run and the jitter buffers fill, then read
