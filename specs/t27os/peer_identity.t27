@@ -1638,3 +1638,170 @@ test an_invitation_never_opens_and_only_a_friend_s_first_proof_is_stored_in_a_me
     assert pid_store_first(false, false, false, true) == false;
     assert pid_verdict(true, true, true, false) == PID_REFUSE;
 }
+
+test same_range_compares_only_the_asked_window_in_constant_shape {
+    const a : [6]u8 = [1, 2, 3, 4, 5, 6];
+    const b : [6]u8 = [0, 0, 3, 4, 5, 9];
+    assert same_range(a[0..6], 2, b[0..6], 2, 3);
+    assert same_range(a[0..6], 2, b[0..6], 2, 4) == false;
+    assert same_range(a[0..6], 0, b[0..6], 0, 1) == false;
+    assert same_range(a[0..6], 5, b[0..6], 5, 1) == false;
+    assert same_range(a[0..6], 1, b[0..6], 3, 0);
+    // a difference in the high bit of the last byte is seen
+    const c : [3]u8 = [7, 7, 7];
+    const d : [3]u8 = [7, 7, 135];
+    assert same_range(c[0..3], 0, d[0..3], 0, 3) == false;
+}
+
+test fp_symbol_reads_five_bits_at_a_time_and_pads_the_last_with_zero {
+    assert fp_symbol(T_FP[0..10], 0) == 0;
+    assert fp_symbol(T_FP[0..10], 1) == 4;
+    assert fp_symbol(T_FP[0..10], 2) == 17;
+    assert fp_symbol(T_FP[0..10], 15) == 28;
+    var z : [10]u8 = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    var f : [10]u8 = [255, 255, 255, 255, 255, 255, 255, 255, 255, 255];
+    var j : usize = 0;
+    while (j < 16) {
+        assert fp_symbol(z[0..10], j) == 0;
+        assert fp_symbol(f[0..10], j) == 31;
+        j = j + 1;
+    }
+    // only the first five bits set: symbol 0 is 31 and symbol 1 is 0
+    z[0] = 248;
+    assert fp_symbol(z[0..10], 0) == 31 and fp_symbol(z[0..10], 1) == 0;
+    // the last symbol is the low five bits of the last byte
+    z[0] = 0;
+    z[9] = 31;
+    assert fp_symbol(z[0..10], 15) == 31 and fp_symbol(z[0..10], 14) == 0;
+    z[9] = 224;
+    assert fp_symbol(z[0..10], 15) == 0;
+}
+
+test check_of_weights_symbol_j_by_2j_plus_1_modulo_32 {
+    var v : [16]u32 = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    assert check_of(v[0..16]) == 0;
+    v[0] = 1;
+    assert check_of(v[0..16]) == 1;
+    v[0] = 0;
+    v[1] = 1;
+    assert check_of(v[0..16]) == 3;
+    v[1] = 0;
+    v[15] = 1;
+    assert check_of(v[0..16]) == 31;
+    v[15] = 2;
+    assert check_of(v[0..16]) == 30;
+    // all ones: 1 + 3 + ... + 31 = 256, which is 0 modulo 32
+    var j : usize = 0;
+    while (j < 16) {
+        v[j] = 1;
+        j = j + 1;
+    }
+    assert check_of(v[0..16]) == 0;
+}
+
+test put_magic_and_magic_ok_tell_the_identity_and_friends_files_apart {
+    var m : [8]u8 = undefined;
+    put_magic(m[0..8], 0);
+    assert m[0] == 84 and m[4] == 83 and m[5] == 73 and m[6] == 68 and m[7] == 10;
+    assert magic_ok(m[0..8], 0) and magic_ok(m[0..8], 1) == false;
+    put_magic(m[0..8], 1);
+    assert m[5] == 70 and m[6] == 82 and m[7] == 10;
+    assert magic_ok(m[0..8], 1) and magic_ok(m[0..8], 0) == false;
+    // any single changed byte is refused, the first and the last included
+    m[0] = 85;
+    assert magic_ok(m[0..8], 1) == false;
+    m[0] = 84;
+    m[7] = 13;
+    assert magic_ok(m[0..8], 1) == false;
+    m[7] = 10;
+    assert magic_ok(m[0..8], 1);
+}
+
+test ft_row_at_puts_row_i_after_the_header_in_34_byte_steps {
+    assert ft_row_at(0) == FT_HDR and ft_row_at(0) == 16;
+    assert ft_row_at(1) == 50;
+    assert ft_row_at(FT_MAX - 1) == FT_HDR + 31 * FT_ROW;
+    assert ft_row_at(FT_MAX) == FT_OFF_CRC;
+}
+
+test ft_seal_makes_a_changed_table_check_again {
+    var t : [1108]u8 = undefined;
+    t_two(t[0..1108]);
+    assert ft_check(t[0..1108]) == FT_OK;
+    t[ft_row_at(0) + FP_BYTES] = 65;
+    assert ft_check(t[0..1108]) == FT_CRC;
+    ft_seal(t[0..1108]);
+    assert ft_check(t[0..1108]) == FT_OK;
+    assert get_u32le(t[0..1108], FT_OFF_CRC) == crc32(t[0..1108], FT_OFF_CRC);
+    // only the four CRC bytes move
+    const before : u8 = t[FT_OFF_CRC - 1];
+    ft_seal(t[0..1108]);
+    assert t[FT_OFF_CRC - 1] == before and ft_check(t[0..1108]) == FT_OK;
+}
+
+test ft_fp_at_gives_the_fingerprint_of_a_row_and_refuses_what_is_not_one {
+    var t : [1108]u8 = undefined;
+    t_two(t[0..1108]);
+    var out : [10]u8 = undefined;
+    assert ft_fp_at(t[0..1108], 0, out[0..10]) and same_bytes(out[0..10], T_FP[0..10]);
+    assert ft_fp_at(t[0..1108], 1, out[0..10]) and out[0] == 50 and out[9] == 59;
+    // row 2 is past the count (2), a short output is refused, and out is left alone
+    out[0] = 77;
+    assert ft_fp_at(t[0..1108], 2, out[0..10]) == false and out[0] == 77;
+    assert ft_fp_at(t[0..1108], 0, out[0..9]) == false;
+    assert ft_fp_at(t[0..1108], 31, out[0..10]) == false;
+}
+
+test fk_used_and_fk_find_see_a_slot_by_any_nonzero_byte {
+    var keys : [2400]u8 = undefined;
+    zero_fill(keys[0..2400]);
+    assert fk_used(keys[0..2400], 0) == false and fk_used(keys[0..2400], 31) == false;
+    // the last byte of the last slot alone makes it used; the slot before stays free
+    keys[31 * FK_SLOT + FK_SLOT - 1] = 1;
+    assert fk_used(keys[0..2400], 31) and fk_used(keys[0..2400], 30) == false;
+    keys[31 * FK_SLOT + FK_SLOT - 1] = 0;
+    keys[FK_SLOT] = 9;
+    assert fk_used(keys[0..2400], 1) and fk_used(keys[0..2400], 0) == false;
+    keys[FK_SLOT] = 0;
+    // a stored fingerprint is found at its slot, the last slot included
+    var fp : [10]u8 = [3, 3, 3, 3, 3, 3, 3, 3, 3, 4];
+    var i : usize = 0;
+    while (i < FP_BYTES) {
+        keys[31 * FK_SLOT + i] = fp[i];
+        keys[31 * FK_SLOT + FP_BYTES + 1] = 4;
+        i = i + 1;
+    }
+    assert fk_find(keys[0..2400], fp[0..10]) == 31;
+    fp[9] = 5;
+    assert fk_find(keys[0..2400], fp[0..10]) == FT_MAX;
+    // a short key buffer or a short fingerprint finds nothing
+    fp[9] = 4;
+    assert fk_find(keys[0..2399], fp[0..10]) == FT_MAX;
+    assert fk_find(keys[0..2400], fp[0..9]) == FT_MAX;
+    // a free slot never matches, even for an all-zero fingerprint
+    var zf : [10]u8 = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    assert fk_find(keys[0..2400], zf[0..10]) == FT_MAX;
+}
+
+test put_str_writes_one_length_prefixed_key_equals_value_and_returns_the_end {
+    var out : [16]u8 = [255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255];
+    const val : [4]u8 = [97, 98, 99, 100];
+    const end : usize = put_str(out[0..16], 2, "fp", val[0..4], 2);
+    assert end == 8;
+    assert out[2] == 5 and out[3] == 102 and out[4] == 112 and out[5] == 61 and out[6] == 97 and out[7] == 98;
+    assert out[1] == 255 and out[8] == 255;
+    // an empty value is "key=" with length 3
+    const e2 : usize = put_str(out[0..16], 8, "ab", val[0..4], 0);
+    assert e2 == 12 and out[8] == 3 and out[9] == 97 and out[10] == 98 and out[11] == 61 and out[12] == 255;
+}
+
+test same_range_uses_each_side_s_own_offset {
+    const a : [6]u8 = [1, 2, 3, 4, 5, 6];
+    const b : [6]u8 = [9, 9, 3, 4, 5, 9];
+    assert same_range(a[0..6], 2, b[0..6], 2, 3);
+    const c : [4]u8 = [3, 4, 5, 0];
+    assert same_range(a[0..6], 2, c[0..4], 0, 3);
+    assert same_range(a[0..6], 2, c[0..4], 1, 3) == false;
+    assert same_range(c[0..4], 0, a[0..6], 2, 3);
+    assert same_range(c[0..4], 0, a[0..6], 3, 3) == false;
+}

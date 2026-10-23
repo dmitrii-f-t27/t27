@@ -580,3 +580,61 @@ test fv_an_empty_field_shows_a_hint_marked_as_a_hint_and_a_typed_one_shows_none 
     // a buffer too short for the prefix and the example is never overrun
     assert fv_field_hint(0, "192.168.1.10:47727", o[0..20]) == 0;
 }
+
+test fv_get32_reads_little_endian_and_round_trips_put32_at_the_limits {
+    var b : [12]u8 = undefined;
+    b[3] = 1; b[4] = 2; b[5] = 0; b[6] = 0; b[7] = 0;
+    assert fv_get32(b[0..12], 3) == 513;
+    b[3] = 0x78; b[4] = 0x56; b[5] = 0x34; b[6] = 0x12;
+    assert fv_get32(b[0..12], 3) == 0x12345678;
+    b[3] = 255; b[4] = 255; b[5] = 255; b[6] = 255;
+    assert fv_get32(b[0..12], 3) == 4294967295;
+    fv_put32(b[0..12], 7, 0);
+    assert fv_get32(b[0..12], 7) == 0;
+    fv_put32(b[0..12], 7, 4294967296);
+    assert fv_get32(b[0..12], 7) == 4294967295;
+    fv_put32(b[0..12], 0, 0x80000001);
+    assert fv_get32(b[0..12], 0) == 0x80000001;
+    assert b[0] == 1 and b[3] == 0x80;
+}
+
+test fv_hex_gives_lowercase_digits_at_the_boundaries {
+    assert fv_hex(0) == 48;
+    assert fv_hex(9) == 57;
+    assert fv_hex(10) == 97;
+    assert fv_hex(15) == 102;
+}
+
+test fv_check_writes_the_three_byte_check_mark_and_returns_the_next_offset {
+    var b : [8]u8 = undefined;
+    b[0] = 7; b[5] = 9;
+    assert fv_check(b[0..8], 1) == 4;
+    assert b[0] == 7 and b[1] == 226 and b[2] == 156 and b[3] == 147 and b[5] == 9;
+    assert fv_check(b[0..8], 0) == 3;
+    assert b[0] == 226;
+}
+
+test fv_trust_tag_put_writes_the_mark_for_each_state_after_the_given_offset {
+    var o : [40]u8 = undefined;
+    var n : usize = fv_trust_tag_put(o[0..40], 0, FV_T_VERIFIED);
+    assert n == 4 and o[0] == 32 and o[1] == 226 and o[2] == 156 and o[3] == 147;
+    n = fv_trust_tag_put(o[0..40], 2, FV_T_UNVERIFIED);
+    assert fv_eq(o[2..40], n - 2, " not verified");
+    assert n == 2 + 13;
+    n = fv_trust_tag_put(o[0..40], 5, FV_T_MISMATCH);
+    assert fv_eq(o[5..40], n - 5, " key mismatch!");
+    assert n == 5 + 14;
+    // an unknown state reads as not verified
+    n = fv_trust_tag_put(o[0..40], 0, 77);
+    assert fv_eq(o[0..40], n, " not verified");
+}
+
+test fv_in_is_half_open_on_every_edge {
+    assert fv_in(10.0, 20.0, 10.0, 20.0, 5.0, 5.0);
+    assert fv_in(14.9, 24.9, 10.0, 20.0, 5.0, 5.0);
+    assert !fv_in(15.0, 22.0, 10.0, 20.0, 5.0, 5.0);
+    assert !fv_in(12.0, 25.0, 10.0, 20.0, 5.0, 5.0);
+    assert !fv_in(9.9, 22.0, 10.0, 20.0, 5.0, 5.0);
+    assert !fv_in(12.0, 19.9, 10.0, 20.0, 5.0, 5.0);
+    assert !fv_in(12.0, 22.0, 10.0, 20.0, 0.0, 5.0);
+}

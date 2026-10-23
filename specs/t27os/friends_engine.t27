@@ -1367,3 +1367,119 @@ test fe_an_accepted_invitation_is_a_friend_with_its_nickname_and_only_once {
     assert fe_accept(cl[0..8000], own[0..10], "", 0, 1000) == FN_SELF and cl[FV_COUNT] == 1;
     assert fe_accept(cl[0..8000], own[0..9], "", 0, 1000) == FN_DAMAGED;
 }
+
+test fe_hexc_gives_lower_case_hex_digits_at_both_edges {
+    assert fe_hexc(0) == 48 and fe_hexc(9) == 57;
+    assert fe_hexc(10) == 97 and fe_hexc(15) == 102;
+}
+
+test fe_put_u64_at_writes_eight_little_endian_bytes_at_the_offset_only {
+    var b : [12]u8 = [9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9];
+    fe_put_u64_at(b[0..12], 2, 0x0102030405060708);
+    assert b[0] == 9 and b[1] == 9 and b[2] == 8 and b[3] == 7 and b[9] == 1 and b[10] == 9 and b[11] == 9;
+    assert get_u64(b[0..12], 2) == 0x0102030405060708;
+    fe_put_u64_at(b[0..12], 4, 0);
+    assert get_u64(b[0..12], 4) == 0 and b[2] == 8 and b[3] == 7;
+}
+
+test fe_ss_file_follows_the_friends_file_slot {
+    var cl : [8000]u8 = undefined;
+    fe_t_blank(cl[0..8000]);
+    assert fe_ss_file(cl[0..8000]) == false;
+    fe_ss(cl[0..8000], FE_S_FILE, 1);
+    assert fe_ss_file(cl[0..8000]);
+    fe_ss(cl[0..8000], FE_S_FILE, 0);
+    assert fe_ss_file(cl[0..8000]) == false;
+    fe_ss(cl[0..8000], FE_S_PORT, 5);
+    assert fe_ss_file(cl[0..8000]) == false;
+}
+
+test fe_ft_clear_empties_exactly_the_friends_table_block {
+    var cl : [8000]u8 = undefined;
+    fe_t_friends(cl[0..8000], 3);
+    cl[FE_FT - 1] = 77;
+    cl[FE_FT + FT_LEN] = 55;
+    cl[FE_FT + FT_LEN + 1] = 78;
+    assert ft_count(cl[FE_FT..FE_FT + FT_LEN]) == 3;
+    fe_ft_clear(cl[0..8000]);
+    assert cl[FE_FT] == 0 and cl[FE_FT + FT_HDR] == 0 and cl[FE_FT + FT_LEN] == 0;
+    assert cl[FE_FT - 1] == 77 and cl[FE_FT + FT_LEN + 1] == 78;
+    assert ft_count(cl[FE_FT..FE_FT + FT_LEN]) == 0;
+}
+
+test fe_row_of_fp_finds_first_and_last_shown_rows_and_nothing_else {
+    var cl : [8000]u8 = undefined;
+    fe_t_friends(cl[0..8000], 9);
+    fe_snapshot(cl[0..8000], 1000);
+    assert cl[FV_SHOWN] == 8;
+    var fp : [10]u8 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    assert fe_row_of_fp(cl[0..8000], fp[0..10]) == 0;
+    fp[0] = 8;
+    assert fe_row_of_fp(cl[0..8000], fp[0..10]) == 7;
+    // friend 9 exists but is not in view
+    fp[0] = 9;
+    assert fe_row_of_fp(cl[0..8000], fp[0..10]) == FV_ROWS_SNAP;
+    // one byte off at the very end of the fingerprint
+    fp[0] = 3;
+    fp[9] = 11;
+    assert fe_row_of_fp(cl[0..8000], fp[0..10]) == FV_ROWS_SNAP;
+    // scrolled: friend 9 is now in view as row 3
+    cl[FV_SCROLL] = 5;
+    fe_snapshot(cl[0..8000], 1000);
+    fp[9] = 10;
+    fp[0] = 9;
+    assert fe_row_of_fp(cl[0..8000], fp[0..10]) == 3;
+    // an empty list holds nobody
+    fe_t_friends(cl[0..8000], 0);
+    fe_snapshot(cl[0..8000], 1000);
+    fp[0] = 1;
+    assert fe_row_of_fp(cl[0..8000], fp[0..10]) == FV_ROWS_SNAP;
+}
+
+test fe_row_copy_shows_an_online_friend_with_address_nickname_and_age {
+    var cl : [8000]u8 = undefined;
+    fe_t_friends(cl[0..8000], 2);
+    var fp : [10]u8 = [2, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    const nk : [24]u8 = [97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120];
+    assert ft_set_nick(cl[FE_FT..FE_FT + FT_LEN], fp[0..10], nk[0..24], 24);
+    // friend 2 (table row 1): met at 4000 ms, 192.168.1.10, port 47727
+    const sa : usize = FE_SEEN + 1 * FE_SEEN_LEN;
+    put_u64(cl[0..8000], sa, 4000);
+    fv_put32(cl[0..8000], sa + 8, 3232235786);
+    fv_put32(cl[0..8000], sa + 12, 47727);
+    fe_snapshot(cl[0..8000], 4000);
+    cl[fv_row_at(1) + FR_REASON] = @as(u8, @intCast(FV_R_ONLINE));
+    fe_row_copy(cl[0..8000], 1, 9999);
+    const r : usize = fv_row_at(1);
+    assert cl[r + FR_FP] == 2 and cl[r + FR_FP + 9] == 10;
+    assert cl[r + FR_NICKLEN] == 24 and cl[r + FR_NICK] == 97 and cl[r + FR_NICK + 23] == 120;
+    assert cl[r + FR_ONLINE] == 1;
+    assert cl[r + FR_IP] == 192 and cl[r + FR_IP + 1] == 168 and cl[r + FR_IP + 2] == 1 and cl[r + FR_IP + 3] == 10;
+    assert cl[r + FR_PORT] == 186 and cl[r + FR_PORT + 1] == 111;
+    assert fv_get32(cl[0..8000], r + FR_AGO) == 5;
+}
+
+test fe_row_copy_shows_an_unmet_or_offline_friend_without_an_address {
+    var cl : [8000]u8 = undefined;
+    fe_t_friends(cl[0..8000], 2);
+    // stale bytes in the snapshot row must be cleared
+    const r : usize = fv_row_at(0);
+    cl[r + FR_NICK + 5] = 66;
+    cl[r + FR_IP] = 9;
+    cl[r + FR_PORT + 1] = 9;
+    cl[r + FR_ONLINE] = 1;
+    cl[r + FR_REASON] = @as(u8, @intCast(FV_R_ONLINE));
+    // never met: the age is FV_NEVER even when the reason says online
+    fe_row_copy(cl[0..8000], 0, 5000);
+    assert cl[r + FR_ONLINE] == 0 and cl[r + FR_IP] == 0 and cl[r + FR_PORT + 1] == 0;
+    assert cl[r + FR_NICKLEN] == 0 and cl[r + FR_NICK + 5] == 0;
+    assert fv_get32(cl[0..8000], r + FR_AGO) == FV_NEVER;
+    // met in the past but gone: offline, the age counts seconds
+    put_u64(cl[0..8000], FE_SEEN, 1500);
+    cl[r + FR_REASON] = @as(u8, @intCast(FV_R_GONE));
+    fe_row_copy(cl[0..8000], 0, 5000);
+    assert cl[r + FR_ONLINE] == 0 and fv_get32(cl[0..8000], r + FR_AGO) == 3;
+    // a clock behind the last meeting shows 0, not a wrap-around
+    fe_row_copy(cl[0..8000], 0, 1000);
+    assert fv_get32(cl[0..8000], r + FR_AGO) == 0;
+}

@@ -2189,3 +2189,381 @@ test the_download_comes_from_the_owner_the_manifest_names {
     const e : str = "\"https://github.com/dmitrii-f-t27/t27/releases-evil/download/t27os-v0.1.1-b4470/T27OS-0.1.1.zip\"";
     assert(url_is_expected(e, ((1 as u64) << 32) | ((e.len - 2) as u64), v, 4470, false) == false);
 }
+
+test put_number_writes_decimal_and_clips_at_the_cap_but_keeps_counting {
+    var out : [16]u8 = undefined;
+    var z : usize = 0;
+    while (z < 16) { out[z] = 0; z += 1; }
+    assert(put_number(out[0..16], 16, 0, 0) == 1);
+    assert(out[0] == '0' and out[1] == 0);
+    assert(put_number(out[0..16], 16, 1, 9) == 2);
+    assert(out[1] == '9');
+    assert(put_number(out[0..16], 16, 0, 10) == 2);
+    assert(out[0] == '1' and out[1] == '0');
+    assert(put_number(out[0..16], 16, 0, 999999) == 6);
+    assert(out[0] == '9' and out[5] == '9' and out[6] == 0);
+    assert(put_number(out[0..16], 16, 2, 4294967295) == 12);
+    assert(out[2] == '4' and out[3] == '2' and out[4] == '9' and out[11] == '5');
+    z = 0;
+    while (z < 16) { out[z] = 0; z += 1; }
+    assert(put_number(out[0..16], 2, 0, 12345) == 5);
+    assert(out[0] == '1' and out[1] == '2' and out[2] == 0);
+    assert(put_number(out[0..16], 0, 4, 7) == 5);
+    assert(out[4] == 0);
+}
+
+test read_part_returns_the_part_and_the_cursor_and_refuses_bad_parts {
+    assert(read_part("12.3", 4, 0) == ((12 as u64) << 32 | 2));
+    assert(read_part("12.3", 4, 3) == ((3 as u64) << 32 | 4));
+    assert(read_part("12.3", 4, 4) == NO_VERSION);
+    assert(read_part("12.3", 4, 9) == NO_VERSION);
+    assert(read_part("0", 1, 0) == 1);
+    assert(read_part("01", 2, 0) == NO_VERSION);
+    assert(read_part("00", 2, 0) == NO_VERSION);
+    assert(read_part("123456", 6, 0) == ((123456 as u64) << 32 | 6));
+    assert(read_part("1234567", 7, 0) == NO_VERSION);
+    assert(read_part("123", 2, 0) == ((12 as u64) << 32 | 2));
+    assert(read_part(".5", 2, 0) == NO_VERSION);
+    assert(read_part("a1", 2, 0) == NO_VERSION);
+    assert(read_part("\xd0\xb81", 3, 0) == NO_VERSION);
+}
+
+test line_start_and_key_match_respect_the_bounds {
+    const t : str = "ab\ncd";
+    assert(at_line_start(t, 0));
+    assert(at_line_start(t, 1) == false);
+    assert(at_line_start(t, 2) == false);
+    assert(at_line_start(t, 3));
+    assert(at_line_start(t, 4) == false);
+    assert(starts_here(t, 5, 3, "cd", 2));
+    assert(starts_here(t, 5, 4, "cd", 2) == false);
+    assert(starts_here(t, 4, 3, "cd", 2) == false);
+    assert(starts_here(t, 5, 3, "ce", 2) == false);
+    assert(starts_here(t, 5, 0, "ab\nc", 4));
+    assert(starts_here(t, 5, 5, "", 0));
+    assert(starts_here(t, 5, 0, "abcde", 5) == false);
+}
+
+test field_num_reads_up_to_nine_digits_on_a_line_that_starts_with_the_key {
+    const a : str = "pub const BUILD : u32 = 4460;\n";
+    assert(field_num(a, a.len, KEY_BUILD, KEY_BUILD.len) == 4460);
+    const z : str = "pub const BUILD : u32 = 0;\n";
+    assert(field_num(z, z.len, KEY_BUILD, KEY_BUILD.len) == 0);
+    const nine : str = "pub const BUILD : u32 = 123456789;\n";
+    assert(field_num(nine, nine.len, KEY_BUILD, KEY_BUILD.len) == 123456789);
+    const ten : str = "pub const BUILD : u32 = 1234567890;\n";
+    assert(field_num(ten, ten.len, KEY_BUILD, KEY_BUILD.len) == NO_FIELD);
+    const none : str = "pub const BUILD : u32 = ;\n";
+    assert(field_num(none, none.len, KEY_BUILD, KEY_BUILD.len) == NO_FIELD);
+    const indent : str = " pub const BUILD : u32 = 7;\n";
+    assert(field_num(indent, indent.len, KEY_BUILD, KEY_BUILD.len) == NO_FIELD);
+    const second : str = "module X;\npub const BUILD : u32 = 7;\n";
+    assert(field_num(second, second.len, KEY_BUILD, KEY_BUILD.len) == 7);
+    const bare : str = "pub const BUILD : u32 = 31";
+    assert(field_num(bare, bare.len, KEY_BUILD, KEY_BUILD.len) == 31);
+    assert(field_num(bare, bare.len - 1, KEY_BUILD, KEY_BUILD.len) == 3);
+    assert(field_num(bare, KEY_BUILD.len, KEY_BUILD, KEY_BUILD.len) == NO_FIELD);
+    assert(field_num("", 0, KEY_BUILD, KEY_BUILD.len) == NO_FIELD);
+}
+
+test a_hex_run_takes_only_lowercase_digits_and_checks_the_edges {
+    assert(rl_hex_run("09af", 0, 4));
+    assert(rl_hex_run("09af", 1, 2));
+    assert(rl_hex_run("09aF", 0, 4) == false);
+    assert(rl_hex_run("09aF", 0, 3));
+    assert(rl_hex_run("/", 0, 1) == false);
+    assert(rl_hex_run(":", 0, 1) == false);
+    assert(rl_hex_run("`", 0, 1) == false);
+    assert(rl_hex_run("g", 0, 1) == false);
+    assert(rl_hex_run("0", 0, 0));
+    assert(rl_hex_run("\xd0\xb0", 0, 2) == false);
+}
+
+test owner_name_gives_each_accepted_owner_and_the_upstream_for_anything_else {
+    assert(owner_name(OW_UPSTREAM) == OWNER_UPSTREAM);
+    assert(owner_name(OW_RENAMED) == OWNER_RENAMED);
+    assert(owner_name(OW_FORK) == OWNER_FORK);
+    assert(owner_name(OW_COUNT) == OWNER_UPSTREAM);
+    assert(owner_name(OW_NONE) == OWNER_UPSTREAM);
+}
+
+test rl_put_and_rl_line_clip_at_the_cap_and_keep_counting {
+    var out : [8]u8 = undefined;
+    var z : usize = 0;
+    while (z < 8) { out[z] = 0; z += 1; }
+    assert(rl_put(out[0..8], 8, 1, "ab") == 3);
+    assert(out[0] == 0 and out[1] == 'a' and out[2] == 'b' and out[3] == 0);
+    assert(rl_put(out[0..8], 3, 0, "wxyz") == 4);
+    assert(out[0] == 'w' and out[2] == 'y' and out[3] == 0);
+    assert(rl_put(out[0..8], 8, 5, "") == 5);
+    assert(rl_line(out[0..8], 8, 0, "q") == 2);
+    assert(out[0] == 'q' and out[1] == 10);
+    z = 0;
+    while (z < 8) { out[z] = 0; z += 1; }
+    assert(rl_line(out[0..8], 2, 0, "ab") == 3);
+    assert(out[0] == 'a' and out[1] == 'b' and out[2] == 0);
+    assert(rl_line(out[0..8], 3, 0, "ab") == 3);
+    assert(out[2] == 10);
+    assert(rl_line(out[0..8], 8, 4, "") == 5);
+    assert(out[4] == 10);
+}
+
+test put_slice_copies_the_bytes_that_fit_and_returns_the_full_end {
+    var out : [8]u8 = undefined;
+    var z : usize = 0;
+    while (z < 8) { out[z] = 0; z += 1; }
+    const b : str = "wxyz";
+    assert(put_slice(out[0..8], 8, 2, b, 3) == 5);
+    assert(out[1] == 0 and out[2] == 'w' and out[3] == 'x' and out[4] == 'y' and out[5] == 0);
+    z = 0;
+    while (z < 8) { out[z] = 0; z += 1; }
+    assert(put_slice(out[0..8], 4, 2, b, 4) == 6);
+    assert(out[2] == 'w' and out[3] == 'x' and out[4] == 0);
+    assert(put_slice(out[0..8], 8, 7, b, 0) == 7);
+}
+
+test the_tag_head_zip_name_and_prefix_are_written_exactly {
+    var out : [128]u8 = undefined;
+    const v : u64 = pack_version(0, 1, 3);
+    var n : usize = put_tag_head(out[0..128], 128, 0, v);
+    assert(n == 14 and rl_has(out[0..128], n, "t27os-v0.1.3-b"));
+    n = put_tag_head(out[0..128], 128, 0, pack_version(12, 345, 999999));
+    assert(n == 22 and rl_has(out[0..128], n, "t27os-v12.345.999999-b"));
+    n = put_zip_name(out[0..128], 128, 0, v);
+    assert(n == 15 and rl_has(out[0..128], n, "T27OS-0.1.3.zip"));
+    n = put_zip_name(out[0..128], 128, 3, pack_version(10, 0, 20));
+    assert(n == 3 + 17 and find_pos(out[0..128], n, "T27OS-10.0.20.zip") == 3);
+    n = put_prefix(out[0..128], 128, 0, OW_UPSTREAM);
+    assert(n == URL_PREFIX_LEN and rl_has(out[0..128], n, "https://github.com/gHashTag/t27/releases/"));
+    n = put_prefix(out[0..128], 128, 0, OW_RENAMED);
+    assert(n == owner_prefix_len(OW_RENAMED) and rl_has(out[0..128], n, "https://github.com/Trinity-S-AI-DNA/t27/releases/"));
+    n = put_prefix(out[0..128], 128, 0, OW_FORK);
+    assert(n == owner_prefix_len(OW_FORK) and rl_has(out[0..128], n, "https://github.com/dmitrii-f-t27/t27/releases/"));
+    n = put_prefix(out[0..128], 128, 0, OW_NONE);
+    assert(n == URL_PREFIX_LEN and rl_has(out[0..128], n, "https://github.com/gHashTag/t27/releases/"));
+    assert(put_prefix(out[0..128], 10, 0, OW_FORK) == owner_prefix_len(OW_FORK));
+}
+
+test the_download_base_and_the_zip_and_notes_addresses_follow_the_owner {
+    var out : [256]u8 = undefined;
+    const v : u64 = pack_version(0, 1, 1);
+    var n : usize = put_base_of(out[0..256], 256, 0, v, 4470, OW_FORK);
+    assert(n > 0 and rl_has(out[0..256], n, "https://github.com/dmitrii-f-t27/t27/releases/download/t27os-v0.1.1-b4470/"));
+    assert(out[n - 1] == '/' and find_pos(out[0..256], n, "https") == 0 and find_pos(out[0..256], n, "/download/") == owner_prefix_len(OW_FORK) - 1);
+    n = put_base(out[0..256], 256, 0, v, 4470);
+    assert(rl_has(out[0..256], n, "https://github.com/gHashTag/t27/releases/download/t27os-v0.1.1-b4470/"));
+    assert(n == URL_PREFIX_LEN + 9 + 18 + 1);
+    n = put_zip_url_of(out[0..256], 256, 0, v, 4470, OW_RENAMED);
+    assert(find_pos(out[0..256], n, "https://github.com/Trinity-S-AI-DNA/t27/releases/download/t27os-v0.1.1-b4470/T27OS-0.1.1.zip") == 0);
+    assert(find_pos(out[0..256], n, "T27OS-0.1.1.zip") + 15 == n);
+    n = put_zip_url(out[0..256], 256, 0, v, 4470);
+    assert(find_pos(out[0..256], n, "https://github.com/gHashTag/t27/releases/download/t27os-v0.1.1-b4470/T27OS-0.1.1.zip") == 0);
+    assert(find_pos(out[0..256], n, "T27OS-0.1.1.zip") + 15 == n);
+    n = put_notes_url_of(out[0..256], 256, 0, v, 4470, OW_FORK);
+    assert(find_pos(out[0..256], n, "https://github.com/dmitrii-f-t27/t27/releases/tag/t27os-v0.1.1-b4470") == 0);
+    assert(find_pos(out[0..256], n, "-b4470") + 6 == n);
+    n = put_notes_url(out[0..256], 256, 4, v, 7);
+    assert(find_pos(out[0..256], n, "https://github.com/gHashTag/t27/releases/tag/t27os-v0.1.1-b7") == 4);
+    assert(find_pos(out[0..256], n, "-b7") + 3 == n);
+}
+
+test rl_eat_num_takes_exactly_the_wanted_number_without_a_leading_zero {
+    assert(rl_eat_num("4460/x", 6, 0, 4460) == 4);
+    assert(rl_eat_num("4460/x", 6, 0, 4461) == NO_FIELD);
+    assert(rl_eat_num("4460/x", 6, 0, 446) == NO_FIELD);
+    assert(rl_eat_num("04460", 5, 0, 4460) == NO_FIELD);
+    assert(rl_eat_num("0", 1, 0, 0) == 1);
+    assert(rl_eat_num("00", 2, 0, 0) == NO_FIELD);
+    assert(rl_eat_num("x", 1, 0, 0) == NO_FIELD);
+    assert(rl_eat_num("44601", 4, 0, 4460) == 4);
+    assert(rl_eat_num("-b4460", 6, 2, 4460) == 6);
+    assert(rl_eat_num("1234567890", 10, 0, 123456789) == 9);
+    assert(rl_eat_num("1234567890", 10, 0, 1234567890) == NO_FIELD);
+}
+
+test rl_eat_semver_takes_exactly_the_wanted_version_and_returns_the_end {
+    const v : u64 = pack_version(0, 1, 3);
+    assert(rl_eat_semver("0.1.3-b", 7, 0, v) == 5);
+    assert(rl_eat_semver("0.1.4-b", 7, 0, v) == NO_FIELD);
+    assert(rl_eat_semver("0.2.3-b", 7, 0, v) == NO_FIELD);
+    assert(rl_eat_semver("1.1.3-b", 7, 0, v) == NO_FIELD);
+    assert(rl_eat_semver("0.1", 3, 0, v) == NO_FIELD);
+    assert(rl_eat_semver("0.1.3", 4, 0, v) == NO_FIELD);
+    assert(rl_eat_semver("0,1.3", 5, 0, v) == NO_FIELD);
+    assert(rl_eat_semver("00.1.3", 6, 0, v) == NO_FIELD);
+    assert(rl_eat_semver("10.20.30x", 9, 0, pack_version(10, 20, 30)) == 8);
+    assert(rl_eat_semver("x1.2.3", 6, 1, pack_version(1, 2, 3)) == 6);
+    assert(rl_eat_semver("0.1.3", 5, 0, v) == 5);
+}
+
+test a_hash_field_is_true_only_for_a_present_field_of_64_lowercase_hex {
+    var sums : [1024]u8 = undefined;
+    const v : u64 = pack_version(0, 1, 1);
+    const sn : usize = rl_test_sums(sums[0..1024], 1024, v, 'a', 'b', 'd', 'e', 'f');
+    var out : [2048]u8 = undefined;
+    const n : usize = manifest_from_sums(out[0..2048], 2048, v, 4460, sums[0..1024], sn);
+    assert(rl_hash_field(out[0..2048], n, KEY_SHA));
+    assert(rl_hash_field(out[0..2048], n, KEY_T27B));
+    assert(rl_hash_field(out[0..2048], n, KEY_T27C));
+    assert(rl_hash_field(out[0..2048], n, KEY_TRI));
+    assert(rl_hash_field(out[0..2048], n, KEY_PTY));
+    assert(rl_hash_field(out[0..2048], n, KEY_MIN) == false);
+    assert(rl_hash_field(out[0..2048], n, KEY_COMMIT) == false);
+    assert(rl_hash_field(out[0..2048], 0, KEY_SHA) == false);
+    assert(rl_hash_field("module X;\n", 10, KEY_SHA) == false);
+    const p : usize = find_pos(out[0..2048], n, KEY_T27C) + KEY_T27C.len + 1;
+    out[p + 10] = 'A';
+    assert(rl_hash_field(out[0..2048], n, KEY_T27C) == false);
+    assert(rl_hash_field(out[0..2048], n, KEY_TRI));
+    out[p + 10] = 'd';
+    out[p + 63] = '"';
+    assert(rl_hash_field(out[0..2048], n, KEY_T27C) == false);
+}
+
+test the_sums_rows_are_found_by_index_and_name_and_each_digest_is_its_own {
+    var sums : [1024]u8 = undefined;
+    const v : u64 = pack_version(0, 1, 1);
+    const sn : usize = rl_test_sums(sums[0..1024], 1024, v, 'a', 'b', 'd', 'e', 'f');
+    const r0 : u64 = rl_row(sums[0..1024], sn, v, 0);
+    const r1 : u64 = rl_row(sums[0..1024], sn, v, 1);
+    const r2 : u64 = rl_row(sums[0..1024], sn, v, 2);
+    const r3 : u64 = rl_row(sums[0..1024], sn, v, 3);
+    const r4 : u64 = rl_row(sums[0..1024], sn, v, 4);
+    assert(r0 == 48);
+    assert(sums[r0 as usize] == 'a' and sums[r1 as usize] == 'b' and sums[r2 as usize] == 'd');
+    assert(sums[r3 as usize] == 'e' and sums[r4 as usize] == 'f');
+    assert(r0 < r1 and r1 < r2 and r2 < r3 and r3 < r4);
+    assert(rl_row(sums[0..1024], sn, v, 9) == r4);
+    assert(rl_row(sums[0..1024], sn, pack_version(0, 1, 2), 0) == NO_FIELD);
+    assert(rl_row(sums[0..1024], sn, v, 1) == sums_row(sums[0..1024], sn, A_T27B));
+    // a cut file loses the last row
+    assert(rl_row(sums[0..1024], r4 as usize + 70, v, 4) == NO_FIELD);
+    assert(rl_row(sums[0..1024], r4 as usize + 66 + A_PTY.len, v, 4) == r4);
+    assert(rl_row(sums[0..1024], 0, v, 2) == NO_FIELD);
+}
+
+test the_manifest_key_of_each_row_matches_the_row_order {
+    assert(rl_row_key(0) == KEY_SHA);
+    assert(rl_row_key(1) == KEY_T27B);
+    assert(rl_row_key(2) == KEY_T27C);
+    assert(rl_row_key(3) == KEY_TRI);
+    assert(rl_row_key(4) == KEY_PTY);
+    assert(rl_row_key(ROWS_ALL) == KEY_PTY);
+}
+
+test the_commit_line_needs_forty_lowercase_hex_digits_and_a_line_end {
+    const c : str = "COMMIT cccccccccccccccccccccccccccccccccccccccc";
+    assert(sums_commit(c, 47) == 7);
+    assert(sums_commit(c, 46) == NO_FIELD);
+    assert(sums_commit("a\nCOMMIT cccccccccccccccccccccccccccccccccccccccc\nz", 50) == 9);
+    assert(sums_commit(" COMMIT cccccccccccccccccccccccccccccccccccccccc", 48) == NO_FIELD);
+    assert(sums_commit("COMMIT cccccccccccccccccccccccccccccccccccccccc0", 48) == NO_FIELD);
+    assert(sums_commit("COMMIT ccccccccccccccccccccccccccccccccccccccCc", 47) == NO_FIELD);
+    assert(sums_commit("COMMIT cccccccccccccccccccccccccccccccccccccccC", 47) == NO_FIELD);
+    assert(sums_commit("commit cccccccccccccccccccccccccccccccccccccccc", 47) == NO_FIELD);
+    assert(sums_commit("COMMIT\tcccccccccccccccccccccccccccccccccccccccc", 47) == NO_FIELD);
+    assert(sums_commit("", 0) == NO_FIELD);
+    var sums : [1024]u8 = undefined;
+    const sn : usize = rl_test_sums(sums[0..1024], 1024, pack_version(0, 1, 1), 'a', 'b', 'd', 'e', 'f');
+    assert(sums_commit(sums[0..1024], sn) == 7);
+}
+
+test a_sha_line_writes_key_quote_64_digits_quote_semicolon_newline {
+    var sums : [1024]u8 = undefined;
+    const v : u64 = pack_version(0, 1, 1);
+    const sn : usize = rl_test_sums(sums[0..1024], 1024, v, 'a', 'b', 'd', 'e', 'f');
+    const rb : u64 = rl_row(sums[0..1024], sn, v, 1);
+    var out : [256]u8 = undefined;
+    const n : usize = rl_sha_line(out[0..256], 256, 0, KEY_T27B, sums[0..1024], rb);
+    assert(n == KEY_T27B.len + 1 + 64 + 3);
+    assert(find_pos(out[0..256], n, KEY_T27B) == 0);
+    assert(out[KEY_T27B.len] == 34);
+    var i : usize = 0;
+    while (i < 64) {
+        assert(out[KEY_T27B.len + 1 + i] == 'b');
+        i += 1;
+    }
+    assert(out[n - 3] == 34 and out[n - 2] == ';' and out[n - 1] == 10);
+    var small : [256]u8 = undefined;
+    i = 0;
+    while (i < 256) { small[i] = 0; i += 1; }
+    const m : usize = rl_sha_line(small[0..256], KEY_T27B.len + 5, 0, KEY_T27B, sums[0..1024], rb);
+    assert(m == n);
+    assert(small[KEY_T27B.len + 4] == 'b' and small[KEY_T27B.len + 5] == 0);
+}
+
+test every_failure_reason_has_its_text_and_the_others_have_none {
+    assert(rl_why_text(WHY_MANIFEST) == "the manifest is not valid");
+    assert(rl_why_text(WHY_DOWNLOAD) == "the download failed");
+    assert(rl_why_text(WHY_SHA) == "a sha256 differs from the manifest");
+    assert(rl_why_text(WHY_STAGE) == "unzip or code signature failed");
+    assert(rl_why_text(WHY_COMMIT) == "the toolchain is from another commit");
+    assert(rl_why_text(WHY_NO_COMMIT) == "the toolchain names no commit");
+    assert(rl_why_text(WHY_BUNDLE) == "this copy is not an installed app");
+    assert(rl_why_text(WHY_SWAP) == "the swap failed, the old app stays");
+    assert(rl_why_text(WHY_BROKEN) == "the last update did not start; rolled back");
+    assert(rl_why_text(WHY_NONE) == "");
+    assert(rl_why_text(WHY_OFFLINE) == "");
+    assert(rl_why_text(255) == "");
+}
+
+test the_script_head_exports_the_home_it_is_given_and_makes_the_update_folders {
+    const tail : str = "\"; export PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin; U=$HOME/.t27os/updates; mkdir -p $U/previous $HOME/.t27os/bin; ";
+    var out : [512]u8 = undefined;
+    var n : usize = rl_head(out[0..512], 512, "/Users/x", 8);
+    assert(n == 13 + 8 + tail.len);
+    assert(find_pos(out[0..512], n, "export HOME=\"/Users/x\"; export PATH=/usr/bin:/bin") == 0);
+    assert(find_pos(out[0..512], n, tail) == 21);
+    assert(out[n - 1] == 32);
+    n = rl_head(out[0..512], 512, "/Users/x", 0);
+    assert(n == 13 + tail.len and find_pos(out[0..512], n, "export HOME=\"\"; export PATH") == 0);
+    n = rl_head(out[0..512], 512, "/Users/x", 6);
+    assert(find_pos(out[0..512], n, "export HOME=\"/Users\"; export PATH") == 0);
+    n = rl_head(out[0..512], 512, "/Users/\xd0\xb8", 9);
+    assert(n == 13 + 9 + tail.len);
+    assert(out[20] == 0xd0 and out[21] == 0xb8 and out[22] == 34);
+    assert(rl_head(out[0..512], 10, "/Users/x", 8) == 13 + 8 + tail.len);
+}
+
+test the_server_start_removes_the_stale_label_and_submits_the_server_with_the_toolchain_path {
+    const head : str = "launchctl remove ai.t27.os.pty 2>/dev/null; launchctl submit -l ai.t27.os.pty -- /usr/bin/env PATH=\"";
+    const tail : str = "\" HOME=\"$HOME\" $HOME/.t27os/t27os-pty";
+    var out : [512]u8 = undefined;
+    var n : usize = rl_server_start(out[0..512], 512, 0);
+    assert(n == head.len + SERVER_PATH.len + tail.len);
+    assert(find_pos(out[0..512], n, head) == 0);
+    assert(find_pos(out[0..512], n, SERVER_PATH) == head.len);
+    assert(find_pos(out[0..512], n, tail) == head.len + SERVER_PATH.len);
+    n = rl_server_start(out[0..512], 512, 5);
+    assert(n == 5 + head.len + SERVER_PATH.len + tail.len);
+    assert(find_pos(out[0..512], n, head) == 5);
+    assert(rl_server_start(out[0..512], 20, 0) == head.len + SERVER_PATH.len + tail.len);
+}
+
+test the_server_restart_stops_a_hand_started_server_then_submits_after_a_second {
+    const pre : str = "pkill -x t27os-pty 2>/dev/null; sleep 1; ";
+    var out : [512]u8 = undefined;
+    var st : [512]u8 = undefined;
+    const sn : usize = rl_server_start(st[0..512], 512, 0);
+    var n : usize = rl_server_restart(out[0..512], 512, 0);
+    assert(n == pre.len + sn);
+    assert(find_pos(out[0..512], n, pre) == 0);
+    assert(find_pos(out[0..512], n, "launchctl remove ai.t27.os.pty") == pre.len);
+    n = rl_server_restart(out[0..512], 512, 3);
+    assert(n == 3 + pre.len + sn);
+    assert(find_pos(out[0..512], n, pre) == 3);
+    assert(server_restart_text(out[0..512], 30) == pre.len + sn);
+}
+
+test one_conditional_fetch_names_the_address_the_target_and_its_etag_and_tmp {
+    const want : str = "[ -s D ] || rm -f D.etag; rm -f D.tmp; curl -fsSL --max-time 20 --etag-save D.etag --etag-compare D.etag -o D.tmp U; R=$?; [ -s D.tmp ] && mv -f D.tmp D";
+    var out : [512]u8 = undefined;
+    var n : usize = rl_fetch(out[0..512], 512, 0, "U", "D");
+    assert(n == want.len);
+    assert(rl_has(out[0..512], n, want));
+    n = rl_fetch(out[0..512], 512, 4, "https://x/y", "$U/m.t27");
+    assert(find_pos(out[0..512], n, "[ -s $U/m.t27 ] || rm -f $U/m.t27.etag; rm -f $U/m.t27.tmp; curl") == 4);
+    assert(find_pos(out[0..512], n, "-o $U/m.t27.tmp https://x/y; R=$?; [ -s $U/m.t27.tmp ] && mv -f $U/m.t27.tmp $U/m.t27") + 85 == n);
+    assert(out[n - 1] == '7' and out[n - 2] == '2' and out[n - 3] == 't');
+    assert(rl_fetch(out[0..512], 10, 0, "U", "D") == want.len);
+}

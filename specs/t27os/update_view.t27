@@ -443,3 +443,91 @@ test upv_the_helper_phases_map_to_the_panel_and_an_offer_waits_while_busy {
     assert upv_takes_offer(UPV_S_NONE) and upv_takes_offer(UPV_S_FAILED) and upv_takes_offer(UPV_S_CANCELLED);
     assert upv_takes_offer(UPV_S_FETCH) == false and upv_takes_offer(UPV_S_INSTALL) == false and upv_takes_offer(UPV_S_DONE) == false;
 }
+
+test upv_get32_reads_little_endian_and_covers_the_top_byte {
+    var b : [12]u8 = undefined;
+    var i : usize = 0;
+    while (i < 12) { b[i] = 0; i = i + 1; }
+    assert upv_get32(b[0..12], 0) == 0;
+    b[0] = 1;
+    b[1] = 2;
+    b[2] = 3;
+    b[3] = 4;
+    assert upv_get32(b[0..12], 0) == 67305985;
+    b[3] = 255;
+    b[2] = 255;
+    b[1] = 255;
+    b[0] = 255;
+    assert upv_get32(b[0..12], 0) == 4294967295;
+    assert upv_get32(b[0..12], 4) == 0;
+    b[8] = 128;
+    assert upv_get32(b[0..12], 8) == 128;
+    b[11] = 128;
+    assert upv_get32(b[0..12], 8) == 2147483776;
+}
+
+test upv_get64_joins_two_words_and_round_trips_put64 {
+    var b : [16]u8 = undefined;
+    var i : usize = 0;
+    while (i < 16) { b[i] = 0; i = i + 1; }
+    assert upv_get64(b[0..16], 0) == 0;
+    upv_put64(b[0..16], 0, 4294967296);
+    assert upv_get64(b[0..16], 0) == 4294967296;
+    assert upv_get32(b[0..16], 0) == 0 and upv_get32(b[0..16], 4) == 1;
+    upv_put64(b[0..16], 8, 1397067);
+    assert upv_get64(b[0..16], 8) == 1397067;
+    upv_put64(b[0..16], 8, 1099511627777);
+    assert upv_get64(b[0..16], 8) == 1099511627777;
+    assert upv_get32(b[0..16], 8) == 1 and upv_get32(b[0..16], 12) == 256;
+}
+
+test upv_offer_line_prints_the_version_build_and_cuts_a_long_nick_at_24 {
+    var cl : [8192]u8 = undefined;
+    upv_blank(cl[0..8192]);
+    upv_offer_fixture(cl[0..8192]);
+    var o : [128]u8 = undefined;
+    var n : usize = upv_offer_line(cl[0..8192], o[0..128]);
+    assert upv_eq(o[0..128], n, "available 0.1.3 (build 7068) from t27os");
+    cl[UPV_OMAJ] = 255;
+    cl[UPV_OMIN] = 10;
+    cl[UPV_OPAT] = 0;
+    upv_put32(cl[0..8192], UPV_OBUILD, 4294967295);
+    n = upv_offer_line(cl[0..8192], o[0..128]);
+    assert upv_eq(o[0..128], n, "available 255.10.0 (build 4294967295) from t27os");
+    var i : usize = 0;
+    while (i < 24) { cl[UPV_NICK + i] = 97 + @as(u8, @intCast(i)); i = i + 1; }
+    cl[UPV_NICKLEN] = 24;
+    n = upv_offer_line(cl[0..8192], o[0..128]);
+    assert upv_eq(o[0..128], n, "available 255.10.0 (build 4294967295) from abcdefghijklmnopqrstuvwx");
+    cl[UPV_NICKLEN] = 200;
+    var m : usize = upv_offer_line(cl[0..8192], o[0..128]);
+    assert m == n;
+    cl[UPV_NICKLEN] = 1;
+    m = upv_offer_line(cl[0..8192], o[0..128]);
+    assert upv_eq(o[0..128], m, "available 255.10.0 (build 4294967295) from a");
+}
+
+test upv_offer_why_names_every_refusal_and_nothing_for_other_codes {
+    assert upv_offer_why(OF_BAD) == "the manifest does not parse";
+    assert upv_offer_why(OF_FP) == "the key does not match its fingerprint";
+    assert upv_offer_why(OF_STRANGER) == "the author is not a friend";
+    assert upv_offer_why(OF_ROLLBACK) == "the build is not newer";
+    assert upv_offer_why(OF_OLDVER) == "the version is older";
+    assert upv_offer_why(OF_SIZE) == "the size is out of range";
+    assert upv_offer_why(10) == "the signature is not true";
+    assert upv_offer_why(0) == "";
+    assert upv_offer_why(7) == "";
+    assert upv_offer_why(11) == "";
+    assert upv_offer_why(4294967295) == "";
+}
+
+test upv_ver_writes_dotted_numbers_at_an_offset_and_returns_the_end {
+    var o : [32]u8 = undefined;
+    var n : usize = upv_ver(o[0..32], 0, 0, 1, 3);
+    assert upv_eq(o[0..32], n, "0.1.3");
+    n = upv_ver(o[0..32], 0, 12, 0, 99);
+    assert upv_eq(o[0..32], n, "12.0.99");
+    o[0] = 120;
+    n = upv_ver(o[0..32], 1, 255, 255, 4294967295);
+    assert n == 1 + 3 + 1 + 3 + 1 + 10 and o[0] == 120 and o[1] == 50;
+}

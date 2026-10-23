@@ -1077,3 +1077,281 @@ test a_session_closes_when_idle_and_dialling_at_once_is_broken_by_the_fingerprin
     assert ch_redial_ms(T_B[0..10], T_A[0..10]) == 3000;
     assert ch_redial_ms(T_A[0..10], T_A[0..10]) == 2000;
 }
+
+test the_little_endian_helpers_round_trip_the_edges {
+    var b : [8]u8 = undefined;
+    put32(b[0..8], 0, 4294967295);
+    assert b[0] == 255 and b[3] == 255 and get32(b[0..8], 0) == 4294967295 and get16(b[0..8], 2) == 65535;
+    put32(b[0..8], 2, 16909060);
+    assert b[2] == 4 and b[3] == 3 and b[4] == 2 and b[5] == 1;
+    assert get16(b[0..8], 2) == 772 and get16(b[0..8], 4) == 258 and get32(b[0..8], 2) == 16909060;
+    // the bytes outside the written window stay
+    assert b[0] == 255 and b[1] == 255;
+    put32(b[0..8], 4, 0);
+    assert get32(b[0..8], 4) == 0 and get16(b[0..8], 0) == 65535;
+    // a 16-bit value above 65535 keeps its low half only
+    put16(b[0..8], 0, 65536 + 513);
+    assert b[0] == 1 and b[1] == 2 and get16(b[0..8], 0) == 513;
+}
+
+test copy_moves_exactly_n_bytes_and_zero_moves_none {
+    const src : [6]u8 = [1, 2, 3, 4, 5, 6];
+    var dst : [8]u8 = [9, 9, 9, 9, 9, 9, 9, 9];
+    copy(dst[0..8], 1, src[0..6], 2, 3);
+    assert dst[0] == 9 and dst[1] == 3 and dst[2] == 4 and dst[3] == 5 and dst[4] == 9;
+    copy(dst[0..8], 0, src[0..6], 0, 0);
+    assert dst[0] == 9 and dst[1] == 3;
+    // up to the last byte of both
+    copy(dst[0..8], 7, src[0..6], 5, 1);
+    assert dst[7] == 6 and dst[6] == 9;
+}
+
+test the_magic_is_t27osch_newline_and_each_byte_counts {
+    var b : [8]u8 = [0, 0, 0, 0, 0, 0, 0, 0];
+    assert magic_ok(b[0..8]) == false;
+    put_magic(b[0..8]);
+    assert b[0] == 84 and b[1] == 50 and b[2] == 55 and b[3] == 79 and b[4] == 83 and b[5] == 67 and b[6] == 72 and b[7] == 10;
+    assert magic_ok(b[0..8]);
+    var i : usize = 0;
+    while (i < 8) {
+        var c : [8]u8 = undefined;
+        copy(c[0..8], 0, b[0..8], 0, 8);
+        c[i] = c[i] + 1;
+        assert magic_ok(c[0..8]) == false;
+        i = i + 1;
+    }
+}
+
+test the_payload_header_puts_every_field_where_the_reader_looks {
+    var p : [20]u8 = undefined;
+    put_phdr(p[0..20], CH_K_TEXT, 4294967295, 2, 3, 1099511627776 + 5, 700);
+    assert p[0] == 1 and p[1] == 0 and get32(p[0..20], 2) == 4294967295 and get16(p[0..20], 6) == 2 and get16(p[0..20], 8) == 3;
+    assert get_u64(p[0..20], 10) == 1099511627781 and get16(p[0..20], 18) == 700;
+    put_phdr(p[0..20], CH_K_READ, 7, 0, 0, 0, 0);
+    assert p[0] == 3 and get32(p[0..20], 2) == 7 and get_u64(p[0..20], 10) == 0 and get16(p[0..20], 18) == 0;
+    assert ch_kind(p[0..20]) == CH_K_READ;
+}
+
+test line_offsets_and_header_fields_follow_the_layout {
+    assert ln(0) == CL_HDR and ln(1) == CL_HDR + CL_LINE and ln(7) == 40 + 7 * 2032;
+    var log : [16296]u8 = undefined;
+    assert cl_init(log[0..T_LOG], T_A[0..10], 8);
+    assert cl_cap(log[0..T_LOG]) == 8 and cl_count(log[0..T_LOG]) == 0;
+    assert cl_init(log[0..T_LOG], T_A[0..10], 1) and cl_cap(log[0..T_LOG]) == 1;
+    assert cl_init(log[0..T_LOG], T_A[0..10], CL_KEEP) == false and cl_cap(log[0..T_LOG]) == 1;
+    assert cl_init(log[0..T_LOG], T_A[0..10], 0) == false;
+    assert cl_init(log[0..T_LOG], T_A[0..9], 8) == false;
+    var big : [1]u8 = undefined;
+    assert cl_init(log[0..T_LOG - 1], T_A[0..10], 8) == false and big.len == 1;
+}
+
+test cl_parts_counts_the_parts_of_each_stored_line {
+    var log : [16296]u8 = undefined;
+    var t : [2000]u8 = undefined;
+    t_fill(t[0..2000], 2000, 1);
+    assert cl_init(log[0..T_LOG], T_A[0..10], T_CAP);
+    assert cl_out_add(log[0..T_LOG], t[0..700], 1) == 1;
+    assert cl_out_add(log[0..T_LOG], t[0..701], 2) == 2;
+    assert cl_out_add(log[0..T_LOG], t[0..1400], 3) == 3;
+    assert cl_out_add(log[0..T_LOG], t[0..1401], 4) == 4;
+    assert cl_out_add(log[0..T_LOG], t[0..2000], 5) == 5;
+    assert cl_parts(log[0..T_LOG], 0) == 1 and cl_parts(log[0..T_LOG], 1) == 2 and cl_parts(log[0..T_LOG], 2) == 2;
+    assert cl_parts(log[0..T_LOG], 3) == 3 and cl_parts(log[0..T_LOG], 4) == 3;
+    assert cl_count(log[0..T_LOG]) == 5;
+}
+
+test cl_find_looks_for_the_direction_and_the_number_together {
+    var la : [16296]u8 = undefined;
+    var lb : [16296]u8 = undefined;
+    var asm : [8064]u8 = undefined;
+    ck_wipe(asm[0..CA_LEN]);
+    assert cl_init(la[0..T_LOG], T_B[0..10], T_CAP);
+    assert cl_init(lb[0..T_LOG], T_A[0..10], T_CAP);
+    const x : [1]u8 = [120];
+    const zero : [1]u32 = [0];
+    assert cl_find(lb[0..T_LOG], CH_DIR_OUT, 1) == CL_NONE;
+    // lb sends message 1, and receives message 1 of the other side: the same number in two directions
+    assert cl_out_add(lb[0..T_LOG], x[0..1], 1) == 1;
+    assert cl_out_add(la[0..T_LOG], x[0..1], 2) == 1;
+    assert t_carry(la[0..T_LOG], 0, lb[0..T_LOG], asm[0..CA_LEN], zero[0..1]) == CH_RX_NEW;
+    assert cl_find(lb[0..T_LOG], CH_DIR_OUT, 1) == 0 and cl_find(lb[0..T_LOG], CH_DIR_IN, 1) == 1;
+    assert cl_find(lb[0..T_LOG], CH_DIR_IN, 2) == CL_NONE and cl_find(lb[0..T_LOG], 0, 1) == CL_NONE;
+}
+
+test cl_open_out_is_true_only_for_outgoing_lines_still_waiting {
+    var la : [16296]u8 = undefined;
+    var lb : [16296]u8 = undefined;
+    var asm : [8064]u8 = undefined;
+    ck_wipe(asm[0..CA_LEN]);
+    assert cl_init(la[0..T_LOG], T_B[0..10], T_CAP);
+    assert cl_init(lb[0..T_LOG], T_A[0..10], T_CAP);
+    const x : [1]u8 = [120];
+    const zero : [1]u32 = [0];
+    assert cl_out_add(lb[0..T_LOG], x[0..1], 1) == 1;
+    assert cl_open_out(lb[0..T_LOG], 0);
+    set_state(lb[0..T_LOG], 0, CH_S_SENT);
+    assert cl_state(lb[0..T_LOG], 0) == CH_S_SENT and cl_open_out(lb[0..T_LOG], 0);
+    set_state(lb[0..T_LOG], 0, CH_S_DELIVERED);
+    assert cl_open_out(lb[0..T_LOG], 0) == false;
+    set_state(lb[0..T_LOG], 0, CH_S_READ);
+    assert cl_open_out(lb[0..T_LOG], 0) == false;
+    set_state(lb[0..T_LOG], 0, CH_S_FAILED);
+    assert cl_open_out(lb[0..T_LOG], 0) == false;
+    // an incoming line is never an open outgoing one, whatever its state
+    assert cl_out_add(la[0..T_LOG], x[0..1], 2) == 1;
+    assert t_carry(la[0..T_LOG], 0, lb[0..T_LOG], asm[0..CA_LEN], zero[0..1]) == CH_RX_NEW;
+    assert cl_dir(lb[0..T_LOG], 1) == CH_DIR_IN and cl_open_out(lb[0..T_LOG], 1) == false;
+    set_state(lb[0..T_LOG], 1, CH_S_PENDING);
+    assert cl_open_out(lb[0..T_LOG], 1) == false;
+}
+
+test cl_drop_oldest_shifts_the_rest_and_raises_the_floor_only_for_incoming {
+    var log : [16296]u8 = undefined;
+    assert cl_init(log[0..T_LOG], T_A[0..10], T_CAP);
+    assert cl_drop_oldest(log[0..T_LOG]) == false and cl_count(log[0..T_LOG]) == 0;
+    const a : [1]u8 = [97];
+    const b : [2]u8 = [98, 98];
+    assert cl_out_add(log[0..T_LOG], a[0..1], 1) == 1;
+    assert cl_out_add(log[0..T_LOG], b[0..2], 2) == 2;
+    // an outgoing oldest line leaves the floor at 0 and the second line moves to the front whole
+    assert cl_drop_oldest(log[0..T_LOG]);
+    assert cl_count(log[0..T_LOG]) == 1 and cl_floor(log[0..T_LOG]) == 0;
+    assert cl_msg(log[0..T_LOG], 0) == 2 and cl_len(log[0..T_LOG], 0) == 2 and cl_time(log[0..T_LOG], 0) == 2;
+    assert cl_text(log[0..T_LOG], 0)[0] == 98 and cl_text(log[0..T_LOG], 0)[1] == 98;
+    assert cl_drop_oldest(log[0..T_LOG]) and cl_count(log[0..T_LOG]) == 0 and cl_drop_oldest(log[0..T_LOG]) == false;
+    // an incoming oldest line raises the floor to its number
+    assert cl_in_put(log[0..T_LOG], 9, 5, a[0..1]);
+    assert cl_in_put(log[0..T_LOG], 12, 6, b[0..2]);
+    assert cl_drop_oldest(log[0..T_LOG]);
+    assert cl_floor(log[0..T_LOG]) == 9 and cl_count(log[0..T_LOG]) == 1 and cl_msg(log[0..T_LOG], 0) == 12;
+    // a floor never goes down: the line numbered below it (a late insert cannot get here) does not lower it
+    assert cl_drop_oldest(log[0..T_LOG]) and cl_floor(log[0..T_LOG]) == 12;
+}
+
+test cl_have_in_knows_lines_and_everything_at_or_below_the_floor {
+    var log : [16296]u8 = undefined;
+    assert cl_init(log[0..T_LOG], T_A[0..10], T_CAP);
+    const a : [1]u8 = [97];
+    assert cl_have_in(log[0..T_LOG], 1) == false and cl_have_in(log[0..T_LOG], 0);
+    assert cl_in_put(log[0..T_LOG], 4, 1, a[0..1]);
+    assert cl_have_in(log[0..T_LOG], 4) and cl_have_in(log[0..T_LOG], 3) == false and cl_have_in(log[0..T_LOG], 5) == false;
+    // an outgoing line of the same number is not an incoming one
+    assert cl_out_add(log[0..T_LOG], a[0..1], 2) == 1;
+    assert cl_have_in(log[0..T_LOG], 1) == false;
+    assert cl_drop_oldest(log[0..T_LOG]);
+    assert cl_floor(log[0..T_LOG]) == 4 and cl_have_in(log[0..T_LOG], 4) and cl_have_in(log[0..T_LOG], 1);
+    assert cl_have_in(log[0..T_LOG], 5) == false;
+}
+
+test cl_in_put_orders_by_number_refuses_duplicates_and_keeps_out_what_the_cap_pushed_below_the_floor {
+    var log : [4104]u8 = undefined;
+    assert cl_init(log[0..4104], T_A[0..10], 2);
+    const a : [1]u8 = [97];
+    const b : [1]u8 = [98];
+    const c : [1]u8 = [99];
+    assert cl_in_put(log[0..4104], 5, 10, a[0..1]);
+    assert cl_in_put(log[0..4104], 5, 11, b[0..1]) == false and cl_count(log[0..4104]) == 1 and cl_text(log[0..4104], 0)[0] == 97;
+    // a lower number is put before: 3, 5
+    assert cl_in_put(log[0..4104], 3, 9, b[0..1]);
+    assert cl_count(log[0..4104]) == 2 and cl_msg(log[0..4104], 0) == 3 and cl_msg(log[0..4104], 1) == 5;
+    assert cl_state(log[0..4104], 0) == CH_S_DELIVERED and cl_dir(log[0..4104], 0) == CH_DIR_IN and cl_time(log[0..4104], 0) == 9;
+    // the log is full (cap 2): 4 pushes 3 out, raising the floor to 3, and lands between nothing and 5
+    assert cl_in_put(log[0..4104], 4, 12, c[0..1]);
+    assert cl_floor(log[0..4104]) == 3 and cl_count(log[0..4104]) == 2 and cl_msg(log[0..4104], 0) == 4 and cl_msg(log[0..4104], 1) == 5;
+    // full again: 2 is older than the floor the drop of 4 will raise, so it stays out and the drop still happened
+    assert cl_in_put(log[0..4104], 2, 13, c[0..1]) == false;
+    assert cl_floor(log[0..4104]) == 3 and cl_count(log[0..4104]) == 2;
+    // full again: 7 pushes 4 out
+    assert cl_in_put(log[0..4104], 7, 14, c[0..1]);
+    assert cl_floor(log[0..4104]) == 4 and cl_msg(log[0..4104], 0) == 5 and cl_msg(log[0..4104], 1) == 7;
+}
+
+test put_line_opens_a_hole_clears_the_text_head_and_counts_the_line {
+    var log : [16296]u8 = undefined;
+    assert cl_init(log[0..T_LOG], T_A[0..10], T_CAP);
+    var t : [800]u8 = undefined;
+    t_fill(t[0..800], 800, 3);
+    const a : [1]u8 = [97];
+    put_line(log[0..T_LOG], 0, CH_DIR_OUT, CH_S_SENT, 6, 77, t[0..800]);
+    assert cl_count(log[0..T_LOG]) == 1 and cl_len(log[0..T_LOG], 0) == 800 and cl_parts(log[0..T_LOG], 0) == 2;
+    assert cl_state(log[0..T_LOG], 0) == CH_S_SENT and cl_msg(log[0..T_LOG], 0) == 6 and cl_time(log[0..T_LOG], 0) == 77;
+    assert cl_text(log[0..T_LOG], 0)[799] == t[799];
+    // a line put in front moves the first one down with all of its text, and its own header starts clean
+    put_line(log[0..T_LOG], 0, CH_DIR_IN, CH_S_DELIVERED, 2, 5, a[0..1]);
+    assert cl_count(log[0..T_LOG]) == 2 and cl_msg(log[0..T_LOG], 0) == 2 and cl_msg(log[0..T_LOG], 1) == 6;
+    assert cl_len(log[0..T_LOG], 1) == 800 and cl_text(log[0..T_LOG], 1)[0] == t[0] and cl_text(log[0..T_LOG], 1)[799] == t[799];
+    assert cl_tries(log[0..T_LOG], 0) == 0 and cl_acked(log[0..T_LOG], 0) == 0 and cl_parts(log[0..T_LOG], 0) == 1;
+    assert cl_text(log[0..T_LOG], 0).len == 1 and cl_text(log[0..T_LOG], 0)[0] == 97;
+}
+
+test the_assembly_slot_offset_is_the_slot_size_times_the_slot_number {
+    assert ca(0) == 0 and ca(1) == CA_SLOT and ca(CA_SLOTS) == CA_LEN and ca(3) == 6048;
+    // two messages in parts keep their slots apart: each completes with its own text
+    var la : [16296]u8 = undefined;
+    var lb : [16296]u8 = undefined;
+    var asm : [8064]u8 = undefined;
+    ck_wipe(asm[0..CA_LEN]);
+    assert cl_init(la[0..T_LOG], T_B[0..10], T_CAP);
+    assert cl_init(lb[0..T_LOG], T_A[0..10], T_CAP);
+    var t : [1500]u8 = undefined;
+    t_fill(t[0..1500], 1500, 4);
+    var u : [1500]u8 = undefined;
+    t_fill(u[0..1500], 1500, 9);
+    assert cl_out_add(la[0..T_LOG], t[0..1500], 1) == 1;
+    assert cl_out_add(la[0..T_LOG], u[0..1500], 2) == 2;
+    var p : [720]u8 = undefined;
+    var n : usize = ch_put_text(p[0..720], 1, 0, 1, t[0..1500]);
+    assert ch_rx_text(lb[0..T_LOG], asm[0..CA_LEN], p[0..n]) == CH_RX_PART;
+    n = ch_put_text(p[0..720], 2, 0, 2, u[0..1500]);
+    assert ch_rx_text(lb[0..T_LOG], asm[0..CA_LEN], p[0..n]) == CH_RX_PART;
+    assert get32(asm[0..CA_LEN], ca(0)) == 1 and get32(asm[0..CA_LEN], ca(1)) == 2 and get32(asm[0..CA_LEN], ca(2)) == 0;
+    n = ch_put_text(p[0..720], 2, 2, 2, u[0..1500]);
+    assert ch_rx_text(lb[0..T_LOG], asm[0..CA_LEN], p[0..n]) == CH_RX_PART;
+    n = ch_put_text(p[0..720], 2, 1, 2, u[0..1500]);
+    assert ch_rx_text(lb[0..T_LOG], asm[0..CA_LEN], p[0..n]) == CH_RX_NEW;
+    assert get32(asm[0..CA_LEN], ca(1)) == 0 and get32(asm[0..CA_LEN], ca(0)) == 1;
+}
+
+test put_line_in_front_of_a_sent_line_leaves_no_trace_of_the_line_that_moved_down {
+    var log : [16296]u8 = undefined;
+    assert cl_init(log[0..T_LOG], T_A[0..10], T_CAP);
+    const a : [1]u8 = [97];
+    assert cl_out_add(log[0..T_LOG], a[0..1], 1) == 1;
+    cl_mark_sent(log[0..T_LOG], 0, 72057594037927936 + 5);
+    log[ln(0) + LN_ACKED] = 7;
+    assert cl_tries(log[0..T_LOG], 0) == 1 and cl_acked(log[0..T_LOG], 0) == 7;
+    put_line(log[0..T_LOG], 0, CH_DIR_OUT, CH_S_PENDING, 9, 3, a[0..1]);
+    assert cl_tries(log[0..T_LOG], 0) == 0 and cl_acked(log[0..T_LOG], 0) == 0;
+    assert get_u64(log[0..T_LOG], ln(0) + LN_LAST) == 0;
+    // the line that moved down keeps its own marks
+    assert cl_tries(log[0..T_LOG], 1) == 1 and cl_acked(log[0..T_LOG], 1) == 7 and get_u64(log[0..T_LOG], ln(1) + LN_LAST) == 72057594037927941;
+}
+
+test cl_in_put_refuses_a_message_the_drop_for_room_just_put_below_the_floor {
+    var log : [4104]u8 = undefined;
+    assert cl_init(log[0..4104], T_A[0..10], 2);
+    const a : [1]u8 = [97];
+    assert cl_in_put(log[0..4104], 5, 1, a[0..1]);
+    assert cl_in_put(log[0..4104], 7, 2, a[0..1]);
+    assert cl_floor(log[0..4104]) == 0 and cl_have_in(log[0..4104], 4) == false;
+    // 4 is unknown, but making room drops 5 and the floor becomes 5: 4 is older than everything kept
+    assert cl_in_put(log[0..4104], 4, 3, a[0..1]) == false;
+    assert cl_floor(log[0..4104]) == 5 and cl_count(log[0..4104]) == 1 and cl_msg(log[0..4104], 0) == 7;
+    assert cl_have_in(log[0..4104], 4);
+}
+
+test cl_drop_oldest_moves_the_last_byte_of_a_full_length_line {
+    var log : [16296]u8 = undefined;
+    assert cl_init(log[0..T_LOG], T_A[0..10], T_CAP);
+    var t : [2000]u8 = undefined;
+    t_fill(t[0..2000], 2000, 2);
+    t[1999] = 122;
+    const a : [1]u8 = [97];
+    assert cl_out_add(log[0..T_LOG], a[0..1], 1) == 1;
+    assert cl_out_add(log[0..T_LOG], t[0..2000], 2) == 2;
+    t[1999] = 123;
+    assert cl_out_add(log[0..T_LOG], t[0..2000], 3) == 3;
+    assert cl_drop_oldest(log[0..T_LOG]);
+    assert cl_len(log[0..T_LOG], 0) == 2000 and cl_text(log[0..T_LOG], 0)[1999] == 122 and cl_text(log[0..T_LOG], 0)[0] == t[0];
+    assert cl_len(log[0..T_LOG], 1) == 2000 and cl_text(log[0..T_LOG], 1)[1999] == 123;
+}

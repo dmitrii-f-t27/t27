@@ -800,3 +800,201 @@ test the_key_list_read_names_the_login_keychain_only_under_another_home {
     n = nv_kc_argv("/tmp/h", "/Users/a", w[0..120], o[0..8]);
     assert n == 7;
 }
+
+test nv_ws_is_space_tab_newline_and_return_only {
+    assert nv_ws(32) and nv_ws(9) and nv_ws(10) and nv_ws(13);
+    assert nv_ws(11) == false;
+    assert nv_ws(12) == false;
+    assert nv_ws(0) == false;
+    assert nv_ws(160) == false;
+    assert nv_ws(65) == false;
+    assert nv_ws(31) == false;
+    assert nv_ws(33) == false;
+}
+
+test nv_skip_ws_stops_at_the_first_other_byte_and_at_the_end {
+    assert nv_skip_ws("  \x09\x0a\x0d x", 0) == 6;
+    assert nv_skip_ws("x  ", 0) == 0;
+    assert nv_skip_ws("x  y", 1) == 3;
+    assert nv_skip_ws("   ", 0) == 3;
+    assert nv_skip_ws("", 0) == 0;
+    assert nv_skip_ws("ab", 2) == 2;
+    // a vertical tab is not blank
+    assert nv_skip_ws(" \x0b ", 0) == 1;
+}
+
+test nv_str_end_returns_the_index_after_the_closing_quote_and_honours_escapes {
+    assert nv_str_end("\"abc\"", 0) == 5;
+    assert nv_str_end("\"\"", 0) == 2;
+    assert nv_str_end("x\"ab\"y", 1) == 5;
+    // an escaped quote does not close the string
+    assert nv_str_end("\"a\\\"b\"", 0) == 6;
+    // an escaped backslash does, when a quote follows it
+    assert nv_str_end("\"a\\\\\"", 0) == 5;
+    // never closed, or a lone backslash at the end: len + 1
+    assert nv_str_end("\"abc", 0) == 5;
+    assert nv_str_end("\"ab\\", 0) == 5;
+    assert nv_str_end("\"", 0) == 2;
+    // Cyrillic bytes are plain bytes
+    assert nv_str_end("\"\xd0\xb0\xd0\xb1\"", 0) == 6;
+}
+
+test nv_value_end_finds_strings_nested_values_and_scalars_and_flags_broken_input {
+    assert nv_value_end("\"ab\",1", 0) == 4;
+    assert nv_value_end("{\"a\":1} x", 0) == 7;
+    assert nv_value_end("[1,[2,3],{\"k\":[4]}],", 0) == 19;
+    // braces and brackets inside a string do not count
+    assert nv_value_end("{\"a\":\"}]\"}z", 0) == 10;
+    assert nv_value_end("{\"a\":\"\\\"}\"}", 0) == 11;
+    // scalars end at a comma, a closing bracket or white space
+    assert nv_value_end("123,4", 0) == 3;
+    assert nv_value_end("true}", 0) == 4;
+    assert nv_value_end("null]", 0) == 4;
+    assert nv_value_end("12 3", 0) == 2;
+    assert nv_value_end("-1.5e3", 0) == 6;
+    // broken: past the end, empty scalar, truncated container, unclosed inner string
+    assert nv_value_end("abc", 3) == 4;
+    assert nv_value_end("abc", 9) == 4;
+    assert nv_value_end(",x", 0) == 3;
+    assert nv_value_end("{\"a\":1", 0) == 7;
+    assert nv_value_end("[[1]", 0) == 5;
+    assert nv_value_end("{\"a", 0) == 4;
+    assert nv_value_end("\"abc", 0) == 5;
+}
+
+test nv_seen_matches_only_equal_bytes_of_equal_length_among_the_first_count_keys {
+    const s : str = "nvapi-aa nvapi-bb nvapi-aa nvapi-a";
+    var o : [4]u32 = undefined;
+    var l : [4]u32 = undefined;
+    o[0] = 0; l[0] = 8;
+    o[1] = 9; l[1] = 8;
+    assert nv_seen(s, 18, 8, o[0..4], l[0..4], 2);
+    assert nv_seen(s, 18, 8, o[0..4], l[0..4], 1);
+    assert nv_seen(s, 9, 8, o[0..4], l[0..4], 2);
+    assert nv_seen(s, 9, 8, o[0..4], l[0..4], 1) == false;
+    assert nv_seen(s, 18, 8, o[0..4], l[0..4], 0) == false;
+    // same prefix but shorter: not the same key
+    assert nv_seen(s, 27, 7, o[0..4], l[0..4], 2) == false;
+    // differs in the last byte only
+    assert nv_seen("nvapi-aanvapi-ab", 8, 8, o[0..4], l[0..4], 1) == false;
+    assert nv_seen("nvapi-aanvapi-aa", 8, 8, o[0..4], l[0..4], 1);
+}
+
+test nv_take_trims_counts_repeats_and_refuses_what_is_not_a_key {
+    var o : [64]u32 = undefined;
+    var l : [64]u32 = undefined;
+    var r : [2]u32 = undefined;
+    r[0] = 0; r[1] = 0;
+    const s : str = "  nvapi-test-1\t nvapi-test-1 nvapi-a\\n nvapi- xx-test-12 nvapi-a b";
+    // trimmed, taken
+    assert nv_take(s, 0, 15, o[0..64], l[0..64], 0, r[0..2]) == 1;
+    assert o[0] == 2 and l[0] == 12 and r[0] == 0 and r[1] == 0;
+    // a repeat is dropped and counted
+    assert nv_take(s, 16, 28, o[0..64], l[0..64], 1, r[0..2]) == 1;
+    assert r[0] == 1 and r[1] == 0;
+    // an escape inside refuses the element
+    assert nv_take(s, 29, 38, o[0..64], l[0..64], 1, r[0..2]) == 1;
+    assert r[1] == 1;
+    // only the prefix (6 bytes) is too short
+    assert nv_take(s, 39, 45, o[0..64], l[0..64], 1, r[0..2]) == 1;
+    assert r[1] == 2;
+    // wrong prefix
+    assert nv_take(s, 46, 56, o[0..64], l[0..64], 1, r[0..2]) == 1;
+    assert r[1] == 3;
+    // an inner space does not fit
+    assert nv_take(s, 57, 66, o[0..64], l[0..64], 1, r[0..2]) == 1;
+    assert r[1] == 4 and r[0] == 1;
+    // an all-blank element
+    assert nv_take("   ", 0, 3, o[0..64], l[0..64], 1, r[0..2]) == 1;
+    assert r[1] == 5;
+}
+
+test nv_take_refuses_a_key_over_the_length_cap_and_a_full_table {
+    var o : [64]u32 = undefined;
+    var l : [64]u32 = undefined;
+    var r : [2]u32 = undefined;
+    var big : [140]u8 = undefined;
+    var i : usize = 0;
+    while (i < 140) { big[i] = 97; i = i + 1; }
+    big[0] = 110; big[1] = 118; big[2] = 97; big[3] = 112; big[4] = 105; big[5] = 45;
+    r[0] = 0; r[1] = 0;
+    // exactly NV_KEY_MAX bytes fits, one more does not
+    assert nv_take(big[0..140], 0, 128, o[0..64], l[0..64], 0, r[0..2]) == 1;
+    assert l[0] == 128 and r[1] == 0;
+    assert nv_take(big[0..140], 0, 129, o[0..64], l[0..64], 0, r[0..2]) == 0;
+    assert r[1] == 1;
+    // the 65th key is over, not taken
+    assert nv_take(big[0..140], 0, 20, o[0..64], l[0..64], NV_MAX, r[0..2]) == NV_MAX;
+    assert r[1] == 2;
+    // output arrays shorter than the count are never written past
+    assert nv_take(big[0..140], 0, 20, o[0..1], l[0..1], 1, r[0..2]) == 1;
+    assert r[1] == 3;
+}
+
+test nv_live_from_wraps_round_and_skips_dead_keys {
+    var st : [260]u32 = undefined;
+    nv_state_init(st[0..260], 4, 1);
+    assert nv_live_from(st[0..260], 0) == 0;
+    st[nv_at(1, NV_K_FLAGS)] = NV_F_DEAD;
+    st[nv_at(2, NV_K_FLAGS)] = NV_F_DEAD;
+    assert nv_live_from(st[0..260], 1) == 3;
+    assert nv_live_from(st[0..260], 3) == 3;
+    // the start index wraps modulo the count
+    assert nv_live_from(st[0..260], 4) == 0;
+    assert nv_live_from(st[0..260], 6) == 3;
+    st[nv_at(0, NV_K_FLAGS)] = NV_F_DEAD;
+    assert nv_live_from(st[0..260], 1) == 3;
+    st[nv_at(3, NV_K_FLAGS)] = NV_F_DEAD;
+    assert nv_live_from(st[0..260], 0) == NV_NONE;
+    nv_state_init(st[0..260], 0, 1);
+    assert nv_live_from(st[0..260], 0) == NV_NONE;
+}
+
+test nv_bump_counts_up_and_stops_at_the_cap {
+    var st : [8]u32 = undefined;
+    st[2] = 0; st[3] = 41; st[4] = NV_COUNT_CAP - 1; st[5] = NV_COUNT_CAP; st[6] = 4294967295;
+    nv_bump(st[0..8], 2);
+    nv_bump(st[0..8], 3);
+    nv_bump(st[0..8], 4);
+    nv_bump(st[0..8], 5);
+    nv_bump(st[0..8], 6);
+    assert st[2] == 1 and st[3] == 42;
+    assert st[4] == NV_COUNT_CAP;
+    assert st[5] == NV_COUNT_CAP;
+    assert st[6] == 4294967295;
+    assert st[7] == st[7] and st[0] == st[0] + 0;
+}
+
+test nv_num_reads_one_decimal_and_flags_missing_or_oversize_numbers {
+    var v : [2]u32 = undefined;
+    v[0] = 99;
+    assert nv_num("  42 7", 0, v[0..2]) == 4;
+    assert v[0] == 42;
+    assert nv_num("  42 7", 4, v[0..2]) == 6;
+    assert v[0] == 7;
+    assert nv_num("\x0a\x0d\x090", 0, v[0..2]) == 4;
+    assert v[0] == 0;
+    assert nv_num("4294967295", 0, v[0..2]) == 10;
+    assert v[0] == 4294967295;
+    // a number is a run of digits only: it stops at a letter or a minus
+    assert nv_num("12ab", 0, v[0..2]) == 2;
+    assert v[0] == 12;
+    // none or too big: len + 1, v untouched
+    v[0] = 5;
+    assert nv_num("   ", 0, v[0..2]) == 4;
+    assert nv_num("", 0, v[0..2]) == 1;
+    assert nv_num("-3", 0, v[0..2]) == 3;
+    assert nv_num("x", 0, v[0..2]) == 2;
+    assert nv_num("4294967296", 0, v[0..2]) == 11;
+    assert nv_num("99999999999999999999", 0, v[0..2]) == 21;
+    assert v[0] == 5;
+}
+
+test nv_take_trims_a_leading_tab_as_well_as_spaces {
+    var o : [4]u32 = undefined;
+    var l : [4]u32 = undefined;
+    var r : [2]u32 = undefined;
+    r[0] = 0; r[1] = 0;
+    assert nv_take(" \x09nvapi-test-9", 0, 14, o[0..4], l[0..4], 0, r[0..2]) == 1;
+    assert o[0] == 2 and l[0] == 12 and r[1] == 0;
+}

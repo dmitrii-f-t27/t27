@@ -3827,3 +3827,223 @@ test the_new_provider_status_agrees_with_the_old_one_for_a_single_key {
         s = s + 1;
     }
 }
+
+test is_transport_failure_is_no_answer_or_a_server_error_only {
+    assert is_transport_failure(0);
+    assert is_transport_failure(500);
+    assert is_transport_failure(503);
+    assert is_transport_failure(599);
+    assert is_transport_failure(4294967295);
+    assert is_transport_failure(1) == false;
+    assert is_transport_failure(200) == false;
+    assert is_transport_failure(401) == false;
+    assert is_transport_failure(429) == false;
+    assert is_transport_failure(499) == false;
+}
+
+test profile_name_gives_the_name_of_each_profile_and_nothing_past_the_table {
+    var o : [24]u8 = undefined;
+    var n : usize = profile_name(PR_ZAI, o[0..24]);
+    assert n == 3 and o[0] == 122 and o[1] == 97 and o[2] == 105;
+    n = profile_name(PR_ANTHROPIC, o[0..24]);
+    assert n == 13 and same_bytes(o[0..n], "anthropic-api");
+    n = profile_name(PR_OPENROUTER, o[0..24]);
+    assert same_bytes(o[0..n], "openrouter");
+    n = profile_name(PR_OLLAMA_CLOUD, o[0..24]);
+    assert same_bytes(o[0..n], "ollama-cloud");
+    assert profile_name(PROFILE_COUNT, o[0..24]) == 0;
+    assert profile_name(PR_NONE, o[0..24]) == 0;
+}
+
+test served_elsewhere_is_true_only_for_the_exact_id_of_another_profile {
+    // z.ai's ids belong to z.ai (and ollama's glm-5.3-flash to ollama), not to the others
+    assert served_elsewhere(PR_ANTHROPIC, "glm-4.5-flash");
+    assert served_elsewhere(PR_OPENROUTER, "glm-4.7-flash");
+    assert served_elsewhere(PR_ZAI, "glm-4.5-flash") == false;
+    assert served_elsewhere(PR_ZAI, "glm-4.7-flash") == false;
+    assert served_elsewhere(PR_ZAI, "glm-5.3-flash");
+    assert served_elsewhere(PR_ANTHROPIC, "minimax/minimax-m3.1-flash:free");
+    assert served_elsewhere(PR_OPENROUTER, "minimax/minimax-m3.1-flash:free") == false;
+    // a prefix or an extension of an id is another id
+    assert served_elsewhere(PR_ANTHROPIC, "glm-4.5") == false;
+    assert served_elsewhere(PR_ANTHROPIC, "glm-4.5-flash-x") == false;
+    assert served_elsewhere(PR_ANTHROPIC, "") == false;
+    assert served_elsewhere(PR_ANTHROPIC, "claude-opus-5") == false;
+}
+
+test slot_present_follows_the_key_slot_the_base_url_the_tier_models_and_the_empty_key {
+    assert slot_present(PR_ZAI, PS_KEY);
+    assert slot_present(PR_ANTHROPIC, PS_KEY);
+    assert slot_present(PR_ZAI, PS_BASE);
+    assert slot_present(PR_ANTHROPIC, PS_BASE) == false;
+    assert slot_present(PR_ZAI, PS_TIER0);
+    assert slot_present(PR_ZAI, PS_TIER0 + TIER_COUNT - 1);
+    assert slot_present(PR_ANTHROPIC, PS_TIER0) == false;
+    assert slot_present(PR_ZAI, PS_EMPTY_KEY) == false;
+    assert slot_present(PR_OPENROUTER, PS_EMPTY_KEY);
+    assert slot_present(PR_OLLAMA_CLOUD, PS_EMPTY_KEY);
+    // past the last tier slot and past the last slot: nothing; no profile: nothing, not even the key
+    assert slot_present(PR_ZAI, PS_TIER0 + TIER_COUNT) == false;
+    assert slot_present(PR_ZAI, PS_COUNT) == false;
+    assert slot_present(PROFILE_COUNT, PS_KEY) == false;
+    assert slot_present(PR_NONE, PS_BASE) == false;
+}
+
+test profile_slot_lists_the_present_slots_in_order_and_ends_with_ps_none {
+    assert profile_slot(PR_ANTHROPIC, 0) == PS_KEY;
+    assert profile_slot(PR_ANTHROPIC, 1) == PS_NONE;
+    assert profile_slot(PR_ZAI, 0) == PS_BASE;
+    assert profile_slot(PR_ZAI, 1) == PS_KEY;
+    assert profile_slot(PR_ZAI, 2) == PS_TIER0;
+    assert profile_slot(PR_ZAI, 6) == PS_TIER0 + TIER_COUNT - 1;
+    assert profile_slot(PR_ZAI, 7) == PS_NONE;
+    // the empty-key slot comes last for the profiles that set it
+    assert profile_slot(PR_OPENROUTER, 7) == PS_EMPTY_KEY;
+    assert profile_slot(PR_OPENROUTER, 8) == PS_NONE;
+    assert profile_slot(PROFILE_COUNT, 0) == PS_NONE;
+    assert profile_slot(PR_ZAI, 255) == PS_NONE;
+}
+
+test oai_base_url_is_set_for_the_openai_compatible_profiles_only {
+    var o : [64]u8 = undefined;
+    var n : usize = oai_base_url(PR_ZAI, o[0..64]);
+    assert same_bytes(o[0..n], "https://api.z.ai/api/paas/v4");
+    n = oai_base_url(PR_OPENROUTER, o[0..64]);
+    assert same_bytes(o[0..n], "https://openrouter.ai/api/v1");
+    assert oai_base_url(PR_ANTHROPIC, o[0..64]) == 0;
+    assert oai_base_url(PR_OLLAMA_CLOUD, o[0..64]) == 0;
+    assert oai_base_url(PROFILE_COUNT, o[0..64]) == 0;
+    assert oai_base_url(PR_NONE, o[0..64]) == 0;
+}
+
+test find_bytes_gives_the_first_index_at_or_after_from_and_len_plus_one_when_absent {
+    assert find_bytes("abcabc", "bc", 0) == 1;
+    assert find_bytes("abcabc", "bc", 1) == 1;
+    assert find_bytes("abcabc", "bc", 2) == 4;
+    assert find_bytes("abcabc", "abc", 3) == 3;
+    assert find_bytes("abcabc", "abcd", 0) == 7;
+    assert find_bytes("abcabc", "c", 6) == 7;
+    assert find_bytes("abcabc", "c", 99) == 7;
+    assert find_bytes("abc", "abcabc", 0) == 4;
+    assert find_bytes("abc", "", 0) == 4;
+    assert find_bytes("", "a", 0) == 1;
+    // the last byte can be matched, one past it cannot
+    assert find_bytes("xxa", "a", 0) == 2;
+    assert find_bytes("xxa", "ab", 0) == 4;
+    // Cyrillic bytes match as bytes
+    assert find_bytes("a\xd0\xb0\xd0\xb1", "\xd0\xb1", 0) == 3;
+}
+
+test error_start_takes_the_five_claude_code_row_openings_at_column_zero_only {
+    assert error_start("API Error: 429");
+    assert error_start("Error: boom");
+    assert error_start("Errors");
+    assert error_start("Request failed with status 500");
+    assert error_start("Your organization has disabled this");
+    assert error_start("Insufficient balance");
+    // case, a leading blank, a diff marker or a quote make it something else
+    assert error_start("api error") == false;
+    assert error_start(" API Error") == false;
+    assert error_start("+Error") == false;
+    assert error_start("\"Insufficient balance\"") == false;
+    assert error_start("Your organization") == false;
+    assert error_start("Insufficient") == false;
+    assert error_start("") == false;
+}
+
+test sec_push_appends_a_nul_ended_word_and_refuses_what_does_not_fit {
+    var w : [8]u8 = undefined;
+    var o : [4]u32 = undefined;
+    o[0] = 99; o[1] = 99; o[2] = 99;
+    var at : usize = sec_push(w[0..8], o[0..4], 0, 0, "ab");
+    assert at == 3 and o[0] == 0 and w[0] == 97 and w[1] == 98 and w[2] == 0;
+    at = sec_push(w[0..8], o[0..4], 1, at, "cde");
+    assert at == 7 and o[1] == 3 and w[3] == 99 and w[5] == 101 and w[6] == 0;
+    // one byte left: only an empty word fits (its NUL), a one-byte word does not
+    assert sec_push(w[0..8], o[0..4], 2, 7, "x") == 0;
+    assert o[2] == 99;
+    assert sec_push(w[0..8], o[0..4], 2, 7, "") == 8;
+    assert o[2] == 7 and w[7] == 0;
+    // exactly the room that is left
+    assert sec_push(w[0..8], o[0..4], 3, 0, "abcdefg") == 8;
+    assert sec_push(w[0..8], o[0..4], 3, 0, "abcdefgh") == 0;
+}
+
+test keys_valid_and_keys_checked_count_only_the_keys_in_the_mask_of_that_provider {
+    var st : [80]u32 = undefined;
+    var i : usize = 0;
+    while (i < 80) { st[i] = ST_STORED; i = i + 1; }
+    st[key_index(P_ZAI, 0)] = ST_VALID;
+    st[key_index(P_ZAI, 1)] = ST_INVALID;
+    st[key_index(P_ZAI, 2)] = ST_RATE_LIMITED;
+    st[key_index(P_ZAI, 3)] = ST_VALID;
+    st[key_index(P_ZAI, 7)] = ST_VALID;
+    st[key_index(P_NVIDIA, 0)] = ST_VALID;
+    // mask 0b1111: keys 0..3
+    assert keys_valid(st[0..80], P_ZAI, 15) == 2;
+    assert keys_checked(st[0..80], P_ZAI, 15) == 4;
+    // a key outside the mask is not counted, a mask of one key counts one
+    assert keys_valid(st[0..80], P_ZAI, 1) == 1;
+    assert keys_valid(st[0..80], P_ZAI, 2) == 0;
+    assert keys_checked(st[0..80], P_ZAI, 2) == 1;
+    assert keys_valid(st[0..80], P_ZAI, 128) == 1;
+    assert keys_valid(st[0..80], P_ZAI, 0) == 0;
+    assert keys_checked(st[0..80], P_ZAI, 0) == 0;
+    // an unchecked (stored) key counts as neither
+    assert keys_checked(st[0..80], P_ZAI, 4 + 16) == 1;
+    // another provider's statuses stay apart
+    assert keys_valid(st[0..80], P_NVIDIA, 255) == 1;
+    assert keys_checked(st[0..80], P_NVIDIA, 255) == 1;
+    assert keys_checked(st[0..80], P_OPENROUTER, 255) == 0;
+}
+
+test status_checked_is_true_from_valid_up_and_false_for_missing_and_stored {
+    assert status_checked(ST_MISSING) == false;
+    assert status_checked(ST_STORED) == false;
+    assert status_checked(ST_VALID);
+    assert status_checked(ST_INVALID);
+    assert status_checked(ST_RATE_LIMITED);
+    assert status_checked(ST_CIRCUIT_OPEN);
+}
+
+test health_rank_puts_tier_first_then_live_before_unlive_then_the_profile_index {
+    // live bit of the profile's provider: z.ai 4, anthropic 0, openrouter 3, ollama 5
+    assert health_rank(PR_ZAI, 16) == 0;
+    assert health_rank(PR_ZAI, 0) == 4;
+    assert health_rank(PR_OPENROUTER, 8) == 10;
+    assert health_rank(PR_OPENROUTER, 0) == 14;
+    assert health_rank(PR_ANTHROPIC, 1) == 17;
+    assert health_rank(PR_ANTHROPIC, 0) == 21;
+    assert health_rank(PR_OLLAMA_CLOUD, 32) == 19;
+    assert health_rank(PR_OLLAMA_CLOUD, 0) == 23;
+    // another provider's live bit does not help
+    assert health_rank(PR_ZAI, 8) == 4;
+    // the free z.ai tier outranks a live openrouter, and a live paid profile outranks a dead one of its tier
+    assert health_rank(PR_ZAI, 0) < health_rank(PR_OPENROUTER, 8);
+    assert health_rank(PR_ANTHROPIC, 1) < health_rank(PR_OLLAMA_CLOUD, 0);
+    // no profile ranks last
+    assert health_rank(PROFILE_COUNT, 0) == 24;
+    assert health_rank(PR_NONE, 4294967295) == 24;
+}
+
+test age_text_says_minutes_under_an_hour_and_hours_from_it {
+    var o : [24]u8 = undefined;
+    var n : usize = age_text(0, o[0..24], 0);
+    assert same_bytes(o[0..n], "0 min");
+    n = age_text(59, o[0..24], 0);
+    assert same_bytes(o[0..n], "0 min");
+    n = age_text(60, o[0..24], 0);
+    assert same_bytes(o[0..n], "1 min");
+    n = age_text(3599, o[0..24], 0);
+    assert same_bytes(o[0..n], "59 min");
+    n = age_text(3600, o[0..24], 0);
+    assert same_bytes(o[0..n], "1 h");
+    n = age_text(7199, o[0..24], 0);
+    assert same_bytes(o[0..n], "1 h");
+    n = age_text(86400 * 2, o[0..24], 0);
+    assert same_bytes(o[0..n], "48 h");
+    // written at an offset: the bytes before it stay, the return is the end index
+    o[0] = 88; o[1] = 89;
+    n = age_text(300, o[0..24], 2);
+    assert n == 7 and o[0] == 88 and o[1] == 89 and same_bytes(o[2..n], "5 min");
+}

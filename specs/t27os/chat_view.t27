@@ -1565,3 +1565,357 @@ test chv_the_chat_port_is_the_call_port_plus_one {
     assert chv_chat_port(0) == 0 and chv_chat_port(65535) == 0;
     assert chv_chat_port(65534) == 65535;
 }
+
+test chv_the_16_bit_slots_are_little_endian_and_keep_their_neighbours {
+    var v : [8]u8 = [9, 9, 9, 9, 9, 9, 9, 9];
+    chv_put16(v[0..8], 2, 0);
+    assert v[2] == 0 and v[3] == 0 and chv_get16(v[0..8], 2) == 0 and v[1] == 9 and v[4] == 9;
+    chv_put16(v[0..8], 2, 255);
+    assert v[2] == 255 and v[3] == 0 and chv_get16(v[0..8], 2) == 255;
+    chv_put16(v[0..8], 2, 256);
+    assert v[2] == 0 and v[3] == 1 and chv_get16(v[0..8], 2) == 256;
+    chv_put16(v[0..8], 2, 65535);
+    assert v[2] == 255 and v[3] == 255 and chv_get16(v[0..8], 2) == 65535 and v[1] == 9 and v[4] == 9;
+    // above 16 bits only the low 16 are kept
+    chv_put16(v[0..8], 6, 65536 + 4660);
+    assert v[6] == 52 and v[7] == 18 and chv_get16(v[0..8], 6) == 4660;
+}
+
+test chv_unread_and_trust_rows_are_told_apart_by_every_byte_of_the_fingerprint {
+    var v : [8192]u8 = undefined;
+    fv_blank(v[0..8192]);
+    var a : [10]u8 = undefined;
+    t_fp(20, a[0..10]);
+    assert chv_unr_at(0) == CHV_UNR and chv_unr_at(1) == CHV_UNR + CHV_UNR_ROW and chv_unr_at(CHV_UNR_MAX) == CHV_UNR + 32 * 12;
+    assert chv_unr_set(v[0..8192], a[0..10], 3);
+    assert chv_unr_same(v[0..8192], 0, a[0..10]) and chv_unr_same(v[0..8192], 1, a[0..10]) == false;
+    assert chv_tr_set(v[0..8192], a[0..10], FV_TB_PIN);
+    assert chv_tr_same(v[0..8192], 0, a[0..10]) and chv_tr_same(v[0..8192], 1, a[0..10]) == false;
+    var i : usize = 0;
+    while (i < 10) {
+        var b : [10]u8 = undefined;
+        t_fp(20, b[0..10]);
+        b[i] = b[i] + 1;
+        assert chv_unr_same(v[0..8192], 0, b[0..10]) == false;
+        assert chv_tr_same(v[0..8192], 0, b[0..10]) == false;
+        assert chv_unr_get(v[0..8192], b[0..10]) == 0 and chv_tr_get(v[0..8192], b[0..10]) == 0;
+        i = i + 1;
+    }
+    assert chv_unr_get(v[0..8192], a[0..10]) == 3 and chv_tr_get(v[0..8192], a[0..10]) == FV_TB_PIN;
+}
+
+test chv_two_digits_pad_with_zero_and_keep_the_last_two_digits {
+    var o : [8]u8 = [120, 120, 120, 120, 120, 120, 120, 120];
+    assert chv_two(o[0..8], 1, 0) == 3 and o[1] == 48 and o[2] == 48 and o[0] == 120 and o[3] == 120;
+    assert chv_two(o[0..8], 0, 7) == 2 and o[0] == 48 and o[1] == 55;
+    assert chv_two(o[0..8], 4, 59) == 6 and o[4] == 53 and o[5] == 57;
+    assert chv_two(o[0..8], 4, 99) == 6 and o[4] == 57 and o[5] == 57;
+    assert chv_two(o[0..8], 4, 100) == 6 and o[4] == 48 and o[5] == 48;
+    assert chv_two(o[0..8], 6, 123) == 8 and o[6] == 50 and o[7] == 51 and o[3] == 120;
+}
+
+test chv_local_seconds_remove_the_bias_and_never_go_below_zero {
+    // tz arrives as 86400 plus the seconds east of UTC
+    assert chv_local_s(0, CHV_TZ_BIAS) == 0;
+    assert chv_local_s(1999, CHV_TZ_BIAS) == 1 and chv_local_s(999, CHV_TZ_BIAS) == 0;
+    assert chv_local_s(7200000, CHV_TZ_BIAS + 3600) == 7200 + 3600;
+    // west of UTC: the offset is smaller than the bias
+    assert chv_local_s(7200000, CHV_TZ_BIAS - 3600) == 7200 - 3600;
+    // before 1970 local time there is nothing to show: 0, at the boundary and below it
+    assert chv_local_s(0, CHV_TZ_BIAS - 1) == 0 and chv_local_s(1000, 0) == 0;
+    assert chv_local_s(86399000, 0) == 0 and chv_local_s(86400000, 0) == 0 and chv_local_s(86401000, 0) == 1;
+    assert chv_local_s(3000000000000, CHV_TZ_BIAS) == 3000000000;
+}
+
+test chv_months_have_three_letter_names_and_anything_else_reads_dec {
+    var o : [8]u8 = undefined;
+    assert fv_eq(o[0..8], put_bytes(o[0..8], 0, chv_month(1)), "Jan");
+    assert fv_eq(o[0..8], put_bytes(o[0..8], 0, chv_month(2)), "Feb");
+    assert fv_eq(o[0..8], put_bytes(o[0..8], 0, chv_month(3)), "Mar");
+    assert fv_eq(o[0..8], put_bytes(o[0..8], 0, chv_month(4)), "Apr");
+    assert fv_eq(o[0..8], put_bytes(o[0..8], 0, chv_month(5)), "May");
+    assert fv_eq(o[0..8], put_bytes(o[0..8], 0, chv_month(6)), "Jun");
+    assert fv_eq(o[0..8], put_bytes(o[0..8], 0, chv_month(7)), "Jul");
+    assert fv_eq(o[0..8], put_bytes(o[0..8], 0, chv_month(8)), "Aug");
+    assert fv_eq(o[0..8], put_bytes(o[0..8], 0, chv_month(9)), "Sep");
+    assert fv_eq(o[0..8], put_bytes(o[0..8], 0, chv_month(10)), "Oct");
+    assert fv_eq(o[0..8], put_bytes(o[0..8], 0, chv_month(11)), "Nov");
+    assert fv_eq(o[0..8], put_bytes(o[0..8], 0, chv_month(12)), "Dec");
+    assert fv_eq(o[0..8], put_bytes(o[0..8], 0, chv_month(0)), "Dec");
+    assert fv_eq(o[0..8], put_bytes(o[0..8], 0, chv_month(13)), "Dec");
+}
+
+test chv_the_check_mark_is_the_three_utf8_bytes_of_u2713 {
+    var o : [6]u8 = [0, 0, 0, 0, 0, 0];
+    assert chv_check(o[0..6], 1) == 4;
+    assert o[0] == 0 and o[1] == 226 and o[2] == 156 and o[3] == 147 and o[4] == 0;
+    assert ch_utf8_ok(o[1..4]);
+    var b : [4]u8 = undefined;
+    assert chv_utf8(10003, b[0..4]) == 3 and b[0] == o[1] and b[1] == o[2] and b[2] == o[3];
+}
+
+test chv_utf8_lengths_change_exactly_at_the_code_point_limits {
+    var b : [4]u8 = undefined;
+    assert chv_utf8(0, b[0..4]) == 1 and b[0] == 0;
+    assert chv_utf8(127, b[0..4]) == 1 and b[0] == 127;
+    assert chv_utf8(128, b[0..4]) == 2 and b[0] == 194 and b[1] == 128;
+    assert chv_utf8(1055, b[0..4]) == 2 and b[0] == 208 and b[1] == 159;
+    assert chv_utf8(2047, b[0..4]) == 2 and b[0] == 223 and b[1] == 191;
+    assert chv_utf8(2048, b[0..4]) == 3 and b[0] == 224 and b[1] == 160 and b[2] == 128;
+    assert chv_utf8(8364, b[0..4]) == 3 and b[0] == 226 and b[1] == 130 and b[2] == 172;
+    assert chv_utf8(65535, b[0..4]) == 3 and b[0] == 239 and b[1] == 191 and b[2] == 191;
+    assert chv_utf8(65536, b[0..4]) == 4 and b[0] == 240 and b[1] == 144 and b[2] == 128 and b[3] == 128;
+    assert chv_utf8(128512, b[0..4]) == 4 and b[0] == 240 and b[1] == 159 and b[2] == 152 and b[3] == 128;
+    assert chv_utf8(1114111, b[0..4]) == 4 and b[0] == 244 and b[1] == 143 and b[2] == 191 and b[3] == 191;
+    // every length decodes back through the reader
+    assert chv_cp_val(b[0..4], 0, chv_cp_len(b[0])) == 1114111;
+}
+
+test chv_a_sequence_length_comes_from_its_first_byte_and_stray_bytes_count_as_one {
+    assert chv_cp_len(0) == 1 and chv_cp_len(127) == 1;
+    // continuation bytes and the unused C0 C1 area: 128..191 stand alone; 192..223 start two
+    assert chv_cp_len(128) == 1 and chv_cp_len(191) == 1;
+    assert chv_cp_len(192) == 2 and chv_cp_len(223) == 2;
+    assert chv_cp_len(224) == 3 and chv_cp_len(239) == 3;
+    assert chv_cp_len(240) == 4 and chv_cp_len(247) == 4;
+    assert chv_cp_len(248) == 1 and chv_cp_len(255) == 1;
+}
+
+test chv_code_points_are_read_from_one_to_four_bytes_and_cyrillic_is_two {
+    const ru : [4]u8 = [208, 159, 209, 128];
+    assert chv_cp_val(ru[0..4], 0, 2) == 1055 and chv_cp_val(ru[0..4], 2, 2) == 1088;
+    const eur : [3]u8 = [226, 130, 172];
+    assert chv_cp_val(eur[0..3], 0, 3) == 8364;
+    const smile : [4]u8 = [240, 159, 152, 128];
+    assert chv_cp_val(smile[0..4], 0, 4) == 128512;
+    const one : [2]u8 = [0, 65];
+    assert chv_cp_val(one[0..2], 0, 1) == 0 and chv_cp_val(one[0..2], 1, 1) == 65;
+    // a broken sequence (continuation bytes without a header bit pattern) still gives a value and never reads past k
+    const bad : [2]u8 = [193, 255];
+    assert chv_cp_val(bad[0..2], 0, 2) == 127;
+    const top : [4]u8 = [247, 191, 191, 191];
+    assert chv_cp_val(top[0..4], 0, 4) == 2097151;
+}
+
+test chv_glyph_widths_follow_the_class_of_the_code_point {
+    assert chv_cp_w(32, 1.0) == 0.3;
+    assert chv_cp_w(97, 1.0) == 0.58 and chv_cp_w(0, 1.0) == 0.58 and chv_cp_w(127, 1.0) == 0.58;
+    assert chv_cp_w(105, 1.0) == 0.34 and chv_cp_w(124, 1.0) == 0.34 and chv_cp_w(46, 1.0) == 0.34;
+    assert chv_cp_w(64, 1.0) == 0.92 and chv_cp_w(109, 1.0) == 0.92 and chv_cp_w(37, 1.0) == 0.92;
+    assert chv_cp_w(65, 1.0) == 0.7 and chv_cp_w(90, 1.0) == 0.7 and chv_cp_w(73, 1.0) == 0.7;
+    assert chv_cp_w(128, 1.0) == 0.64 and chv_cp_w(591, 1.0) == 0.64;
+    assert chv_cp_w(592, 1.0) == 0.7;
+    // combining marks and joiners take no room
+    assert chv_cp_w(768, 1.0) == 0.0 and chv_cp_w(879, 1.0) == 0.0 and chv_cp_w(8205, 1.0) == 0.0;
+    assert chv_cp_w(65024, 1.0) == 0.0 and chv_cp_w(65039, 1.0) == 0.0 and chv_cp_w(65040, 1.0) == 0.7;
+    // Greek, Cyrillic, Armenian
+    assert chv_cp_w(880, 1.0) == 0.68 and chv_cp_w(1055, 1.0) == 0.68 and chv_cp_w(1327, 1.0) == 0.68 and chv_cp_w(1328, 1.0) == 0.7;
+    // wide scripts
+    assert chv_cp_w(11904, 1.0) == 1.05 and chv_cp_w(40959, 1.0) == 1.05 and chv_cp_w(40960, 1.0) == 0.7;
+    assert chv_cp_w(44032, 1.0) == 1.05 and chv_cp_w(55215, 1.0) == 1.05 and chv_cp_w(55216, 1.0) == 0.7;
+    assert chv_cp_w(63744, 1.0) == 1.05 and chv_cp_w(64255, 1.0) == 1.05 and chv_cp_w(65280, 1.0) == 1.05 and chv_cp_w(65519, 1.0) == 1.05 and chv_cp_w(65520, 1.0) == 0.7;
+    // arrows, symbols and emoji
+    assert chv_cp_w(8592, 1.0) == 1.3 and chv_cp_w(11263, 1.0) == 1.3 and chv_cp_w(11264, 1.0) == 0.7;
+    assert chv_cp_w(126976, 1.0) == 1.3 and chv_cp_w(128512, 1.0) == 1.3;
+    // the size scales the advance
+    assert chv_cp_w(97, 0.0) == 0.0 and chv_cp_w(97, 2.0) == 1.16;
+}
+
+test chv_a_wrapped_line_loses_its_trailing_spaces_and_line_ends_and_is_recorded {
+    var st : [4]u32 = undefined;
+    var ln : [4]u32 = undefined;
+    const t : [9]u8 = [97, 98, 32, 32, 10, 32, 99, 32, 10];
+    assert chv_emit_line(t[0..9], 0, 5, st[0..4], ln[0..4], 0) == 1;
+    assert st[0] == 0 and ln[0] == 2;
+    // a line that is nothing but blanks is empty, and k moves on
+    assert chv_emit_line(t[0..9], 2, 5, st[0..4], ln[0..4], 1) == 2;
+    assert st[1] == 2 and ln[1] == 0;
+    // leading spaces stay; the empty range is empty
+    assert chv_emit_line(t[0..9], 5, 9, st[0..4], ln[0..4], 2) == 3;
+    assert st[2] == 5 and ln[2] == 2;
+    assert chv_emit_line(t[0..9], 4, 4, st[0..4], ln[0..4], 3) == 4;
+    assert st[3] == 4 and ln[3] == 0;
+    // a text with no trailing blank is whole
+    assert chv_emit_line(t[0..9], 0, 2, st[0..4], ln[0..4], 0) == 1 and ln[0] == 2;
+}
+
+test chv_the_field_appends_up_to_exactly_2000_bytes_and_says_why_it_stopped {
+    var v : [8192]u8 = undefined;
+    fv_blank(v[0..8192]);
+    const x : [4]u8 = [97, 98, 99, 100];
+    assert chv_tlen(v[0..8192]) == 0;
+    assert chv_append(v[0..8192], x[0..4], 4);
+    assert chv_tlen(v[0..8192]) == 4 and v[CHV_TYPED] == 97 and v[CHV_TYPED + 3] == 100 and v[CHV_NOTE] == 0;
+    // fill to 1999 one byte at a time, then a 1-byte append reaches exactly the cap and a 1-byte one more is refused
+    var i : usize = 4;
+    while (i < 1999) {
+        assert chv_append(v[0..8192], x[0..1], 1);
+        i = i + 1;
+    }
+    assert chv_tlen(v[0..8192]) == 1999;
+    assert chv_append(v[0..8192], x[1..3], 2) == false and chv_tlen(v[0..8192]) == 1999 and v[CHV_NOTE] == CHV_N_LONG;
+    assert chv_append(v[0..8192], x[1..2], 1) and chv_tlen(v[0..8192]) == 2000 and v[CHV_NOTE] == 0 and v[CHV_TYPED + 1999] == 98;
+    assert chv_append(v[0..8192], x[0..1], 1) == false and chv_tlen(v[0..8192]) == 2000 and v[CHV_NOTE] == CHV_N_LONG;
+    assert v[CHV_TYPED + 2000] == 0;
+    // an empty append never fails while there is room, and a pending note is cleared by the next good one
+    assert chv_append(v[0..8192], x[0..0], 0) and v[CHV_NOTE] == 0 and chv_tlen(v[0..8192]) == 2000;
+}
+
+test chv_the_avatar_and_the_bubble_follow_the_panel_geometry {
+    assert chv_av_cx(0.0) == QP_PAD + CHV_AV_R and chv_av_cx(660.0) == 660.0 + 16.0 + 24.0;
+    assert chv_av_cx(-10.0) == 30.0;
+    // the avatar's right edge is left of the nickname
+    assert chv_av_cx(100.0) + CHV_AV_R < chv_nick_x(100.0);
+    assert chv_bubble_max(300.0) > 209.0 and chv_bubble_max(300.0) < 209.1 and chv_bubble_max(300.0) < chv_inner_w(300.0);
+    assert chv_bubble_max(32.0) == 0.0 and chv_bubble_max(100.0) > 53.0 and chv_bubble_max(100.0) < 53.1;
+    // below the padding the width is negative, never clamped here (the caller clamps to the minimum)
+    assert chv_bubble_max(0.0) < 0.0;
+}
+
+test chv_item_slots_are_128_bytes_apart_and_points_round_to_the_nearest_whole {
+    assert chv_item_at(0) == CHV_ITEMS and chv_item_at(1) == CHV_ITEMS + 128 and chv_item_at(CHV_ITEMS_MAX) == CHV_END;
+    assert chv_pt(-5.0) == 0 and chv_pt(0.0) == 0 and chv_pt(0.49) == 0 and chv_pt(0.5) == 1;
+    assert chv_pt(1.49) == 1 and chv_pt(1.5) == 2 and chv_pt(268.4) == 268 and chv_pt(268.6) == 269;
+    assert chv_pt(65534.4) == 65534 and chv_pt(65534.6) == 65535 and chv_pt(65535.0) == 65535;
+    assert chv_pt(65535.4) == 65535 and chv_pt(65535.5) == 65535 and chv_pt(65535.6) == 65535;
+    assert chv_pt(65536.0) == 65535 and chv_pt(1000000000.0) == 65535;
+}
+
+test chv_an_item_stores_kind_direction_state_box_and_text_and_clips_long_text {
+    var v : [8192]u8 = undefined;
+    fv_blank(v[0..8192]);
+    const t : [4]u8 = [208, 159, 105, 33];
+    chv_put_item(v[0..8192], 1, CHV_I_LINE, CH_DIR_OUT, CH_S_READ, 12.4, -30.0, 100.5, 14.0, t[0..4]);
+    assert chv_item_kind(v[0..8192], 1) == CHV_I_LINE and chv_item_dir(v[0..8192], 1) == CH_DIR_OUT and chv_item_state(v[0..8192], 1) == CH_S_READ;
+    assert chv_item_x(v[0..8192], 1) == 12.0 and chv_item_y(v[0..8192], 1) == -30.0 and chv_item_w(v[0..8192], 1) == 101.0 and chv_item_h(v[0..8192], 1) == 14.0;
+    assert chv_item_len(v[0..8192], 1) == 4 and v[chv_item_text(1)] == 208 and v[chv_item_text(1) + 3] == 33;
+    // the neighbours are not touched
+    assert chv_item_kind(v[0..8192], 0) == 0 and chv_item_kind(v[0..8192], 2) == 0 and chv_item_len(v[0..8192], 2) == 0;
+    // y below the top of the history is stored with the 32768 offset: far above is clamped at the edge
+    chv_put_item(v[0..8192], 2, CHV_I_BUBBLE, CH_DIR_IN, CH_S_DELIVERED, -4.0, -40000.0, 70000.0, 0.0, t[0..0]);
+    assert chv_item_x(v[0..8192], 2) == 0.0 and chv_item_y(v[0..8192], 2) == -32768.0 and chv_item_w(v[0..8192], 2) == 65535.0 and chv_item_len(v[0..8192], 2) == 0;
+    chv_put_item(v[0..8192], 3, CHV_I_META, CH_DIR_IN, CH_S_SENT, 0.0, 32767.0, 0.0, 0.0, t[0..0]);
+    assert chv_item_y(v[0..8192], 3) == 32767.0;
+    // text of exactly 112 bytes is kept whole, 113 is cut to 112
+    var big : [113]u8 = undefined;
+    var i : usize = 0;
+    while (i < 113) {
+        big[i] = 97 + @as(u8, @intCast(i % 26));
+        i = i + 1;
+    }
+    chv_put_item(v[0..8192], 4, CHV_I_LINE, CH_DIR_IN, CH_S_READ, 0.0, 0.0, 10.0, 10.0, big[0..112]);
+    assert chv_item_len(v[0..8192], 4) == 112 and v[chv_item_text(4) + 111] == big[111];
+    chv_put_item(v[0..8192], 5, CHV_I_LINE, CH_DIR_IN, CH_S_READ, 0.0, 0.0, 10.0, 10.0, big[0..113]);
+    assert chv_item_len(v[0..8192], 5) == 112 and v[chv_item_text(5) + 111] == big[111];
+    assert v[chv_item_text(5) + 112] == 0 and chv_item_kind(v[0..8192], 6) == 0;
+}
+
+test chv_one_log_line_becomes_a_bubble_its_text_lines_and_a_meta_line_placed_by_direction {
+    var a : [10]u8 = undefined;
+    t_fp(30, a[0..10]);
+    var log : [16296]u8 = undefined;
+    var asm : [8064]u8 = undefined;
+    fv_blank(asm[0..CA_LEN]);
+    assert cl_init(log[0..cl_bytes(8)], a[0..10], 8);
+    const hi : [2]u8 = [104, 105];
+    assert cl_out_add(log[0..cl_bytes(8)], hi[0..2], 1792677900000) == 1;
+    var p : [720]u8 = undefined;
+    const pn : usize = ch_put_text(p[0..720], 1, 0, 1792677900000, hi[0..2]);
+    assert ch_rx_text(log[0..cl_bytes(8)], asm[0..CA_LEN], p[0..pn]) == 2;
+    var v : [8192]u8 = undefined;
+    fv_blank(v[0..8192]);
+    const w : f64 = 300.0;
+    const now : u64 = 1792677900000;
+    // line 0 is ours: right aligned, bubble + 1 line + meta, starting at slot 3
+    const n : usize = chv_emit(v[0..8192], 3, log[0..cl_bytes(8)], 0, 10.0, w, 400.0, now, CHV_TZ_BIAS, true);
+    assert n == 6 and chv_item_kind(v[0..8192], 3) == CHV_I_BUBBLE and chv_item_kind(v[0..8192], 4) == CHV_I_LINE and chv_item_kind(v[0..8192], 5) == CHV_I_META;
+    assert chv_item_dir(v[0..8192], 3) == CH_DIR_OUT and chv_item_state(v[0..8192], 5) == CH_S_PENDING;
+    const bw : f64 = chv_item_w(v[0..8192], 3);
+    assert bw >= CHV_BUB_MIN_W and bw <= chv_bubble_max(w) + 1.0;
+    assert chv_item_x(v[0..8192], 3) + bw >= chv_inner_w(w) - 1.0 and chv_item_x(v[0..8192], 3) + bw <= chv_inner_w(w) + 1.0;
+    assert chv_item_y(v[0..8192], 3) == 10.0 and chv_item_h(v[0..8192], 3) == chv_bubble_h(1);
+    assert chv_item_y(v[0..8192], 4) == 15.0 and chv_item_len(v[0..8192], 4) == 2 and v[chv_item_text(4)] == 104;
+    assert chv_item_y(v[0..8192], 5) == 29.0 and chv_item_len(v[0..8192], 5) > 2;
+    assert chv_item_x(v[0..8192], 4) == chv_item_x(v[0..8192], 3) + CHV_BUB_PAD_X;
+    // the meta of an own line carries the state word
+    var mb : [64]u8 = undefined;
+    const mn : usize = chv_meta_put(mb[0..64], CH_DIR_OUT, CH_S_PENDING, now, now, CHV_TZ_BIAS, true);
+    assert chv_item_len(v[0..8192], 5) == mn and v[chv_item_text(5) + mn - 1] == mb[mn - 1];
+    // line 1 is the friend's: left aligned, its meta is the time alone
+    var u : [8192]u8 = undefined;
+    fv_blank(u[0..8192]);
+    const m : usize = chv_emit(u[0..8192], 0, log[0..cl_bytes(8)], 1, 10.0, w, 400.0, now, CHV_TZ_BIAS, true);
+    assert m == 3 and chv_item_dir(u[0..8192], 0) == CH_DIR_IN and chv_item_x(u[0..8192], 0) == 0.0;
+    assert chv_item_len(u[0..8192], 2) == 5 and chv_item_state(u[0..8192], 2) == CH_S_DELIVERED;
+    // a short text and a short time still get the minimum bubble width
+    assert chv_item_w(u[0..8192], 0) == CHV_BUB_MIN_W;
+}
+
+test chv_emit_skips_what_is_out_of_view_and_stops_at_the_item_table {
+    var a : [10]u8 = undefined;
+    t_fp(40, a[0..10]);
+    var log : [16296]u8 = undefined;
+    assert cl_init(log[0..cl_bytes(8)], a[0..10], 8);
+    const hi : [2]u8 = [104, 105];
+    assert cl_out_add(log[0..cl_bytes(8)], hi[0..2], 1792677900000) == 1;
+    var v : [8192]u8 = undefined;
+    fv_blank(v[0..8192]);
+    const w : f64 = 300.0;
+    const now : u64 = 1792677900000;
+    const hh : f64 = 100.0;
+    // fully below the view: only the bubble box is written (the layout does not call this for such a top)
+    assert chv_emit(v[0..8192], 0, log[0..cl_bytes(8)], 0, 200.0, w, hh, now, CHV_TZ_BIAS, false) == 1;
+    // text line ends exactly at the top edge: gone; the meta line below it is still in
+    assert chv_emit(v[0..8192], 0, log[0..cl_bytes(8)], 0, -19.0, w, hh, now, CHV_TZ_BIAS, false) == 2 and chv_item_kind(v[0..8192], 1) == CHV_I_META;
+    // the meta line also ends exactly at the edge: the bubble alone
+    assert chv_emit(v[0..8192], 0, log[0..cl_bytes(8)], 0, -31.0, w, hh, now, CHV_TZ_BIAS, false) == 1;
+    // the meta line starts exactly at the bottom edge: out, with the text line above it still in
+    assert chv_emit(v[0..8192], 0, log[0..cl_bytes(8)], 0, 81.0, w, hh, now, CHV_TZ_BIAS, false) == 2 and chv_item_kind(v[0..8192], 1) == CHV_I_LINE;
+    // a line that starts exactly at the bottom edge is out, the one just above it is in
+    assert chv_emit(v[0..8192], 0, log[0..cl_bytes(8)], 0, 95.0, w, hh, now, CHV_TZ_BIAS, false) == 1;
+    assert chv_emit(v[0..8192], 0, log[0..cl_bytes(8)], 0, 94.5, w, hh, now, CHV_TZ_BIAS, false) == 2 and chv_item_kind(v[0..8192], 1) == CHV_I_LINE;
+    // the table is CHV_ITEMS_MAX long: no room, one slot, two slots, three slots
+    assert chv_emit(v[0..8192], CHV_ITEMS_MAX, log[0..cl_bytes(8)], 0, 10.0, w, 400.0, now, CHV_TZ_BIAS, false) == CHV_ITEMS_MAX;
+    assert chv_emit(v[0..8192], CHV_ITEMS_MAX - 1, log[0..cl_bytes(8)], 0, 10.0, w, 400.0, now, CHV_TZ_BIAS, false) == CHV_ITEMS_MAX;
+    assert chv_item_kind(v[0..8192], CHV_ITEMS_MAX - 1) == CHV_I_BUBBLE;
+    assert chv_emit(v[0..8192], CHV_ITEMS_MAX - 2, log[0..cl_bytes(8)], 0, 10.0, w, 400.0, now, CHV_TZ_BIAS, false) == CHV_ITEMS_MAX;
+    assert chv_item_kind(v[0..8192], CHV_ITEMS_MAX - 1) == CHV_I_LINE;
+    assert chv_emit(v[0..8192], CHV_ITEMS_MAX - 3, log[0..cl_bytes(8)], 0, 10.0, w, 400.0, now, CHV_TZ_BIAS, false) == CHV_ITEMS_MAX;
+    assert chv_item_kind(v[0..8192], CHV_ITEMS_MAX - 1) == CHV_I_META;
+}
+
+test chv_emit_wraps_a_long_cyrillic_message_into_lines_inside_the_bubble {
+    var a : [10]u8 = undefined;
+    t_fp(50, a[0..10]);
+    var log : [16296]u8 = undefined;
+    assert cl_init(log[0..cl_bytes(8)], a[0..10], 8);
+    // 120 times a two byte letter and a space: far wider than one line
+    var t : [360]u8 = undefined;
+    var i : usize = 0;
+    while (i < 120) {
+        t[i * 3] = 208;
+        t[i * 3 + 1] = 159;
+        t[i * 3 + 2] = 32;
+        i = i + 1;
+    }
+    assert cl_out_add(log[0..cl_bytes(8)], t[0..360], 1792677900000) == 1;
+    var v : [8192]u8 = undefined;
+    fv_blank(v[0..8192]);
+    const w : f64 = 300.0;
+    const n : usize = chv_emit(v[0..8192], 0, log[0..cl_bytes(8)], 0, 0.0, w, 100000.0, 1792677900000, CHV_TZ_BIAS, true);
+    assert n >= 5 and n <= CHV_ITEMS_MAX;
+    assert chv_item_kind(v[0..8192], 0) == CHV_I_BUBBLE and chv_item_kind(v[0..8192], n - 1) == CHV_I_META;
+    var lines : usize = 0;
+    var k : usize = 1;
+    while (k < n - 1) {
+        assert chv_item_kind(v[0..8192], k) == CHV_I_LINE;
+        // a line is whole letters, no wider than the bubble's text area, and starts below the previous one
+        assert chv_item_len(v[0..8192], k) % 3 == 2 and chv_item_len(v[0..8192], k) >= 2 and chv_item_len(v[0..8192], k) <= CHV_LINE_BYTES;
+        assert chv_text_w(v[chv_item_text(k)..chv_item_text(k) + chv_item_len(v[0..8192], k)], chv_item_len(v[0..8192], k), CHV_FONT) <= chv_text_max(w);
+        if (k > 1) { assert chv_item_y(v[0..8192], k) == chv_item_y(v[0..8192], k - 1) + CHV_LINE_H; }
+        lines = lines + 1;
+        k = k + 1;
+    }
+    assert lines >= 3 and chv_item_h(v[0..8192], 0) == @as(f64, @floatFromInt(chv_pt(chv_bubble_h(lines))));
+    assert chv_item_w(v[0..8192], 0) <= chv_bubble_max(w) + 1.0 and chv_item_w(v[0..8192], 0) > 0.6 * chv_bubble_max(w);
+}
