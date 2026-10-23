@@ -17,6 +17,10 @@
 //                   duplicate). Ends when every line is here, every own line DELIVERED to both, and every session
 //                   closed idle; then the log is checked, saved, read back and checked again, and the order is
 //                   printed as one number (ORDER) to compare across members.
+//                   GRP_LEARN=1: only the creator writes the group; every other member starts with no groups and
+//                   learns it from the creator's GROUP_INFO over their message session (kept, written to groups.t27,
+//                   answered GI_HAVE), then opens it and sends its messages. The creator's lines that reach a member
+//                   before the group does are dropped there and go again (the HAVE restarts them).
 // Build (Apple silicon): as chat_probe.t27 (t27b build ... --macho; ld ... -lffi -framework Security ...).
 module T27osGroupProbe;
 
@@ -95,6 +99,7 @@ use t27os::group_core::gt_count;
 use t27os::group_core::gt_find;
 use t27os::group_core::gt_id;
 use t27os::group_core::gt_n;
+use t27os::group_core::GT_NONE;
 use t27os::group_core::gt_idx;
 use t27os::group_core::gt_member;
 use t27os::group_core::gt_encode;
@@ -138,6 +143,13 @@ use t27os::chat_host::GRM_FAILED;
 use t27os::chat_host::GRM_NOT_OPEN;
 use t27os::chat_host::GRM_K_DROP_ACK;
 use t27os::chat_host::GRM_ACK_DROPPED;
+use t27os::chat_host::CHM_E_GINFO;
+use t27os::chat_host::CHM_INFO_TX;
+use t27os::chat_host::CHM_INFO_KEPT;
+use t27os::chat_host::CHM_INFO_HAVE;
+use t27os::chat_host::CHM_INFO_REFUSED;
+use t27os::chat_host::CHM_INFO_WHY;
+use t27os::group_core::gi_owe_new;
 
 /// The text of message k of member `who` (0..7) into out; its length.
 pub fn grp_text(who: u32, k: u32, out: []u8) -> usize {
@@ -339,22 +351,44 @@ fn grp_member() -> bool {
     gt_init(t[0..GT_LEN]);
     var gid : [8]u8 = undefined;
     var made : u32 = 0;
-    if (ck_same(cfp[0..10], fp[0..10])) {
-        made = ghh_make(t[0..GT_LEN], friends[0..FT_LEN], fp[0..10], others[0..70], k, "trio", t0, gid[0..8]);
-    } else {
-        made = ghh_keep(t[0..GT_LEN], friends[0..FT_LEN], fp[0..10], roster[0..80], n, creator, "trio", t0, gid[0..8]);
-    }
-    ok = ckh_check("the group is made (creator) or kept (member)", made == GR_OK) and ok;
-    ok = ckh_check("the groups file is written", ghh_save(t[0..GT_LEN])) and ok;
+    const mine : bool = ck_same(cfp[0..10], fp[0..10]);
+    const learn : bool = ckh_env_num("GRP_LEARN", 0) != 0 and !mine;
     var t2 : [4240]u8 = undefined;
-    ok = ckh_check("the groups file reads back with the same id", ghh_open(t2[0..GT_LEN]) == IH_LOADED and gt_find(t2[0..GT_LEN], gid[0..8]) == 0) and ok;
+    gt_init(t2[0..GT_LEN]);
+    var own : [32]u8 = undefined;
+    i = 0;
+    while (i < 32) {
+        own[i] = 0;
+        i = i + 1;
+    }
+    if (learn) {
+        // the member does not write the group: its groups file must not hold it yet, and the id is known only to wait
+        ok = ckh_check("the id of the roster hashes", ghh_id(roster[0..80], n, gid[0..8])) and ok;
+        ok = ckh_check("no group here before the GROUP_INFO", ghh_open(t2[0..GT_LEN]) != IH_LOADED or gt_find(t2[0..GT_LEN], gid[0..8]) == GT_NONE) and ok;
+        gt_init(t2[0..GT_LEN]);
+    } else {
+        if (mine) {
+            made = ghh_make(t[0..GT_LEN], friends[0..FT_LEN], fp[0..10], others[0..70], k, "trio", t0, gid[0..8]);
+        } else {
+            made = ghh_keep(t[0..GT_LEN], friends[0..FT_LEN], fp[0..10], roster[0..80], n, creator, "trio", t0, gid[0..8]);
+        }
+        ok = ckh_check("the group is made (creator) or kept (member)", made == GR_OK) and ok;
+        ok = ckh_check("the groups file is written", ghh_save(t[0..GT_LEN])) and ok;
+        ok = ckh_check("the groups file reads back with the same id", ghh_open(t2[0..GT_LEN]) == IH_LOADED and gt_find(t2[0..GT_LEN], gid[0..8]) == 0) and ok;
+        // the creator owes every other member the ANNOUNCE
+        if (mine) { own[0] = @as(u8, @intCast(gi_owe_new(t2[0..GT_LEN], 0, fp[0..10]))); }
+    }
     if (!ok) { return false; }
     ckh_line("GROUP ");
     ckh_num("id0", @as(u64, gid[0]));
+    var me : u32 = 0;
+    while (@as(usize, me) < n and !ck_same(roster[@as(usize, me) * 10..@as(usize, me) * 10 + 10], fp[0..10])) { me = me + 1; }
     var g : [256]u8 = undefined;
-    ok = ckh_check("the group opens", grm_init(g[0..GRM_LEN], t2[0..GT_LEN], gid[0..8], fp[0..10])) and ok;
-    const me : u32 = gt_idx(t2[0..GT_LEN], 0, fp[0..10]);
-    grm_set(g[0..GRM_LEN], GRM_K_DROP_ACK, ckh_env_num("GRP_DROP_ACK", 0));
+    i = 0;
+    while (i < 256) {
+        g[i] = 0;
+        i = i + 1;
+    }
     const L : usize = cl_bytes(CL_KEEP);
     var glog : [1016040]u8 = undefined;
     var buf : [1008048]u8 = undefined;
@@ -364,8 +398,11 @@ fn grp_member() -> bool {
         gasm[i] = 0;
         i = i + 1;
     }
-    const lr : u32 = grm_load(g[0..GRM_LEN], t2[0..GT_LEN], friends[0..FT_LEN], glog[0..L], CL_KEEP, buf[0..CF_MAX + 1]);
-    ok = ckh_check("a fresh group log", lr == CHH_NEW and cl_count(glog[0..L]) == 0) and ok;
+    i = 0;
+    while (i < L) {
+        glog[i] = 0;
+        i = i + 1;
+    }
     // one message session, driver and small friend's log per other member
     const base : u64 = ckh_env_num("GRP_BASE", 47900);
     var ss : [1165696]u8 = undefined;
@@ -387,11 +424,39 @@ fn grp_member() -> bool {
             if (!cs_identity(ss[so..so + CS_LEN], idb[ID_OFF_PUB..ID_OFF_PUB + 65], idb[ID_OFF_PRIV..ID_OFF_PRIV + 97])) { return ckh_check("identity handed to the session", false); }
             cs_set(ss[so..so + CS_LEN], CS_K_CALLING_MS, CH_CALLING_MS);
             cs_set(ss[so..so + CS_LEN], CS_K_SILENT_MS, CH_SILENT_MS);
-            chm_init(ms[j * 256..j * 256 + 256], gt_member(t2[0..GT_LEN], 0, j), 2130706433, base + 10 * @as(u64, j) + @as(u64, me));
-            cl_init(logs[j * 2072..j * 2072 + 2072], gt_member(t2[0..GT_LEN], 0, j), 1);
+            chm_init(ms[j * 256..j * 256 + 256], roster[j * 10..j * 10 + 10], 2130706433, base + 10 * @as(u64, j) + @as(u64, me));
+            cl_init(logs[j * 2072..j * 2072 + 2072], roster[j * 10..j * 10 + 10], 1);
         }
         j = j + 1;
     }
+    // GRP_LEARN: the member runs its sessions with no group until the creator's GROUP_INFO puts the group in its table
+    const start0 : u64 = ckh_ms();
+    var t_learn : u64 = 0;
+    if (learn) {
+        const lim0 : u64 = ckh_env_num("GRP_SECS", 150) * 1000;
+        while (gt_find(t2[0..GT_LEN], gid[0..8]) == GT_NONE and ckh_ms() - start0 < lim0) {
+            const now0 : u64 = ckh_ms();
+            j = 0;
+            while (j < n) {
+                if (@as(u32, @intCast(j)) != me) {
+                    const so0 : usize = j * CS_LEN;
+                    const ev0 : u32 = chm_tick_g(ms[j * 256..j * 256 + 256], ss[so0..so0 + CS_LEN], logs[j * 2072..j * 2072 + 2072], asms[j * 8064..j * 8064 + 8064], friends[0..FT_LEN], fp[0..10], now0, g[0..GRM_LEN], t2[0..GT_LEN], glog[0..L], gasm[0..CA_LEN], own[0..32]);
+                    if ((ev0 & CHM_E_GINFO) != 0) { ghh_save(t2[0..GT_LEN]); }
+                }
+                j = j + 1;
+            }
+            ckh_usleep(2000);
+        }
+        t_learn = ckh_ms() - start0;
+        var t3 : [4240]u8 = undefined;
+        ok = ckh_check("the group came by GROUP_INFO from its creator", gt_find(t2[0..GT_LEN], gid[0..8]) == 0 and gt_n(t2[0..GT_LEN], 0) == n) and ok;
+        ok = ckh_check("and was written to groups.t27", ghh_open(t3[0..GT_LEN]) == IH_LOADED and gt_find(t3[0..GT_LEN], gid[0..8]) == 0) and ok;
+        if (!ok) { return false; }
+    }
+    ok = ckh_check("the group opens", grm_init(g[0..GRM_LEN], t2[0..GT_LEN], gid[0..8], fp[0..10]) and gt_idx(t2[0..GT_LEN], 0, fp[0..10]) == me) and ok;
+    grm_set(g[0..GRM_LEN], GRM_K_DROP_ACK, ckh_env_num("GRP_DROP_ACK", 0));
+    const lr : u32 = grm_load(g[0..GRM_LEN], t2[0..GT_LEN], friends[0..FT_LEN], glog[0..L], CL_KEEP, buf[0..CF_MAX + 1]);
+    ok = ckh_check("a fresh group log", lr == CHH_NEW and cl_count(glog[0..L]) == 0) and ok;
     // every message of this member, at the times shared by all members
     const nmsg : u32 = @as(u32, @intCast(ckh_env_num("GRP_N", 10)));
     const reach : u32 = grm_reach(g[0..GRM_LEN], t2[0..GT_LEN], friends[0..FT_LEN]);
@@ -423,7 +488,7 @@ fn grp_member() -> bool {
         while (j < n) {
             if (@as(u32, @intCast(j)) != me) {
                 const so : usize = j * CS_LEN;
-                const ev : u32 = chm_tick_g(ms[j * 256..j * 256 + 256], ss[so..so + CS_LEN], logs[j * 2072..j * 2072 + 2072], asms[j * 8064..j * 8064 + 8064], friends[0..FT_LEN], fp[0..10], now, g[0..GRM_LEN], t2[0..GT_LEN], glog[0..L], gasm[0..CA_LEN]);
+                const ev : u32 = chm_tick_g(ms[j * 256..j * 256 + 256], ss[so..so + CS_LEN], logs[j * 2072..j * 2072 + 2072], asms[j * 8064..j * 8064 + 8064], friends[0..FT_LEN], fp[0..10], now, g[0..GRM_LEN], t2[0..GT_LEN], glog[0..L], gasm[0..CA_LEN], own[0..32]);
                 if ((ev & CHM_E_GDIRTY) != 0) { dirty = true; }
                 const cst : u32 = cs_state(ss[so..so + CS_LEN]);
                 if (trace and @as(u32, prev[j]) != cst) {
@@ -451,7 +516,7 @@ fn grp_member() -> bool {
             cl_open_read(glog[0..L]);
             dirty = true;
         }
-        if (t_all != 0 and idle) { done = true; }
+        if (t_all != 0 and idle and own[0] == 0) { done = true; }
         ckh_usleep(2000);
     }
     const total : u64 = ckh_ms() - start;
@@ -472,6 +537,24 @@ fn grp_member() -> bool {
     const lr2 : u32 = grm_load(g2[0..GRM_LEN], t2[0..GT_LEN], friends[0..FT_LEN], log2[0..L], CL_KEEP, buf[0..CF_MAX + 1]);
     ok = ckh_check("the group log reads back from ~/.t27os/chat/g-<id>.t27", lr2 == CHH_LOADED and grp_order_ok(log2[0..L], me, @as(u32, @intCast(n)), nmsg) and cl_unread(log2[0..L]) == 0) and ok;
     ok = ckh_check("nothing refused, nothing failed", grm_stat(g[0..GRM_LEN], GRM_REFUSED) == 0 and grm_stat(g[0..GRM_LEN], GRM_FAILED) == 0 and grm_stat(g[0..GRM_LEN], GRM_NOT_OPEN) == 0) and ok;
+    var itx : u64 = 0;
+    var ikept : u64 = 0;
+    var ihave : u64 = 0;
+    var iref : u64 = 0;
+    var iwhy : u64 = 0;
+    j = 0;
+    while (j < n) {
+        if (@as(u32, @intCast(j)) != me) {
+            itx = itx + chm_stat(ms[j * 256..j * 256 + 256], CHM_INFO_TX);
+            ikept = ikept + chm_stat(ms[j * 256..j * 256 + 256], CHM_INFO_KEPT);
+            ihave = ihave + chm_stat(ms[j * 256..j * 256 + 256], CHM_INFO_HAVE);
+            iref = iref + chm_stat(ms[j * 256..j * 256 + 256], CHM_INFO_REFUSED);
+            if (chm_stat(ms[j * 256..j * 256 + 256], CHM_INFO_WHY) != 0) { iwhy = chm_stat(ms[j * 256..j * 256 + 256], CHM_INFO_WHY); }
+        }
+        j = j + 1;
+    }
+    if (learn) { ok = ckh_check("the group was kept once, from its creator", ikept == 1 and iref == 0) and ok; }
+    if (mine and ckh_env_num("GRP_LEARN", 0) != 0) { ok = ckh_check("every member answered the ANNOUNCE", own[0] == 0 and ihave >= @as(u64, k)) and ok; }
     grp_stat("member", @as(u64, me));
     grp_stat("members", @as(u64, n));
     grp_stat("lines", @as(u64, cl_count(glog[0..L])));
@@ -515,6 +598,12 @@ fn grp_member() -> bool {
     grp_stat("sealed_text_tx", stx);
     grp_stat("sealed_text_rx", srx);
     grp_stat("replays_refused", rep);
+    grp_stat("info_announces_sent", itx);
+    grp_stat("info_groups_kept", ikept);
+    grp_stat("info_haves_taken", ihave);
+    grp_stat("info_refused", iref);
+    grp_stat("info_refused_last_reason", iwhy);
+    grp_stat("ms_to_learn_group", t_learn);
     grp_stat("ms_to_all_delivered", t_all);
     grp_stat("ms_total", total);
     return ok;

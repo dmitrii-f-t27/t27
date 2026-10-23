@@ -5,8 +5,8 @@
 //   * GROUPS N in the cabinet, under the friends and above the add part: a row a group (its name, how many people,
 //     the unread badge); a click opens the group's chat. "+" at the right end of the label line opens NEW GROUP.
 //   * NEW GROUP, a screen of the panel: the name (1..32 bytes, group_core gr_name_ok), the friends with a box each,
-//     CREATE. CREATE stays muted and says why while fewer than two friends are ticked or the name is empty; a group is
-//     at most 8 people (7 friends and this device).
+//     CREATE. CREATE stays muted and says why while no friend is ticked or the name is empty; a group is 2 to 8
+//     people (1 to 7 friends and this device), as group_core.t27 allows.
 //   * the group's CHAT, a screen of the panel drawn from the chat_view region (mode GV_CHAT): own lines right, the
 //     others' left with the sender's nickname over the text, the time, and for own lines "sending", "sent",
 //     "delivered to 2/3", "read by 1/3", "failed, will retry"; the field, Return sends, Esc goes back; an empty log
@@ -117,6 +117,7 @@ use t27os::chat_core::CH_S_SENT;
 use t27os::chat_core::CH_S_DELIVERED;
 use t27os::chat_core::CH_S_READ;
 use t27os::chat_core::CH_S_FAILED;
+use t27os::chat_core::ch_utf8_ok;
 use t27os::chat_core::cl_init;
 use t27os::chat_core::cl_count;
 use t27os::chat_core::cl_dir;
@@ -185,6 +186,10 @@ pub const GV_G_AID : usize = 161;
 /// The groups table (group_core GT_LEN bytes): the window's own copy, read from and written to groups.t27.
 pub const GV_T : usize = 256;
 pub const GV_T_END : usize = 4496;
+/// The ANNOUNCEs (group_core GROUP_INFO) this device still owes: a byte per group of the table, a bit per member index
+/// that has not answered GI_HAVE yet. In memory only.
+pub const GV_INFO : usize = 4496;
+pub const GV_INFO_END : usize = 4528;
 
 pub const GV_M_OFF : u32 = 0;
 pub const GV_M_NEW : u32 = 1;
@@ -460,8 +465,8 @@ pub fn gv_scroll(sc: usize, up: bool, count: usize, rows: usize) -> usize {
 // ---------------------------------------------------------------- 6. NEW GROUP (a screen of the panel)
 
 pub const GV_N_NONE : u32 = 0;
-pub const GV_N_PICK2 : u32 = 1;
-pub const GV_N_PICK1 : u32 = 2;
+/// No friend ticked (code 2, "one more friend", went when a group of two became possible).
+pub const GV_N_PICK : u32 = 1;
 pub const GV_N_NAME : u32 = 3;
 pub const GV_N_FULL : u32 = 4;
 pub const GV_N_TABLE : u32 = 5;
@@ -473,8 +478,7 @@ pub const GV_N_BAD : u32 = 9;
 pub const GV_N_NOBODY : u32 = 10;
 
 pub fn gv_note_text(code: u32) -> str {
-    if (code == GV_N_PICK2) { return "Tick at least two friends."; }
-    if (code == GV_N_PICK1) { return "Tick one more friend."; }
+    if (code == GV_N_PICK) { return "Tick at least one friend."; }
     if (code == GV_N_NAME) { return "Type a name for the group."; }
     if (code == GV_N_FULL) { return "A group is at most 8 people: 7 friends and you."; }
     if (code == GV_N_TABLE) { return "32 groups is the most this device keeps."; }
@@ -526,10 +530,10 @@ pub fn gv_pick_toggle(gv: []u8, i: usize, friends: usize) -> bool {
 
 pub fn gv_name_of(gv: []const u8) -> []const u8 { return gv[GV_NAME..GV_NAME + @as(usize, gv[GV_NLEN])]; }
 
-/// Why CREATE cannot be pressed now (GV_N_NONE when it can): fewer than two friends ticked, then no name.
+/// Why CREATE cannot be pressed now (GV_N_NONE when it can): no friend ticked (one friend and this device are a
+/// group of two), then no name.
 pub fn gv_create_why(picks: u32, name: []const u8) -> u32 {
-    if (picks == 0) { return GV_N_PICK2; }
-    if (picks < 2) { return GV_N_PICK1; }
+    if (picks == 0) { return GV_N_PICK; }
     if (!gr_name_ok(name)) { return GV_N_NAME; }
     return GV_N_NONE;
 }
@@ -577,6 +581,55 @@ pub fn gv_name_back(gv: []u8) -> void {
     n = n - 1;
     while (n > 0 and (gv[GV_NAME + n] & 192) == 128) { n = n - 1; }
     gv[GV_NLEN] = @as(u8, @intCast(n));
+}
+
+/// Cmd+V into the name: the pasted UTF-8 joins it, whole sequences only (a broken one is skipped), a tab or a line end
+/// becomes a space, other control bytes are dropped; it stops before the first sequence that would not fit
+/// GR_NAME_MAX bytes. The bytes added.
+pub fn gv_name_paste(gv: []u8, b: []const u8, n: usize) -> usize {
+    var added : usize = 0;
+    var i : usize = 0;
+    while (i < n and i < b.len) {
+        const c : u8 = b[i];
+        var k : usize = 1;
+        if (c >= 240 and c < 248) { k = 4; } else if (c >= 224) { k = 3; } else if (c >= 192) { k = 2; }
+        var ok : bool = true;
+        if (c >= 128 and c < 192) { ok = false; }
+        if (c >= 248) { ok = false; }
+        if (i + k > n or i + k > b.len) { return added; }
+        var j : usize = 1;
+        while (j < k) {
+            if ((b[i + j] & 192) != 128) { ok = false; }
+            j = j + 1;
+        }
+        if (ok and k > 1 and ch_utf8_ok(b[i..i + k]) == false) { ok = false; }
+        if (ok == false) {
+            i = i + 1;
+        } else {
+            var one : [4]u8 = undefined;
+            var q : usize = 0;
+            while (q < k) {
+                one[q] = b[i + q];
+                q = q + 1;
+            }
+            if (k == 1 and (c == 9 or c == 10 or c == 13)) { one[0] = 32; }
+            const keep : bool = k > 1 or (one[0] >= 32 and one[0] != 127);
+            if (keep) {
+                const nl : usize = @as(usize, gv[GV_NLEN]);
+                if (nl + k > GR_NAME_MAX) { return added; }
+                q = 0;
+                while (q < k) {
+                    gv[GV_NAME + nl + q] = one[q];
+                    q = q + 1;
+                }
+                gv[GV_NLEN] = @as(u8, @intCast(nl + k));
+                gv[GV_NOTE] = 0;
+                added = added + k;
+            }
+            i = i + k;
+        }
+    }
+    return added;
 }
 
 /// The boxes of NEW GROUP (t = panel top, l = its left, w = QP_W, h = panel height).
@@ -895,6 +948,7 @@ fn t_region(gv: []u8) -> void {
 
 test gv_the_region_holds_the_table_and_ends_inside_its_cap {
     assert GV_T_END == GV_T + GT_LEN and GV_T_END <= GV_CAP;
+    assert GV_INFO >= GV_T_END and GV_INFO_END == GV_INFO + 32 and GV_INFO_END <= GV_CAP;
     assert GV_UNR + 2 * @as(usize, GT_MAX) <= GV_KEY_END and GV_KEY_END <= GV_G_ON;
     assert GV_NAME + GR_NAME_MAX <= GV_PICK and GV_G_AID < GV_T;
     assert GV_CHAT > 2 and GV_I_NAME > 3;
@@ -970,7 +1024,7 @@ test gv_a_row_says_its_name_its_people_and_its_unread {
     assert gv_unr_total(gv[0..GV_CAP]) == 150;
 }
 
-test gv_create_is_muted_below_two_friends_and_without_a_name {
+test gv_create_is_muted_with_no_friend_and_without_a_name_and_one_friend_makes_a_group_of_two {
     var gv : [4608]u8 = undefined;
     t_region(gv[0..GV_CAP]);
     gv_new_open(gv[0..GV_CAP]);
@@ -978,27 +1032,31 @@ test gv_create_is_muted_below_two_friends_and_without_a_name {
     // 0 ticked
     assert gv_picks(gv[0..GV_CAP]) == 0;
     assert gv_create_ok(gv[0..GV_CAP]) == false;
-    assert gv_create_why(0, "x") == GV_N_PICK2;
-    // 1 ticked: still muted, and says one more
+    assert gv_create_why(0, "x") == GV_N_PICK;
+    // 1 ticked, no name yet: muted for the name
     assert gv_pick_toggle(gv[0..GV_CAP], 1, 3);
     assert gv_picks(gv[0..GV_CAP]) == 1 and gv_picked(gv[0..GV_CAP], 1);
+    assert gv_create_why(gv_picks(gv[0..GV_CAP]), gv_name_of(gv[0..GV_CAP])) == GV_N_NAME;
+    // 1 ticked and a name: CREATE (this device and one friend, a group of two)
     gv_name_unit(gv[0..GV_CAP], 116);
-    assert gv_create_ok(gv[0..GV_CAP]) == false;
-    assert gv_create_why(gv_picks(gv[0..GV_CAP]), gv_name_of(gv[0..GV_CAP])) == GV_N_PICK1;
-    // 2 ticked and a name: CREATE
+    assert gv_create_ok(gv[0..GV_CAP]);
+    assert gv_create_why(1, "t") == GV_N_NONE;
+    // 2 ticked: still CREATE
     assert gv_pick_toggle(gv[0..GV_CAP], 2, 3);
     assert gv_create_ok(gv[0..GV_CAP]);
     // no name: muted again, for the name
     gv_name_back(gv[0..GV_CAP]);
     assert gv_create_why(gv_picks(gv[0..GV_CAP]), gv_name_of(gv[0..GV_CAP])) == GV_N_NAME;
-    // untick: back to one
+    // untick both: no friend, muted for the pick
     assert gv_pick_toggle(gv[0..GV_CAP], 2, 3);
-    assert gv_picks(gv[0..GV_CAP]) == 1;
+    assert gv_pick_toggle(gv[0..GV_CAP], 1, 3);
+    gv_name_unit(gv[0..GV_CAP], 116);
+    assert gv_picks(gv[0..GV_CAP]) == 0 and gv_create_why(gv_picks(gv[0..GV_CAP]), gv_name_of(gv[0..GV_CAP])) == GV_N_PICK;
     // a friend past the table is no tick
     assert gv_pick_toggle(gv[0..GV_CAP], 3, 3) == false;
     var o : [64]u8 = undefined;
     assert fv_eq(o[0..64], gv_pick_label(2, o[0..64]), "FRIENDS  2 ticked");
-    assert gv_note_text(GV_N_PICK1).len > 0 and gv_note_text(GV_N_PICK2).len > 0;
+    assert gv_note_text(GV_N_PICK).len > 0 and gv_note_text(GV_N_PICK)[14] == 111;
 }
 
 test gv_a_group_takes_seven_friends_at_most {
@@ -1184,4 +1242,35 @@ test gv_an_empty_group_says_hello_and_opening_it_reads_everything {
     assert gv_read_all(gv[0..GV_CAP], 0, log[0..cl_bytes(8)]);
     assert gv_unr_get(gv[0..GV_CAP], 0) == 0 and cl_unread(log[0..cl_bytes(8)]) == 0;
     assert gv_read_all(gv[0..GV_CAP], 0, log[0..cl_bytes(8)]) == false;
+}
+
+test gv_cmd_v_pastes_into_the_group_name_whole_sequences_only_up_to_32_bytes {
+    var gv : [4608]u8 = undefined;
+    fv_blank(gv[0..4608]);
+    gv_new_open(gv[0..GV_CAP]);
+    // "Trip" then a tab, a CR and LF, a bell, Cyrillic "Ya" (2 bytes), a lone continuation byte
+    const p : [11]u8 = [84, 114, 105, 112, 9, 13, 10, 7, 208, 175, 128];
+    assert gv_name_paste(gv[0..GV_CAP], p[0..11], 11) == 9;
+    assert gv[GV_NLEN] == 9 and gv[GV_NAME + 4] == 32 and gv[GV_NAME + 6] == 32 and gv[GV_NAME + 7] == 208 and gv[GV_NAME + 8] == 175;
+    // a pasted name is a name CREATE takes with one friend ticked
+    assert gv_pick_toggle(gv[0..GV_CAP], 0, 2);
+    assert gv_create_why(gv_picks(gv[0..GV_CAP]), gv_name_of(gv[0..GV_CAP])) == GV_N_NONE;
+    // a long paste stops at 32 bytes and never cuts a sequence: 23 more ASCII bytes fit, then "Ya" would make 34
+    gv_new_open(gv[0..GV_CAP]);
+    var big : [40]u8 = undefined;
+    var i : usize = 0;
+    while (i < 31) {
+        big[i] = 97;
+        i = i + 1;
+    }
+    big[31] = 208;
+    big[32] = 175;
+    assert gv_name_paste(gv[0..GV_CAP], big[0..40], 33) == 31;
+    assert gv[GV_NLEN] == 31;
+    // a cut sequence at the end of the paste is not taken
+    gv_new_open(gv[0..GV_CAP]);
+    const cut : [2]u8 = [65, 208];
+    assert gv_name_paste(gv[0..GV_CAP], cut[0..2], 2) == 1 and gv[GV_NLEN] == 1;
+    // an empty paste changes nothing
+    assert gv_name_paste(gv[0..GV_CAP], cut[0..2], 0) == 0 and gv[GV_NLEN] == 1;
 }

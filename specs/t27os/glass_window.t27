@@ -893,6 +893,8 @@ use t27os::group_view::GV_N_BAD;
 use t27os::group_view::GV_N_DUP;
 use t27os::group_view::GV_N_NOBODY;
 use t27os::group_view::GV_N_NOKEY;
+use t27os::group_view::GV_N_PICK;
+use t27os::group_core::GT_MAX;
 use t27os::group_view::GV_N_NONE;
 use t27os::group_view::GV_N_NOSAVE;
 use t27os::group_view::GV_N_TABLE;
@@ -981,6 +983,12 @@ use t27os::chat_host::chm_tick_g;
 use t27os::chat_host::CHM_E_GNEW;
 use t27os::chat_host::CHM_E_GSTATUS;
 use t27os::chat_host::CHM_E_GDIRTY;
+use t27os::chat_host::CHM_E_GINFO;
+use t27os::chat_host::ghm_owed;
+use t27os::group_view::GV_INFO;
+use t27os::group_view::GV_INFO_END;
+use t27os::group_view::gv_name_paste;
+use t27os::group_core::gi_owe_new;
 use t27os::chat_host::GRM_LEN;
 use t27os::chat_core::cl_open_read;
 use t27os::peer_identity::crc32;
@@ -12640,9 +12648,20 @@ pub fn ch_tick_at(cl: []u8, v: []u8, s: []u8, m: []u8, log: []u8, asm: []u8, buf
         w[CHW_AID] = 0;
     }
     // GR. the test aid T27OS_GROUP: the first group's chat, or NEW GROUP, once the cabinet is open
+    // (=chat waits for a group to come, from the disk or by GROUP_INFO; =make makes "test" with the first friend)
     if (gv.len >= GV_CAP and gv[GV_G_AID] != 0 and cl[CL_OPEN] != 0 and cl[AC_ON] != 0) {
-        if (gv[GV_G_AID] == 1) { gv_new_open(gv); } else if (gv_count(gv) > 0) { gw_open_chat(cl, v, gv, gx, buf, 0, now); }
-        gv[GV_G_AID] = 0;
+        if (gv[GV_G_AID] == 1) {
+            gv_new_open(gv);
+            gv[GV_G_AID] = 0;
+        } else if (gv[GV_G_AID] == 3) {
+            if (ft_count(cl[FE_FT .. FE_FT + FT_LEN]) > 0) {
+                gw_make_aid(cl, v, gv, gx, buf, now);
+                gv[GV_G_AID] = 0;
+            }
+        } else if (gv_count(gv) > 0) {
+            gw_open_chat(cl, v, gv, gx, buf, 0, now);
+            gv[GV_G_AID] = 0;
+        }
     }
     // the test aid T27OS_CHAT_SAY: once the chat is open, one numbered line a second through the field and ch_send
     if (w[CHW_SAY] != 0 and w[CHW_AID] == 0 and (chv_mode(v) == CHV_M_CHAT or gv_chat_shown(v)) and now >= w[CHW_SAY_AT]) {
@@ -12702,12 +12721,17 @@ pub fn ch_tick_at(cl: []u8, v: []u8, s: []u8, m: []u8, log: []u8, asm: []u8, buf
         const a : u64 = ch_friend_addr(cl, lf[0..10]);
         chm_addr(m, a / 65536, a % 65536);
         // GR. the open group's payloads ride this friend's session, and its lines owed to this friend go out over it
+        // a GROUP_INFO is taken whatever group is open (the table and the ANNOUNCEs owed ride every pass)
         var ev : u32 = 0;
         if (gw_active(gv, gx)) {
-            ev = chm_tick_g(m, s, log, asm, cl[FE_FT .. FE_FT + FT_LEN], cl[FE_FP .. FE_FP + 10], now, gx[GX_GRM..GX_ASM], gv[GV_T..GV_T_END], gx[GX_LOG..GX_LEN], gx[GX_ASM..GX_LOG]);
+            ev = chm_tick_g(m, s, log, asm, cl[FE_FT .. FE_FT + FT_LEN], cl[FE_FP .. FE_FP + 10], now, gx[GX_GRM..GX_ASM], gv[GV_T..GV_T_END], gx[GX_LOG..GX_LEN], gx[GX_ASM..GX_LOG], gv[GV_INFO..GV_INFO_END]);
+        } else if (gv.len >= GV_CAP) {
+            var gz : [1]u8 = undefined;
+            ev = chm_tick_g(m, s, log, asm, cl[FE_FT .. FE_FT + FT_LEN], cl[FE_FP .. FE_FP + 10], now, gz[0..0], gv[GV_T..GV_T_END], gz[0..0], gz[0..0], gv[GV_INFO..GV_INFO_END]);
         } else {
             ev = chm_tick(m, s, log, asm, cl[FE_FT .. FE_FT + FT_LEN], cl[FE_FP .. FE_FP + 10], now);
         }
+        if ((ev & CHM_E_GINFO) != 0) { gw_learned(cl, v, gv, gx, buf); }
         gev = ev;
         if ((ev & CHM_E_INVITE) != 0) { ivw_take(cl, s, iv, now); }
         if ((ev & CHM_E_STRANGER) != 0) { ivw_ringing(cl, s, iv, now); }
@@ -13050,11 +13074,17 @@ pub fn gw_boot(cl: []const u8, gv: []u8, gx: []u8, buf: []u8) -> void {
         gv[i] = 0;
         i = i + 1;
     }
+    i = GV_INFO;
+    while (i < GV_INFO_END) {
+        gv[i] = 0;
+        i = i + 1;
+    }
     ghh_open(gv[GV_T..GV_T_END]);
     var e : [8]u8 = undefined;
     const en : usize = cl_env("T27OS_GROUP", e[0..8]);
     if (en == 4 and e[0] == 99 and e[1] == 104 and e[2] == 97 and e[3] == 116) { gv[GV_G_AID] = 2; }
     if (en == 3 and e[0] == 110 and e[1] == 101 and e[2] == 119) { gv[GV_G_AID] = 1; }
+    if (en == 4 and e[0] == 109 and e[1] == 97 and e[2] == 107 and e[3] == 101) { gv[GV_G_AID] = 3; }
     const n : usize = gv_count(gv);
     i = 0;
     while (i < n) {
@@ -13154,9 +13184,40 @@ pub fn gw_create(cl: []const u8, gv: []u8, now: u64) -> u32 {
     gv_new_close(gv);
     gv[GV_NOTE] = 0;
     if (ghh_save(gv[GV_T..GV_T_END]) == false) { gv[GV_NOTE] = @as(u8, @intCast(GV_N_NOSAVE)); }
+    // every other member is owed the group's ANNOUNCE (GROUP_INFO) until it answers; gw_rotate dials it
+    const ngi : usize = gt_find(gv[GV_T..GV_T_END], id[0..8]);
+    if (ngi < GV_INFO_END - GV_INFO) { gv[GV_INFO + ngi] = @as(u8, @intCast(gi_owe_new(gv[GV_T..GV_T_END], ngi, cl[FE_FP .. FE_FP + 10]))); }
     // the new group comes into view at the end of the list
     fv_put32(gv, GV_GSCROLL, 255);
     return gv[GV_NOTE];
+}
+
+/// A GROUP_INFO put a group into the table (chat_host CHM_E_GINFO): groups.t27 is written, the group stands in the
+/// list at once, and it becomes the open one when none is (so its lines are taken from now on).
+pub fn gw_learned(cl: []const u8, v: []u8, gv: []u8, gx: []u8, buf: []u8) -> void {
+    if (gv.len < GV_CAP) { return; }
+    if (ghh_save(gv[GV_T..GV_T_END]) == false) { gv[GV_NOTE] = @as(u8, @intCast(GV_N_NOSAVE)); }
+    const n : usize = gv_count(gv);
+    if (n > 0 and gw_active(gv, gx) == false) { gw_load(cl, gv, gx, buf, n - 1); }
+    fv_put32(gv, GV_GSCROLL, 255);
+    v[CHV_DIRTY] = 1;
+}
+
+/// The test aid T27OS_GROUP=make: NEW GROUP with the first friend ticked and the name "test", CREATE, then that
+/// group's chat (a group of two).
+fn gw_make_aid(cl: []const u8, v: []u8, gv: []u8, gx: []u8, buf: []u8, now: u64) -> void {
+    gv_new_open(gv);
+    gv_pick_toggle(gv, 0, @as(usize, ft_count(cl[FE_FT .. FE_FT + FT_LEN])));
+    gv_name_paste(gv, "test", 4);
+    const r : u32 = gw_create(cl, gv, now);
+    // run again with the group already made: its chat (the first group)
+    if (r == GV_N_DUP) {
+        gv_new_close(gv);
+        gw_open_chat(cl, v, gv, gx, buf, 0, now);
+        return;
+    }
+    if (r != GV_N_NONE and r != GV_N_NOSAVE) { return; }
+    gw_open_chat(cl, v, gv, gx, buf, gv_count(gv) - 1, now);
 }
 
 /// One hit in NEW GROUP. h is the panel's height.
@@ -13209,25 +13270,44 @@ pub fn gw_part_do(cl: []u8, v: []u8, gv: []u8, gx: []u8, buf: []u8, hit: u32, ro
 /// The fan-out: with no friend's chat on screen, the session idle and the friend log open owing nothing, the next
 /// member who is owed a line of the open group and is online gets its log opened; chm_tick_g dials it next pass.
 pub fn gw_rotate(cl: []const u8, v: []u8, s: []u8, m: []u8, log: []u8, buf: []u8, w: []u64, gv: []u8, gx: []u8) -> void {
-    if (gw_active(gv, gx) == false or cs_state(s) != CK_IDLE) { return; }
+    if (gv.len < GV_CAP or cs_state(s) != CK_IDLE) { return; }
     if (chv_mode(v) == CHV_M_CHAT or chv_mode(v) == CHV_M_CARD) { return; }
     if (w[CHW_LOADED] != 0 and cl_pending(log) > 0) { return; }
-    const gi : usize = gw_gi(gv);
     const t : []const u8 = gv[GV_T..GV_T_END];
-    const n : usize = gt_n(t, gi);
-    const me : u32 = gt_idx(t, gi, cl[FE_FP .. FE_FP + 10]);
-    var j : usize = 0;
-    while (j < n) {
-        const k : usize = (@as(usize, gv[GV_G_NEXT]) + j) % n;
-        const kk : u32 = @as(u32, @intCast(k));
-        const fp : []const u8 = gt_member(t, gi, k);
-        if (kk != me and gl_pending_for(gx[GX_LOG..GX_LEN], kk) > 0 and ch_friend_addr(cl, fp) != 0) {
-            if (w[CHW_LOADED] != 0 and ch_log_is(log, fp)) { return; }
-            ch_open_log(cl, v, s, m, log, buf, w, fp);
-            gv[GV_G_NEXT] = @as(u8, @intCast((k + 1) % n));
-            return;
+    if (gw_active(gv, gx)) {
+        const gi : usize = gw_gi(gv);
+        const n : usize = gt_n(t, gi);
+        const me : u32 = gt_idx(t, gi, cl[FE_FP .. FE_FP + 10]);
+        var j : usize = 0;
+        while (j < n) {
+            const k : usize = (@as(usize, gv[GV_G_NEXT]) + j) % n;
+            const kk : u32 = @as(u32, @intCast(k));
+            const fp : []const u8 = gt_member(t, gi, k);
+            if (kk != me and gl_pending_for(gx[GX_LOG..GX_LEN], kk) > 0 and ch_friend_addr(cl, fp) != 0) {
+                if (w[CHW_LOADED] != 0 and ch_log_is(log, fp)) { return; }
+                ch_open_log(cl, v, s, m, log, buf, w, fp);
+                gv[GV_G_NEXT] = @as(u8, @intCast((k + 1) % n));
+                return;
+            }
+            j = j + 1;
         }
-        j = j + 1;
+    }
+    // the ANNOUNCEs still owed: the next member of a group made here that has not answered and is online
+    if (w[CHW_LOADED] != 0 and ghm_owed(m, t, gv[GV_INFO..GV_INFO_END], cl[FE_FP .. FE_FP + 10]) > 0) { return; }
+    var g : usize = 0;
+    while (g < gv_count(gv) and g < GV_INFO_END - GV_INFO) {
+        const owe : u32 = @as(u32, gv[GV_INFO + g]);
+        var k : usize = 0;
+        while (owe != 0 and k < gt_n(t, g)) {
+            const fp : []const u8 = gt_member(t, g, k);
+            if (((owe >> @as(u32, @intCast(k))) & 1) != 0 and ch_friend_addr(cl, fp) != 0) {
+                if (w[CHW_LOADED] != 0 and ch_log_is(log, fp)) { return; }
+                ch_open_log(cl, v, s, m, log, buf, w, fp);
+                return;
+            }
+            k = k + 1;
+        }
+        g = g + 1;
     }
 }
 
@@ -13373,7 +13453,7 @@ fn draw_gv_new(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, cl: []c
     }
     if (nf == 0) {
         cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
-        draw_cl_wrap(c, kit, "No friends yet: add two by key in the cabinet first.", x, right, gv_pick_y(t, 0) + 14.0, 9.5, 2, sh);
+        draw_cl_wrap(c, kit, "No friends yet: add one by key in the cabinet first.", x, right, gv_pick_y(t, 0) + 14.0, 9.5, 2, sh);
     }
     var k : usize = 0;
     while (k < rows and sc + k < nf) {
@@ -16281,7 +16361,8 @@ pub fn main() -> void {
                         used = false;
                     }
                 } else if (clp and ac_shown(tbv[TBO_CL .. TBO_CL + CL_CAP]) and gv_new_shown(tbv[TBO_GV .. TBO_GV + GV_CAP]) and tbv[TBO_GV + GV_FOCUS] != 0) {
-                    // GR. NEW GROUP's name is being typed: Return presses CREATE, Esc closes, Backspace drops a code point
+                    // GR. NEW GROUP's name is being typed: Return presses CREATE, Esc closes, Backspace drops a code point,
+                    // Cmd+V pastes (group_view gv_name_paste: whole UTF-8 sequences, up to 32 bytes)
                     const gk : u32 = ky_key(@as(u32, @intCast(key)), cmd);
                     if (gk == KE_CANCEL) {
                         gv_new_close(tbv[TBO_GV .. TBO_GV + GV_CAP]);
@@ -16289,6 +16370,13 @@ pub fn main() -> void {
                         gv_name_back(tbv[TBO_GV .. TBO_GV + GV_CAP]);
                     } else if (gk == KE_SAVE) {
                         gw_create(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_GV .. TBO_GV + GV_CAP], ckh_ms());
+                    } else if (gk == KE_PASTE) {
+                        const gpb : u64 = msg0(cls("NSPasteboard"), sel("generalPasteboard"));
+                        const gps : u64 = msg1(gpb, sel("stringForType:"), cf("public.utf8-plain-text"));
+                        if (gps != 0) {
+                            const gpn : usize = ns_bytes(gps, ktmp[0..256]);
+                            gv_name_paste(tbv[TBO_GV .. TBO_GV + GV_CAP], ktmp[0..256], gpn);
+                        }
                     } else if (gk == KE_CHAR) {
                         const gc2 : u64 = msg0(ev, s_chars);
                         var gn2 : u64 = 0;
@@ -19594,4 +19682,22 @@ test gr_the_groups_part_takes_its_rows_from_the_friends_and_plus_opens_new_group
     // the region sits after the backup panel and ends the text store
     assert TBO_BK + BK_CAP == TBO_GV and TBO_GV + GV_CAP == TB_SIZE;
     assert GX_ASM == GX_GRM + GRM_LEN and GX_LOG == GX_ASM + CA_LEN and GX_LEN == GX_LOG + CH_LOG_LEN;
+}
+
+test gr_one_ticked_friend_is_enough_for_create_and_a_pasted_name_counts {
+    var cl : [8192]u8 = undefined;
+    fv_blank(cl[0..8192]);
+    var gv : [4608]u8 = undefined;
+    fv_blank(gv[0..GV_CAP]);
+    gt_init(gv[GV_T..GV_T_END]);
+    gv_new_open(gv[0..GV_CAP]);
+    // one friend and a pasted name: past the pick and the name, only the missing identity stops CREATE here
+    assert gv_pick_toggle(gv[0..GV_CAP], 0, 3);
+    assert gv_name_paste(gv[0..GV_CAP], "Trip", 4) == 4;
+    assert gw_create(cl[0..8192], gv[0..GV_CAP], 1000) == GV_N_NOKEY;
+    // no friend ticked: the pick is the reason
+    assert gv_pick_toggle(gv[0..GV_CAP], 0, 3);
+    assert gw_create(cl[0..8192], gv[0..GV_CAP], 1000) == GV_N_PICK;
+    // the ANNOUNCEs owed sit after the table, inside the region, a byte per group
+    assert GV_INFO >= GV_T_END and GV_INFO_END - GV_INFO == GT_MAX and GV_INFO_END <= GV_CAP;
 }

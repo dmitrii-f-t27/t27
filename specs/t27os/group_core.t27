@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// specs/t27os/group_core.t27 -- the core of group chat in T27 OS (3 to 8 people): pure decisions, no @extern, no
+// specs/t27os/group_core.t27 -- the core of group chat in T27 OS (2 to 8 people): pure decisions, no @extern, no
 // crypto. A group message travels as one more kind of payload inside the person to person message session of each
 // member (chat_core.t27, call_session.t27): no new transport. The disk and the session driving are chat_host.t27.
 // Owner, 2026-10-23. Refs gHashTag/t27#11560. ASCII only (L3), English only (LANG-EN).
@@ -20,6 +20,13 @@
 //   bytes. A message is 1..2000 bytes of UTF-8 in parts of 700 (chat_core's limits), so a payload is at most 738
 //   bytes and a sealed frame 52 + 738 + 16 = 806. An ACK names the message's author in the sender field: len 0,
 //   parts 0, time 0.
+// ROSTER  GROUP_INFO (GM_K_INFO 6), a payload of the same sealed frames: kind | flag (GI_ANNOUNCE 0, GI_HAVE 1) | id (8)
+//   | creator fingerprint (10) | members n u8 | n fingerprints sorted (10 each) | name length u8 | name | time u64; 51 to
+//   142 bytes. The creator announces a new group to each member over its message session (repeated while that member
+//   has not answered, and at the start of every session with it). A member keeps it only when the creator is the
+//   proven peer of that session and a friend with a stored key, the member is in the roster, and the id is the SHA-256
+//   of the roster (gi_apply); else it is dropped with the reason. A member that has the group answers GI_HAVE; the
+//   creator then sends every line still owed to that member again, a FAILED one too (gl_session_start).
 // DELIVERY  fan-out: the author sends every part to each member, over the message session with that member. Who
 //   is a recipient is fixed when the line is made (gr_fanout): a member that is a friend is sent to now when
 //   reachable, queued otherwise; a member that is not a friend of the author cannot be reached (no session) and is
@@ -522,6 +529,152 @@ pub fn gr_gate(t: []const u8, p: []const u8, me_fp: []const u8, peer: []const u8
     }
     if (!pinned) { return GR_UNTRUSTED; }
     return GR_OK;
+}
+
+// ---------------------------------------------------------------- the roster frame (GROUP_INFO)
+
+pub const GM_K_INFO : u32 = 6;
+/// Flag byte 1 of a GROUP_INFO: the creator announces its group (0); a member answers that it has it (1).
+pub const GI_ANNOUNCE : u32 = 0;
+pub const GI_HAVE : u32 = 1;
+/// Its smallest (2 members, a name of 1 byte) and largest (8 members, 32 bytes) length.
+pub const GI_MIN : usize = 51;
+pub const GI_MAX : usize = 142;
+const I_CREATOR : usize = 10;
+const I_N : usize = 20;
+const I_FPS : usize = 21;
+
+/// What gi_apply did (low 8 bits; a refusal is a GR_* reason below 16): a new group kept, an ANNOUNCE of a group
+/// already here, a HAVE taken (its lines owed to that member restarted: their count in bits 8..15).
+pub const GI_KEPT : u32 = 16;
+pub const GI_ALREADY : u32 = 17;
+pub const GI_JOINED : u32 = 18;
+/// Refusals only GROUP_INFO has: its id is not the SHA-256 of its roster; the table is full.
+pub const GR_ID_BAD : u32 = 11;
+pub const GR_FULL : u32 = 12;
+
+/// The length of a GROUP_INFO of n members and a name of nl bytes.
+pub fn gi_len(n: usize, nl: usize) -> usize { return 30 + n * 10 + nl; }
+
+fn g_sorted(r: []const u8, ro: usize, n: usize) -> bool {
+    var i : usize = 1;
+    while (i < n) {
+        if (gr_fp_cmp(r, ro + (i - 1) * 10, r, ro + i * 10) >= 0) { return false; }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// A GROUP_INFO into out: kind 6 | flag (GI_ANNOUNCE or GI_HAVE) | group id (8) | creator fingerprint (10) | members n
+/// u8 | the n fingerprints sorted (10 each) | name length u8 | name | time u64 (ms, made). Its length, 0 when it cannot
+/// be (2..8 members sorted with nobody twice, the creator one of them, a good name, out long enough).
+pub fn gi_put(out: []u8, flag: u32, gid: []const u8, creator: []const u8, roster: []const u8, n: usize, name: []const u8, time: u64) -> usize {
+    if (flag > GI_HAVE or gid.len != GR_ID or creator.len != 10 or n < @as(usize, GR_MIN) or n > @as(usize, GR_MEMBERS)) { return 0; }
+    if (roster.len < n * 10 or !gr_name_ok(name) or out.len < gi_len(n, name.len)) { return 0; }
+    if (!g_sorted(roster, 0, n) or g_in_list(roster, n, creator) == n) { return 0; }
+    out[0] = @as(u8, @intCast(GM_K_INFO));
+    out[1] = @as(u8, @intCast(flag));
+    copy(out, 2, gid, 0, GR_ID);
+    copy(out, I_CREATOR, creator, 0, 10);
+    out[I_N] = @as(u8, @intCast(n));
+    copy(out, I_FPS, roster, 0, n * 10);
+    const o : usize = I_FPS + n * 10;
+    out[o] = @as(u8, @intCast(name.len));
+    copy(out, o + 1, name, 0, name.len);
+    put_u64(out, o + 1 + name.len, time);
+    return gi_len(n, name.len);
+}
+
+/// The GROUP_INFO of group gi of table t.
+pub fn gi_put_rec(out: []u8, flag: u32, t: []const u8, gi: usize) -> usize {
+    return gi_put(out, flag, gt_id(t, gi), gt_member(t, gi, gt_creator(t, gi)), gt_roster(t, gi), gt_n(t, gi), gt_name(t, gi), gt_time(t, gi));
+}
+
+/// Is p a GROUP_INFO (the session driver hands it to gi_apply)?
+pub fn gi_is(p: []const u8) -> bool { return p.len > 0 and @as(u32, p[0]) == GM_K_INFO; }
+
+/// Does p check as a GROUP_INFO: its length, flag, 2..8 members sorted with nobody twice, the creator one of them,
+/// a good name?
+pub fn gi_ok(p: []const u8) -> bool {
+    if (p.len < GI_MIN or p.len > GI_MAX or !gi_is(p) or @as(u32, p[1]) > GI_HAVE) { return false; }
+    const n : usize = @as(usize, p[I_N]);
+    if (n < @as(usize, GR_MIN) or n > @as(usize, GR_MEMBERS) or p.len < gi_len(n, 0)) { return false; }
+    const nl : usize = @as(usize, p[I_FPS + n * 10]);
+    if (p.len != gi_len(n, nl)) { return false; }
+    if (!g_sorted(p, I_FPS, n) or g_in_list(p[I_FPS..I_FPS + n * 10], n, p[I_CREATOR..I_CREATOR + 10]) == n) { return false; }
+    return gr_name_ok(p[I_FPS + n * 10 + 1..I_FPS + n * 10 + 1 + nl]);
+}
+
+pub fn gi_flag(p: []const u8) -> u32 { return @as(u32, p[1]); }
+pub fn gi_gid(p: []const u8) -> []const u8 { return p[2..10]; }
+pub fn gi_creator(p: []const u8) -> []const u8 { return p[I_CREATOR..I_CREATOR + 10]; }
+pub fn gi_n(p: []const u8) -> usize { return @as(usize, p[I_N]); }
+pub fn gi_roster(p: []const u8) -> []const u8 { return p[I_FPS..I_FPS + gi_n(p) * 10]; }
+pub fn gi_name(p: []const u8) -> []const u8 {
+    const o : usize = I_FPS + gi_n(p) * 10;
+    return p[o + 1..o + 1 + @as(usize, p[o])];
+}
+pub fn gi_time(p: []const u8) -> u64 { return get_u64(p, p.len - 8); }
+
+/// One GROUP_INFO (it passed gi_ok? checked here first) that came over the message session with peer (its proven
+/// fingerprint; pinned: its key is stored). idc is the id this device hashed from the frame's roster (the host's
+/// SHA-256, gr_id_from_digest). An ANNOUNCE is kept only from its creator, who must be the peer and a trusted friend,
+/// for a roster this device is in, under the id of that roster; a HAVE only from a member of a group in the table,
+/// and then every line of the open group's log (glog, its table index open_gi; an empty glog: none open) still owed
+/// to that member starts again, a FAILED one too (gl_session_start). GI_* (with the restarted count) or a GR_* reason.
+pub fn gi_apply(t: []u8, friends: []const u8, me_fp: []const u8, peer: []const u8, pinned: bool, p: []const u8, idc: []const u8, glog: []u8, open_gi: usize) -> u32 {
+    if (!gi_ok(p)) { return GR_BAD; }
+    if (idc.len != GR_ID or gr_fp_cmp8(gi_gid(p), idc) == false) { return GR_ID_BAD; }
+    const n : usize = gi_n(p);
+    const roster : []const u8 = gi_roster(p);
+    if (gi_flag(p) == GI_ANNOUNCE) {
+        if (gr_fp_cmp(gi_creator(p), 0, peer, 0) != 0) { return GR_SPOOF; }
+        const ci : usize = g_in_list(roster, n, gi_creator(p));
+        const why : u32 = gr_known(friends, me_fp, roster, n, ci);
+        if (why != GR_OK) { return why; }
+        if (!pinned) { return GR_UNTRUSTED; }
+        if (gt_find(t, gi_gid(p)) != GT_NONE) { return GI_ALREADY; }
+        const st : u32 = gt_add(t, gi_gid(p), gi_name(p), roster, n, ci, gi_time(p));
+        if (st == GT_FULL) { return GR_FULL; }
+        if (st != GT_OK) { return GR_BAD; }
+        return GI_KEPT;
+    }
+    const gi : usize = gt_find(t, gi_gid(p));
+    if (gi == GT_NONE) { return GR_UNKNOWN; }
+    if (gt_idx(t, gi, me_fp) == GR_NOBODY) { return GR_NOT_ME; }
+    const pidx : u32 = gt_idx(t, gi, peer);
+    if (pidx == GR_NOBODY) { return GR_NOT_MEMBER; }
+    if (!pinned) { return GR_UNTRUSTED; }
+    var c : u32 = 0;
+    if (open_gi == gi and glog.len >= CL_HDR) { c = gl_session_start(glog, pidx); }
+    return GI_JOINED | (c << 8);
+}
+
+fn gr_fp_cmp8(a: []const u8, b: []const u8) -> bool {
+    var i : usize = 0;
+    while (i < GR_ID) {
+        if (a[i] != b[i]) { return false; }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// The members of group gi a new group of this device owes its ANNOUNCE (every member but this device), by index.
+pub fn gi_owe_new(t: []const u8, gi: usize, me_fp: []const u8) -> u32 {
+    const n : usize = gt_n(t, gi);
+    const me : u32 = gt_idx(t, gi, me_fp);
+    var m : u32 = 0;
+    var k : u32 = 0;
+    while (@as(usize, k) < n) {
+        if (k != me) { m = m | (@as(u32, 1) << k); }
+        k = k + 1;
+    }
+    return m;
+}
+
+/// Does this device announce group gi (it made it)?
+pub fn gi_mine(t: []const u8, gi: usize, me_fp: []const u8) -> bool {
+    return gt_idx(t, gi, me_fp) == @as(u32, @intCast(gt_creator(t, gi)));
 }
 
 // ---------------------------------------------------------------- fan-out
@@ -1296,4 +1449,171 @@ test a_full_group_log_moves_the_floor_to_the_sender_of_the_dropped_line {
     gl_after_load(log[0..4104], fl[0..32], 3);
     assert gl_floor_of(fl[0..32], 0) == 0 and gl_floor_of(fl[0..32], 1) == 0;
     assert cl_msg(log[0..4104], 0) == gl_key(0, 1);
+}
+
+test the_group_info_frame_carries_the_roster_and_its_bounds_are_checked {
+    var r : [30]u8 = undefined;
+    copy(r[0..30], 0, T_A[0..10], 0, 10);
+    copy(r[0..30], 10, T_B[0..10], 0, 10);
+    copy(r[0..30], 20, T_C[0..10], 0, 10);
+    var p : [160]u8 = undefined;
+    const n : usize = gi_put(p[0..160], GI_ANNOUNCE, T_DIGEST[0..8], T_A[0..10], r[0..30], 3, "trio", 1234);
+    assert n == gi_len(3, 4) and n == 64;
+    assert gi_ok(p[0..n]) and gi_is(p[0..n]) and gi_flag(p[0..n]) == GI_ANNOUNCE and gi_n(p[0..n]) == 3;
+    assert gi_gid(p[0..n])[0] == 72 and gi_creator(p[0..n])[9] == 10 and gi_roster(p[0..n])[20] == 200;
+    assert gi_name(p[0..n]).len == 4 and gi_name(p[0..n])[0] == 116 and gi_time(p[0..n]) == 1234;
+    // the largest (8 members, a name of 32 bytes) and the smallest (2 members, a name of 1 byte)
+    var f8 : [80]u8 = undefined;
+    var i : usize = 0;
+    while (i < 80) {
+        f8[i] = @as(u8, @intCast(10 + i / 10));
+        i = i + 1;
+    }
+    assert gi_put(p[0..160], GI_HAVE, T_DIGEST[0..8], f8[70..80], f8[0..80], 8, "01234567890123456789012345678901", 1) == GI_MAX;
+    assert gi_ok(p[0..GI_MAX]) and gi_flag(p[0..GI_MAX]) == GI_HAVE and gi_name(p[0..GI_MAX]).len == 32;
+    assert gi_put(p[0..160], GI_ANNOUNCE, T_DIGEST[0..8], T_A[0..10], r[0..30], 2, "x", 0) == GI_MIN;
+    assert gi_ok(p[0..GI_MIN]);
+    assert 52 + GI_MAX + 16 <= 808;
+    // refused when built: one member, nine, the creator not a member, unsorted, no name, a third flag, out too short
+    assert gi_put(p[0..160], GI_ANNOUNCE, T_DIGEST[0..8], T_A[0..10], r[0..30], 1, "trio", 0) == 0;
+    assert gi_put(p[0..160], GI_ANNOUNCE, T_DIGEST[0..8], f8[0..10], f8[0..80], 9, "trio", 0) == 0;
+    assert gi_put(p[0..160], GI_ANNOUNCE, T_DIGEST[0..8], T_X[0..10], r[0..30], 3, "trio", 0) == 0;
+    var u : [30]u8 = undefined;
+    copy(u[0..30], 0, T_B[0..10], 0, 10);
+    copy(u[0..30], 10, T_A[0..10], 0, 10);
+    copy(u[0..30], 20, T_C[0..10], 0, 10);
+    assert gi_put(p[0..160], GI_ANNOUNCE, T_DIGEST[0..8], T_A[0..10], u[0..30], 3, "trio", 0) == 0;
+    assert gi_put(p[0..160], GI_ANNOUNCE, T_DIGEST[0..8], T_A[0..10], r[0..30], 3, "", 0) == 0;
+    assert gi_put(p[0..160], 2, T_DIGEST[0..8], T_A[0..10], r[0..30], 3, "trio", 0) == 0;
+    assert gi_put(p[0..63], GI_ANNOUNCE, T_DIGEST[0..8], T_A[0..10], r[0..30], 3, "trio", 0) == 0;
+    // refused when read: cut, one byte long, a name length that disagrees, nine members, unsorted, a creator outside,
+    // a third flag, another kind
+    assert gi_put(p[0..160], GI_ANNOUNCE, T_DIGEST[0..8], T_A[0..10], r[0..30], 3, "trio", 1234) == 64;
+    assert gi_ok(p[0..63]) == false and gi_ok(p[0..65]) == false;
+    p[51] = 5;
+    assert gi_ok(p[0..64]) == false;
+    p[51] = 4;
+    p[20] = 9;
+    assert gi_ok(p[0..64]) == false;
+    p[20] = 3;
+    p[21] = 250;
+    assert gi_ok(p[0..64]) == false;
+    p[21] = 1;
+    p[10] = 90;
+    assert gi_ok(p[0..64]) == false;
+    p[10] = 1;
+    p[1] = 2;
+    assert gi_ok(p[0..64]) == false;
+    p[1] = 0;
+    p[0] = 4;
+    assert gi_ok(p[0..64]) == false;
+    p[0] = 6;
+    assert gi_ok(p[0..64]);
+    // the kinds stay apart: a GROUP_INFO is no TEXT or ACK
+    assert GM_K_INFO != GM_K_TEXT and GM_K_INFO != GM_K_ACK and GM_K_INFO > 3;
+    assert gm_is_group(p[0..64]) == false and gm_kind(p[0..64]) == 0;
+    // the frame of a table record: the same bytes
+    var t : [4240]u8 = undefined;
+    t_table(t[0..GT_LEN]);
+    var q : [160]u8 = undefined;
+    assert gi_put(p[0..160], GI_ANNOUNCE, T_DIGEST[0..8], T_A[0..10], r[0..30], 3, "trio", 1000) == 64;
+    assert gi_put_rec(q[0..160], GI_ANNOUNCE, t[0..GT_LEN], 0) == 64;
+    i = 0;
+    while (i < 64) {
+        assert p[i] == q[i];
+        i = i + 1;
+    }
+}
+
+test a_group_info_is_kept_only_from_a_trusted_creator_with_this_device_in_it_under_its_own_id {
+    // A announces the group {A, B} to B over their message session
+    var r2 : [20]u8 = undefined;
+    copy(r2[0..20], 0, T_A[0..10], 0, 10);
+    copy(r2[0..20], 10, T_B[0..10], 0, 10);
+    const id2 : [8]u8 = [4, 23, 205, 1, 40, 87, 215, 222];
+    var p : [160]u8 = undefined;
+    const n : usize = gi_put(p[0..160], GI_ANNOUNCE, id2[0..8], T_A[0..10], r2[0..20], 2, "pair", 777);
+    var frb : [1108]u8 = undefined;
+    ft_init(frb[0..FT_LEN]);
+    assert t_friend(frb[0..FT_LEN], T_A[0..10], T_B[0..10]);
+    var fre : [1108]u8 = undefined;
+    ft_init(fre[0..FT_LEN]);
+    var frc : [1108]u8 = undefined;
+    ft_init(frc[0..FT_LEN]);
+    assert t_friend(frc[0..FT_LEN], T_A[0..10], T_C[0..10]);
+    var t : [4240]u8 = undefined;
+    gt_init(t[0..GT_LEN]);
+    var z : [1]u8 = undefined;
+    // A's key is not stored at B
+    assert gi_apply(t[0..GT_LEN], frb[0..FT_LEN], T_B[0..10], T_A[0..10], false, p[0..n], id2[0..8], z[0..0], GT_NONE) == GR_UNTRUSTED;
+    // A is not B's friend
+    assert gi_apply(t[0..GT_LEN], fre[0..FT_LEN], T_B[0..10], T_A[0..10], true, p[0..n], id2[0..8], z[0..0], GT_NONE) == GR_NOT_FRIEND;
+    // C is not in the group
+    assert gi_apply(t[0..GT_LEN], frc[0..FT_LEN], T_C[0..10], T_A[0..10], true, p[0..n], id2[0..8], z[0..0], GT_NONE) == GR_NOT_ME;
+    // the roster hashes to another id than the frame names
+    assert gi_apply(t[0..GT_LEN], frb[0..FT_LEN], T_B[0..10], T_A[0..10], true, p[0..n], T_DIGEST[0..8], z[0..0], GT_NONE) == GR_ID_BAD;
+    var p2 : [160]u8 = undefined;
+    const n2 : usize = gi_put(p2[0..160], GI_ANNOUNCE, T_DIGEST[0..8], T_A[0..10], r2[0..20], 2, "pair", 777);
+    assert gi_apply(t[0..GT_LEN], frb[0..FT_LEN], T_B[0..10], T_A[0..10], true, p2[0..n2], id2[0..8], z[0..0], GT_NONE) == GR_ID_BAD;
+    // relayed by someone else than its creator
+    assert gi_apply(t[0..GT_LEN], frb[0..FT_LEN], T_B[0..10], T_C[0..10], true, p[0..n], id2[0..8], z[0..0], GT_NONE) == GR_SPOOF;
+    // cut
+    assert gi_apply(t[0..GT_LEN], frb[0..FT_LEN], T_B[0..10], T_A[0..10], true, p[0..n - 1], id2[0..8], z[0..0], GT_NONE) == GR_BAD;
+    // none of these was kept
+    assert gt_count(t[0..GT_LEN]) == 0;
+    // from its trusted creator, B in it, its own id: kept with A its creator, the name and the time
+    assert gi_apply(t[0..GT_LEN], frb[0..FT_LEN], T_B[0..10], T_A[0..10], true, p[0..n], id2[0..8], z[0..0], GT_NONE) == GI_KEPT;
+    assert gt_count(t[0..GT_LEN]) == 1 and gt_find(t[0..GT_LEN], id2[0..8]) == 0 and gt_creator(t[0..GT_LEN], 0) == 0;
+    assert gt_n(t[0..GT_LEN], 0) == 2 and gt_name(t[0..GT_LEN], 0)[0] == 112 and gt_time(t[0..GT_LEN], 0) == 777 and gt_idx(t[0..GT_LEN], 0, T_B[0..10]) == 1;
+    // the same again: already here, nothing added
+    assert gi_apply(t[0..GT_LEN], frb[0..FT_LEN], T_B[0..10], T_A[0..10], true, p[0..n], id2[0..8], z[0..0], GT_NONE) == GI_ALREADY;
+    assert gt_count(t[0..GT_LEN]) == 1;
+    // a HAVE of a group not in a table
+    var t2 : [4240]u8 = undefined;
+    gt_init(t2[0..GT_LEN]);
+    var h : [160]u8 = undefined;
+    const hn : usize = gi_put(h[0..160], GI_HAVE, id2[0..8], T_A[0..10], r2[0..20], 2, "pair", 777);
+    assert gi_apply(t2[0..GT_LEN], frb[0..FT_LEN], T_A[0..10], T_B[0..10], true, h[0..hn], id2[0..8], z[0..0], GT_NONE) == GR_UNKNOWN;
+}
+
+test a_have_from_a_member_sends_its_unacknowledged_lines_again {
+    // A made {A, B, C}; its line to B and C failed while they did not know the group
+    var t : [4240]u8 = undefined;
+    t_table(t[0..GT_LEN]);
+    var log : [16296]u8 = undefined;
+    var fl : [32]u8 = undefined;
+    ck_wipe(fl[0..32]);
+    t_log(log[0..T_LOG]);
+    const x : [1]u8 = [120];
+    assert gl_out_add(log[0..T_LOG], fl[0..32], 0, x[0..1], 0, 6) == 1;
+    var now : u64 = 1000;
+    var k : u32 = 0;
+    while (k < 20) {
+        gl_due_for(log[0..T_LOG], 0, 1, now);
+        gl_due_for(log[0..T_LOG], 0, 2, now + 1);
+        now = now + CH_RETRY_MS;
+        k = k + 1;
+    }
+    assert cl_state(log[0..T_LOG], 0) == CH_S_FAILED and gl_pending_for(log[0..T_LOG], 1) == 0;
+    var fra : [1108]u8 = undefined;
+    ft_init(fra[0..FT_LEN]);
+    assert t_friend(fra[0..FT_LEN], T_B[0..10], T_A[0..10]);
+    var h : [160]u8 = undefined;
+    const hn : usize = gi_put_rec(h[0..160], GI_HAVE, t[0..GT_LEN], 0);
+    // B says it has the group while another group is open: nothing restarts here
+    var r : u32 = gi_apply(t[0..GT_LEN], fra[0..FT_LEN], T_A[0..10], T_B[0..10], true, h[0..hn], T_DIGEST[0..8], log[0..T_LOG], GT_NONE);
+    assert r == GI_JOINED and cl_state(log[0..T_LOG], 0) == CH_S_FAILED;
+    // not pinned, not a member: refused
+    assert gi_apply(t[0..GT_LEN], fra[0..FT_LEN], T_A[0..10], T_B[0..10], false, h[0..hn], T_DIGEST[0..8], log[0..T_LOG], 0) == GR_UNTRUSTED;
+    assert gi_apply(t[0..GT_LEN], fra[0..FT_LEN], T_A[0..10], T_X[0..10], true, h[0..hn], T_DIGEST[0..8], log[0..T_LOG], 0) == GR_NOT_MEMBER;
+    assert cl_state(log[0..T_LOG], 0) == CH_S_FAILED;
+    // with the group open: the failed line is owed to B again and goes out at once
+    r = gi_apply(t[0..GT_LEN], fra[0..FT_LEN], T_A[0..10], T_B[0..10], true, h[0..hn], T_DIGEST[0..8], log[0..T_LOG], 0);
+    assert (r & 255) == GI_JOINED and (r >> 8) == 1;
+    assert cl_state(log[0..T_LOG], 0) == CH_S_PENDING and cl_tries(log[0..T_LOG], 0) == 0;
+    assert gl_pending_for(log[0..T_LOG], 1) == 1;
+    assert gl_due_for(log[0..T_LOG], 0, 1, now) == CH_R_SEND;
+    // the announces a new group owes: every member but its creator
+    assert gi_owe_new(t[0..GT_LEN], 0, T_A[0..10]) == 6 and gi_owe_new(t[0..GT_LEN], 0, T_B[0..10]) == 5;
+    assert gi_mine(t[0..GT_LEN], 0, T_A[0..10]) and gi_mine(t[0..GT_LEN], 0, T_B[0..10]) == false;
 }

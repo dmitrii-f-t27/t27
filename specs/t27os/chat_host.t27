@@ -27,7 +27,11 @@
 // opens one group at a time (grm_init, grm_load) and passes it to chm_tick_g for every friend's driver: a group
 // payload that comes over a friend's message session goes to the group (gr_gate first; dropped and counted with its
 // reason otherwise), and every line still owed to that member goes out over that session (fan-out). chm_tick is
-// chm_tick_g with no group, as before.
+// chm_tick_g with no group, as before. A GROUP_INFO (group_core) is taken whatever group is open: an ANNOUNCE that
+// gi_apply keeps goes into the table (CHM_E_GINFO: the window writes groups.t27 and shows the group) and is answered
+// GI_HAVE; a HAVE clears the ANNOUNCE owed to that member (the window's owed block, a byte per group) and sends the
+// open group's lines owed to it again. The ANNOUNCEs owed go out over the session with that member, again every
+// CH_RETRY_MS while unanswered; a session with a member of a group this device made owes it the ANNOUNCE again.
 module T27osChatHost;
 
 use t27os::pty_sys::sys_rename;
@@ -159,6 +163,23 @@ use t27os::group_core::gl_due_for;
 use t27os::group_core::gl_part_due;
 use t27os::group_core::gl_session_start;
 use t27os::group_core::gl_pending_for;
+use t27os::group_core::GT_MAX;
+use t27os::group_core::GI_ANNOUNCE;
+use t27os::group_core::GI_HAVE;
+use t27os::group_core::GI_MAX;
+use t27os::group_core::GI_KEPT;
+use t27os::group_core::GI_ALREADY;
+use t27os::group_core::GI_JOINED;
+use t27os::group_core::GR_BAD;
+use t27os::group_core::gi_is;
+use t27os::group_core::gi_ok;
+use t27os::group_core::gi_gid;
+use t27os::group_core::gi_n;
+use t27os::group_core::gi_roster;
+use t27os::group_core::gi_put_rec;
+use t27os::group_core::gi_apply;
+use t27os::group_core::gi_mine;
+use t27os::chat_core::CH_RETRY_MS;
 
 fn chh_access(path: []const u8, mode: i32) -> i32 { return @extern("access"); }
 
@@ -392,6 +413,14 @@ pub const CHM_SEND_ERR : u32 = 21;
 pub const CHM_K_DROP : u32 = 22;
 const M_TXN : usize = 23;
 const M_FP : usize = 192;
+/// After the fingerprint: when the ANNOUNCEs owed went out last (internal), then the GROUP_INFO counters (chm_stat):
+/// ANNOUNCEs sent, groups kept, HAVEs taken, GROUP_INFOs refused and the last reason (group_core GR_*).
+const M_INFO_AT : usize = 26;
+pub const CHM_INFO_TX : u32 = 27;
+pub const CHM_INFO_KEPT : u32 = 28;
+pub const CHM_INFO_HAVE : u32 = 29;
+pub const CHM_INFO_REFUSED : u32 = 30;
+pub const CHM_INFO_WHY : u32 = 31;
 
 /// chm_tick says what moved (bits): a new incoming line, a status of a line, the log needs saving.
 pub const CHM_E_NEW : u32 = 1;
@@ -408,6 +437,8 @@ pub const CHM_E_STRANGER : u32 = 32;
 pub const CHM_E_GNEW : u32 = 64;
 pub const CHM_E_GSTATUS : u32 = 128;
 pub const CHM_E_GDIRTY : u32 = 256;
+/// A GROUP_INFO put a new group into the table: the window writes groups.t27 and the group shows.
+pub const CHM_E_GINFO : u32 = 512;
 
 /// What the window does with a session that rings from someone who is not a friend: answer it, so the peer proves its
 /// key and the session ends as an invitation; or decline it while it rings, when the person declined this fingerprint
@@ -455,7 +486,7 @@ pub fn chm_ringing(s: []const u8, fp: []u8) -> bool {
 }
 
 pub fn chm_stat(m: []const u8, k: u32) -> u64 {
-    if (@as(usize, k) * 8 + 8 > M_FP) { return 0; }
+    if (@as(usize, k) * 8 + 8 > M_FP and (k < CHM_INFO_TX or k > CHM_INFO_WHY)) { return 0; }
     return mg(m, @as(usize, k));
 }
 
@@ -657,17 +688,116 @@ fn grm_out(m: []u8, s: []u8, g: []u8, t: []const u8, glog: []u8, pidx: u32, now:
     return ev;
 }
 
+// ---------------------------------------------------------------- GROUP_INFO
+
+/// The ANNOUNCEs owed to this driver's friend (own: a byte per group, a bit per member index; groups this device
+/// made only).
+pub fn ghm_owed(m: []const u8, t: []const u8, own: []const u8, me_fp: []const u8) -> u32 {
+    if (own.len < GT_MAX or t.len < GT_LEN) { return 0; }
+    var c : u32 = 0;
+    var gi : usize = 0;
+    while (gi < @as(usize, gt_count(t))) {
+        const k : u32 = gt_idx(t, gi, m[M_FP..M_FP + 10]);
+        if (k != GR_NOBODY and (@as(u32, own[gi]) & (@as(u32, 1) << k)) != 0 and gi_mine(t, gi, me_fp)) { c = c + 1; }
+        gi = gi + 1;
+    }
+    return c;
+}
+
+/// A session with this driver's friend came up: every group this device made with the friend in it owes the friend
+/// its ANNOUNCE again (it may have been lost, or this device restarted before the answer), sent at once.
+fn ghm_session(m: []u8, t: []const u8, own: []u8, me_fp: []const u8) -> void {
+    mp(m, M_INFO_AT, 0);
+    if (own.len < GT_MAX or t.len < GT_LEN) { return; }
+    var gi : usize = 0;
+    while (gi < @as(usize, gt_count(t))) {
+        const k : u32 = gt_idx(t, gi, m[M_FP..M_FP + 10]);
+        if (k != GR_NOBODY and gi_mine(t, gi, me_fp)) { own[gi] = own[gi] | @as(u8, @intCast(@as(u32, 1) << k)); }
+        gi = gi + 1;
+    }
+}
+
+/// The ANNOUNCEs owed to this driver's friend go out over its session, once every CH_RETRY_MS. How many.
+fn ghm_info_out(m: []u8, s: []u8, t: []const u8, own: []u8, me_fp: []const u8, now: u64) -> u32 {
+    if (own.len < GT_MAX or t.len < GT_LEN) { return 0; }
+    const at : u64 = mg(m, M_INFO_AT);
+    if (at != 0 and now < at + CH_RETRY_MS) { return 0; }
+    var c : u32 = 0;
+    var gi : usize = 0;
+    while (gi < @as(usize, gt_count(t))) {
+        const k : u32 = gt_idx(t, gi, m[M_FP..M_FP + 10]);
+        if (k != GR_NOBODY and (@as(u32, own[gi]) & (@as(u32, 1) << k)) != 0) {
+            if (gi_mine(t, gi, me_fp)) {
+                var a : [142]u8 = undefined;
+                const an : usize = gi_put_rec(a[0..GI_MAX], GI_ANNOUNCE, t, gi);
+                if (an > 0 and chm_tx(m, s, a[0..an])) {
+                    ma(m, @as(usize, CHM_INFO_TX));
+                    c = c + 1;
+                }
+            } else {
+                own[gi] = own[gi] & @as(u8, @intCast(255 ^ (@as(u32, 1) << k)));
+            }
+        }
+        gi = gi + 1;
+    }
+    if (c > 0) { mp(m, M_INFO_AT, now + 1); }
+    return c;
+}
+
+/// One GROUP_INFO that came over the session with this driver's friend: group_core gi_apply on the id this device
+/// hashes from its roster. A group kept or already here is answered GI_HAVE; a HAVE clears the ANNOUNCE owed to the
+/// friend, and the open group's lines owed to it go again. A refusal is counted with its reason.
+fn ghm_info_rx(m: []u8, s: []u8, g: []const u8, t: []u8, own: []u8, glog: []u8, friends: []const u8, me_fp: []const u8, p: []const u8) -> u32 {
+    var peer : [10]u8 = undefined;
+    if (cs_peer(s, peer[0..10]) == 0) { return 0; }
+    const ids : u32 = cs_id_state(s);
+    const pinned : bool = ids == CS_ID_VERIFIED or ids == CS_ID_STORED;
+    var idc : [8]u8 = undefined;
+    var r : u32 = GR_BAD;
+    if (gi_ok(p) and ghh_id(gi_roster(p), gi_n(p), idc[0..8])) {
+        if (g.len >= GRM_LEN and mg(g, G_ON) != 0) {
+            r = gi_apply(t, friends, me_fp, peer[0..10], pinned, p, idc[0..8], glog, grm_gi(g));
+        } else {
+            r = gi_apply(t, friends, me_fp, peer[0..10], pinned, p, idc[0..8], glog[0..0], GT_NONE);
+        }
+    }
+    const code : u32 = r & 255;
+    if (code == GI_KEPT or code == GI_ALREADY) {
+        var ev : u32 = 0;
+        if (code == GI_KEPT) {
+            ma(m, @as(usize, CHM_INFO_KEPT));
+            ev = CHM_E_GINFO;
+        }
+        var a : [142]u8 = undefined;
+        const an : usize = gi_put_rec(a[0..GI_MAX], GI_HAVE, t, gt_find(t, gi_gid(p)));
+        if (an > 0) { chm_tx(m, s, a[0..an]); }
+        return ev;
+    }
+    if (code == GI_JOINED) {
+        ma(m, @as(usize, CHM_INFO_HAVE));
+        const gi : usize = gt_find(t, gi_gid(p));
+        const k : u32 = gt_idx(t, gi, peer[0..10]);
+        if (gi < own.len and k != GR_NOBODY) { own[gi] = own[gi] & @as(u8, @intCast(255 ^ (@as(u32, 1) << k))); }
+        if ((r >> 8) > 0) { return CHM_E_GSTATUS | CHM_E_GDIRTY; }
+        return 0;
+    }
+    ma(m, @as(usize, CHM_INFO_REFUSED));
+    mp(m, @as(usize, CHM_INFO_WHY), @as(u64, code));
+    return 0;
+}
+
 /// One pass: run the session (answer a friend, dismiss an ended one), take every received chat frame,
 /// send what is due, send a pending READ, dial when something waits, close when idle. me_fp is this device's
 /// fingerprint, friends the peer_identity table. Returns CHM_E_* bits.
 pub fn chm_tick(m: []u8, s: []u8, log: []u8, asm: []u8, friends: []const u8, me_fp: []const u8, now: u64) -> u32 {
     var z : [1]u8 = undefined;
-    return chm_tick_g(m, s, log, asm, friends, me_fp, now, z[0..0], z[0..0], z[0..0], z[0..0]);
+    return chm_tick_g(m, s, log, asm, friends, me_fp, now, z[0..0], z[0..0], z[0..0], z[0..0], z[0..0]);
 }
 
 /// chm_tick with the open group: g its block (grm_init), t the groups table, glog its log, gasm the log's assembly
-/// (chat_core CA_LEN). A g shorter than GRM_LEN, or not initialised, is no group.
-pub fn chm_tick_g(m: []u8, s: []u8, log: []u8, asm: []u8, friends: []const u8, me_fp: []const u8, now: u64, g: []u8, t: []const u8, glog: []u8, gasm: []u8) -> u32 {
+/// (chat_core CA_LEN), own the ANNOUNCEs owed (GT_MAX bytes). A g shorter than GRM_LEN, or not initialised, is no
+/// group; a t shorter than GT_LEN takes no GROUP_INFO; an own shorter than GT_MAX owes none.
+pub fn chm_tick_g(m: []u8, s: []u8, log: []u8, asm: []u8, friends: []const u8, me_fp: []const u8, now: u64, g: []u8, t: []u8, glog: []u8, gasm: []u8, own: []u8) -> u32 {
     var pidx : u32 = GR_NOBODY;
     if (g.len >= GRM_LEN and mg(g, G_ON) != 0) { pidx = gt_idx(t, grm_gi(g), m[M_FP..M_FP + 10]); }
     const grp : bool = g.len >= GRM_LEN and mg(g, G_ON) != 0;
@@ -681,6 +811,7 @@ pub fn chm_tick_g(m: []u8, s: []u8, log: []u8, asm: []u8, friends: []const u8, m
             mp(m, M_READ_SENT, 0);
             if (cl_session_start(log) > 0) { ev = ev | CHM_E_STATUS; }
             if (pidx != GR_NOBODY and gl_session_start(glog, pidx) > 0) { ev = ev | CHM_E_GSTATUS; }
+            ghm_session(m, t, own, me_fp);
         } else if (e == CS_EV_ENDED or e == CS_EV_FAILED) {
             ev = ev | chm_end_bits(e == CS_EV_FAILED, cs_reason(s));
             cs_dismiss(s);
@@ -712,7 +843,9 @@ pub fn chm_tick_g(m: []u8, s: []u8, log: []u8, asm: []u8, friends: []const u8, m
         while (n > 0) {
             mp(m, M_LAST, now);
             const kind : u32 = ch_kind(pt[0..n]);
-            if (grp and gm_is_group(pt[0..n])) {
+            if (gi_is(pt[0..n])) {
+                if (t.len >= GT_LEN) { ev = ev | ghm_info_rx(m, s, g, t, own, glog, friends, me_fp, pt[0..n]); }
+            } else if (grp and gm_is_group(pt[0..n])) {
                 ev = ev | grm_rx(m, s, g, t, glog, gasm, me_fp, pt[0..n]);
             } else if (kind == CH_K_TEXT) {
                 const r : u32 = ch_rx_text(log, asm, pt[0..n]);
@@ -766,6 +899,7 @@ pub fn chm_tick_g(m: []u8, s: []u8, log: []u8, asm: []u8, friends: []const u8, m
             }
             i = i + 1;
         }
+        if (ghm_info_out(m, s, t, own, me_fp, now) > 0) { mp(m, M_LAST, now); }
         if (pidx != GR_NOBODY) { ev = ev | grm_out(m, s, g, t, glog, pidx, now); }
         // a READ is sent once per session for the highest message shown
         const upto : u64 = mg(m, M_READ_UPTO);
@@ -781,6 +915,7 @@ pub fn chm_tick_g(m: []u8, s: []u8, log: []u8, asm: []u8, friends: []const u8, m
         var waiting : u32 = cl_pending(log);
         if (upto > mg(m, M_READ_SENT)) { waiting = waiting + 1; }
         if (pidx != GR_NOBODY) { waiting = waiting + gl_pending_for(glog, pidx); }
+        waiting = waiting + ghm_owed(m, t, own, me_fp);
         if (ch_idle_close(now, mg(m, M_LAST), waiting)) {
             ma(m, CHM_IDLE_CLOSED);
             cs_hangup(s);
@@ -791,6 +926,7 @@ pub fn chm_tick_g(m: []u8, s: []u8, log: []u8, asm: []u8, friends: []const u8, m
         // something waits: dial the friend's chat port; a dial that was not answered is retried after the redial gap
         var need : bool = cl_pending(log) > 0 or mg(m, M_READ_UPTO) > mg(m, M_READ_SENT);
         if (pidx != GR_NOBODY and gl_pending_for(glog, pidx) > 0) { need = true; }
+        if (ghm_owed(m, t, own, me_fp) > 0) { need = true; }
         if (need and now >= mg(m, M_REDIAL) and mg(m, M_IP) != 0) {
             if (cs_call(s, mg(m, M_IP), mg(m, M_PORT), m[M_FP..M_FP + 10])) { ma(m, CHM_DIALS); }
             mp(m, M_REDIAL, now + CH_CALLING_MS + ch_redial_ms(me_fp, m[M_FP..M_FP + 10]));
@@ -1039,4 +1175,46 @@ test the_group_block_opens_only_a_known_group_with_this_device_in_it {
     // the counter slots end before the floors and the id
     assert @as(usize, GRM_ACK_DROPPED) * 8 + 8 <= G_FLOORS and G_FLOORS + GL_FLOORS <= G_GID and G_GID + GR_ID <= GRM_LEN;
     assert (CHM_E_GNEW | CHM_E_GSTATUS | CHM_E_GDIRTY) & (CHM_E_NEW | CHM_E_STATUS | CHM_E_DIRTY | CHM_E_OTHER | CHM_E_INVITE | CHM_E_STRANGER) == 0;
+}
+
+test the_announces_owed_follow_the_groups_this_device_made_and_the_info_counters_read_back {
+    // A made {A, B} and holds B's {B, C} too (a group B made)
+    var t : [4240]u8 = undefined;
+    gt_init(t[0..GT_LEN]);
+    const ab : [20]u8 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11];
+    const bc : [20]u8 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 200, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+    const id1 : [8]u8 = [4, 23, 205, 1, 40, 87, 215, 222];
+    const id2 : [8]u8 = [7, 7, 7, 7, 7, 7, 7, 7];
+    assert gt_add(t[0..GT_LEN], id1[0..8], "pair", ab[0..20], 2, 0, 1) == GT_OK;
+    assert gt_add(t[0..GT_LEN], id2[0..8], "bc", bc[0..20], 2, 0, 1) == GT_OK;
+    var own : [32]u8 = undefined;
+    var i : usize = 0;
+    while (i < 32) {
+        own[i] = 0;
+        i = i + 1;
+    }
+    var m : [256]u8 = undefined;
+    assert chm_init(m[0..256], ab[10..20], 1, 2);
+    // nothing owed until a session with B comes up; then A's own group owes B its ANNOUNCE, B's group owes nothing
+    assert ghm_owed(m[0..256], t[0..GT_LEN], own[0..32], ab[0..10]) == 0;
+    ghm_session(m[0..256], t[0..GT_LEN], own[0..32], ab[0..10]);
+    assert own[0] == 2 and own[1] == 0;
+    assert ghm_owed(m[0..256], t[0..GT_LEN], own[0..32], ab[0..10]) == 1;
+    // an owed bit on a group this device did not make counts for nothing
+    own[1] = 1;
+    assert ghm_owed(m[0..256], t[0..GT_LEN], own[0..32], ab[0..10]) == 1;
+    // C's driver: C is in no group A made
+    assert chm_init(m[0..256], bc[10..20], 1, 2);
+    assert ghm_owed(m[0..256], t[0..GT_LEN], own[0..32], ab[0..10]) == 0;
+    // no table, no owed block: nothing
+    assert ghm_owed(m[0..256], t[0..10], own[0..32], ab[0..10]) == 0 and ghm_owed(m[0..256], t[0..GT_LEN], own[0..4], ab[0..10]) == 0;
+    // the GROUP_INFO counters sit after the fingerprint and read back; the time slot is not a counter
+    mp(m[0..256], @as(usize, CHM_INFO_WHY), 11);
+    ma(m[0..256], @as(usize, CHM_INFO_KEPT));
+    assert chm_stat(m[0..256], CHM_INFO_WHY) == 11 and chm_stat(m[0..256], CHM_INFO_KEPT) == 1 and chm_stat(m[0..256], CHM_INFO_TX) == 0;
+    mp(m[0..256], M_INFO_AT, 5);
+    assert chm_stat(m[0..256], 26) == 0 and chm_stat(m[0..256], 32) == 0;
+    assert M_INFO_AT * 8 >= M_FP + 10 and @as(usize, CHM_INFO_WHY) * 8 + 8 <= CHM_LEN;
+    assert m[M_FP] == 200 and m[M_FP + 9] == 9;
+    assert (CHM_E_GINFO & (CHM_E_NEW | CHM_E_STATUS | CHM_E_DIRTY | CHM_E_OTHER | CHM_E_INVITE | CHM_E_STRANGER | CHM_E_GNEW | CHM_E_GSTATUS | CHM_E_GDIRTY)) == 0;
 }
