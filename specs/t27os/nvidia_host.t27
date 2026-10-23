@@ -21,6 +21,8 @@ use t27os::keys::NV_MODEL_DEFAULT;
 use t27os::keys::SEC_OK;
 use t27os::keys::SEC_TIMEOUT_MS;
 use t27os::keys_host::sec_run;
+use t27os::keys_host::kc_env;
+use t27os::keys_host::kc_user_home;
 use t27os::keys_probe::probe_nvidia;
 use t27os::nvidia_direct::NV_BAD;
 use t27os::nvidia_direct::NV_NONE;
@@ -45,9 +47,6 @@ use t27os::nvidia_direct::NV_S_N;
 use t27os::session_store::put_bytes;
 use t27os::session_store::put_dec;
 use t27os::session_store::csv_field;
-use t27os::pty_sys::sys_getenv;
-use t27os::pty_sys::sys_strlen;
-use t27os::pty_sys::sys_peek;
 use t27os::pty_sys::sys_open_ro;
 use t27os::pty_sys::sys_read;
 use t27os::pty_sys::sys_write;
@@ -55,7 +54,6 @@ use t27os::pty_sys::sys_close;
 use t27os::pty_sys::sys_creat;
 use t27os::pty_sys::sys_rename;
 use t27os::pty_sys::sys_mkdir;
-use t27os::pty_proto::get_u64;
 
 /// The most checks one T27OS_NVIDIA_CHECK run sends.
 pub const NV_CHECK_MAX : u32 = 5;
@@ -68,38 +66,10 @@ fn nv_wipe(b: []u8) -> void {
     }
 }
 
-/// An environment variable into out (cut at out.len - 1); its length, 0 when unset.
-fn nv_env(name: []const u8, out: []u8) -> usize {
-    const a : u64 = sys_getenv(name);
-    if (a == 0) { return 0; }
-    var n : u64 = sys_strlen(a);
-    if (n > @as(u64, out.len - 1)) { n = @as(u64, out.len - 1); }
-    sys_peek(out, a, n);
-    return @as(usize, @intCast(n));
-}
-
-fn nv_getuid() -> u32 { return @extern("getuid"); }
-fn nv_getpwuid(uid: u32) -> u64 { return @extern("getpwuid"); }
-
-/// The user's own home folder (getpwuid(getuid())->pw_dir, at byte 48 of the macOS struct passwd) into out,
-/// cut at out.len - 1; its length, 0 when unknown.
-fn nv_user_home(out: []u8) -> usize {
-    const pw : u64 = nv_getpwuid(nv_getuid());
-    if (pw == 0) { return 0; }
-    var b : [8]u8 = undefined;
-    sys_peek(b[0..8], pw + 48, 8);
-    const d : u64 = get_u64(b[0..8], 0);
-    if (d == 0) { return 0; }
-    var n : u64 = sys_strlen(d);
-    if (n > @as(u64, out.len - 1)) { return 0; }
-    sys_peek(out, d, n);
-    return @as(usize, @intCast(n));
-}
-
 /// T27OS_NVIDIA_DEBUG=1: one line to standard error with three numbers (lengths and codes only, never a key).
 fn nv_debug3(tag: []const u8, a: u32, b: u32, c: u32) -> void {
     var e : [8]u8 = undefined;
-    if (nv_env("T27OS_NVIDIA_DEBUG", e[0..8]) == 0 or e[0] != 49) { return; }
+    if (kc_env("T27OS_NVIDIA_DEBUG", e[0..8]) == 0 or e[0] != 49) { return; }
     var l : [128]u8 = undefined;
     var n : usize = put_bytes(l[0..128], 0, tag);
     n = put_dec(l[0..128], n, @as(u64, a));
@@ -123,9 +93,9 @@ pub fn nv_kc_read(out: []u8) -> usize {
         z = z + 1;
     }
     var home : [160]u8 = undefined;
-    const hn : usize = nv_env("HOME", home[0..160]);
+    const hn : usize = kc_env("HOME", home[0..160]);
     var uh : [160]u8 = undefined;
-    const un : usize = nv_user_home(uh[0..160]);
+    const un : usize = kc_user_home(uh[0..160]);
     const argc : u32 = nv_kc_argv(home[0..hn], uh[0..un], words[0..256], offs[0..8]);
     if (argc == 0) { return 0; }
     var res : [2]u32 = undefined;
@@ -144,7 +114,7 @@ pub fn nv_kc_read(out: []u8) -> usize {
 /// ~/.t27os/nvidia, then `leaf` after a slash, NUL-ended in out; the length without the NUL, 0 without HOME.
 fn nv_path(leaf: []const u8, out: []u8) -> usize {
     var home : [256]u8 = undefined;
-    const hn : usize = nv_env("HOME", home[0..256]);
+    const hn : usize = kc_env("HOME", home[0..256]);
     if (hn == 0) { return 0; }
     var n : usize = put_bytes(out, 0, home[0..hn]);
     n = put_bytes(out, n, "/.t27os/nvidia");
@@ -238,13 +208,13 @@ fn nv_err(b: []const u8, n: usize) -> void {
 /// next live key; any other answer ends the run. T27OS_NVIDIA_MODEL names a model (a dead one is replaced).
 pub fn nv_check_main() -> bool {
     var e : [16]u8 = undefined;
-    const en : usize = nv_env("T27OS_NVIDIA_CHECK", e[0..16]);
+    const en : usize = kc_env("T27OS_NVIDIA_CHECK", e[0..16]);
     if (en == 0) { return false; }
     var times : u32 = 1;
     if (e[0] >= 49 and e[0] <= 57) { times = @as(u32, e[0] - 48); }
     if (times > NV_CHECK_MAX) { times = NV_CHECK_MAX; }
     var mw : [96]u8 = undefined;
-    const mwn : usize = nv_env("T27OS_NVIDIA_MODEL", mw[0..96]);
+    const mwn : usize = kc_env("T27OS_NVIDIA_MODEL", mw[0..96]);
     var model : [96]u8 = undefined;
     const mn : usize = nv_model_for(mw[0..mwn], model[0..96]);
     var st : [260]u32 = undefined;

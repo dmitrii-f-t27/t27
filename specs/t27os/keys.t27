@@ -1290,7 +1290,18 @@ pub fn keychain_label_n(p: u32, k: u32, out: []u8) -> usize {
 /// The Keychain account of key number k of provider p: the provider's name for key 1 and "<name>#<k+1>" for
 /// the others ("zai", "zai#2", ...); the service is KEYCHAIN_SERVICE for all. 0 when p or k is out of range.
 pub fn keychain_account_n(p: u32, k: u32, out: []u8) -> usize {
-    if (p >= PROVIDER_COUNT or k >= MAX_KEYS) { return 0; }
+    if (k >= MAX_KEYS) { return 0; }
+    return keychain_account_any(p, k, out);
+}
+
+/// How far the cabinet counts a provider's accounts in the Keychain. The panes use MAX_KEYS of them; the owner
+/// holds more (11 z.ai accounts on 2026-10-22, "zai" .. "zai#11"), and the cabinet says how many there are.
+pub const KC_COUNT_MAX : u32 = 64;
+
+/// The account of key number k as keychain_account_n names it, without the MAX_KEYS cap (k < KC_COUNT_MAX):
+/// only for counting; nothing past MAX_KEYS is read into a pane.
+pub fn keychain_account_any(p: u32, k: u32, out: []u8) -> usize {
+    if (p >= PROVIDER_COUNT or k >= KC_COUNT_MAX) { return 0; }
     var n : usize = provider_name(p, out);
     if (k == 0) { return n; }
     n = put_bytes(out, n, "#");
@@ -2930,6 +2941,61 @@ pub fn sec_argv(op: u32, service: []const u8, account: []const u8, words: []u8, 
     return 7;
 }
 
+/// The login keychain under a home folder; `security` looks for it under $HOME when no keychain is named.
+pub const KC_LOGIN_TAIL : str = "/Library/Keychains/login.keychain-db";
+
+/// The read words of one key: /usr/bin/security find-generic-password -s <service> [-a <account>] -w [keychain].
+/// An empty account leaves out -a (the first item of the service). `security` finds the login keychain through
+/// $HOME, so a window started with another HOME (`tri t27os shot`, HOME=/tmp/...) was answered 44, item not
+/// found, for every key that is there (2026-10-22: OpenRouter and Z.ai "no key stored", 11 z.ai items present).
+/// When `home` is not the user's own folder `user_home`, the last word names <user_home>KC_LOGIN_TAIL; an
+/// unknown user folder or a path that does not fit leaves it out. The count of words; 0 when nothing fits.
+pub fn kc_read_argv(service: []const u8, account: []const u8, home: []const u8, user_home: []const u8, words: []u8, offs: []u32) -> u32 {
+    if (offs.len < SEC_MAX_WORDS or service.len == 0) { return 0; }
+    var at : usize = sec_push(words, offs, 0, 0, SEC_TOOL);
+    if (at > 0) { at = sec_push(words, offs, 1, at, "find-generic-password"); }
+    if (at > 0) { at = sec_push(words, offs, 2, at, "-s"); }
+    if (at > 0) { at = sec_push(words, offs, 3, at, service); }
+    var w : u32 = 4;
+    if (at > 0 and account.len > 0) {
+        at = sec_push(words, offs, 4, at, "-a");
+        if (at > 0) { at = sec_push(words, offs, 5, at, account); }
+        w = 6;
+    }
+    if (at > 0) { at = sec_push(words, offs, w, at, "-w"); }
+    if (at == 0) { return 0; }
+    w = w + 1;
+    if (user_home.len == 0 or same_bytes(home, user_home)) { return w; }
+    if (at + user_home.len + KC_LOGIN_TAIL.len + 1 > words.len) { return w; }
+    offs[@as(usize, w)] = @as(u32, @intCast(at));
+    var n : usize = put_bytes(words, at, user_home);
+    n = put_bytes(words, n, KC_LOGIN_TAIL);
+    words[n] = 0;
+    return w + 1;
+}
+
+/// The service a provider's key was kept under before T27 OS had its own (read as a source, never copied or
+/// deleted): OpenRouter in "openrouter-api-key" (2026-10-22, one item, a working key). "" for the others.
+pub const KC_LEGACY_OPENROUTER : str = "openrouter-api-key";
+
+pub fn kc_legacy_service(p: u32) -> str {
+    if (p == P_OPENROUTER) { return KC_LEGACY_OPENROUTER; }
+    return "";
+}
+
+/// Where key k of provider p is read from.
+pub const KC_SRC_PROFILE : u32 = 0;
+pub const KC_SRC_LEGACY : u32 = 1;
+pub const KC_SRC_NONE : u32 = 2;
+
+/// The source of key k of p once its own item (ai.t27.os) was looked up: that item when found; else for key 1
+/// the provider's old service when it has one; else none. A key in ai.t27.os always wins over the old one.
+pub fn kc_source(p: u32, k: u32, own_found: bool) -> u32 {
+    if (own_found) { return KC_SRC_PROFILE; }
+    if (k == 0 and kc_legacy_service(p).len > 0) { return KC_SRC_LEGACY; }
+    return KC_SRC_NONE;
+}
+
 /// The one line the host writes to `security -i`, newline included, that adds `key` under service and account
 /// (label "<service>/<account>", the label keychain_label_n gives). 0 when the key is not sec_key_safe, a name
 /// is not a clean word or the line does not fit. No -U: an existing account makes the add fail (45).
@@ -4046,4 +4112,68 @@ test age_text_says_minutes_under_an_hour_and_hours_from_it {
     o[0] = 88; o[1] = 89;
     n = age_text(300, o[0..24], 2);
     assert n == 7 and o[0] == 88 and o[1] == 89 and same_bytes(o[2..n], "5 min");
+}
+
+test the_cabinet_counts_accounts_past_max_keys_with_the_same_names {
+    var o : [32]u8 = undefined;
+    // keychain_account_n keeps its cap, keychain_account_any names "zai#9" .. "zai#11" that the owner holds
+    assert keychain_account_n(P_ZAI, 7, o[0..32]) == 5 and same_bytes(o[0..5], "zai#8");
+    assert keychain_account_n(P_ZAI, 8, o[0..32]) == 0;
+    var n : usize = keychain_account_any(P_ZAI, 8, o[0..32]);
+    assert same_bytes(o[0..n], "zai#9");
+    n = keychain_account_any(P_ZAI, 10, o[0..32]);
+    assert same_bytes(o[0..n], "zai#11");
+    n = keychain_account_any(P_ZAI, 0, o[0..32]);
+    assert same_bytes(o[0..n], "zai");
+    n = keychain_account_any(P_OPENROUTER, 1, o[0..32]);
+    assert same_bytes(o[0..n], "openrouter#2");
+    assert keychain_account_any(P_ZAI, KC_COUNT_MAX - 1, o[0..32]) == 6;
+    assert keychain_account_any(P_ZAI, KC_COUNT_MAX, o[0..32]) == 0;
+    assert keychain_account_any(PROVIDER_COUNT, 0, o[0..32]) == 0;
+    assert KC_COUNT_MAX > MAX_KEYS;
+}
+
+test the_key_read_names_the_login_keychain_only_under_another_home {
+    var w : [160]u8 = undefined;
+    var o : [8]u32 = undefined;
+    // the same home: the seven words sec_argv READ gives, nothing added
+    var c : u32 = kc_read_argv("ai.t27.os", "zai#2", "/Users/a", "/Users/a", w[0..160], o[0..8]);
+    assert c == 7;
+    assert sec_word_is(w[0..160], o[0], "/usr/bin/security");
+    assert sec_word_is(w[0..160], o[1], "find-generic-password");
+    assert sec_word_is(w[0..160], o[3], "ai.t27.os");
+    assert sec_word_is(w[0..160], o[5], "zai#2");
+    assert sec_word_is(w[0..160], o[6], "-w");
+    // a window started with HOME=/tmp/...: the last word is the user's login keychain
+    c = kc_read_argv("ai.t27.os", "zai#11", "/tmp/t27os-shot-home-1", "/Users/a", w[0..160], o[0..8]);
+    assert c == 8;
+    assert sec_word_is(w[0..160], o[5], "zai#11");
+    assert sec_word_is(w[0..160], o[6], "-w");
+    assert sec_word_is(w[0..160], o[7], "/Users/a/Library/Keychains/login.keychain-db");
+    // no account: the first item of the old OpenRouter service, -w right after the service
+    c = kc_read_argv("openrouter-api-key", "", "/Users/a", "/Users/a", w[0..160], o[0..8]);
+    assert c == 5;
+    assert sec_word_is(w[0..160], o[3], "openrouter-api-key");
+    assert sec_word_is(w[0..160], o[4], "-w");
+    c = kc_read_argv("openrouter-api-key", "", "/tmp/h", "/Users/a", w[0..160], o[0..8]);
+    assert c == 6 and sec_word_is(w[0..160], o[5], "/Users/a/Library/Keychains/login.keychain-db");
+    // an unknown user folder or a path that does not fit: the plain words
+    assert kc_read_argv("ai.t27.os", "zai", "/tmp/h", "", w[0..160], o[0..8]) == 7;
+    assert kc_read_argv("ai.t27.os", "zai", "/tmp/h", "/Users/a", w[0..80], o[0..8]) == 7;
+    // refused: no service, too few offsets, words that do not fit
+    assert kc_read_argv("", "zai", "/Users/a", "/Users/a", w[0..160], o[0..8]) == 0;
+    assert kc_read_argv("ai.t27.os", "zai", "/Users/a", "/Users/a", w[0..160], o[0..4]) == 0;
+    assert kc_read_argv("ai.t27.os", "zai", "/Users/a", "/Users/a", w[0..30], o[0..8]) == 0;
+}
+
+test openrouter_key_one_falls_back_to_its_old_service_and_its_own_item_wins {
+    assert same_bytes(kc_legacy_service(P_OPENROUTER), "openrouter-api-key");
+    assert kc_legacy_service(P_ZAI).len == 0;
+    assert kc_legacy_service(P_ANTHROPIC).len == 0;
+    assert kc_source(P_OPENROUTER, 0, true) == KC_SRC_PROFILE;
+    assert kc_source(P_OPENROUTER, 0, false) == KC_SRC_LEGACY;
+    // only key 1 has an old home; key 2 and the other providers have none
+    assert kc_source(P_OPENROUTER, 1, false) == KC_SRC_NONE;
+    assert kc_source(P_ZAI, 0, false) == KC_SRC_NONE;
+    assert kc_source(P_ZAI, 0, true) == KC_SRC_PROFILE;
 }

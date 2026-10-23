@@ -132,6 +132,7 @@ use t27os::keys::circuit_fails;
 use t27os::keys::status_shown;
 use t27os::keys_host::kc_put_n;
 use t27os::keys_host::kc_get_n;
+use t27os::keys_host::kc_count;
 use t27os::keys_host::kc_del_n;
 use t27os::keys_host::kc_has;
 use t27os::keys_probe::probe;
@@ -859,6 +860,11 @@ use t27os::account_view::ac_kp_name;
 use t27os::account_view::ac_kp_facts;
 use t27os::account_view::ac_kp_dim;
 use t27os::account_view::ac_kp_line;
+use t27os::account_view::ac_kp_seen;
+use t27os::account_view::ac_kc_pack;
+use t27os::account_view::ac_kc_total;
+use t27os::account_view::AC_KC_AT;
+use t27os::account_view::ac_kp_provider;
 use t27os::account_view::ac_fit;
 use t27os::account_view::ac_fr_label;
 use t27os::account_view::ac_nv_pack;
@@ -5955,7 +5961,12 @@ fn bytes_w(kit: [48]u64, s: []const u8, n: usize, size: f64, weight: f64, mono: 
 fn keys_refresh(stored: []u32, mask: []u8, mlen: []u32) -> void {
     // the Devices view (keysync.t27) rides after the 144 mask bytes: refreshed with the keys
     if (mask.len >= 544) { ks_view_fill(mask[144..544]); }
-    if (mask.len >= 640) { nv_mask_fill(mask[544..640]); }
+    if (mask.len >= 640) {
+        nv_mask_fill(mask[544..640]);
+        // the cabinet's OpenRouter and Z.ai rows say how many keys the Keychain holds, past MAX_KEYS too
+        ac_kc_pack(mask[544..640], 0, kc_count(ac_kp_provider(0)));
+        ac_kc_pack(mask[544..640], 1, kc_count(ac_kp_provider(1)));
+    }
     var key : [256]u8 = undefined;
     var p : u32 = 0;
     while (p < PROVIDER_COUNT) {
@@ -11191,12 +11202,13 @@ fn draw_account_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, 
     draw_bytes(c, kit, "KEYS", 4, x, t + AC_KEYS_LABEL_Y, 9.5, 0.0, false);
     cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
     draw_bytes(c, kit, "values are never shown", 22, x + 36.0, t + AC_KEYS_LABEL_Y, 9.0, 0.0, false);
-    var kf : [7]u64 = undefined;
+    var kf : [8]u64 = undefined;
     var kl : [128]u8 = undefined;
     var kp : usize = 0;
     while (kp < AC_KP_N) {
         const kb : f64 = ac_keys_row_base(t, kp);
-        ac_kp_facts(kp, kstored, khl, nvm, now, kf[0..7]);
+        ac_kp_facts(kp, kstored, khl, nvm, now, kf[0..8]);
+        ac_kp_seen(kp, kf[0..8], ac_kc_total(nvm, kp));
         const kst0 : u32 = @as(u32, @intCast(kf[6]));
         const kdim : bool = ac_kp_dim(kst0);
         draw_cl_dot(c, kit, x, kb - 7.0, kst0 == AC_KS_LIVE);
@@ -11205,7 +11217,7 @@ fn draw_account_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, 
         cg_fill_rgba(c, 1.0, 1.0, 1.0, kink);
         const kname : []const u8 = ac_kp_name(kp);
         draw_bytes(c, kit, kname, kname.len, x + AC_KEYS_NAME_DX, kb, 9.5, WEIGHT_SEMIBOLD, false);
-        const kn : usize = ac_kp_line(kp, kf[0..7], now, kl[0..128]);
+        const kn : usize = ac_kp_line(kp, kf[0..8], now, kl[0..128]);
         cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
         if (kdim) { cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE)); }
         draw_ac_fit(c, kit, kl[0..128], kn, x + AC_KEYS_VALUE_DX, kb, AC_KEYS_SIZE, 0.0, false, right);
@@ -13613,6 +13625,8 @@ pub fn main() -> void {
     }
     kmask[544] = 0;
     kmask[544 + AC_NV_FLAG] = 0;
+    kmask[544 + AC_KC_AT] = 0;
+    kmask[544 + AC_KC_AT + 1] = 0;
     // the cabinet reads the key tables once in a run if KEYS was not opened before it (kseen)
     var kseen : bool = false;
     var kz : u32 = 0;
