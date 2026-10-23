@@ -111,6 +111,9 @@ use t27os::keys_health::kh_pack;
 use t27os::keys_health::kh_unpack;
 use t27os::keys_health::kh_state;
 use t27os::keys_health::kh_status;
+use t27os::qr::QR_QUIET;
+use t27os::qr::qr_size;
+use t27os::qr::qr_version_for;
 
 // ---------------------------------------------------------------- 1. the state in the CALL region (below 256, folded)
 
@@ -123,6 +126,8 @@ pub const AC_BUILD : usize = 192;
 pub const AC_VERLEN : usize = 196;
 pub const AC_VER : usize = 197;
 pub const AC_VER_MAX : usize = 16;
+/// 1 while the key's QR code is shown large in place of the friends (section 8b); 0 = the small code in ME.
+pub const AC_QR_BIG : usize = 213;
 pub const AC_COPIES : usize = 216;
 pub const AC_LAST : usize = 220;
 /// The copy just made, shown for AC_FLASH_FOR_MS next to what was copied (AC_L_*, 0 = nothing shown), and the
@@ -510,6 +515,8 @@ pub const AC_H_ADD : u32 = 10;
 pub const AC_H_UPD : u32 = 11;
 /// CALL in the head: calls the first friend in view who is online, else the first friend (ac_call_target).
 pub const AC_H_HCALL : u32 = 12;
+/// The key's QR code: the small one in ME, or the large one in the friends part (section 8b).
+pub const AC_H_QR : u32 = 13;
 /// Per row i (0..15): the row (a click opens the friend's card, chat_view.t27), copy that friend's key, remove (asks),
 /// YES, NO, CALL, MESSAGE.
 pub const AC_H_ROW : u32 = 16;
@@ -784,6 +791,91 @@ pub fn ac_give_text() -> str { return "Give this key to people so they can messa
 pub fn ac_account_text(server: bool) -> str {
     if (server) { return "Account on the server; this device holds its keys."; }
     return "No server account: it is kept only on this device.";
+}
+
+// ---------------------------------------------------------------- 8b. ME: the key as a QR code (qr.t27)
+
+// Owner, 2026-10-22: a friend points a phone at the cabinet instead of typing the key. The code carries the key's
+// 25 bytes and nothing else (qr.t27), so it is version 2, 25 modules, plus the light border of QR_QUIET modules a
+// side. ME has no room for 120 pt, so ME holds the small code (AC_QR_SMALL_MOD a module, right of the lines under
+// the key, "click to enlarge" under it) and a click shows it large (AC_QR_BIG_MOD a module, about 120 pt with its
+// frame, "scan to add me" over it) where the friends stand; a click on either gives the friends back. No new window.
+
+pub const AC_QR_SMALL_MOD : f64 = 2.0;
+pub const AC_QR_BIG_MOD : f64 = 3.0;
+/// The small code's top, below the key field; the gap between it and the lines left of it.
+pub const AC_QR_Y : f64 = 150.0;
+pub const AC_QR_GAP : f64 = 8.0;
+/// The caption under the small code (baseline below its bottom) and its size.
+pub const AC_QR_CAP_DY : f64 = 10.0;
+pub const AC_QR_CAP_SIZE : f64 = 8.5;
+/// The large code: its frame around the light square, the frame's top below the friends' label line, the caption
+/// under the frame.
+pub const AC_QR_FRAME_PAD : f64 = 10.0;
+pub const AC_QR_FRAME_DY : f64 = 8.0;
+pub const AC_QR_BIG_CAP_DY : f64 = 14.0;
+
+/// The modules a side of the key's code (the symbol, no border): version 2 for INVITE_LEN bytes.
+pub fn ac_qr_n() -> usize { return qr_size(qr_version_for(INVITE_LEN)); }
+
+/// The light square of a code of n modules at mod points a module, the border included.
+pub fn ac_qr_side(n: usize, md: f64) -> f64 { return @as(f64, @floatFromInt(n + 2 * QR_QUIET)) * md; }
+
+/// The small code: its left edge at the panel's right padding, its top, its side.
+pub fn ac_qr_small_side() -> f64 { return ac_qr_side(ac_qr_n(), AC_QR_SMALL_MOD); }
+pub fn ac_qr_small_x(l: f64, w: f64) -> f64 { return l + w - QP_PAD - ac_qr_small_side(); }
+
+/// Where the lines left of the small code end.
+pub fn ac_qr_text_right(l: f64, w: f64) -> f64 { return ac_qr_small_x(l, w) - AC_QR_GAP; }
+
+/// The large code's frame side at mod points a module.
+pub fn ac_qr_frame_side(md: f64) -> f64 { return ac_qr_side(ac_qr_n(), md) + 2.0 * AC_QR_FRAME_PAD; }
+pub fn ac_qr_frame_x(l: f64, w: f64, md: f64) -> f64 { return l + (w - ac_qr_frame_side(md)) / 2.0; }
+pub fn ac_qr_frame_y(tf: f64) -> f64 { return tf + AC_FR_LABEL_Y + AC_QR_FRAME_DY; }
+
+/// The module size the large code takes in a panel of height h whose friends part starts at tf: AC_QR_BIG_MOD when
+/// the frame and its caption fit above the add part, else 2.0, else 0.0 (no room: the code stays small).
+pub fn ac_qr_big_mod(t: f64, h: f64, tf: f64) -> f64 {
+    const room : f64 = ac_add_label_y(t, h) - 14.0 - ac_qr_frame_y(tf) - AC_QR_BIG_CAP_DY;
+    if (ac_qr_frame_side(AC_QR_BIG_MOD) <= room) { return AC_QR_BIG_MOD; }
+    if (ac_qr_frame_side(2.0) <= room) { return 2.0; }
+    return 0.0;
+}
+
+pub fn ac_qr_is_big(cl: []const u8) -> bool { return cl[AC_QR_BIG] != 0; }
+
+/// A click on the code: large if it was small, small if it was large.
+pub fn ac_qr_toggle(cl: []u8) -> void {
+    if (cl[AC_QR_BIG] != 0) { cl[AC_QR_BIG] = 0; } else { cl[AC_QR_BIG] = 1; }
+}
+
+/// The words under the codes.
+pub fn ac_qr_small_word(big: bool) -> str {
+    if (big) { return "click to shrink"; }
+    return "click to enlarge";
+}
+pub fn ac_qr_big_title() -> str { return "SCAN TO ADD ME"; }
+pub fn ac_qr_big_word() -> str { return "A phone camera reads the key. Click to shrink."; }
+
+/// What the key is for, short enough for the room left of the small code.
+pub fn ac_give_text_qr() -> str { return "Give this key, or let them scan it."; }
+pub fn ac_account_text_qr() -> str { return "No server account: this device only."; }
+
+/// ac_hit with the codes over it: `raw` is what ac_hit / ac_hit_inv answered, `key` whether the panel shows a key
+/// (and so the codes), `dy` how far the invitations moved the friends part. The small code answers AC_H_QR; while
+/// the code is large (and has room), its frame answers AC_H_QR and the rest of the friends part answers nothing.
+pub fn ac_hit_qr(x: f64, y: f64, l: f64, w: f64, t: f64, h: f64, dy: f64, key: bool, big: bool, raw: u32) -> u32 {
+    if (key == false) { return raw; }
+    const ss : f64 = ac_qr_small_side();
+    if (fv_in(x, y, ac_qr_small_x(l, w), t + AC_QR_Y, ss, ss)) { return AC_H_QR; }
+    const tf : f64 = t + dy;
+    const md : f64 = ac_qr_big_mod(t, h, tf);
+    if (big and md > 0.0) {
+        const fs : f64 = ac_qr_frame_side(md);
+        if (fv_in(x, y, ac_qr_frame_x(l, w, md), ac_qr_frame_y(tf), fs, fs)) { return AC_H_QR; }
+        if (y >= tf + AC_FR_LABEL_Y - 14.0 and y < ac_ifield_y(t, h) - 12.0) { return AC_H_NONE; }
+    }
+    return raw;
 }
 
 // ---------------------------------------------------------------- 9. KEYS: one line a provider, from the tables the window holds
@@ -1987,4 +2079,59 @@ test ac_keys_line_says_the_health_files_last_check_without_the_keys_tab {
     nv[AC_NV_FLAG] = AC_NV_UNREAD;
     ac_kp_facts(2, stored[0..9], hw[0..72], nv[0..96], now, f[0..8]);
     assert fv_eq(o[0..128], ac_kp_line_kh(2, f[0..8], kh[0..96], now, o[0..128]), "not read yet");
+}
+
+test ac_the_key_code_sits_right_of_the_lines_under_the_key_and_grows_where_the_friends_stand {
+    // the state byte is a free one of the folded region (after the version text, before the copies)
+    assert AC_VER + AC_VER_MAX <= AC_QR_BIG and AC_QR_BIG < AC_COPIES;
+    // the key is 25 bytes: version 2, 25 modules; small 33 x 2 = 66 pt, large 33 x 3 = 99 pt in a 119 pt frame
+    assert ac_qr_n() == 25 and ac_qr_small_side() == 66.0 and ac_qr_frame_side(AC_QR_BIG_MOD) == 119.0;
+    assert ac_qr_side(25, 3.0) == 99.0 and ac_qr_big_title().len == 14;
+    const l : f64 = 400.0;
+    const w : f64 = QP_W;
+    const t : f64 = 35.0;
+    // the small code: under the key field, above the UPDATE button, right of the lines that end at ac_qr_text_right
+    assert AC_KEY_Y + AC_KEY_H < AC_QR_Y and AC_QR_Y + ac_qr_small_side() <= AC_UPD_BTN_Y;
+    assert AC_QR_Y <= AC_GIVE_BASE - 9.0 and ac_qr_small_x(l, w) + ac_qr_small_side() == l + w - QP_PAD;
+    const room : f64 = ac_qr_text_right(l, w) - (l + QP_PAD);
+    assert room == 194.0;
+    assert chv_text_w(ac_give_text_qr(), ac_give_text_qr().len, 9.0) <= room;
+    assert chv_text_w(ac_account_text_qr(), ac_account_text_qr().len, 9.0) <= room;
+    assert chv_text_w(ac_qr_small_word(false), ac_qr_small_word(false).len, AC_QR_CAP_SIZE) <= ac_qr_small_side() + AC_QR_GAP;
+    assert chv_text_w(ac_qr_small_word(true), ac_qr_small_word(true).len, AC_QR_CAP_SIZE) <= ac_qr_small_side() + AC_QR_GAP;
+    assert chv_text_w(ac_qr_big_word(), ac_qr_big_word().len, 9.0) <= w - 2.0 * QP_PAD;
+    // the large code: 3 pt a module from a panel of 555 pt, 2 pt from 522, none below (it stays small)
+    assert ac_qr_big_mod(t, 555.0, t) == 3.0 and ac_qr_big_mod(t, 554.0, t) == 2.0;
+    assert ac_qr_big_mod(t, 522.0, t) == 2.0 and ac_qr_big_mod(t, 521.0, t) == 0.0;
+    assert ac_qr_big_mod(t, 700.0, t + ac_inv_dy(2)) == 3.0;
+    assert ac_qr_frame_x(l, w, 3.0) == l + 90.5 and ac_qr_frame_y(t) == t + AC_FR_LABEL_Y + AC_QR_FRAME_DY;
+}
+
+test ac_a_click_on_the_code_grows_it_and_a_second_click_gives_the_friends_back {
+    var cl : [256]u8 = undefined;
+    fv_blank(cl[0..256]);
+    cl[AC_QR_BIG] = 0;
+    const l : f64 = 400.0;
+    const w : f64 = QP_W;
+    const t : f64 = 35.0;
+    const h : f64 = 700.0;
+    const sx : f64 = ac_qr_small_x(l, w) + 10.0;
+    const sy : f64 = t + AC_QR_Y + 10.0;
+    // the small code answers over whatever was under it; with no key there is no code
+    assert ac_hit_qr(sx, sy, l, w, t, h, 0.0, true, false, AC_H_NONE) == AC_H_QR;
+    assert ac_hit_qr(sx, sy, l, w, t, h, 0.0, false, false, AC_H_NONE) == AC_H_NONE;
+    assert ac_hit_qr(l + 40.0, t + AC_KEY_Y + 6.0, l, w, t, h, 0.0, true, false, AC_H_KEY) == AC_H_KEY;
+    assert ac_is_on(cl[0..256]) == false and ac_qr_is_big(cl[0..256]) == false;
+    ac_qr_toggle(cl[0..256]);
+    assert ac_qr_is_big(cl[0..256]);
+    // large: the frame answers, a friend row under it does not, the add part still does
+    const fy : f64 = ac_qr_frame_y(t) + 30.0;
+    assert ac_hit_qr(l + w / 2.0, fy, l, w, t, h, 0.0, true, true, AC_H_ROW + 1) == AC_H_QR;
+    assert ac_hit_qr(l + QP_PAD + 2.0, fy, l, w, t, h, 0.0, true, true, AC_H_ROW + 1) == AC_H_NONE;
+    assert ac_hit_qr(l + QP_PAD + 2.0, ac_ifield_y(t, h) + 4.0, l, w, t, h, 0.0, true, true, AC_H_IFIELD) == AC_H_IFIELD;
+    // the same row answers again once small, and in a panel too short for the large code
+    assert ac_hit_qr(l + QP_PAD + 2.0, fy, l, w, t, h, 0.0, true, false, AC_H_ROW + 1) == AC_H_ROW + 1;
+    assert ac_hit_qr(l + QP_PAD + 2.0, ac_row_y(t, 0) + 4.0, l, w, t, 505.0, 0.0, true, true, AC_H_ROW) == AC_H_ROW;
+    ac_qr_toggle(cl[0..256]);
+    assert ac_qr_is_big(cl[0..256]) == false;
 }

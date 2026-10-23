@@ -862,6 +862,34 @@ use t27os::account_view::ac_token_text;
 use t27os::account_view::ac_token_word;
 use t27os::account_view::ac_give_text;
 use t27os::account_view::ac_account_text;
+use t27os::account_view::AC_QR_Y;
+use t27os::account_view::AC_QR_CAP_DY;
+use t27os::account_view::AC_QR_CAP_SIZE;
+use t27os::account_view::AC_QR_SMALL_MOD;
+use t27os::account_view::AC_QR_FRAME_PAD;
+use t27os::account_view::AC_QR_BIG_CAP_DY;
+use t27os::account_view::AC_H_QR;
+use t27os::account_view::ac_qr_small_x;
+use t27os::account_view::ac_qr_small_side;
+use t27os::account_view::ac_qr_text_right;
+use t27os::account_view::ac_qr_frame_side;
+use t27os::account_view::ac_qr_frame_x;
+use t27os::account_view::ac_qr_frame_y;
+use t27os::account_view::ac_qr_big_mod;
+use t27os::account_view::ac_qr_is_big;
+use t27os::account_view::ac_qr_toggle;
+use t27os::account_view::ac_qr_small_word;
+use t27os::account_view::ac_qr_big_title;
+use t27os::account_view::ac_qr_big_word;
+use t27os::account_view::ac_give_text_qr;
+use t27os::account_view::ac_account_text_qr;
+use t27os::account_view::ac_hit_qr;
+use t27os::qr::QR_CELLS_MAX;
+use t27os::qr::QR_QUIET;
+use t27os::qr::qr_make;
+use t27os::qr::qr_size;
+use t27os::qr::qr_ver_of;
+use t27os::qr::qr_dark;
 use t27os::account_view::ac_kp_name;
 use t27os::account_view::ac_kp_facts;
 use t27os::account_view::ac_kp_dim;
@@ -10706,7 +10734,8 @@ pub fn ac_upd_shown(cl: []const u8) -> bool { return upv_button(@as(u32, cl[UPV_
 pub fn ac_hit_now(x: f64, y: f64, sw: f64, sh: f64, cl: []const u8) -> u32 {
     const h : f64 = sh - WS_TOP;
     const vis : usize = ac_rows_vis(h);
-    return ac_hit(x, y, qp_left(sw), QP_W, WS_TOP, h, ac_rows_drawn(@as(usize, cl[FV_SHOWN]), vis), @as(usize, cl[FV_COUNT]), vis, ac_conf_row(cl), ac_upd_shown(cl));
+    const raw : u32 = ac_hit(x, y, qp_left(sw), QP_W, WS_TOP, h, ac_rows_drawn(@as(usize, cl[FV_SHOWN]), vis), @as(usize, cl[FV_COUNT]), vis, ac_conf_row(cl), ac_upd_shown(cl));
+    return ac_hit_qr(x, y, qp_left(sw), QP_W, WS_TOP, h, 0.0, cl[CL_UP] != 0, ac_qr_is_big(cl), raw);
 }
 
 /// The friends rows that fit while the invitations are shown (account_view ac_inv_dy).
@@ -10717,7 +10746,8 @@ pub fn ac_hit_now_iv(x: f64, y: f64, sw: f64, sh: f64, cl: []const u8, iv: []con
     const h : f64 = sh - WS_TOP;
     const inv : usize = ac_inv_rows(iv_waiting(iv));
     const vis : usize = ac_rows_vis(h - ac_inv_dy(inv));
-    return ac_hit_inv(x, y, qp_left(sw), QP_W, WS_TOP, h, inv, ac_rows_drawn(@as(usize, cl[FV_SHOWN]), vis), @as(usize, cl[FV_COUNT]), vis, ac_conf_row(cl), ac_upd_shown(cl));
+    const raw : u32 = ac_hit_inv(x, y, qp_left(sw), QP_W, WS_TOP, h, inv, ac_rows_drawn(@as(usize, cl[FV_SHOWN]), vis), @as(usize, cl[FV_COUNT]), vis, ac_conf_row(cl), ac_upd_shown(cl));
+    return ac_hit_qr(x, y, qp_left(sw), QP_W, WS_TOP, h, ac_inv_dy(inv), cl[CL_UP] != 0, ac_qr_is_big(cl), raw);
 }
 
 /// The wheel takes a step over the friends part, wherever the invitations moved it.
@@ -10921,6 +10951,8 @@ pub fn ac_do(cl: []u8, s: []u8, w: []u64, pf: []u8, hit: u32, vis: usize) -> u32
     }
     if (hit == AC_H_KEY or hit == AC_H_COPYKEY) {
         ac_copy_mine(cl, now);
+    } else if (hit == AC_H_QR) {
+        ac_qr_toggle(cl);
     } else if (hit == AC_H_NICK) {
         pf_to_edit(pf);
     } else if (hit == AC_H_SAVE) {
@@ -11058,6 +11090,39 @@ fn draw_ac_fit(c: u64, kit: [48]u64, s: []const u8, n: usize, x: f64, base: f64,
     draw_fit(c, kit, b[0..160], k, x, base, size, weight, mono, right);
 }
 
+/// A QR code of n modules (qr.t27, 1 = dark) at (qx, qy), md points a module: a white square with the QR_QUIET light
+/// border, the dark modules black, one rectangle a run of a row; a thin light ring around it while it is under the
+/// pointer (the small code is a button).
+fn draw_ac_qr(c: u64, qm: []const u8, n: usize, qx: f64, qy: f64, md: f64, over: bool) -> void {
+    const side : f64 = @as(f64, @floatFromInt(n + 2 * QR_QUIET)) * md;
+    if (over) {
+        round_rect(c, qx - 2.0, qy - 2.0, side + 4.0, side + 4.0, 4.0);
+        cg_line_width(c, 1.0);
+        cg_stroke_rgba(c, 1.0, 1.0, 1.0, 0.9);
+        cg_stroke_path(c);
+    }
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, 1.0);
+    cg_fill_rect(c, qx, qy, side, side);
+    cg_fill_rgba(c, 0.0, 0.0, 0.0, 1.0);
+    const ox : f64 = qx + @as(f64, @floatFromInt(QR_QUIET)) * md;
+    const oy : f64 = qy + @as(f64, @floatFromInt(QR_QUIET)) * md;
+    var r : usize = 0;
+    while (r < n) {
+        var cc : usize = 0;
+        while (cc < n) {
+            if (qr_dark(qm, n, r, cc)) {
+                var e : usize = cc;
+                while (e < n and qr_dark(qm, n, r, e)) { e = e + 1; }
+                cg_fill_rect(c, ox + @as(f64, @floatFromInt(cc)) * md, oy + @as(f64, @floatFromInt(r)) * md, @as(f64, @floatFromInt(e - cc)) * md, md);
+                cc = e;
+            } else {
+                cc = cc + 1;
+            }
+        }
+        r = r + 1;
+    }
+}
+
 fn draw_account_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, cl: []const u8, pf: []const u8, img: u64, ch: []const u8, kstored: []const u32, khl: []const u64, nvm: []const u8, kh: []const u8, now: u64, iv: []const u8, cnow: u64) -> void {
     const l : f64 = qp_left(sw);
     const t : f64 = WS_TOP;
@@ -11075,7 +11140,18 @@ fn draw_account_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, 
     const count : usize = @as(usize, cl[FV_COUNT]);
     const scroll : usize = @as(usize, cl[FV_SCROLL]);
     const conf : usize = ac_conf_row(cl);
-    const hit : u32 = ac_hit_inv(mx, my, l, QP_W, t, h, inv, drawn, count, vis, conf, ac_upd_shown(cl));
+    const hit : u32 = ac_hit_qr(mx, my, l, QP_W, t, h, dy, cl[CL_UP] != 0, ac_qr_is_big(cl), ac_hit_inv(mx, my, l, QP_W, t, h, inv, drawn, count, vis, conf, ac_upd_shown(cl)));
+    // the key as a QR code (qr.t27): small in ME, large in place of the friends after a click on it
+    var qm : [QR_CELLS_MAX]u8 = undefined;
+    var qn : usize = 0;
+    if (cl[CL_UP] != 0) {
+        const qres : u32 = qr_make(cl[FV_INV .. FV_INV + INVITE_LEN], INVITE_LEN, qm[0..QR_CELLS_MAX]);
+        if (qres != 0) { qn = qr_size(qr_ver_of(qres)); }
+    }
+    const qbmod : f64 = ac_qr_big_mod(t, h, tf);
+    const qbig : bool = qn > 0 and ac_qr_is_big(cl) and qbmod > 0.0;
+    var qright : f64 = right;
+    if (qn > 0) { qright = ac_qr_text_right(l, QP_W); }
     var line : [96]u8 = undefined;
     var n : usize = 0;
     cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LINE_WHITE));
@@ -11172,25 +11248,42 @@ fn draw_account_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, 
         draw_bytes(c, kit, "no key: calls are off", 21, x + 7.0, t + AC_KEY_BASE, 10.0, 0.0, false);
     }
     draw_ac_btn_h(c, kit, ac_copy_x(l, QP_W), t + AC_COPY_Y, AC_COPY_W, AC_KEY_H, "COPY", false, hit == AC_H_COPYKEY);
-    const gv : []const u8 = ac_give_text();
+    var gv : []const u8 = ac_give_text();
+    var av : []const u8 = ac_account_text(false);
+    if (qn > 0) {
+        gv = ac_give_text_qr();
+        av = ac_account_text_qr();
+    }
     cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
-    draw_ac_fit(c, kit, gv, gv.len, x, t + AC_GIVE_BASE, 9.0, 0.0, false, right);
-    const av : []const u8 = ac_account_text(false);
+    draw_ac_fit(c, kit, gv, gv.len, x, t + AC_GIVE_BASE, 9.0, 0.0, false, qright);
     cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
-    draw_ac_fit(c, kit, av, av.len, x, t + AC_ACCT_BASE, 9.0, 0.0, false, right);
+    draw_ac_fit(c, kit, av, av.len, x, t + AC_ACCT_BASE, 9.0, 0.0, false, qright);
+    // the small code right of these lines; under it what a click does, unless the UPDATE button stands there
+    if (qn > 0) {
+        const qsx : f64 = ac_qr_small_x(l, QP_W);
+        const qss : f64 = ac_qr_small_side();
+        draw_ac_qr(c, qm[0..QR_CELLS_MAX], qn, qsx, t + AC_QR_Y, AC_QR_SMALL_MOD, hit == AC_H_QR or qbig);
+        if (upv_button(@as(u32, cl[UPV_ST]), upv_has_offer(cl)) == UPV_B_NONE) {
+            const qw : []const u8 = ac_qr_small_word(qbig);
+            cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+            if (hit == AC_H_QR) { cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE)); }
+            const qcw : f64 = bytes_w(kit, qw, qw.len, AC_QR_CAP_SIZE, 0.0, false);
+            draw_bytes(c, kit, qw, qw.len, qsx + qss - qcw, t + AC_QR_Y + qss + AC_QR_CAP_DY, AC_QR_CAP_SIZE, 0.0, false);
+        }
+    }
     // this device: online or not, the port, discovery; then the version, the build and how long it has been up
     const up : bool = cl[CL_UP] != 0 and cl[FV_NET] == @as(u8, @intCast(FV_NET_UP));
     draw_cl_dot(c, kit, x, t + AC_STATE_Y - 8.0, up);
     n = ac_state_line(cl[CL_UP] != 0, cl[FV_NET] == @as(u8, @intCast(FV_NET_UP)), cl_me_port(cl), line[0..96]);
     cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
-    draw_fit(c, kit, line[0..96], n, x + 14.0, t + AC_STATE_Y, 9.5, WEIGHT_SEMIBOLD, false, right);
+    draw_fit(c, kit, line[0..96], n, x + 14.0, t + AC_STATE_Y, 9.5, WEIGHT_SEMIBOLD, false, qright);
     n = ac_build_line(cl, line[0..96]);
     cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
-    draw_fit(c, kit, line[0..96], n, x + 14.0, t + AC_BUILD_Y, 9.0, 0.0, true, right);
+    draw_fit(c, kit, line[0..96], n, x + 14.0, t + AC_BUILD_Y, 9.0, 0.0, true, qright);
     // UPDATE: a friend's newer build and its one button (UPDATE / CANCEL / RESTART), the progress or the reason, or what
     // this device serves (update_view.t27)
     const ub : u32 = upv_button(@as(u32, cl[UPV_ST]), upv_has_offer(cl));
-    var uright : f64 = right;
+    var uright : f64 = qright;
     if (ub != UPV_B_NONE) {
         uright = ac_upd_btn_x(l, QP_W) - 6.0;
         draw_ac_btn_small(c, kit, ac_upd_btn_x(l, QP_W), t + AC_UPD_BTN_Y, AC_UPD_BTN_W, upv_button_word(ub), hit == AC_H_UPD);
@@ -11199,7 +11292,7 @@ fn draw_account_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, 
     var un : usize = upv_line1(cl, ul[0..128]);
     cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
     if (cl[UPV_ST] != 0) { cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE)); }
-    draw_fit(c, kit, ul[0..128], un, x, t + AC_UPD_Y, 9.5, WEIGHT_SEMIBOLD, false, right);
+    draw_fit(c, kit, ul[0..128], un, x, t + AC_UPD_Y, 9.5, WEIGHT_SEMIBOLD, false, qright);
     un = upv_line2(cl, ul[0..128]);
     cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
     draw_fit(c, kit, ul[0..128], un, x, t + AC_UPD2_Y, 9.0, 0.0, false, uright);
@@ -11256,69 +11349,88 @@ fn draw_account_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, 
             ik = ik + 1;
         }
     }
-    // WHO YOU CAN CALL: a window of the list, the arrows and the range when the list is longer than the window
-    n = ac_fr_label(count, line[0..96]);
-    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
-    draw_fit(c, kit, line[0..96], n, x, tf + AC_FR_LABEL_Y, 9.5, 0.0, false, x + AC_FLASH_FRIEND_DX - 4.0);
-    if (flash == AC_L_FRIEND) {
-        const fw1 : []const u8 = ac_flash_text(flash);
+    // the large code in place of the friends: the title, the frame, the light square with the modules, what a click does
+    if (qbig) {
+        const fs : f64 = ac_qr_frame_side(qbmod);
+        const fx : f64 = ac_qr_frame_x(l, QP_W, qbmod);
+        const fy : f64 = ac_qr_frame_y(tf);
+        const qt : []const u8 = ac_qr_big_title();
         cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
-        draw_fit(c, kit, fw1, fw1.len, x + AC_FLASH_FRIEND_DX, tf + AC_FR_LABEL_Y, 9.5, WEIGHT_SEMIBOLD, false, ac_up_x(l, QP_W) - 8.0);
-    }
-    if (count > vis) {
-        n = ac_range_text(scroll, drawn, count, line[0..96]);
+        draw_bytes(c, kit, qt, qt.len, x, tf + AC_FR_LABEL_Y, 9.5, WEIGHT_SEMIBOLD, false);
+        round_rect(c, fx, fy, fs, fs, 8.0);
+        cg_line_width(c, 1.0);
+        cg_stroke_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+        if (hit == AC_H_QR) { cg_stroke_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE)); }
+        cg_stroke_path(c);
+        draw_ac_qr(c, qm[0..QR_CELLS_MAX], qn, fx + AC_QR_FRAME_PAD, fy + AC_QR_FRAME_PAD, qbmod, false);
+        const qbw : []const u8 = ac_qr_big_word();
         cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
-        if (flash != AC_L_FRIEND) { draw_fit(c, kit, line[0..96], n, x + AC_FLASH_FRIEND_DX, tf + AC_FR_LABEL_Y, 9.0, 0.0, true, ac_up_x(l, QP_W) - 8.0); }
-        draw_ac_arrow(c, kit, ac_up_x(l, QP_W), ac_arrow_y(tf), true, scroll > 0, hit == AC_H_UP);
-        draw_ac_arrow(c, kit, ac_down_x(l, QP_W), ac_arrow_y(tf), false, scroll < ac_max_scroll(count, vis), hit == AC_H_DOWN);
-    }
-    if (count == 0) {
+        draw_ac_fit(c, kit, qbw, qbw.len, x, fy + fs + AC_QR_BIG_CAP_DY, 9.0, 0.0, false, right);
+    } else {
+        // WHO YOU CAN CALL: a window of the list, the arrows and the range when the list is longer than the window
+        n = ac_fr_label(count, line[0..96]);
         cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
-        draw_cl_wrap(c, kit, ac_empty_text(count), x, right, tf + AC_FR_LABEL_Y + 18.0, 9.5, 2, sh);
-    }
-    i = 0;
-    while (i < drawn) {
-        const ry : f64 = ac_row_y(tf, i);
-        const r : usize = fv_row_at(i);
-        const k : u32 = @as(u32, @intCast(i));
-        const online : bool = cl[r + FR_ONLINE] != 0;
-        const asking : bool = conf == i;
-        if (hit == AC_H_ROW + k or hit == AC_H_FCOPY + k or hit == AC_H_DEL + k or hit == AC_H_YES + k or hit == AC_H_NO + k or hit == AC_H_CALL + k or hit == AC_H_MSG + k) {
-            round_rect(c, x - 4.0, ry, right - x + 8.0, AC_ROW_H - 2.0, 5.0);
-            cg_line_width(c, 1.0);
-            cg_stroke_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
-            cg_stroke_path(c);
-        }
-        draw_cl_dot(c, kit, x + 1.0, ry + 6.0, online);
-        const unr : u32 = chv_unr_get(ch, cl[r + FR_FP .. r + FR_FP + 10]);
-        var nameright : f64 = ac_call_x(l, QP_W) - 6.0;
-        if (unr > 0) { nameright = ac_call_x(l, QP_W) - 28.0; }
-        if (asking) { nameright = ac_yes_x(l, QP_W) - 58.0; }
-        const nl : usize = @as(usize, cl[r + FR_NICKLEN]);
-        if (nl > 0) {
+        draw_fit(c, kit, line[0..96], n, x, tf + AC_FR_LABEL_Y, 9.5, 0.0, false, x + AC_FLASH_FRIEND_DX - 4.0);
+        if (flash == AC_L_FRIEND) {
+            const fw1 : []const u8 = ac_flash_text(flash);
             cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
-            draw_fit(c, kit, cl[r + FR_NICK .. r + FR_NICK + nl], nl, x + 16.0, ry + 12.0, 11.0, WEIGHT_SEMIBOLD, false, nameright);
-        } else {
+            draw_fit(c, kit, fw1, fw1.len, x + AC_FLASH_FRIEND_DX, tf + AC_FR_LABEL_Y, 9.5, WEIGHT_SEMIBOLD, false, ac_up_x(l, QP_W) - 8.0);
+        }
+        if (count > vis) {
+            n = ac_range_text(scroll, drawn, count, line[0..96]);
             cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
-            draw_fit(c, kit, "(no name yet)", 13, x + 16.0, ry + 12.0, 11.0, 0.0, false, nameright);
+            if (flash != AC_L_FRIEND) { draw_fit(c, kit, line[0..96], n, x + AC_FLASH_FRIEND_DX, tf + AC_FR_LABEL_Y, 9.0, 0.0, true, ac_up_x(l, QP_W) - 8.0); }
+            draw_ac_arrow(c, kit, ac_up_x(l, QP_W), ac_arrow_y(tf), true, scroll > 0, hit == AC_H_UP);
+            draw_ac_arrow(c, kit, ac_down_x(l, QP_W), ac_arrow_y(tf), false, scroll < ac_max_scroll(count, vis), hit == AC_H_DOWN);
         }
-        if (asking) {
-            cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
-            draw_bytes(c, kit, "REMOVE?", 7, ac_yes_x(l, QP_W) - 52.0, ry + 12.0, 9.5, WEIGHT_SEMIBOLD, false);
-            draw_ac_chip(c, kit, ac_yes_x(l, QP_W), ry + 2.0, AC_ZONE_YES_W, "YES", hit == AC_H_YES + k);
-            draw_ac_chip(c, kit, ac_no_x(l, QP_W), ry + 2.0, AC_ZONE_YES_W, "NO", hit == AC_H_NO + k);
-        } else {
-            if (unr > 0) { draw_ch_badge(c, kit, ac_call_x(l, QP_W) - 4.0, ry + 8.0, unr); }
-            // CALL (filled while the friend is online), MESSAGE, copy the friend's key, remove
-            draw_ac_btn_h(c, kit, ac_call_x(l, QP_W), ry + 2.0, AC_ZONE_CALL_W, 14.0, "CALL", online, hit == AC_H_CALL + k);
-            draw_ac_chip(c, kit, ac_msg_x(l, QP_W), ry + 2.0, AC_ZONE_MSG_W, "MESSAGE", hit == AC_H_MSG + k);
-            draw_ac_chip(c, kit, ac_fcopy_x(l, QP_W), ry + 2.0, AC_ZONE_COPY_W, "COPY", hit == AC_H_FCOPY + k);
-            draw_ac_chip(c, kit, ac_del_x(l, QP_W), ry + 2.0, AC_ZONE_DEL_W, "x", hit == AC_H_DEL + k);
+        if (count == 0) {
+            cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+            draw_cl_wrap(c, kit, ac_empty_text(count), x, right, tf + AC_FR_LABEL_Y + 18.0, 9.5, 2, sh);
         }
-        n = ac_row_line(cl, i, chv_trust(ch, cl[r + FR_FP .. r + FR_FP + 10]), line[0..96]);
-        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
-        draw_fit(c, kit, line[0..96], n, x + 16.0, ry + 23.0, 9.0, 0.0, true, right);
-        i = i + 1;
+        i = 0;
+        while (i < drawn) {
+            const ry : f64 = ac_row_y(tf, i);
+            const r : usize = fv_row_at(i);
+            const k : u32 = @as(u32, @intCast(i));
+            const online : bool = cl[r + FR_ONLINE] != 0;
+            const asking : bool = conf == i;
+            if (hit == AC_H_ROW + k or hit == AC_H_FCOPY + k or hit == AC_H_DEL + k or hit == AC_H_YES + k or hit == AC_H_NO + k or hit == AC_H_CALL + k or hit == AC_H_MSG + k) {
+                round_rect(c, x - 4.0, ry, right - x + 8.0, AC_ROW_H - 2.0, 5.0);
+                cg_line_width(c, 1.0);
+                cg_stroke_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+                cg_stroke_path(c);
+            }
+            draw_cl_dot(c, kit, x + 1.0, ry + 6.0, online);
+            const unr : u32 = chv_unr_get(ch, cl[r + FR_FP .. r + FR_FP + 10]);
+            var nameright : f64 = ac_call_x(l, QP_W) - 6.0;
+            if (unr > 0) { nameright = ac_call_x(l, QP_W) - 28.0; }
+            if (asking) { nameright = ac_yes_x(l, QP_W) - 58.0; }
+            const nl : usize = @as(usize, cl[r + FR_NICKLEN]);
+            if (nl > 0) {
+                cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+                draw_fit(c, kit, cl[r + FR_NICK .. r + FR_NICK + nl], nl, x + 16.0, ry + 12.0, 11.0, WEIGHT_SEMIBOLD, false, nameright);
+            } else {
+                cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+                draw_fit(c, kit, "(no name yet)", 13, x + 16.0, ry + 12.0, 11.0, 0.0, false, nameright);
+            }
+            if (asking) {
+                cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+                draw_bytes(c, kit, "REMOVE?", 7, ac_yes_x(l, QP_W) - 52.0, ry + 12.0, 9.5, WEIGHT_SEMIBOLD, false);
+                draw_ac_chip(c, kit, ac_yes_x(l, QP_W), ry + 2.0, AC_ZONE_YES_W, "YES", hit == AC_H_YES + k);
+                draw_ac_chip(c, kit, ac_no_x(l, QP_W), ry + 2.0, AC_ZONE_YES_W, "NO", hit == AC_H_NO + k);
+            } else {
+                if (unr > 0) { draw_ch_badge(c, kit, ac_call_x(l, QP_W) - 4.0, ry + 8.0, unr); }
+                // CALL (filled while the friend is online), MESSAGE, copy the friend's key, remove
+                draw_ac_btn_h(c, kit, ac_call_x(l, QP_W), ry + 2.0, AC_ZONE_CALL_W, 14.0, "CALL", online, hit == AC_H_CALL + k);
+                draw_ac_chip(c, kit, ac_msg_x(l, QP_W), ry + 2.0, AC_ZONE_MSG_W, "MESSAGE", hit == AC_H_MSG + k);
+                draw_ac_chip(c, kit, ac_fcopy_x(l, QP_W), ry + 2.0, AC_ZONE_COPY_W, "COPY", hit == AC_H_FCOPY + k);
+                draw_ac_chip(c, kit, ac_del_x(l, QP_W), ry + 2.0, AC_ZONE_DEL_W, "x", hit == AC_H_DEL + k);
+            }
+            n = ac_row_line(cl, i, chv_trust(ch, cl[r + FR_FP .. r + FR_FP + 10]), line[0..96]);
+            cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+            draw_fit(c, kit, line[0..96], n, x + 16.0, ry + 23.0, 9.0, 0.0, true, right);
+            i = i + 1;
+        }
     }
     // add a friend: the field takes a pasted or typed key; PASTE reads the clipboard; ADD checks the last symbol (one line)
     cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
@@ -17416,6 +17528,39 @@ test a_point_in_the_cabinet_means_the_same_to_the_click_the_cursor_and_the_drawi
     assert ac_hit_now(ac_del_x(l, QP_W) + 4.0, ac_row_y(WS_TOP, 1) + 4.0, sw, sh, cl[0..8192]) == AC_H_NO + 1;
     // outside the panel nothing answers
     assert ac_hit_now(l - 20.0, ac_row_y(WS_TOP, 1) + 4.0, sw, sh, cl[0..8192]) == AC_H_NONE;
+}
+
+test the_key_code_answers_a_click_only_while_a_key_is_shown_and_large_it_covers_the_friends {
+    var cl : [8192]u8 = undefined;
+    var iv : [IV_LEN]u8 = undefined;
+    var i : usize = 0;
+    while (i < 8192) {
+        cl[i] = 0;
+        i = i + 1;
+    }
+    iv_init(iv[0..IV_LEN]);
+    cl[AC_ON] = 1;
+    cl[FV_COUNT] = 2;
+    cl[FV_SHOWN] = 2;
+    const sw : f64 = 960.0;
+    const sh : f64 = 800.0;
+    const l : f64 = qp_left(sw);
+    const qx : f64 = ac_qr_small_x(l, QP_W) + 20.0;
+    const qy : f64 = WS_TOP + AC_QR_Y + 20.0;
+    // no key yet: no code, the point is empty panel
+    assert ac_hit_now_iv(qx, qy, sw, sh, cl[0..8192], iv[0..IV_LEN]) == AC_H_NONE;
+    cl[CL_UP] = 1;
+    assert ac_hit_now(qx, qy, sw, sh, cl[0..8192]) == AC_H_QR and ac_hit_now_iv(qx, qy, sw, sh, cl[0..8192], iv[0..IV_LEN]) == AC_H_QR;
+    // small: the friend row answers; large (after the click): the frame answers there, the row does not
+    const ry : f64 = ac_row_y(WS_TOP, 0) + 4.0;
+    assert ac_hit_now(l + 40.0, ry, sw, sh, cl[0..8192]) == AC_H_ROW;
+    ac_qr_toggle(cl[0..8192]);
+    assert ac_qr_big_mod(WS_TOP, sh - WS_TOP, WS_TOP) == 3.0;
+    assert ac_hit_now(l + 40.0, ry, sw, sh, cl[0..8192]) == AC_H_NONE;
+    assert ac_hit_now(l + QP_W / 2.0, ac_qr_frame_y(WS_TOP) + 40.0, sw, sh, cl[0..8192]) == AC_H_QR;
+    assert ac_hit_now(ac_copy_x(l, QP_W) + 4.0, WS_TOP + AC_COPY_Y + 4.0, sw, sh, cl[0..8192]) == AC_H_COPYKEY;
+    ac_qr_toggle(cl[0..8192]);
+    assert ac_hit_now(l + 40.0, ry, sw, sh, cl[0..8192]) == AC_H_ROW;
 }
 
 test a_copy_confirmation_changes_no_click_and_ends_after_two_seconds_of_frames {
