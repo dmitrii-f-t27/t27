@@ -11907,7 +11907,11 @@ fn draw_ac_qr(c: u64, qm: []const u8, n: usize, qx: f64, qy: f64, md: f64, over:
     }
 }
 
-fn draw_account_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, cl: []const u8, pf: []const u8, img: u64, ch: []const u8, kstored: []const u32, khl: []const u64, nvm: []const u8, kh: []const u8, now: u64, iv: []const u8, cnow: u64, bk: []const u8, gv: []const u8) -> void {
+fn draw_account_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, cl: []const u8, pf: []const u8, img: u64, ch: []const u8, kstored: []const u32, khl: []const u64, nvm: []const u8, kh: []const u8, now: u64, iv: []const u8, cnow: u64, bkgv: []const u8) -> void {
+    // the backup panel's block and the groups' region (GR) travel as one slice, TBO_BK .. TB_SIZE; the groups' region is
+    // grv here: gv is the line under the key
+    const bk : []const u8 = bkgv[0..BK_CAP];
+    const grv : []const u8 = bkgv[BK_CAP .. BK_CAP + GV_CAP];
     const l : f64 = qp_left(sw);
     const t : f64 = WS_TOP;
     const h : f64 = sh - t;
@@ -11920,7 +11924,7 @@ fn draw_account_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, 
     const tf : f64 = t + dy;
     // GR. the GROUPS part under the friends takes its rows from them (none while the backup panel or the large code
     // stands in the friends' place)
-    const grows : usize = gw_part_rows(cl, gv, h, dy);
+    const grows : usize = gw_part_rows(cl, grv, h, dy);
     const gshown : bool = grows > 0 and gw_part_shown(cl, bk);
     const vis : usize = ac_rows_vis(h - dy - gw_part_room(grows));
     const shown : usize = @as(usize, cl[FV_SHOWN]);
@@ -11931,7 +11935,7 @@ fn draw_account_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, 
     const bkhave : bool = bk_have_id(cl);
     var hit : u32 = bk_hit(mx, my, l, QP_W, t, h, dy, bkhave, bk_mode(bk), ac_hit_qr(mx, my, l, QP_W, t, h, dy, cl[CL_UP] != 0, ac_qr_is_big(cl), ac_hit_inv(mx, my, l, QP_W, t, h, inv, drawn, count, vis, conf, ac_upd_shown(cl))));
     if (gshown) {
-        const ghit : u32 = gv_hit(mx, my, l, QP_W, t, h, grows, gv_count(gv));
+        const ghit : u32 = gv_hit(mx, my, l, QP_W, t, h, grows, gv_count(grv));
         if (ghit != GV_H_NONE) { hit = ghit; }
     }
     // the key as a QR code (qr.t27): small in ME, large in place of the friends after a click on it
@@ -11965,7 +11969,7 @@ fn draw_account_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, 
         draw_bytes(c, kit, hb[0..32], hn, x + AC_INV_HEAD_DX + 6.0, t + 24.0, 8.5, WEIGHT_SEMIBOLD, false);
         headx = headx + hw + 6.0;
     }
-    if (gv.len >= GV_CAP) { headx = draw_gv_head(c, kit, headx, t, gv); }
+    if (grv.len >= GV_CAP) { headx = draw_gv_head(c, kit, headx, t, grv); }
     // CALL in the head while there is someone to call: the first friend in view who is online (ac_call_target)
     if (ac_hcall_shown(count)) {
         draw_ac_btn_h(c, kit, ac_hcall_x(l, QP_W), t + AC_HCALL_Y, AC_HCALL_W, AC_HCALL_H, "CALL", true, hit == AC_H_HCALL);
@@ -12237,7 +12241,7 @@ fn draw_account_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, 
             i = i + 1;
         }
         // GR. the GROUPS part: under the friends, above the add part
-        if (gshown) { draw_gv_part(c, kit, l, t, h, cl, gv, grows, hit); }
+        if (gshown) { draw_gv_part(c, kit, l, t, h, cl, grv, grows, hit); }
     }
     // add a friend: the field takes a pasted or typed key; PASTE reads the clipboard; ADD checks the last symbol (one line)
     cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
@@ -13418,7 +13422,7 @@ fn draw_gv_new(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, cl: []c
     if (note == GV_N_NONE) { note = why; }
     const nt : []const u8 = gv_note_text(note);
     cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
-    draw_cl_wrap(c, kit, nt, x, right, gv_hint_y(t, h), 9.5, 2, sh);
+    draw_cl_wrap(c, kit, nt, x, cx - 8.0, gv_hint_y(t, h), 9.0, 2, sh);
 }
 
 /// The group's chat: back, the group's name and its people, the history (the senders' names over their lines), the
@@ -13519,7 +13523,7 @@ fn draw(c: u64, kit: [48]u64, frame: u32, state: u32, hov: u32, ma: f64, shown: 
             } else if (gv_new_shown(tb[TBO_GV .. TBO_GV + GV_CAP])) {
                 draw_gv_new(c, kit, sw, sh, mx, my, tb[TBO_CL .. TBO_CL + CL_CAP], tb[TBO_GV .. TBO_GV + GV_CAP]);
             } else {
-                draw_account_panel(c, kit, sw, sh, mx, my, tb[TBO_CL .. TBO_CL + CL_CAP], tb[TBO_PF .. TBO_PF + PF_CAP], tg[TPG_PF_IMG], tb[TBO_CH .. TBO_CH + CHV_CAP], kstored, kopen[KHL_AT .. KHL_AT + 72], kmask[544..640], kmask[640..736], now, tb[TBO_IV .. TBO_IV + IV_LEN], ckh_ms(), tb[TBO_BK .. TBO_BK + BK_CAP], tb[TBO_GV .. TBO_GV + GV_CAP]);
+                draw_account_panel(c, kit, sw, sh, mx, my, tb[TBO_CL .. TBO_CL + CL_CAP], tb[TBO_PF .. TBO_PF + PF_CAP], tg[TPG_PF_IMG], tb[TBO_CH .. TBO_CH + CHV_CAP], kstored, kopen[KHL_AT .. KHL_AT + 72], kmask[544..640], kmask[640..736], now, tb[TBO_IV .. TBO_IV + IV_LEN], ckh_ms(), tb[TBO_BK .. TB_SIZE]);
             }
         } else {
             draw_call_panel(c, kit, sw, sh, mx, my, tb[TBO_CL .. TBO_CL + CL_CAP], tb[TBO_CH .. TBO_CH + CHV_CAP]);

@@ -588,11 +588,12 @@ pub const GV_PICK_H : f64 = 24.0;
 pub const GV_BOX : f64 = 12.0;
 pub const GV_CREATE_W : f64 = 84.0;
 pub const GV_CREATE_FROM_BOTTOM : f64 = 64.0;
-pub const GV_HINT_FROM_BOTTOM : f64 = 22.0;
+/// The reason or the note stands left of CREATE, on its line and the next.
+pub const GV_HINT_DY : f64 = 11.0;
 
 pub fn gv_create_x(l: f64, w: f64) -> f64 { return l + w - QP_PAD - GV_CREATE_W; }
 pub fn gv_create_y(t: f64, h: f64) -> f64 { return t + h - GV_CREATE_FROM_BOTTOM; }
-pub fn gv_hint_y(t: f64, h: f64) -> f64 { return t + h - GV_HINT_FROM_BOTTOM; }
+pub fn gv_hint_y(t: f64, h: f64) -> f64 { return gv_create_y(t, h) + GV_HINT_DY; }
 pub fn gv_pick_y(t: f64, k: usize) -> f64 { return t + GV_PICKS_Y + GV_PICK_H * @as(f64, @floatFromInt(k)); }
 pub fn gv_sarrow_y(t: f64) -> f64 { return t + GV_PICK_LABEL_Y - 12.0; }
 pub fn gv_sdown_x(l: f64, w: f64) -> f64 { return l + w - QP_PAD - AC_ARROW_W; }
@@ -764,7 +765,10 @@ fn gv_emit(v: []u8, at: usize, log: []const u8, j: usize, top: f64, w: f64, hh: 
     var x : f64 = 0.0;
     if (dir == CH_DIR_OUT) { x = chv_inner_w(w) - bw; }
     var c : usize = at;
-    if (c >= CHV_ITEMS_MAX) { return c; }
+    // a bubble goes in whole or not at all: its frame, the name, every line, the small line (no empty frame at the top)
+    var need : usize = k + 2;
+    if (dir == CH_DIR_IN) { need = need + 1; }
+    if (c + need > CHV_ITEMS_MAX) { return c; }
     chv_put_item(v, c, CHV_I_BUBBLE, dir, state, x, top, bw, gv_bub_h(log, j, k), t[0..0]);
     c = c + 1;
     // the sender's nickname heads an incoming bubble (the history's own lines carry none)
@@ -831,7 +835,11 @@ pub fn gv_layout(v: []u8, log: []const u8, now_ms: u64, tz: u64, w: f64, hh: f64
     while (j > first and btm > 0.0 and c < CHV_ITEMS_MAX) {
         j = j - 1;
         const top : f64 = btm - gv_bub_h(log, j, @as(usize, lines[j - first]));
-        if (top < hh) { c = gv_emit(v, c, log, j, top, w, hh, now_ms, tz, names, me, n); }
+        if (top < hh) {
+            const was : usize = c;
+            c = gv_emit(v, c, log, j, top, w, hh, now_ms, tz, names, me, n);
+            if (c == was) { break; }
+        }
         btm = top - CHV_BUB_GAP;
     }
     fv_put32(v, CHV_NITEMS, @as(u64, c));
@@ -1116,6 +1124,12 @@ test gv_the_senders_name_stands_over_an_incoming_line_and_never_over_an_own_one 
         k = k + 1;
     }
     assert names_n == 2 and seen_bob and seen_carol;
+    // every frame is followed by its text (a name or a line): no empty bubble
+    k = 0;
+    while (k < chv_nitems(v[0..CHV_CAP])) {
+        if (chv_item_kind(v[0..CHV_CAP], k) == CHV_I_BUBBLE) { assert k + 1 < chv_nitems(v[0..CHV_CAP]) and chv_item_kind(v[0..CHV_CAP], k + 1) != CHV_I_BUBBLE; }
+        k = k + 1;
+    }
     // the own line's state: nobody acknowledged it yet ("sending" while PENDING)
     var o : [64]u8 = undefined;
     var oi : usize = 0;
