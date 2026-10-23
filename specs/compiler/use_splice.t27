@@ -21,7 +21,13 @@
 ;    texts of the module that means it is rewritten (`rewrite`). A qualified reference the importer writes
 ;    (`beta::name_ok`) is read in beta's scope, so it takes the same flat name.
 ; R4 (the author's choice stays refused). A bare name the importer writes, declared differently by two
-;    imported modules, is still UNRESOLVED: no scope applies to it.
+;    imported modules, is still UNRESOLVED: no scope applies to it -- unless R6 applies.
+; R6 (the author's named choice). A bare name the importer writes AND names in an item import of its own
+;    (`use t27os::statusbar::age_text;`) is the author's choice made: it is read with ctx = that module's
+;    path, so `scope_index` answers the line of that module (-1 if it declares no such name, which stays
+;    UNRESOLVED), and the declaration is spliced under the bare name. Before, queen_dash.t27 (age_text: also
+;    a private fn of keys.t27) and peer_identity_host.t27 (fp_input: also in keysync.t27) lost the name they
+;    imported, and `t27b test` refused them as "undeclared fn" with no test run.
 ; R5 (paths in a pulled text). The flat output has no namespace, so `type_text::same` in a pulled
 ;    declaration of a module that imports type_text loses its `type_text::` when the splice pulled `same`, as
 ;    the importer's own qualified references always did (#5574, W588). Before, the file called
@@ -479,6 +485,12 @@ test a_qualified_reference_means_the_module_it_names {
 test the_importers_own_text_has_no_scope {
     assert scope_index("m/a.t27\nm/b.t27", "", "m/a.t27") == -1;
     assert scope_index("m/a.t27\nm/b.t27", "", "") == -1;
+}
+
+test an_item_import_of_the_importer_names_its_module {
+    assert scope_index("t27os/keys.t27\nt27os/statusbar.t27", "t27os/statusbar.t27", "") == 1;
+    assert scope_index("t27os/keysync.t27\nt27os/peer_identity.t27", "t27os/peer_identity.t27", "") == 1;
+    assert scope_index("t27os/keys.t27\nt27os/statusbar.t27", "t27os/release.t27", "") == -1;
 }
 
 test a_module_that_imports_both_or_neither_has_no_answer {

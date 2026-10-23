@@ -674,12 +674,24 @@ pub fn resolve(input_path: &Path, source: &str) -> String {
         .filter_map(|(p, _)| p.file_stem().map(|s| s.to_string_lossy().to_string()))
         .collect();
     let qualified = qualified_refs(source, &modules);
+    // R6 (specs/compiler/use_splice.t27): a name the importer item-imports, `use a::b::N;` or
+    // `use a::b::{N, M};`, is read in the scope of the module that line names.
+    let mut named: HashMap<String, String> = HashMap::new();
+    for e in source.lines().filter_map(use_path_expr) {
+        if let Some((p, false)) = use_target(&specs_root, e) {
+            let items = brace_module(e).map_or(e.rsplit("::").next().unwrap_or(""), |m| e[m.len()..].trim_start_matches(|c| c == ':' || c == '.'));
+            for n in items.trim_matches(|c| c == '{' || c == '}').split(',').map(str::trim).filter(|n| !n.is_empty()) {
+                named.insert(n.to_string(), p.strip_prefix(&specs_root).unwrap_or(&p).to_string_lossy().to_string());
+            }
+        }
+    }
 
     // Fixpoint: pull a needed declaration, then look at what IT references.
     let mut pulled: Vec<Decl> = Vec::new();
     let mut pulled_names: HashSet<String> = HashSet::new();
     let mut ambiguous: Vec<(String, Vec<String>)> = Vec::new();
     let mut scoped: HashMap<(String, String), String> = HashMap::new();
+    let mut mine: HashMap<String, String> = HashMap::new(); // R6 picks: name -> the module the item import named
     let mut frontier: HashSet<(String, String)> = identifiers(&qualified.iter().fold(source.to_string(), |s, (q, n, _)| s.replace(q.as_str(), &q[..q.len() - n.len()]))).into_iter().map(|n| (n, String::new())).collect();
     for (q, name, _) in &qualified {
         frontier.insert((name.clone(), format!("={}", q)));
@@ -693,7 +705,8 @@ pub fn resolve(input_path: &Path, source: &str) -> String {
         // changes nothing measurable is decoration, and the comment justifying
         // it would outlive the reason for it.
         for (name, ctx) in frontier {
-            if local.contains(&name) || pulled_names.contains(&name) {
+            // R6: a name the importer's item import chose still means its own module's in another module's text.
+            if local.contains(&name) || pulled_names.contains(&name) && mine.get(&name).is_none_or(|o| ctx.is_empty() || *o == ctx) {
                 continue;
             }
             let candidates = match available.get(&name) {
@@ -717,7 +730,13 @@ pub fn resolve(input_path: &Path, source: &str) -> String {
             let chosen: Option<&Decl> = if distinct.len() == 1 || all_agree(&distinct) {
                 Some(distinct[0])
             } else {
-                alias_resolved(&distinct, &name)
+                alias_resolved(&distinct, &name).or_else(|| {
+                    let m = named.get(&name).filter(|_| ctx.is_empty())?;
+                    let at = use_splice::scope_index(distinct.iter().map(|d| d.origin.as_str()).collect::<Vec<_>>().join("\n").as_bytes(), m.as_bytes(), b"");
+                    let d = distinct.get(usize::try_from(at).ok()?).copied()?;
+                    mine.insert(name.clone(), d.origin.clone());
+                    Some(d)
+                })
             };
             let decl = match chosen {
                 Some(d) => d.clone(),
@@ -731,7 +750,7 @@ pub fn resolve(input_path: &Path, source: &str) -> String {
                         if pulled_names.insert(format!("{}::{}", d.origin, name)) { next.extend(identifiers(&d.text).into_iter().map(|n| (n, d.origin.clone()))); pulled.push((*d).clone()); }
                         continue;
                     }
-                    ambiguous.push((name.clone(), origins));
+                    if !pulled_names.contains(&name) { ambiguous.push((name.clone(), origins)); }
                     continue;
                 }
             };
@@ -1250,24 +1269,22 @@ mod missing_use_tests {
         assert!(out.contains("return K;") && !out.contains("b::K"), "{}", out);
     }
 
-    /// Listing a name does not pick between two modules that declare it: it
-    /// stays UNRESOLVED, as with whole-module imports. Rust's rule (an explicit
-    /// import outranks a glob) was tried and measured on the corpus: in
-    /// `specs/base/ring_32.t27` it chose math/sacred_physics' TRINITY, whose
-    /// closure declares `PHI` as `constants::PHI`, and the splice rewrites
-    /// qualifiers in the importer only, so zig failed on `constants` where the
-    /// unspliced output passed its test.
+    /// R6 (specs/compiler/use_splice.t27): listing a name picks the module the line names; a whole
+    /// import still leaves it UNRESOLVED. queen_dash.t27 lost `age_text` (also a private fn of keys.t27)
+    /// to the old refusal. A module whose own text names K keeps its own K (R1), so vsa_core's `Trit = i8`
+    /// survives `use base::types::Trit;`, and an alias resolves first, so ring_32's `PHI` keeps its value.
     #[test]
-    fn a_listed_item_two_modules_declare_stays_unresolved() {
+    fn a_listed_item_picks_the_module_it_names() {
         let root = specs_with_a_b("listed");
-        std::fs::write(root.join("a/c.t27"), "module c;\npub const K : u8 = 4;\n").expect("write");
+        std::fs::write(root.join("a/c.t27"), "module c;\npub const K : u8 = 4;\npub fn kc() -> u8 {\n    return K;\n}\n").expect("write");
         let input = root.join("m.t27");
-        let body = "\n\npub fn k() -> u8 {\n    return K;\n}\n";
-        for line in ["use a::b::{ K };", "use a::b::K;", "use a::b;"] {
+        let body = "\n\npub fn k() -> u8 {\n    return K + kc();\n}\n";
+        for line in ["use a::b::{ K };", "use a::b::K;"] {
             let out = resolve(&input, &format!("module m;\nuse a::c;\n{}{}", line, body));
-            assert!(out.contains("UNRESOLVED K"), "{}: {}", line, out);
-            assert!(!out.contains("= 3;") && !out.contains("= 4;"), "{}: {}", line, out);
+            assert!(!out.contains("UNRESOLVED") && out.contains("const K : u8 = 3;") && out.contains("const a_c__K : u8 = 4;") && out.contains("return a_c__K;"), "{}: {}", line, out);
         }
+        let out = resolve(&input, &format!("module m;\nuse a::c;\nuse a::b;{}", body));
+        assert!(out.contains("UNRESOLVED K") && !out.contains("= 3;"), "{}", out);
     }
 
     /// `specs/fpga/testbench/spi_tb.t27`'s shape: a module body at four spaces
