@@ -182,6 +182,7 @@ use t27os::pty_logic::pane_keys_reset;
 use t27os::pty_logic::pane_key_get;
 use t27os::pty_logic::pane_key_shown;
 use t27os::pty_logic::list_flags_key;
+use t27os::pty_logic::list_key_of;
 use t27os::pty_logic::key_put;
 use t27os::pty_logic::plan_pane_keys;
 use t27os::pty_logic::plan_failover;
@@ -1325,11 +1326,12 @@ fn run_ctl(st: []u64, mem: []u8, verb: u8) -> void {
             say(" light ");
             const ln : usize = light_name(shown_light_of(@as(u32, out[at + 2])), mem[O_TMP1 + 3900 .. O_TMP1 + 3930]);
             sys_write(1, mem[O_TMP1 + 3900 .. O_TMP1 + 3900 + ln], @as(u64, ln));
-            // bits 0 to 2 of the flags byte as before; its high nibble is the key number (1 to 8) the pane holds
+            // bits 0 to 2 of the flags byte as before; the rest is the key number (1 to 16) the pane holds (list_key_of)
+            const kof : u32 = list_key_of(@as(u32, out[at + 3]));
             say(" flags ");
-            print_dec(@as(u64, out[at + 3] % 16), mem);
+            print_dec(@as(u64, out[at + 3] % 8), mem);
             say(" key ");
-            if (out[at + 3] / 16 == 0) { say("-"); } else { print_dec(@as(u64, out[at + 3] / 16), mem); }
+            if (kof == 0) { say("-"); } else { print_dec(@as(u64, kof), mem); }
             say("\n");
             at = at + 4;
         }
@@ -1383,8 +1385,8 @@ fn run_install(st: []u64, mem: []u8) -> void {
 }
 
 pub fn main() -> void {
-    var st : [512]u64 = undefined;
-    var mem : [1171712]u8 = undefined;
+    var st : [1024]u64 = undefined;
+    var mem : [1190144]u8 = undefined;
     var z : usize = 0;
     while (z < ST_SIZE) {
         st[z] = 0;
@@ -1427,7 +1429,7 @@ test the_arena_regions_do_not_overlap {
     assert O_KEYS + @as(usize, PROVIDER_COUNT) * @as(usize, MAX_KEYS) * KEY_CAP <= O_CARRY;
     assert O_CARRY + 16 * CARRY_SLOT <= O_SCAN;
     assert O_SCAN + SCAN_CAP <= MEM_SIZE;
-    assert MEM_SIZE == 1171712;
-    assert ST_SIZE == 512;
+    assert MEM_SIZE == 1190144;
+    assert ST_SIZE == 1024;
     assert CARRY_SLOT == CARRY_CAP + 4;
 }

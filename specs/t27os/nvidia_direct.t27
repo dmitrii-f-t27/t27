@@ -13,7 +13,7 @@
 ; is dead and never sent again; 429 moves on to the next live key; the counters and the current key survive a
 ; restart as ~/.t27os/nvidia/state.t27 (nv_state_text), which holds no key, only the list's FNV-1a hash so a
 ; changed list starts from a clean state. Every test uses fake nvapi-test-... values.
-; Why not a tenth row of the provider tables (PROVIDER_COUNT 9 -> 10): those rows hold MAX_KEYS = 8 keys each
+; Why not a tenth row of the provider tables (PROVIDER_COUNT 9 -> 10): those rows hold MAX_KEYS = 16 keys each (8 until 2026-10-23)
 ; under the service ai.t27.os, and their count sizes the PTY server's shared key table and the window's mask
 ; buffer; the 34 keys of one JSON item fit neither. The provider id is P_NVIDIA = 9 in keys.t27, the same
 ; id the feat/t27os-key-auth-hold branch (dmitrii-f-t27/t27#6) gives its NVIDIA row.

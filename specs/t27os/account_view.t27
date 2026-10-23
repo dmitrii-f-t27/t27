@@ -1688,9 +1688,9 @@ test ac_the_token_is_the_short_fingerprint_and_the_account_says_where_it_lives {
 test ac_keys_lines_read_the_health_of_the_keys_never_the_keys {
     const now : u64 = 1800000000;
     var stored : [9]u32 = [0, 0, 0, 0, 0, 0, 0, 0, 0];
-    var hw : [72]u64 = undefined;
+    var hw : [144]u64 = undefined;
     var j : usize = 0;
-    while (j < 72) {
+    while (j < 144) {
         hw[j] = 0;
         j = j + 1;
     }
@@ -1703,49 +1703,49 @@ test ac_keys_lines_read_the_health_of_the_keys_never_the_keys {
     var f : [7]u64 = undefined;
     var o : [128]u8 = undefined;
     // nothing stored, NVIDIA not read: three muted rows that say so
-    ac_kp_facts(0, stored[0..9], hw[0..72], nv[0..96], now, f[0..7]);
+    ac_kp_facts(0, stored[0..9], hw[0..144], nv[0..96], now, f[0..7]);
     assert fv_eq(o[0..128], ac_kp_line(0, f[0..7], now, o[0..128]), "no key stored");
     assert ac_kp_dim(@as(u32, @intCast(f[6])));
-    ac_kp_facts(2, stored[0..9], hw[0..72], nv[0..96], now, f[0..7]);
+    ac_kp_facts(2, stored[0..9], hw[0..144], nv[0..96], now, f[0..7]);
     assert fv_eq(o[0..128], ac_kp_line(2, f[0..7], now, o[0..128]), "not read yet");
     // OpenRouter: one key, stored, not checked since launch
     stored[3] = 1;
-    ac_kp_facts(0, stored[0..9], hw[0..72], nv[0..96], now, f[0..7]);
+    ac_kp_facts(0, stored[0..9], hw[0..144], nv[0..96], now, f[0..7]);
     assert fv_eq(o[0..128], ac_kp_line(0, f[0..7], now, o[0..128]), "1 key, not checked in this run");
     assert ac_kp_dim(@as(u32, @intCast(f[6]))) == false;
     // checked 5 min ago with 200: live
     hw[key_index(3, 0)] = health_pack(now - 300, 200);
-    ac_kp_facts(0, stored[0..9], hw[0..72], nv[0..96], now, f[0..7]);
+    ac_kp_facts(0, stored[0..9], hw[0..144], nv[0..96], now, f[0..7]);
     assert fv_eq(o[0..128], ac_kp_line(0, f[0..7], now, o[0..128]), "1 key, 1 live, checked 5 min ago");
     assert f[6] == @as(u64, AC_KS_LIVE);
     // Z.ai: two keys, both answered 401 two hours ago: dead, muted, with the reason
     stored[4] = 3;
     hw[key_index(4, 0)] = health_pack(now - 7200, 401);
     hw[key_index(4, 1)] = health_pack(now - 7300, 401);
-    ac_kp_facts(1, stored[0..9], hw[0..72], nv[0..96], now, f[0..7]);
+    ac_kp_facts(1, stored[0..9], hw[0..144], nv[0..96], now, f[0..7]);
     assert fv_eq(o[0..128], ac_kp_line(1, f[0..7], now, o[0..128]), "2 keys, 0 live, 2 dead (401), checked 2 h ago");
     assert ac_kp_dim(@as(u32, @intCast(f[6])));
     // one of them answers again: live, the dead one still named
     hw[key_index(4, 1)] = health_pack(now - 60, 200);
-    ac_kp_facts(1, stored[0..9], hw[0..72], nv[0..96], now, f[0..7]);
+    ac_kp_facts(1, stored[0..9], hw[0..144], nv[0..96], now, f[0..7]);
     assert fv_eq(o[0..128], ac_kp_line(1, f[0..7], now, o[0..128]), "2 keys, 1 live, 1 dead (401), checked 1 min ago");
     assert ac_kp_dim(@as(u32, @intCast(f[6]))) == false;
     // a rate limit is not death: stale, the code named
     hw[key_index(3, 0)] = health_pack(now - 30, 429);
-    ac_kp_facts(0, stored[0..9], hw[0..72], nv[0..96], now, f[0..7]);
+    ac_kp_facts(0, stored[0..9], hw[0..144], nv[0..96], now, f[0..7]);
     assert fv_eq(o[0..128], ac_kp_line(0, f[0..7], now, o[0..128]), "1 key, 0 live, rate limited (429), checked 30 s ago");
     hw[key_index(3, 0)] = health_pack(now - 30, 0);
-    ac_kp_facts(0, stored[0..9], hw[0..72], nv[0..96], now, f[0..7]);
+    ac_kp_facts(0, stored[0..9], hw[0..144], nv[0..96], now, f[0..7]);
     assert fv_eq(o[0..128], ac_kp_line(0, f[0..7], now, o[0..128]), "1 key, 0 live, no answer, checked 30 s ago");
     // NVIDIA from its counts: 34 keys, 33 live
     ac_nv_pack(nv[0..96], true, 34, 33);
-    ac_kp_facts(2, stored[0..9], hw[0..72], nv[0..96], now, f[0..7]);
+    ac_kp_facts(2, stored[0..9], hw[0..144], nv[0..96], now, f[0..7]);
     assert fv_eq(o[0..128], ac_kp_line(2, f[0..7], now, o[0..128]), "34 keys, 33 live, 1 dead (401/403)");
     ac_nv_pack(nv[0..96], true, 2, 0);
-    ac_kp_facts(2, stored[0..9], hw[0..72], nv[0..96], now, f[0..7]);
+    ac_kp_facts(2, stored[0..9], hw[0..144], nv[0..96], now, f[0..7]);
     assert ac_kp_dim(@as(u32, @intCast(f[6])));
     ac_nv_pack(nv[0..96], false, 0, 0);
-    ac_kp_facts(2, stored[0..9], hw[0..72], nv[0..96], now, f[0..7]);
+    ac_kp_facts(2, stored[0..9], hw[0..144], nv[0..96], now, f[0..7]);
     assert fv_eq(o[0..128], ac_kp_line(2, f[0..7], now, o[0..128]), "key list unreadable");
     // live never exceeds keys; the NVIDIA text stays where it was (the counts are past its room)
     ac_nv_pack(nv[0..96], true, 3, 9);
@@ -1936,9 +1936,9 @@ test ac_token_word_and_provider_names_read_as_shown {
 test ac_keys_line_says_what_the_keychain_holds_and_how_many_the_panes_use {
     const now : u64 = 1800000000;
     var stored : [9]u32 = [0, 0, 0, 0, 0, 0, 0, 0, 0];
-    var hw : [72]u64 = undefined;
+    var hw : [144]u64 = undefined;
     var j : usize = 0;
-    while (j < 72) {
+    while (j < 144) {
         hw[j] = 0;
         j = j + 1;
     }
@@ -1950,9 +1950,9 @@ test ac_keys_line_says_what_the_keychain_holds_and_how_many_the_panes_use {
     }
     var f : [8]u64 = undefined;
     var o : [128]u8 = undefined;
-    // the owner's Keychain on 2026-10-22: 11 z.ai accounts, the panes take the first 8 (MAX_KEYS)
+    // a Keychain with 11 z.ai accounts of which the panes hold 8 (as with MAX_KEYS 8 until 2026-10-23)
     stored[4] = 255;
-    ac_kp_facts(1, stored[0..9], hw[0..72], nv[0..96], now, f[0..8]);
+    ac_kp_facts(1, stored[0..9], hw[0..144], nv[0..96], now, f[0..8]);
     assert f[AC_KP_INUSE] == 8;
     ac_kp_seen(1, f[0..8], 11);
     assert fv_eq(o[0..128], ac_kp_line(1, f[0..8], now, o[0..128]), "11 keys, 8 in use, not checked in this run");
@@ -1962,33 +1962,53 @@ test ac_keys_line_says_what_the_keychain_holds_and_how_many_the_panes_use {
         hw[key_index(4, k)] = health_pack(now - 60, 200);
         k = k + 1;
     }
-    ac_kp_facts(1, stored[0..9], hw[0..72], nv[0..96], now, f[0..8]);
+    ac_kp_facts(1, stored[0..9], hw[0..144], nv[0..96], now, f[0..8]);
     ac_kp_seen(1, f[0..8], 11);
     assert fv_eq(o[0..128], ac_kp_line(1, f[0..8], now, o[0..128]), "11 keys, 8 in use, 8 live, checked 1 min ago");
     assert f[6] == @as(u64, AC_KS_LIVE);
     // the count equal to the used ones, or not read (0): the line as before, no "in use"
     stored[3] = 1;
-    ac_kp_facts(0, stored[0..9], hw[0..72], nv[0..96], now, f[0..8]);
+    ac_kp_facts(0, stored[0..9], hw[0..144], nv[0..96], now, f[0..8]);
     ac_kp_seen(0, f[0..8], 1);
     assert fv_eq(o[0..128], ac_kp_line(0, f[0..8], now, o[0..128]), "1 key, not checked in this run");
     ac_kp_seen(0, f[0..8], 0);
     assert f[0] == 1;
     // items in the Keychain the panes do not hold: counted, not "no key stored"
     stored[3] = 0;
-    ac_kp_facts(0, stored[0..9], hw[0..72], nv[0..96], now, f[0..8]);
+    ac_kp_facts(0, stored[0..9], hw[0..144], nv[0..96], now, f[0..8]);
     assert fv_eq(o[0..128], ac_kp_line(0, f[0..8], now, o[0..128]), "no key stored");
     ac_kp_seen(0, f[0..8], 2);
     assert fv_eq(o[0..128], ac_kp_line(0, f[0..8], now, o[0..128]), "2 keys, not checked in this run");
     assert ac_kp_dim(@as(u32, @intCast(f[6]))) == false;
     // NVIDIA keeps its own counts; seven words leave the old line
     ac_nv_pack(nv[0..96], true, 34, 34);
-    ac_kp_facts(2, stored[0..9], hw[0..72], nv[0..96], now, f[0..8]);
+    ac_kp_facts(2, stored[0..9], hw[0..144], nv[0..96], now, f[0..8]);
     ac_kp_seen(2, f[0..8], 50);
     assert fv_eq(o[0..128], ac_kp_line(2, f[0..8], now, o[0..128]), "34 keys, 34 live");
     stored[4] = 255;
-    ac_kp_facts(1, stored[0..9], hw[0..72], nv[0..96], now, f[0..7]);
+    ac_kp_facts(1, stored[0..9], hw[0..144], nv[0..96], now, f[0..7]);
     ac_kp_seen(1, f[0..7], 11);
     assert f[0] == 8;
+    // MAX_KEYS 16 (2026-10-23): the panes take all 11 of the owner's z.ai keys, so the line has no "in use"
+    stored[4] = 2047;
+    ac_kp_facts(1, stored[0..9], hw[0..144], nv[0..96], now, f[0..8]);
+    assert f[AC_KP_INUSE] == 11;
+    ac_kp_seen(1, f[0..8], 11);
+    assert fv_eq(o[0..128], ac_kp_line(1, f[0..8], now, o[0..128]), "11 keys, 8 live, checked 1 min ago");
+    k = 8;
+    while (k < 11) {
+        hw[key_index(4, k)] = health_pack(now - 60, 200);
+        k = k + 1;
+    }
+    ac_kp_facts(1, stored[0..9], hw[0..144], nv[0..96], now, f[0..8]);
+    ac_kp_seen(1, f[0..8], 11);
+    assert fv_eq(o[0..128], ac_kp_line(1, f[0..8], now, o[0..128]), "11 keys, 11 live, checked 1 min ago");
+    // all 16: every key is counted and checked, the 16th too
+    stored[4] = 65535;
+    hw[key_index(4, 15)] = health_pack(now - 60, 401);
+    ac_kp_facts(1, stored[0..9], hw[0..144], nv[0..96], now, f[0..8]);
+    assert f[0] == 16 and f[AC_KP_INUSE] == 16;
+    assert f[2] == 1;
 }
 
 test ac_keychain_counts_ride_after_the_nvidia_counts_without_touching_them {
@@ -2015,9 +2035,9 @@ test ac_keychain_counts_ride_after_the_nvidia_counts_without_touching_them {
 test ac_keys_line_says_the_health_files_last_check_without_the_keys_tab {
     const now : u64 = 1800000000;
     var stored : [9]u32 = [0, 0, 0, 0, 0, 0, 0, 0, 0];
-    var hw : [72]u64 = undefined;
+    var hw : [144]u64 = undefined;
     var j : usize = 0;
-    while (j < 72) {
+    while (j < 144) {
         hw[j] = 0;
         j = j + 1;
     }
@@ -2034,10 +2054,10 @@ test ac_keys_line_says_the_health_files_last_check_without_the_keys_tab {
     var f : [8]u64 = undefined;
     var o : [128]u8 = undefined;
     // no file yet: the count, then "not checked yet"; no key: as before
-    ac_kp_facts(0, stored[0..9], hw[0..72], nv[0..96], now, f[0..8]);
+    ac_kp_facts(0, stored[0..9], hw[0..144], nv[0..96], now, f[0..8]);
     assert fv_eq(o[0..128], ac_kp_line_kh(0, f[0..8], kh[0..96], now, o[0..128]), "no key stored");
     stored[3] = 1;
-    ac_kp_facts(0, stored[0..9], hw[0..72], nv[0..96], now, f[0..8]);
+    ac_kp_facts(0, stored[0..9], hw[0..144], nv[0..96], now, f[0..8]);
     ac_kp_seen(0, f[0..8], 1);
     assert fv_eq(o[0..128], ac_kp_line_kh(0, f[0..8], kh[0..96], now, o[0..128]), "1 key, not checked yet");
     assert ac_kp_live_kh(0, f[0..8], kh[0..96], now) == false;
@@ -2048,14 +2068,14 @@ test ac_keys_line_says_the_health_files_last_check_without_the_keys_tab {
     kh_set(recs[0..32], 1, 200, now - 3600, 410, 1);
     kh_set(recs[0..32], 2, 200, now - 720, 280, 1);
     kh_pack(recs[0..32], kh[0..96]);
-    ac_kp_facts(0, stored[0..9], hw[0..72], nv[0..96], now, f[0..8]);
+    ac_kp_facts(0, stored[0..9], hw[0..144], nv[0..96], now, f[0..8]);
     ac_kp_seen(0, f[0..8], 1);
     assert fv_eq(o[0..128], ac_kp_line_kh(0, f[0..8], kh[0..96], now, o[0..128]), "1 key, live (200, checked 2 min ago)");
     assert ac_kp_live_kh(0, f[0..8], kh[0..96], now);
-    ac_kp_facts(1, stored[0..9], hw[0..72], nv[0..96], now, f[0..8]);
+    ac_kp_facts(1, stored[0..9], hw[0..144], nv[0..96], now, f[0..8]);
     ac_kp_seen(1, f[0..8], 11);
     assert fv_eq(o[0..128], ac_kp_line_kh(1, f[0..8], kh[0..96], now, o[0..128]), "11 keys, live (200, checked 1 h ago)");
-    ac_kp_facts(2, stored[0..9], hw[0..72], nv[0..96], now, f[0..8]);
+    ac_kp_facts(2, stored[0..9], hw[0..144], nv[0..96], now, f[0..8]);
     assert fv_eq(o[0..128], ac_kp_line_kh(2, f[0..8], kh[0..96], now, o[0..128]), "34 keys, live (200, checked 12 min ago)");
     // the same file a day and more later: stale, the dot goes out
     const later : u64 = now + 86400 + 1;
@@ -2064,20 +2084,20 @@ test ac_keys_line_says_the_health_files_last_check_without_the_keys_tab {
     // a refused key is said, its dot stays out
     kh_set(recs[0..32], 0, 401, now - 60, 90, 1);
     kh_pack(recs[0..32], kh[0..96]);
-    ac_kp_facts(0, stored[0..9], hw[0..72], nv[0..96], now, f[0..8]);
+    ac_kp_facts(0, stored[0..9], hw[0..144], nv[0..96], now, f[0..8]);
     ac_kp_seen(0, f[0..8], 1);
     assert fv_eq(o[0..128], ac_kp_line_kh(0, f[0..8], kh[0..96], now, o[0..128]), "1 key, refused (401, checked 1 min ago)");
     assert ac_kp_live_kh(0, f[0..8], kh[0..96], now) == false;
     // a later check from the KEYS panel wins for its row
     hw[key_index(3, 0)] = health_pack(now - 10, 200);
-    ac_kp_facts(0, stored[0..9], hw[0..72], nv[0..96], now, f[0..8]);
+    ac_kp_facts(0, stored[0..9], hw[0..144], nv[0..96], now, f[0..8]);
     ac_kp_seen(0, f[0..8], 1);
     assert fv_eq(o[0..128], ac_kp_line_kh(0, f[0..8], kh[0..96], now, o[0..128]), "1 key, 1 live, checked 10 s ago");
     assert ac_kp_live_kh(0, f[0..8], kh[0..96], now);
     // an unread NVIDIA list stays "not read yet"
     ac_nv_pack(nv[0..96], false, 0, 0);
     nv[AC_NV_FLAG] = AC_NV_UNREAD;
-    ac_kp_facts(2, stored[0..9], hw[0..72], nv[0..96], now, f[0..8]);
+    ac_kp_facts(2, stored[0..9], hw[0..144], nv[0..96], now, f[0..8]);
     assert fv_eq(o[0..128], ac_kp_line_kh(2, f[0..8], kh[0..96], now, o[0..128]), "not read yet");
 }
 

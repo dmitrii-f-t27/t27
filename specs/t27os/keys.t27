@@ -1272,13 +1272,30 @@ pub fn shown_light_of(b: u32) -> u32 {
     return b / 64 % 4;
 }
 
-/// How many keys one provider may hold, numbered from 1 (Free Claude Code: "key 1 first"). Eight, since the
-/// owner stores seven z.ai keys and rotates over all of them (gHashTag/t27#11241).
-pub const MAX_KEYS : u32 = 8;
+/// How many keys one provider may hold, numbered from 1 (Free Claude Code: "key 1 first"). Sixteen: the owner
+/// holds 11 z.ai accounts (2026-10-22) and the panes must take all of them, not the first eight
+/// (gHashTag/t27#11241). A key number rides in the high nibble of an OP_SETKEY byte (SETKEY_STEP), so 16 is
+/// the most one byte carries; a 17th key is refused (key_number_ok).
+pub const MAX_KEYS : u32 = 16;
+
+/// Every key slot of every provider: the length of the per-key arrays (key_index) in the window and the server.
+pub const KEY_SLOTS_ALL : usize = 144;
+
+/// May a key take number k (0-based)? A 17th key (k = MAX_KEYS) or more is refused, and the panel says so.
+pub fn key_number_ok(k: u32) -> bool {
+    return k < MAX_KEYS;
+}
+
+/// Why "add" on a full row does nothing, for the KEYS hint line: "full: 16 keys is the most a provider holds".
+pub fn key_full_why(out: []u8) -> usize {
+    var n : usize = put_bytes(out, 0, "full: ");
+    n = put_dec(out, n, @as(u64, MAX_KEYS));
+    return put_bytes(out, n, " keys is the most a provider holds");
+}
 
 /// The Keychain item of key number k (0-based; the panel says "key k+1") of provider p. Key 1 keeps the
-/// plain label of keychain_label, so a key stored before numbering stays where it is; keys 2 to 8 add
-/// "#2" to "#8". 0 for an unknown provider or a number past MAX_KEYS.
+/// plain label of keychain_label, so a key stored before numbering stays where it is; keys 2 to 16 add
+/// "#2" to "#16". 0 for an unknown provider or a number past MAX_KEYS.
 pub fn keychain_label_n(p: u32, k: u32, out: []u8) -> usize {
     if (p >= PROVIDER_COUNT or k >= MAX_KEYS) { return 0; }
     var n : usize = keychain_label(p, out);
@@ -1423,9 +1440,9 @@ pub const FA_GIVE_UP : u32 = 3;
 /// model the pane ran. Only pty_logic plan_failover gives it (fo_next_model); fo_action never does.
 pub const FA_RESPAWN_MODEL : u32 = 4;
 
-/// At most this many failovers per pane: every key of each free provider on each model of its tier (z.ai 8 keys on
-/// 2 models, OpenRouter 8 keys on 3 models: 8 * 5 = 40), then every profile once, and a few spare.
-pub const MAX_FAILOVERS : u32 = 48;
+/// At most this many failovers per pane: every key of each free provider on each model of its tier (z.ai 16 keys
+/// on 2 models, OpenRouter 16 keys on 3 models: 16 * 5 = 80), then every profile once, and a few spare.
+pub const MAX_FAILOVERS : u32 = 96;
 
 /// The index of the first occurrence of needle in hay at or after `from`; hay.len + 1 when absent.
 fn find_bytes(hay: []const u8, needle: []const u8, from: usize) -> usize {
@@ -2277,7 +2294,7 @@ test the_account_of_key_k_is_the_provider_name_with_a_number {
     assert a[9] == 35 and a[10] == 56;
     assert keychain_account_n(P_ZAI, MAX_KEYS, a[0..32]) == 0;
     assert keychain_account_n(PROVIDER_COUNT, 0, a[0..32]) == 0;
-    assert MAX_KEYS == 8;
+    assert MAX_KEYS == 16;
     var l : [48]u8 = undefined;
     assert keychain_label_n(P_ZAI, 7, l[0..48]) == 15;
     assert l[13] == 35 and l[14] == 56;
@@ -2327,8 +2344,8 @@ test a_keys_row_says_how_many_keys_the_provider_holds {
     assert o[0] == 49 and o[2] == 107 and o[4] == 121;
     assert key_count_text(7, o[0..24]) == 6;
     assert o[0] == 55 and o[5] == 115;
-    assert key_count_text(MAX_KEYS, o[0..24]) == 6;
-    assert o[0] == 56;
+    assert key_count_text(MAX_KEYS, o[0..24]) == 7;
+    assert o[0] == 49 and o[1] == 54;
 }
 
 test the_key_number_rides_in_the_high_nibble_of_the_setkey_byte {
@@ -3310,8 +3327,8 @@ pub fn ky_set_word(mask: u32) -> u32 {
 }
 
 /// A scan of one provider's numbers ends after this many misses in a row (a gap of one is stepped over). Each
-/// read is a run of /usr/bin/security (about 23 ms measured), so reading all 8 numbers of all 9 providers
-/// costs about 1.7 s; this keeps a scan to the numbers that exist and the first miss behind them. Set it to
+/// read is a run of /usr/bin/security (about 23 ms measured), so reading all 16 numbers of all 9 providers
+/// costs about 3.3 s; this keeps a scan to the numbers that exist and the first miss behind them. Set it to
 /// MAX_KEYS to read every number again.
 pub const SCAN_GAP_STOP : u32 = 2;
 
@@ -3622,9 +3639,9 @@ test a_200_is_live_until_it_grows_old_and_5xx_or_no_answer_is_suspect {
 
 test a_provider_is_dead_only_when_every_key_is {
     const t : u64 = 1800000000;
-    var hw : [72]u64 = undefined;
+    var hw : [144]u64 = undefined;
     var i : usize = 0;
-    while (i < 72) {
+    while (i < 144) {
         hw[i] = 0;
         i = i + 1;
     }
@@ -3639,20 +3656,20 @@ test a_provider_is_dead_only_when_every_key_is {
     stored[P_ANTHROPIC] = 1;
     hw[key_index(P_ZAI, 0)] = health_pack(t, 401);
     // one dead key of two, the other unchecked: not dead
-    assert provider_health(hw[0..72], P_ZAI, 3, t + 1) == HL_UNKNOWN;
+    assert provider_health(hw[0..144], P_ZAI, 3, t + 1) == HL_UNKNOWN;
     hw[key_index(P_ZAI, 1)] = health_pack(t, 403);
-    assert provider_health(hw[0..72], P_ZAI, 3, t + 1) == HL_DEAD;
+    assert provider_health(hw[0..144], P_ZAI, 3, t + 1) == HL_DEAD;
     hw[key_index(P_OPENROUTER, 0)] = health_pack(t, 200);
-    assert dead_mask_health(hw[0..72], stored[0..9], t + 1) == 16;
-    assert live_mask_health(hw[0..72], stored[0..9], t + 1) == 8;
-    assert health_dim(hw[0..72], P_ZAI, 3, t + 1);
-    assert health_dim(hw[0..72], P_OPENROUTER, 1, t + 1) == false;
+    assert dead_mask_health(hw[0..144], stored[0..9], t + 1) == 16;
+    assert live_mask_health(hw[0..144], stored[0..9], t + 1) == 8;
+    assert health_dim(hw[0..144], P_ZAI, 3, t + 1);
+    assert health_dim(hw[0..144], P_OPENROUTER, 1, t + 1) == false;
     // the hold runs out: the provider is stale, offered again, the row is no longer dim
-    assert dead_mask_health(hw[0..72], stored[0..9], t + HEALTH_DEAD_HOLD_S) == 0;
-    assert provider_health(hw[0..72], P_ZAI, 3, t + HEALTH_DEAD_HOLD_S) == HL_STALE;
+    assert dead_mask_health(hw[0..144], stored[0..9], t + HEALTH_DEAD_HOLD_S) == 0;
+    assert provider_health(hw[0..144], P_ZAI, 3, t + HEALTH_DEAD_HOLD_S) == HL_STALE;
     // a dead key next to a live one: the provider is live
     hw[key_index(P_ZAI, 1)] = health_pack(t, 200);
-    assert provider_health(hw[0..72], P_ZAI, 3, t + 1) == HL_OK;
+    assert provider_health(hw[0..144], P_ZAI, 3, t + 1) == HL_OK;
 }
 
 test the_pick_skips_dead_providers_and_prefers_a_live_one_in_the_same_tier {
@@ -3687,35 +3704,35 @@ test the_pick_skips_dead_providers_and_prefers_a_live_one_in_the_same_tier {
 
 test the_keys_row_says_ok_dead_stale_or_unknown {
     const t : u64 = 1800000000;
-    var hw : [72]u64 = undefined;
+    var hw : [144]u64 = undefined;
     var i : usize = 0;
-    while (i < 72) {
+    while (i < 144) {
         hw[i] = 0;
         i = i + 1;
     }
     var o : [48]u8 = undefined;
-    var n : usize = health_text(hw[0..72], P_ZAI, 1, t, o[0..48]);
+    var n : usize = health_text(hw[0..144], P_ZAI, 1, t, o[0..48]);
     assert same_bytes(o[0..n], "unknown");
     hw[key_index(P_ZAI, 0)] = health_pack(t, 401);
-    n = health_text(hw[0..72], P_ZAI, 1, t + 60, o[0..48]);
+    n = health_text(hw[0..144], P_ZAI, 1, t + 60, o[0..48]);
     assert same_bytes(o[0..n], "dead (401)");
     hw[key_index(P_OPENROUTER, 0)] = health_pack(t, 200);
-    n = health_text(hw[0..72], P_OPENROUTER, 1, t + 60, o[0..48]);
+    n = health_text(hw[0..144], P_OPENROUTER, 1, t + 60, o[0..48]);
     assert same_bytes(o[0..n], "ok");
-    n = health_text(hw[0..72], P_OPENROUTER, 1, t + 3 * 3600 + HEALTH_STALE_S, o[0..48]);
+    n = health_text(hw[0..144], P_OPENROUTER, 1, t + 3 * 3600 + HEALTH_STALE_S, o[0..48]);
     assert same_bytes(o[0..n], "stale (checked 9 h ago)");
     hw[key_index(P_OPENROUTER, 0)] = health_pack(t, 503);
-    n = health_text(hw[0..72], P_OPENROUTER, 1, t + 60, o[0..48]);
+    n = health_text(hw[0..144], P_OPENROUTER, 1, t + 60, o[0..48]);
     assert same_bytes(o[0..n], "stale (HTTP 503)");
     hw[key_index(P_OPENROUTER, 0)] = health_pack(t, 0);
-    n = health_text(hw[0..72], P_OPENROUTER, 1, t + 600, o[0..48]);
+    n = health_text(hw[0..144], P_OPENROUTER, 1, t + 600, o[0..48]);
     assert same_bytes(o[0..n], "stale (no answer)");
     hw[key_index(P_OPENROUTER, 0)] = health_pack(t, 200);
     hw[key_index(P_OPENROUTER, 1)] = health_pack(t, 401);
-    n = health_text(hw[0..72], P_OPENROUTER, 3, t + 60, o[0..48]);
+    n = health_text(hw[0..144], P_OPENROUTER, 3, t + 60, o[0..48]);
     assert same_bytes(o[0..n], "ok (1/2)");
     // a dead hold that ran out reads its age
-    n = health_text(hw[0..72], P_ZAI, 1, t + HEALTH_DEAD_HOLD_S + 300, o[0..48]);
+    n = health_text(hw[0..144], P_ZAI, 1, t + HEALTH_DEAD_HOLD_S + 300, o[0..48]);
     assert same_bytes(o[0..n], "stale (checked 24 h ago)");
 }
 
@@ -3725,10 +3742,11 @@ test add_takes_the_lowest_free_number_and_stops_when_full {
     assert next_free_key(3) == 2;
     assert next_free_key(5) == 1;
     assert next_free_key(127) == 7;
-    assert next_free_key(255) == MAX_KEYS;
+    assert next_free_key(65535) == MAX_KEYS;
     assert ky_set_word(0) == 1;
     assert ky_set_word(127) == 1;
-    assert ky_set_word(255) == 2;
+    assert ky_set_word(255) == 1;
+    assert ky_set_word(65535) == 2;
     var w : [24]u8 = undefined;
     assert csv_field(KEYS_WORDS, 1, w[0..24]) == 3;
     assert w[0] == 97;
@@ -3757,7 +3775,8 @@ test the_numbers_in_a_mask_are_counted {
     assert slot_taken(5, 0) and slot_taken(5, 2);
     assert slot_taken(5, 1) == false;
     assert slot_taken(5, MAX_KEYS) == false;
-    assert slot_taken(65535, 9) == false;
+    assert slot_taken(65535, 9);
+    assert slot_taken(131071, MAX_KEYS) == false;
 }
 
 test a_scan_steps_over_one_gap_and_stops_at_two {
@@ -3771,34 +3790,100 @@ test a_scan_steps_over_one_gap_and_stops_at_two {
 test a_key_has_its_own_place_among_the_statuses {
     assert key_index(0, 0) == 0;
     assert key_index(0, 7) == 7;
-    assert key_index(4, 0) == 32;
-    assert key_index(4, 6) == 38;
-    assert key_index(8, 7) == 71;
+    assert key_index(0, 15) == 15;
+    assert key_index(4, 0) == 64;
+    assert key_index(4, 6) == 70;
+    assert key_index(8, 15) == 143;
+    assert key_index(PROVIDER_COUNT - 1, MAX_KEYS - 1) + 1 == KEY_SLOTS_ALL;
 }
 
-test a_provider_is_valid_while_one_key_is_and_bad_when_none_can_serve {
-    var st : [72]u32 = undefined;
+// The owner's Keychain on 2026-10-22 holds 11 z.ai accounts and the panes used the first 8. With MAX_KEYS 16 all
+// of them are read, counted, given numbers and rotated; a 17th is refused, not dropped in silence.
+test sixteen_keys_of_one_provider_are_read_and_a_seventeenth_is_refused {
+    // the scan reads every number up to 16 when they exist (no two misses in a row)
+    var mask : u32 = 0;
+    var k : u32 = 0;
+    while (scan_goes_on(k, 0)) {
+        mask = mask + (1 << k);
+        k = k + 1;
+    }
+    assert k == 16;
+    assert mask == 65535;
+    assert slot_count(mask) == 16;
+    // the owner's eleven: "zai" .. "zai#11" all taken, "add" still offers number 12
+    assert slot_count(2047) == 11;
+    assert next_free_key(2047) == 11;
+    assert newest_key(2047) == 10;
+    assert ky_set_word(2047) == 1;
+    var a : [32]u8 = undefined;
+    var n : usize = keychain_account_n(P_ZAI, 10, a[0..32]);
+    assert same_bytes(a[0..n], "zai#11");
+    n = keychain_account_n(P_ZAI, 15, a[0..32]);
+    assert same_bytes(a[0..n], "zai#16");
+    var l : [48]u8 = undefined;
+    assert keychain_label_n(P_ZAI, 15, l[0..48]) > 0;
+    // the row says "11 keys" and "16 keys"
+    var o : [24]u8 = undefined;
+    n = key_count_text(slot_count(2047), o[0..24]);
+    assert same_bytes(o[0..n], "11 keys");
+    n = key_count_text(slot_count(65535), o[0..24]);
+    assert same_bytes(o[0..n], "16 keys");
+    // a full row: "add" reads "full" and has no number to give
+    assert next_free_key(65535) == MAX_KEYS;
+    assert ky_set_word(65535) == 2;
+    assert key_number_ok(15);
+    // the 17th: no number, no Keychain account, no label, no setkey byte that fits, and the hint says why
+    assert key_number_ok(16) == false;
+    assert ky_click(B_SET, true, next_free_key(65535) >= MAX_KEYS, true, KY_NONE, P_ZAI) == KA_NONE;
+    assert ky_click(B_SET, true, next_free_key(32767) >= MAX_KEYS, true, KY_NONE, P_ZAI) == KA_EDIT;
+    var wy : [48]u8 = undefined;
+    n = key_full_why(wy[0..48]);
+    assert same_bytes(wy[0..n], "full: 16 keys is the most a provider holds");
+    assert keychain_account_n(P_ZAI, 16, a[0..32]) == 0;
+    assert keychain_label_n(P_ZAI, 16, l[0..48]) == 0;
+    assert slot_taken(131071, 16) == false;
+    assert slot_count(131071) == 16;
+    assert setkey_byte(P_ZAI, 15) < 256;
+    assert setkey_byte(P_ZAI, 16) >= 256;
+    // a 17th account in the Keychain is still counted for the cabinet (KC_COUNT_MAX), never read into a pane
+    n = keychain_account_any(P_ZAI, 16, a[0..32]);
+    assert same_bytes(a[0..n], "zai#17");
+    // statuses of all 16 keys of the last provider fit the per-key arrays
+    var st : [144]u32 = undefined;
     var i : usize = 0;
-    while (i < 72) {
+    while (i < 144) {
         st[i] = ST_STORED;
         i = i + 1;
     }
-    assert provider_status(st[0..72], P_ZAI, 0) == ST_MISSING;
-    assert provider_status(st[0..72], P_ZAI, 127) == ST_STORED;
+    st[key_index(P_ZAI, 15)] = ST_VALID;
+    assert keys_valid(st[0..144], P_ZAI, 65535) == 1;
+    assert keys_valid(st[0..144], P_ZAI, 2047) == 0;
+    assert provider_status(st[0..144], P_ZAI, 32768) == ST_VALID;
+}
+
+test a_provider_is_valid_while_one_key_is_and_bad_when_none_can_serve {
+    var st : [144]u32 = undefined;
+    var i : usize = 0;
+    while (i < 144) {
+        st[i] = ST_STORED;
+        i = i + 1;
+    }
+    assert provider_status(st[0..144], P_ZAI, 0) == ST_MISSING;
+    assert provider_status(st[0..144], P_ZAI, 127) == ST_STORED;
     st[key_index(P_ZAI, 0)] = ST_INVALID;
-    assert provider_status(st[0..72], P_ZAI, 127) == ST_STORED;
+    assert provider_status(st[0..144], P_ZAI, 127) == ST_STORED;
     st[key_index(P_ZAI, 1)] = ST_VALID;
-    assert provider_status(st[0..72], P_ZAI, 127) == ST_VALID;
-    assert provider_status(st[0..72], P_ZAI, 1) == ST_INVALID;
-    assert provider_status(st[0..72], P_ZAI, 3) == ST_VALID;
+    assert provider_status(st[0..144], P_ZAI, 127) == ST_VALID;
+    assert provider_status(st[0..144], P_ZAI, 1) == ST_INVALID;
+    assert provider_status(st[0..144], P_ZAI, 3) == ST_VALID;
     var k : u32 = 0;
     while (k < 7) {
         st[key_index(P_ZAI, k)] = ST_INVALID;
         k = k + 1;
     }
-    assert provider_status(st[0..72], P_ZAI, 127) == ST_INVALID;
+    assert provider_status(st[0..144], P_ZAI, 127) == ST_INVALID;
     st[key_index(P_ZAI, 4)] = ST_RATE_LIMITED;
-    assert provider_status(st[0..72], P_ZAI, 127) == ST_RATE_LIMITED;
+    assert provider_status(st[0..144], P_ZAI, 127) == ST_RATE_LIMITED;
     var stored : [9]u32 = undefined;
     var s : usize = 0;
     while (s < 9) {
@@ -3806,15 +3891,15 @@ test a_provider_is_valid_while_one_key_is_and_bad_when_none_can_serve {
         s = s + 1;
     }
     stored[P_ZAI] = 127;
-    assert bad_mask_keys(st[0..72], stored[0..9]) == 0;
+    assert bad_mask_keys(st[0..144], stored[0..9]) == 0;
     st[key_index(P_ZAI, 4)] = ST_INVALID;
-    assert bad_mask_keys(st[0..72], stored[0..9]) == 16;
+    assert bad_mask_keys(st[0..144], stored[0..9]) == 16;
     stored[P_ANTHROPIC] = 1;
-    assert bad_mask_keys(st[0..72], stored[0..9]) == 16;
+    assert bad_mask_keys(st[0..144], stored[0..9]) == 16;
     st[key_index(P_ANTHROPIC, 0)] = ST_INVALID;
-    assert bad_mask_keys(st[0..72], stored[0..9]) == 17;
+    assert bad_mask_keys(st[0..144], stored[0..9]) == 17;
     st[key_index(P_ZAI, 6)] = ST_VALID;
-    assert bad_mask_keys(st[0..72], stored[0..9]) == 1;
+    assert bad_mask_keys(st[0..144], stored[0..9]) == 1;
 }
 
 test only_a_key_that_failed_is_withheld_from_the_server {
@@ -3826,9 +3911,9 @@ test only_a_key_that_failed_is_withheld_from_the_server {
 }
 
 test a_row_after_a_check_says_how_many_keys_are_valid {
-    var st : [72]u32 = undefined;
+    var st : [144]u32 = undefined;
     var i : usize = 0;
-    while (i < 72) {
+    while (i < 144) {
         st[i] = ST_STORED;
         i = i + 1;
     }
@@ -3844,27 +3929,27 @@ test a_row_after_a_check_says_how_many_keys_are_valid {
         k = k + 1;
     }
     st[key_index(P_ZAI, 3)] = ST_INVALID;
-    const n : usize = key_status_text(ST_VALID, st[0..72], P_ZAI, 127, out[0..32]);
+    const n : usize = key_status_text(ST_VALID, st[0..144], P_ZAI, 127, out[0..32]);
     assert n == 9;
     assert out[0] == 54 and out[1] == 47 and out[2] == 55 and out[3] == 32;
     assert out[4] == 118 and out[8] == 100;
-    assert key_status_text(ST_CIRCUIT_OPEN, st[0..72], P_ZAI, 127, out[0..32]) == 12;
+    assert key_status_text(ST_CIRCUIT_OPEN, st[0..144], P_ZAI, 127, out[0..32]) == 12;
     assert out[0] == 99;
-    assert key_status_text(ST_MISSING, st[0..72], P_ZAI, 0, out[0..32]) == 7;
-    assert key_status_text(ST_STORED, st[0..72], P_ANTHROPIC, 1, out[0..32]) == 6;
+    assert key_status_text(ST_MISSING, st[0..144], P_ZAI, 0, out[0..32]) == 7;
+    assert key_status_text(ST_STORED, st[0..144], P_ANTHROPIC, 1, out[0..32]) == 6;
     assert out[0] == 115;
     st[key_index(P_OPENAI, 0)] = ST_VALID;
-    assert key_status_text(ST_VALID, st[0..72], P_OPENAI, 1, out[0..32]) == 5;
+    assert key_status_text(ST_VALID, st[0..144], P_OPENAI, 1, out[0..32]) == 5;
     assert out[0] == 118;
     st[key_index(P_OPENAI, 1)] = ST_INVALID;
-    assert key_status_text(ST_VALID, st[0..72], P_OPENAI, 3, out[0..32]) == 9;
+    assert key_status_text(ST_VALID, st[0..144], P_OPENAI, 3, out[0..32]) == 9;
     assert out[0] == 49 and out[2] == 50;
 }
 
 test the_new_provider_status_agrees_with_the_old_one_for_a_single_key {
-    var st : [72]u32 = undefined;
+    var st : [144]u32 = undefined;
     var i : usize = 0;
-    while (i < 72) {
+    while (i < 144) {
         st[i] = ST_STORED;
         i = i + 1;
     }
@@ -3878,7 +3963,7 @@ test the_new_provider_status_agrees_with_the_old_one_for_a_single_key {
     while (s <= ST_RATE_LIMITED) {
         st[key_index(P_GEMINI, 0)] = s;
         one[P_GEMINI] = s;
-        assert provider_status(st[0..72], P_GEMINI, 1) == s;
+        assert provider_status(st[0..144], P_GEMINI, 1) == s;
         var sm : [9]u32 = undefined;
         var q : usize = 0;
         while (q < 9) {
@@ -3888,7 +3973,7 @@ test the_new_provider_status_agrees_with_the_old_one_for_a_single_key {
         sm[P_GEMINI] = 1;
         var bad : u32 = 0;
         if (s == ST_INVALID) { bad = 4; }
-        assert bad_mask_keys(st[0..72], sm[0..9]) == bad;
+        assert bad_mask_keys(st[0..144], sm[0..9]) == bad;
         assert bad_mask(one[0..9]) == bad;
         s = s + 1;
     }
@@ -4036,9 +4121,9 @@ test sec_push_appends_a_nul_ended_word_and_refuses_what_does_not_fit {
 }
 
 test keys_valid_and_keys_checked_count_only_the_keys_in_the_mask_of_that_provider {
-    var st : [80]u32 = undefined;
+    var st : [160]u32 = undefined;
     var i : usize = 0;
-    while (i < 80) { st[i] = ST_STORED; i = i + 1; }
+    while (i < 160) { st[i] = ST_STORED; i = i + 1; }
     st[key_index(P_ZAI, 0)] = ST_VALID;
     st[key_index(P_ZAI, 1)] = ST_INVALID;
     st[key_index(P_ZAI, 2)] = ST_RATE_LIMITED;
@@ -4046,21 +4131,21 @@ test keys_valid_and_keys_checked_count_only_the_keys_in_the_mask_of_that_provide
     st[key_index(P_ZAI, 7)] = ST_VALID;
     st[key_index(P_NVIDIA, 0)] = ST_VALID;
     // mask 0b1111: keys 0..3
-    assert keys_valid(st[0..80], P_ZAI, 15) == 2;
-    assert keys_checked(st[0..80], P_ZAI, 15) == 4;
+    assert keys_valid(st[0..160], P_ZAI, 15) == 2;
+    assert keys_checked(st[0..160], P_ZAI, 15) == 4;
     // a key outside the mask is not counted, a mask of one key counts one
-    assert keys_valid(st[0..80], P_ZAI, 1) == 1;
-    assert keys_valid(st[0..80], P_ZAI, 2) == 0;
-    assert keys_checked(st[0..80], P_ZAI, 2) == 1;
-    assert keys_valid(st[0..80], P_ZAI, 128) == 1;
-    assert keys_valid(st[0..80], P_ZAI, 0) == 0;
-    assert keys_checked(st[0..80], P_ZAI, 0) == 0;
+    assert keys_valid(st[0..160], P_ZAI, 1) == 1;
+    assert keys_valid(st[0..160], P_ZAI, 2) == 0;
+    assert keys_checked(st[0..160], P_ZAI, 2) == 1;
+    assert keys_valid(st[0..160], P_ZAI, 128) == 1;
+    assert keys_valid(st[0..160], P_ZAI, 0) == 0;
+    assert keys_checked(st[0..160], P_ZAI, 0) == 0;
     // an unchecked (stored) key counts as neither
-    assert keys_checked(st[0..80], P_ZAI, 4 + 16) == 1;
+    assert keys_checked(st[0..160], P_ZAI, 4 + 16) == 1;
     // another provider's statuses stay apart
-    assert keys_valid(st[0..80], P_NVIDIA, 255) == 1;
-    assert keys_checked(st[0..80], P_NVIDIA, 255) == 1;
-    assert keys_checked(st[0..80], P_OPENROUTER, 255) == 0;
+    assert keys_valid(st[0..160], P_NVIDIA, 255) == 1;
+    assert keys_checked(st[0..160], P_NVIDIA, 255) == 1;
+    assert keys_checked(st[0..160], P_OPENROUTER, 255) == 0;
 }
 
 test status_checked_is_true_from_valid_up_and_false_for_missing_and_stored {
@@ -4116,9 +4201,10 @@ test age_text_says_minutes_under_an_hour_and_hours_from_it {
 
 test the_cabinet_counts_accounts_past_max_keys_with_the_same_names {
     var o : [32]u8 = undefined;
-    // keychain_account_n keeps its cap, keychain_account_any names "zai#9" .. "zai#11" that the owner holds
+    // keychain_account_n keeps its cap (16), keychain_account_any names "zai#17" and on for the count
     assert keychain_account_n(P_ZAI, 7, o[0..32]) == 5 and same_bytes(o[0..5], "zai#8");
-    assert keychain_account_n(P_ZAI, 8, o[0..32]) == 0;
+    assert keychain_account_n(P_ZAI, 8, o[0..32]) == 5;
+    assert keychain_account_n(P_ZAI, MAX_KEYS, o[0..32]) == 0;
     var n : usize = keychain_account_any(P_ZAI, 8, o[0..32]);
     assert same_bytes(o[0..n], "zai#9");
     n = keychain_account_any(P_ZAI, 10, o[0..32]);
