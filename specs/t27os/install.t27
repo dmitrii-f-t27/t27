@@ -547,6 +547,10 @@ pub fn plist_text(out : []u8, cap : usize, version : []const u8, version_len : u
     w = put_line(out, cap, w, "<key>NSHighResolutionCapable</key><true/>", 41);
     w = put_line(out, cap, w, "<key>NSMicrophoneUsageDescription</key><string>T27 OS uses the microphone during a call you answer or start.</string>", 117);
     w = put_line(out, cap, w, "<key>NSCameraUsageDescription</key><string>T27 OS uses the camera during a call you answer or start.</string>", 109);
+    // calls listen on the network with no variable set (call_view section 7, owner 2026-10-23): macOS asks the person
+    // once for the local network, with this text, and the friends' announcement is the one Bonjour type it browses
+    w = put_line(out, cap, w, "<key>NSLocalNetworkUsageDescription</key><string>T27 OS listens for calls and messages from your friends on this network.</string>", 130);
+    w = put_line(out, cap, w, "<key>NSBonjourServices</key><array><string>_t27call._udp</string></array>", 73);
     w = put_line(out, cap, w, "<key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>", 88);
     w = put_line(out, cap, w, "</dict>", 7);
     w = put_line(out, cap, w, "</plist>", 8);
@@ -627,6 +631,8 @@ test the_plist_names_the_bundle_the_version_and_the_minimum_system {
     assert(buf_has(out[0..2048], n, "<key>NSHighResolutionCapable</key><true/>", 41));
     assert(buf_has(out[0..2048], n, "<key>NSMicrophoneUsageDescription</key><string>T27 OS uses the microphone during a call you answer or start.</string>", 117));
     assert(buf_has(out[0..2048], n, "<key>NSCameraUsageDescription</key><string>T27 OS uses the camera during a call you answer or start.</string>", 109));
+    assert(buf_has(out[0..2048], n, "<key>NSLocalNetworkUsageDescription</key><string>T27 OS listens for calls and messages from your friends on this network.</string>", 130));
+    assert(buf_has(out[0..2048], n, "<key>NSBonjourServices</key><array><string>_t27call._udp</string></array>", 73));
     assert(buf_has(out[0..2048], n, "<plist version='1.0'>", 21));
     assert(buf_has(out[0..2048], n, "</plist>", 8));
     assert(out[n - 1] == 10);
