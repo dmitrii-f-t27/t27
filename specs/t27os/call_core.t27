@@ -291,6 +291,63 @@ pub fn ck_sas_digits(digest: []const u8, out: []u8) -> u32 {
     return @as(u32, @intCast(code));
 }
 
+// ---------------------------------------------------------------- identity proof (owner, 2026-10-22)
+//
+// Once both sides hold the keys (VERIFY, the code known) each sends one sealed IDENT frame (type 21, same AEAD as
+// CONFIRM): its long-lived identity key (P-256, 65 bytes, the key whose hash is the fingerprint it puts in every
+// header), the DER length (1 byte) and the ECDSA P-256 / SHA-256 signature (8..72 bytes, zero padded to 72) over
+//   tag || role (1 = the caller signs, 0 = the callee) || session (16) || T (32, the hash of INVITE || ANSWER ||
+//   REVEAL, so both ephemeral keys and both nonces) || the signer's own ephemeral key (65) || fp_signer || fp_peer.
+// Someone in the middle runs two handshakes with two different T, so a signature from one cannot be shown in the
+// other. What a proof means for the call (code, no code, refused) is peer_identity.t27 pid_verdict.
+
+pub const CK_T_IDENT : u32 = 21;
+pub const CK_TAG_IDENT : str = "t27os.call.v1.ident\n";
+pub const CK_SIG_MAX : usize = 72;
+pub const CK_SIG_MIN : usize = 8;
+/// The IDENT plaintext: key (65) || DER length (1) || signature padded to 72.
+pub const CK_IDENT_PT : usize = 138;
+pub const CK_IDENT_INPUT_LEN : usize = 154;
+
+/// What the signer signs: tag || role || session || T || own ephemeral key || fp_signer || fp_peer. Its length
+/// (CK_IDENT_INPUT_LEN), 0 on a wrong size.
+pub fn ck_ident_input(caller: bool, session: []const u8, t: []const u8, eph_pub: []const u8, fp_signer: []const u8, fp_peer: []const u8, out: []u8) -> usize {
+    if (session.len != CK_SID or t.len != CK_HASH or eph_pub.len != CK_PUB or fp_signer.len != CK_FP or fp_peer.len != CK_FP) { return 0; }
+    if (out.len < CK_IDENT_INPUT_LEN) { return 0; }
+    var at : usize = ck_put(out, 0, CK_TAG_IDENT);
+    if (caller) { out[at] = 1; } else { out[at] = 0; }
+    at = at + 1;
+    at = ck_put(out, at, session);
+    at = ck_put(out, at, t);
+    at = ck_put(out, at, eph_pub);
+    at = ck_put(out, at, fp_signer);
+    return ck_put(out, at, fp_peer);
+}
+
+/// The IDENT plaintext from a key and a DER signature; CK_IDENT_PT, 0 on a wrong size.
+pub fn ck_ident_build(key: []const u8, sig: []const u8, out: []u8) -> usize {
+    if (key.len != CK_PUB or key[0] != 4 or sig.len < CK_SIG_MIN or sig.len > CK_SIG_MAX or out.len < CK_IDENT_PT) { return 0; }
+    ck_wipe(out[0..CK_IDENT_PT]);
+    ck_put(out, 0, key);
+    out[CK_PUB] = @as(u8, @intCast(sig.len));
+    ck_put(out, CK_PUB + 1, sig);
+    return CK_IDENT_PT;
+}
+
+/// The signature length of an IDENT plaintext (the key is pt[0..65], the signature pt[66..66 + length]); 0 when it is
+/// malformed: a wrong size, a key that is not an uncompressed point, a length outside 8..72, a non-zero pad.
+pub fn ck_ident_sig_len(pt: []const u8) -> usize {
+    if (pt.len != CK_IDENT_PT or pt[0] != 4) { return 0; }
+    const n : usize = @as(usize, pt[CK_PUB]);
+    if (n < CK_SIG_MIN or n > CK_SIG_MAX) { return 0; }
+    var i : usize = CK_PUB + 1 + n;
+    while (i < CK_IDENT_PT) {
+        if (pt[i] != 0) { return 0; }
+        i = i + 1;
+    }
+    return n;
+}
+
 // ---------------------------------------------------------------- attempt limit
 
 /// Failed attempts kept per peer, and the window they count in.
@@ -923,6 +980,73 @@ test the_commitment_binds_session_parties_key_and_nonce {
     assert ck_commit_input(sid[0..15], fi[0..10], fr[0..10], pk[0..65], ni[0..16], o[0..160]) == 0;
     assert ck_commit_input(sid[0..16], fi[0..10], fr[0..10], pk[0..64], ni[0..16], o[0..160]) == 0;
     assert ck_commit_input(sid[0..16], fi[0..10], fr[0..10], pk[0..65], ni[0..16], o[0..137]) == 0;
+}
+
+test the_identity_proof_signs_role_session_transcript_own_key_and_both_parties {
+    var sid : [16]u8 = undefined;
+    var t : [32]u8 = undefined;
+    var pk : [65]u8 = undefined;
+    var fa : [10]u8 = undefined;
+    var fb : [10]u8 = undefined;
+    ck_fill(sid[0..16], 3);
+    ck_fill(t[0..32], 40);
+    ck_fill(pk[0..65], 90);
+    ck_fill(fa[0..10], 30);
+    ck_fill(fb[0..10], 60);
+    var o : [160]u8 = undefined;
+    const n : usize = ck_ident_input(true, sid[0..16], t[0..32], pk[0..65], fa[0..10], fb[0..10], o[0..160]);
+    assert n == CK_IDENT_INPUT_LEN;
+    assert n == 20 + 1 + 16 + 32 + 65 + 10 + 10;
+    assert o[0] == 116 and o[19] == 10;
+    assert o[20] == 1;
+    assert o[21] == sid[0] and o[37] == t[0] and o[69] == pk[0] and o[134] == fa[0] and o[144] == fb[0];
+    // the other role, the parties swapped or another transcript sign other bytes
+    var p : [160]u8 = undefined;
+    assert ck_ident_input(false, sid[0..16], t[0..32], pk[0..65], fa[0..10], fb[0..10], p[0..160]) == n;
+    assert ck_same(o[0..n], p[0..n]) == false;
+    assert ck_ident_input(true, sid[0..16], t[0..32], pk[0..65], fb[0..10], fa[0..10], p[0..160]) == n;
+    assert ck_same(o[0..n], p[0..n]) == false;
+    var t2 : [32]u8 = t;
+    t2[31] = t2[31] ^ 1;
+    assert ck_ident_input(true, sid[0..16], t2[0..32], pk[0..65], fa[0..10], fb[0..10], p[0..160]) == n;
+    assert ck_same(o[0..n], p[0..n]) == false;
+    // wrong sizes and a short buffer
+    assert ck_ident_input(true, sid[0..15], t[0..32], pk[0..65], fa[0..10], fb[0..10], o[0..160]) == 0;
+    assert ck_ident_input(true, sid[0..16], t[0..31], pk[0..65], fa[0..10], fb[0..10], o[0..160]) == 0;
+    assert ck_ident_input(true, sid[0..16], t[0..32], pk[0..65], fa[0..10], fb[0..10], o[0..153]) == 0;
+}
+
+test the_identity_frame_carries_the_key_and_a_signature_of_8_to_72_bytes {
+    var k : [65]u8 = undefined;
+    ck_fill(k[0..65], 9);
+    k[0] = 4;
+    var sig : [72]u8 = undefined;
+    ck_fill(sig[0..72], 200);
+    var pt : [138]u8 = undefined;
+    assert ck_ident_build(k[0..65], sig[0..70], pt[0..138]) == CK_IDENT_PT;
+    assert ck_ident_sig_len(pt[0..138]) == 70;
+    assert ck_same(pt[0..65], k[0..65]);
+    assert pt[66] == sig[0] and pt[135] == sig[69] and pt[136] == 0 and pt[137] == 0;
+    assert ck_ident_build(k[0..65], sig[0..72], pt[0..138]) == CK_IDENT_PT;
+    assert ck_ident_sig_len(pt[0..138]) == 72;
+    // too short or too long a signature, a key that is not a point, a short buffer
+    assert ck_ident_build(k[0..65], sig[0..7], pt[0..138]) == 0;
+    var k2 : [65]u8 = k;
+    k2[0] = 2;
+    assert ck_ident_build(k2[0..65], sig[0..70], pt[0..138]) == 0;
+    assert ck_ident_build(k[0..65], sig[0..70], pt[0..137]) == 0;
+    // a malformed frame reads as no signature
+    assert ck_ident_build(k[0..65], sig[0..70], pt[0..138]) == CK_IDENT_PT;
+    var a : [138]u8 = pt;
+    a[65] = 73;
+    assert ck_ident_sig_len(a[0..138]) == 0;
+    var b : [138]u8 = pt;
+    b[137] = 1;
+    assert ck_ident_sig_len(b[0..138]) == 0;
+    var c : [138]u8 = pt;
+    c[0] = 3;
+    assert ck_ident_sig_len(c[0..138]) == 0;
+    assert ck_ident_sig_len(pt[0..137]) == 0;
 }
 
 test the_transcript_is_the_three_messages_in_order {

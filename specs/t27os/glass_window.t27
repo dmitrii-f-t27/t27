@@ -327,6 +327,9 @@ use t27os::call_session::CS_R_PEER_SILENT;
 use t27os::call_session::CS_R_ERROR;
 use t27os::call_session::CS_R_COMMITMENT;
 use t27os::call_session::CS_R_AUDIO;
+use t27os::call_session::CS_R_IDENTITY;
+use t27os::call_session::CS_R_UNVERIFIED;
+use t27os::call_session::cs_identity;
 use t27os::call_session::CS_ST_SENT;
 use t27os::call_session::CS_ST_ACCEPTED;
 use t27os::call_session::CS_ST_REJ_AEAD;
@@ -412,6 +415,9 @@ use t27os::friends_view::fv_offline_text;
 use t27os::friends_view::fv_inv_char;
 use t27os::friends_view::fv_short_fp;
 use t27os::friends_engine::FE_FP;
+use t27os::friends_engine::FE_ID;
+use t27os::peer_identity::ID_OFF_PUB;
+use t27os::peer_identity::ID_OFF_PRIV;
 use t27os::friends_engine::FE_TONE;
 use t27os::friends_engine::FE_END;
 use t27os::friends_engine::fe_identity;
@@ -9509,6 +9515,8 @@ pub fn cl_reason_text(r: u32) -> str {
     if (r == CS_R_ERROR) { return "The call failed."; }
     if (r == CS_R_COMMITMENT) { return "The other side's key did not match its commitment."; }
     if (r == CS_R_AUDIO) { return "The microphone or the speakers could not start."; }
+    if (r == CS_R_IDENTITY) { return "Refused: this is not the key stored for this friend."; }
+    if (r == CS_R_UNVERIFIED) { return "Not verified yet: call once and compare the code."; }
     return "";
 }
 
@@ -9598,6 +9606,8 @@ pub fn cl_boot(cl: []u8, s: []u8) -> void {
     }
     if (cs_open(s, me[0..10], bind, port, audio)) {
         cl[CL_UP] = 1;
+        // the identity key pair signs this device's part of every call (peer_identity: the key the friends stored)
+        cs_identity(s, cl[FE_ID + ID_OFF_PUB .. FE_ID + ID_OFF_PUB + 65], cl[FE_ID + ID_OFF_PRIV .. FE_ID + ID_OFF_PRIV + 97]);
         // group call test aids (all off by default): GROUPSTAT lines with T27OS_CALL_STATS, T27OS_GROUP_LEAVE_AFTER=<s>
         // (leave that many seconds after the group is whole), T27OS_GROUP_AUTO (the group's further links answer and
         // confirm by themselves, like AUTOTEST does for the first), T27OS_CALL_TONE_AMP=<100..32767>
@@ -10983,6 +10993,8 @@ pub fn ch_boot(cl: []u8, v: []u8, s: []u8, log: []u8, buf: []u8, w: []u64) -> vo
     const port : u64 = chv_chat_port(cl_me_port(cl));
     if (port == 0) { return; }
     if (cs_open(s, cl[FE_FP .. FE_FP + 10], cl_ip(cl, CL_ME_IP), port, CS_AUDIO_NONE) == false) { return; }
+    // a message session opens only for a friend who proves the key stored for it, with this device's key on our side
+    cs_identity(s, cl[FE_ID + ID_OFF_PUB .. FE_ID + ID_OFF_PUB + 65], cl[FE_ID + ID_OFF_PRIV .. FE_ID + ID_OFF_PRIV + 97]);
     cs_set(s, CS_K_CALLING_MS, CH_CALLING_MS);
     cs_set(s, CS_K_SILENT_MS, CH_SILENT_MS);
     v[CHV_UP] = 1;
@@ -12875,7 +12887,7 @@ pub fn main() -> void {
     var clring : bool = false;
     // A. the wheel over the cabinet's friends: trackpad travel gathers here until it makes one row
     var acwheel : f64 = 0.0;
-    var csv : [496512]u8 = undefined;
+    var csv : [499584]u8 = undefined;
     var clw : [10]u64 = undefined;
     var clz : usize = 0;
     while (clz < 74368) {
@@ -12893,7 +12905,7 @@ pub fn main() -> void {
     var chbuf : [1008041]u8 = undefined;
     var chasm : [8064]u8 = undefined;
     var chm : [256]u8 = undefined;
-    var chs : [165504]u8 = undefined;
+    var chs : [166528]u8 = undefined;
     var chw : [8]u64 = undefined;
     clz = 0;
     while (clz < CA_LEN) {
@@ -16634,7 +16646,7 @@ test an_environment_variable_is_cut_at_the_buffer_it_is_read_into {
 
 test every_reason_a_call_ends_with_has_its_line_and_ports_parse {
     var r : u32 = 1;
-    while (r <= 13) {
+    while (r <= 15) {
         assert cl_reason_text(r).len > 0;
         r = r + 1;
     }
@@ -16844,7 +16856,7 @@ test the_footer_update_item_follows_the_friends_offer_before_the_self_updater {
 test ch_the_chat_region_follows_the_call_region_and_mains_buffers_have_their_sizes {
     assert TBO_CH == TBO_CL + CL_CAP and TBO_CH + CHV_CAP == TB_SIZE;
     assert CH_LOG_LEN == cl_bytes(CL_KEEP) and CH_BUF_LEN == CF_MAX + 1;
-    assert CS_LEN == 165504 and CA_LEN == 8064 and CHM_LEN == 256 and CHW_AID < CHW_N;
+    assert CS_LEN == 166528 and CA_LEN == 8064 and CHM_LEN == 256 and CHW_AID < CHW_N;
     // the voice-call byte stands after the cabinet's bytes and before the friends snapshot, inside the folded bytes
     assert CL_NOCAM >= AC_END and CL_NOCAM < FV_BASE and CL_NOCAM < CL_KEY_N;
 }

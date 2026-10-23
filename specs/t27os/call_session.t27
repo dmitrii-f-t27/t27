@@ -62,7 +62,19 @@
 // assembles; cs_vstat(CS_V_*) counts, cs_vlen / s[CS_VLAST ..] give the last complete JPEG, cs_vlive says "video on".
 // cs_video_encoder hands in an encoder block (call_vid.t27 vgq_new): the generator's JPEG is then made on its own
 // queue and the poll only takes it and cuts it into parts.
-// Test identities only (fixed fingerprints in the probe); binding to keysync device keys is the next slice.
+// Identity (owner, 2026-10-22): cs_identity(s, pub, priv) hands in this device's identity key pair (peer_identity's
+// ~/.t27os/identity, the key whose fingerprint was given to cs_open). Once the keys of a call exist, each side sends a
+// sealed IDENT (call_core ck_ident_*): its identity key and an ECDSA signature over the session's transcript. The key
+// stored for the friend in ~/.t27os/friends (v2) is read when the call starts; peer_identity pid_verdict decides:
+// the same key with a signature that verifies -> the session says "match" by itself and no code is shown; no stored
+// key, or no proof -> the people compare the code; a stored key and another key or a bad signature -> FAILED with
+// CS_R_IDENTITY. After a matched code the proven key of a friend is stored, so the next call needs no code. A message
+// session (CS_AUDIO_NONE) has no person to compare a code: it opens only for a trusted friend (else CS_R_UNVERIFIED),
+// and cs_confirm(true) is refused there. A block with no identity handed in calls as before, with the code.
+//   cs_identity(s, pubk, priv) -> bool                 the identity key pair for every link of the slice; false when
+//                                                      the block is not open or the key is not the one of me_fp.
+//   cs_id_state(s) -> u32                              CS_ID_* of the current or last call (unverified, verified,
+//                                                      refused, key stored now).
 // Behaviour checks, not a security audit.
 module T27osCallSession;
 
@@ -100,6 +112,7 @@ use t27os::call_core::CK_EV_BYE;
 use t27os::call_core::CK_EV_TIMEOUT;
 use t27os::call_core::CK_EV_ERROR;
 use t27os::call_core::CK_EV_DISMISS;
+use t27os::call_core::CK_EV_CODE_BAD;
 use t27os::call_core::CK_SAY_MATCH;
 use t27os::call_core::CK_SAY_DIFFER;
 use t27os::call_core::CK_HDR;
@@ -200,6 +213,30 @@ use t27os::call_crypto_probe::EP_SID;
 use t27os::call_crypto_probe::EP_HAVE_CODE;
 use t27os::call_crypto_probe::EP_CODE;
 use t27os::call_crypto_probe::EP_TR;
+use t27os::call_crypto_probe::EP_T;
+use t27os::call_crypto_probe::EP_PUB;
+use t27os::call_crypto_probe::EP_PPUB;
+use t27os::call_core::CK_T_IDENT;
+use t27os::call_core::CK_IDENT_PT;
+use t27os::call_core::CK_IDENT_INPUT_LEN;
+use t27os::call_core::ck_ident_input;
+use t27os::call_core::ck_ident_build;
+use t27os::call_core::ck_ident_sig_len;
+use t27os::keysync_host::ks_sign;
+use t27os::keysync_host::ks_verify;
+use t27os::peer_identity::PID_TRUSTED;
+use t27os::peer_identity::PID_REFUSE;
+use t27os::peer_identity::PIN_NEW;
+use t27os::peer_identity::PIN_SAME;
+use t27os::peer_identity::pid_verdict;
+use t27os::peer_identity::pid_pinnable;
+use t27os::peer_identity::pid_auto_match;
+use t27os::peer_identity::pid_person_may_match;
+use t27os::peer_identity::pid_message_refused;
+use t27os::peer_identity::pid_show_code;
+use t27os::peer_identity_host::ih_fingerprint;
+use t27os::peer_identity_host::ih_pin_get;
+use t27os::peer_identity_host::ih_pin_put;
 use t27os::callback_probe::cbp_get;
 use t27os::callback_probe::cbp_put;
 use t27os::callback_probe::cbp_inc;
@@ -263,7 +300,32 @@ pub const CS_VBUF : usize = 24576;
 pub const CS_VASM : usize = 91776;
 pub const CS_VLAST : usize = 116352;
 pub const CS_VCAM : usize = 140928;
-pub const CS_LEN : usize = 165504;
+/// After the video region: this device's identity and the peer's for the identity proof (1024 bytes, per link). Bytes
+/// CI_ON .. CI_PUB are flags (CI_ON and the key pair stay across calls, the rest is cleared by cs_fresh); then the
+/// own public key, the own private key (wiped by cs_close), the peer's stored key, the key the peer showed, the own
+/// signature of this call and the sealed IDENT kept for resends.
+pub const CS_ID : usize = 165504;
+pub const CS_ID_LEN : usize = 1024;
+pub const CS_LEN : usize = 166528;
+const CI_ON : usize = 0;
+const CI_PIN : usize = 1;
+const CI_GOT : usize = 2;
+const CI_OK : usize = 3;
+const CI_SAME : usize = 4;
+const CI_VERDICT : usize = 5;
+const CI_PERSON : usize = 6;
+const CI_STORED : usize = 7;
+const CI_MSGN : usize = 8;
+const CI_PUB : usize = 16;
+const CI_PRIV : usize = 88;
+const CI_PEER : usize = 192;
+const CI_RX : usize = 264;
+const CI_MSG : usize = 512;
+/// cs_id_state.
+pub const CS_ID_UNVERIFIED : u32 = 0;
+pub const CS_ID_VERIFIED : u32 = 1;
+pub const CS_ID_REFUSED : u32 = 2;
+pub const CS_ID_STORED : u32 = 3;
 
 /// Slots (u64 LE at CS_SLOTS + 8 k). The first ones are also the window's counters through cs_stat.
 pub const CS_ST_SENT : u32 = 0;
@@ -373,6 +435,10 @@ pub const CS_R_PEER_SILENT : u32 = 10;
 pub const CS_R_ERROR : u32 = 11;
 pub const CS_R_COMMITMENT : u32 = 12;
 pub const CS_R_AUDIO : u32 = 13;
+/// The friend's stored identity key and the key it showed differ, or its signature does not verify.
+pub const CS_R_IDENTITY : u32 = 14;
+/// A message session with a peer whose identity is not verified (no stored key, or no own identity).
+pub const CS_R_UNVERIFIED : u32 = 15;
 
 /// Slots of the group region (u64 k at CS_GRP + 8 k). 0..15 belong to one call of one link (cs_fresh clears them),
 /// 16..31 to the link for good, 32.. to the whole group and are used in the block of link 0 only.
@@ -580,6 +646,7 @@ fn cs_sync(s: []u8) -> void {
         cs_p(s, CS_T_STATE, now);
         if (was == CK_ACTIVE) { cs_audio_leave(s); }
         if (st == CK_ACTIVE) {
+            cs_id_store(s);
             cs_p(s, CS_ST_MS_TO_ACTIVE, now - cs_g(s, CS_T_DIAL));
             cs_p(s, CS_T_RX, now);
             if (!cs_audio_enter(s)) {
@@ -593,7 +660,7 @@ fn cs_sync(s: []u8) -> void {
         const ev : u32 = cs_event_for(st);
         if (ev != CS_EV_NONE) { cs_push(s, ev); }
     }
-    if (s[EP_HAVE_CODE] != 0 and cs_g(s, CS_CODE_SAID) == 0 and (st == CK_VERIFY or st == CK_ACTIVE)) {
+    if (s[EP_HAVE_CODE] != 0 and cs_g(s, CS_CODE_SAID) == 0 and (st == CK_VERIFY or st == CK_ACTIVE) and cs_id_show_code(s)) {
         cs_p(s, CS_CODE_SAID, 1);
         cs_push(s, CS_EV_CODE);
     }
@@ -749,6 +816,7 @@ fn cs_fresh(s: []u8) -> void {
     ck_wipe(s[CS_GRP..CS_GRP + 16 * 8]);
     ck_wipe(s[CS_GRP + CS_GBODY..CS_GRP + CS_GRP_LEN]);
     ck_wipe(s[CS_VID..CS_VID + CS_VSLOTS]);
+    cs_id_fresh(s);
     cs_p(s, CS_CODE_SAID, 0);
     cs_p(s, CS_REASON, 0);
     cs_p(s, CS_N1, 0);
@@ -765,6 +833,7 @@ pub fn cs_call(s: []u8, ip: u64, port: u64, peer_fp: []const u8) -> bool {
     cs_fresh(s);
     s[EP_ROLE] = 1;
     ck_put(s, EP_PEER, peer_fp);
+    cs_id_load(s);
     ckh_addr4(s[CS_PADDR..CS_PADDR + 16], ip, port);
     cs_p(s, CS_PEER_IP, ip);
     const n : usize = ckh_invite(s[0..EP_LEN], s[CS_L1..CS_L1 + 256]);
@@ -834,8 +903,18 @@ pub fn cs_decline(s: []u8) -> bool {
     return true;
 }
 
+/// The person's verdict on the code. A "match" is refused in a message session (only a trusted friend opens one, by
+/// itself) and after the peer's identity was refused.
 pub fn cs_confirm(s: []u8, same: bool) -> bool {
     if (!cs_live(s) or ckh_state(s[0..EP_LEN]) != CK_VERIFY or s[EP_HAVE_CODE] == 0 or cs_g(s, CS_N2) != 0) { return false; }
+    if (same and !pid_person_may_match(@as(u32, s[CS_ID + CI_VERDICT]), cs_g(s, CS_MODE) == @as(u64, CS_AUDIO_NONE))) { return false; }
+    if (same) { s[CS_ID + CI_PERSON] = 1; }
+    return cs_say(s, same);
+}
+
+/// Seal and send this side's verdict (the person's, or the session's own "match" for a trusted friend).
+fn cs_say(s: []u8, same: bool) -> bool {
+    if (ckh_state(s[0..EP_LEN]) != CK_VERIFY or s[EP_HAVE_CODE] == 0 or cs_g(s, CS_N2) != 0) { return false; }
     var say : u32 = CK_SAY_DIFFER;
     if (same) { say = CK_SAY_MATCH; }
     const n : usize = ckh_confirm(s[0..EP_LEN], say, s[CS_L2..CS_L2 + 128]);
@@ -874,10 +953,12 @@ pub fn cs_close(s: []u8) -> void {
     cs_audio_stop(s);
     sys_close(cs_fd(s));
     cs_p(s, CS_MAGIC, 0);
+    ck_wipe(s[CS_ID..CS_ID + CS_ID_LEN]);
     var j : usize = 1;
     const nl : usize = cs_links(s);
     while (j < nl) {
         put_u64(s, j * CS_LEN + CS_SLOTS + @as(usize, CS_MAGIC) * 8, 0);
+        ck_wipe(s[j * CS_LEN + CS_ID..j * CS_LEN + CS_ID + CS_ID_LEN]);
         j = j + 1;
     }
 }
@@ -1175,7 +1256,7 @@ fn cs_on_packet(s: []u8, m: []const u8, from: []const u8) -> void {
             ck_put(s, EP_PEER, m[8..18]);
             ck_put(s, CS_PADDR, from[0..16]);
             cs_p(s, CS_PEER_IP, (@as(u64, from[4]) << 24) | (@as(u64, from[5]) << 16) | (@as(u64, from[6]) << 8) | @as(u64, from[7]));
-            if (!ckh_on_invite(ep, m)) { cs_add(s, CS_ST_REJ_OTHER, 1); }
+            if (!ckh_on_invite(ep, m)) { cs_add(s, CS_ST_REJ_OTHER, 1); } else { cs_id_load(s); }
             return;
         }
         // the same INVITE again after I answered: my ANSWER was lost
@@ -1196,6 +1277,8 @@ fn cs_on_packet(s: []u8, m: []const u8, from: []const u8) -> void {
             if (n > 0) {
                 cs_p(s, CS_N1, @as(u64, n));
                 cs_send(s, s[CS_L1..CS_L1 + n]);
+                cs_id_send(s);
+                cs_id_apply(s);
             }
         } else if (cs_g(s, CS_N1) > 0) {
             cs_send(s, s[CS_L1..CS_L1 + @as(usize, @intCast(cs_g(s, CS_N1)))]);
@@ -1205,12 +1288,24 @@ fn cs_on_packet(s: []u8, m: []const u8, from: []const u8) -> void {
     }
     if (typ == CK_T_REVEAL and !caller) {
         if (st == CK_VERIFY and s[EP_HAVE_CODE] == 0) {
-            if (!ckh_on_reveal(ep, m) and ckh_state(ep) == CK_FAILED) { cs_p(s, CS_REASON, @as(u64, CS_R_COMMITMENT)); }
-        } else if (cs_g(s, CS_N2) > 0 and m.len == CK_REVEAL_LEN and ck_same(m, s[EP_TR + CK_INVITE_LEN + CK_ANSWER_LEN..EP_TR + CK_TRANSCRIPT_LEN])) {
-            // the caller has not seen my CONFIRM yet
-            cs_send(s, s[CS_L2..CS_L2 + @as(usize, @intCast(cs_g(s, CS_N2)))]);
-            cs_add(s, CS_ST_RESENDS, 1);
+            if (ckh_on_reveal(ep, m)) {
+                cs_id_send(s);
+                cs_id_apply(s);
+            } else if (ckh_state(ep) == CK_FAILED) {
+                cs_p(s, CS_REASON, @as(u64, CS_R_COMMITMENT));
+            }
+        } else if (m.len == CK_REVEAL_LEN and ck_same(m, s[EP_TR + CK_INVITE_LEN + CK_ANSWER_LEN..EP_TR + CK_TRANSCRIPT_LEN])) {
+            // the caller has not seen my CONFIRM (or my IDENT) yet
+            if (cs_g(s, CS_N2) > 0) {
+                cs_send(s, s[CS_L2..CS_L2 + @as(usize, @intCast(cs_g(s, CS_N2)))]);
+                cs_add(s, CS_ST_RESENDS, 1);
+            }
+            cs_id_send(s);
         }
+        return;
+    }
+    if (typ == CK_T_IDENT) {
+        cs_id_take(s, m);
         return;
     }
     if (typ == CK_T_CONFIRM) {
@@ -1262,6 +1357,136 @@ fn cs_on_packet(s: []u8, m: []const u8, from: []const u8) -> void {
         return;
     }
     cs_add(s, CS_ST_REJ_OTHER, 1);
+}
+
+// ---------------------------------------------------------------- identity proof
+
+pub fn cs_identity(s: []u8, pubk: []const u8, priv: []const u8) -> bool {
+    if (!cs_live(s) or pubk.len != 65 or priv.len != 97 or pubk[0] != 4 or !ck_same(priv[0..65], pubk)) { return false; }
+    var fp : [10]u8 = undefined;
+    if (!ih_fingerprint(pubk, fp[0..10]) or !ck_same(fp[0..10], s[EP_ME..EP_ME + 10])) { return false; }
+    const nl : usize = cs_links(s);
+    var j : usize = 0;
+    while (j < nl) {
+        const a : usize = j * CS_LEN + CS_ID;
+        ck_put(s, a + CI_PUB, pubk);
+        ck_put(s, a + CI_PRIV, priv);
+        s[a + CI_ON] = 1;
+        j = j + 1;
+    }
+    return true;
+}
+
+pub fn cs_id_state(s: []const u8) -> u32 {
+    if (s.len < CS_LEN) { return CS_ID_UNVERIFIED; }
+    if (s[CS_ID + CI_STORED] != 0) { return CS_ID_STORED; }
+    if (s[CS_ID + CI_GOT] == 0) { return CS_ID_UNVERIFIED; }
+    const v : u32 = @as(u32, s[CS_ID + CI_VERDICT]);
+    if (v == PID_TRUSTED) { return CS_ID_VERIFIED; }
+    if (v == PID_REFUSE) { return CS_ID_REFUSED; }
+    return CS_ID_UNVERIFIED;
+}
+
+/// A new call: every flag of the last peer, its stored and shown keys and the sealed IDENT go; CI_ON and the own key
+/// pair stay.
+fn cs_id_fresh(s: []u8) -> void {
+    ck_wipe(s[CS_ID + CI_PIN..CS_ID + CI_PUB]);
+    ck_wipe(s[CS_ID + CI_PEER..CS_ID + CS_ID_LEN]);
+}
+
+/// A new call with a known peer: read the key stored for it (none for a stranger, a v1 file or no identity).
+fn cs_id_load(s: []u8) -> void {
+    if (s[CS_ID + CI_ON] == 0) { return; }
+    if (ih_pin_get(s[EP_PEER..EP_PEER + 10], s[CS_ID + CI_PEER..CS_ID + CI_PEER + 65])) { s[CS_ID + CI_PIN] = 1; }
+}
+
+/// Is the code event due now: not for a trusted or refused peer, not yet while a stored key's proof may still come.
+fn cs_id_show_code(s: []const u8) -> bool {
+    if (cs_g(s, CS_MODE) == @as(u64, CS_AUDIO_NONE)) { return false; }
+    if (s[CS_ID + CI_ON] == 0) { return true; }
+    const waited : u64 = ckh_ms() - cs_g(s, CS_T_STATE);
+    return pid_show_code(s[CS_ID + CI_PIN] != 0, s[CS_ID + CI_GOT] != 0, @as(u32, s[CS_ID + CI_VERDICT]), waited);
+}
+
+/// Send this side's IDENT (signed and sealed once per call, the same bytes on every resend). Only in VERIFY with
+/// the code known and an identity handed in.
+fn cs_id_send(s: []u8) -> void {
+    if (s[CS_ID + CI_ON] == 0 or ckh_state(s[0..EP_LEN]) != CK_VERIFY or s[EP_HAVE_CODE] == 0) { return; }
+    var n : usize = @as(usize, s[CS_ID + CI_MSGN]) | (@as(usize, s[CS_ID + CI_MSGN + 1]) << 8);
+    if (n == 0) {
+        var inp : [160]u8 = undefined;
+        const k : usize = ck_ident_input(ckh_caller(s[0..EP_LEN]), s[EP_SID..EP_SID + 16], s[EP_T..EP_T + 32], s[EP_PUB..EP_PUB + 65], s[EP_ME..EP_ME + 10], s[EP_PEER..EP_PEER + 10], inp[0..160]);
+        if (k != CK_IDENT_INPUT_LEN) { return; }
+        var sig : [128]u8 = undefined;
+        const sl : usize = ks_sign(s[CS_ID + CI_PRIV..CS_ID + CI_PRIV + 97], inp[0..k], sig[0..128]);
+        if (sl == 0 or sl > 72) { return; }
+        var pt : [138]u8 = undefined;
+        if (ck_ident_build(s[CS_ID + CI_PUB..CS_ID + CI_PUB + 65], sig[0..sl], pt[0..138]) != CK_IDENT_PT) { return; }
+        n = ckh_seal(s[0..EP_LEN], CK_T_IDENT, pt[0..138], s[CS_ID + CI_MSG..CS_ID + CS_ID_LEN]);
+        if (n == 0) { return; }
+        s[CS_ID + CI_MSGN] = @as(u8, @intCast(n & 255));
+        s[CS_ID + CI_MSGN + 1] = @as(u8, @intCast(n >> 8));
+    }
+    cs_send(s, s[CS_ID + CI_MSG..CS_ID + CI_MSG + n]);
+}
+
+/// The peer's IDENT: opened (VERIFY only), its key checked against the fingerprint the frames name, its signature
+/// against this call's transcript, its key against the stored one. The first proof that opens decides; resends are
+/// ignored.
+fn cs_id_take(s: []u8, m: []const u8) -> void {
+    if (s[CS_ID + CI_GOT] != 0) { return; }
+    const ep : []u8 = s[0..EP_LEN];
+    var pt : [160]u8 = undefined;
+    const r : i64 = ckh_open(ep, m, pt[0..160]);
+    if (r == -2) { cs_add(s, CS_ST_REJ_STATE, 1); return; }
+    if (r == -3) { cs_add(s, CS_ST_REJ_AEAD, 1); return; }
+    if (r == -4) { cs_add(s, CS_ST_REJ_REPLAY, 1); return; }
+    if (r < 0) { cs_add(s, CS_ST_REJ_OTHER, 1); return; }
+    var ok : bool = false;
+    var same : bool = false;
+    var sl : usize = 0;
+    if (r == @as(i64, @intCast(CK_IDENT_PT))) { sl = ck_ident_sig_len(pt[0..CK_IDENT_PT]); }
+    if (sl > 0) {
+        ck_put(s, CS_ID + CI_RX, pt[0..65]);
+        var fp : [10]u8 = undefined;
+        const fp_ok : bool = ih_fingerprint(pt[0..65], fp[0..10]) and ck_same(fp[0..10], s[EP_PEER..EP_PEER + 10]);
+        var inp : [160]u8 = undefined;
+        const k : usize = ck_ident_input(!ckh_caller(ep), s[EP_SID..EP_SID + 16], s[EP_T..EP_T + 32], s[EP_PPUB..EP_PPUB + 65], s[EP_PEER..EP_PEER + 10], s[EP_ME..EP_ME + 10], inp[0..160]);
+        ok = fp_ok and k == CK_IDENT_INPUT_LEN and ks_verify(pt[0..65], inp[0..k], pt[66..66 + sl]);
+        same = s[CS_ID + CI_PIN] != 0 and ck_same(pt[0..65], s[CS_ID + CI_PEER..CS_ID + CI_PEER + 65]);
+    }
+    ck_wipe(pt[0..160]);
+    s[CS_ID + CI_GOT] = 1;
+    if (ok) { s[CS_ID + CI_OK] = 1; }
+    if (same) { s[CS_ID + CI_SAME] = 1; }
+    s[CS_ID + CI_VERDICT] = @as(u8, @intCast(pid_verdict(s[CS_ID + CI_PIN] != 0, true, ok, same)));
+    cs_id_apply(s);
+}
+
+/// What the identity verdict does to a call in VERIFY: refuse it, refuse an unverified message session, or say
+/// "match" for a trusted friend.
+fn cs_id_apply(s: []u8) -> void {
+    if (ckh_state(s[0..EP_LEN]) != CK_VERIFY or s[EP_HAVE_CODE] == 0) { return; }
+    const v : u32 = @as(u32, s[CS_ID + CI_VERDICT]);
+    const got : bool = s[CS_ID + CI_GOT] != 0;
+    var why : u32 = CS_R_NONE;
+    if (got and v == PID_REFUSE) { why = CS_R_IDENTITY; }
+    if (why == CS_R_NONE and cs_g(s, CS_MODE) == @as(u64, CS_AUDIO_NONE) and pid_message_refused(s[CS_ID + CI_ON] != 0, got, v)) { why = CS_R_UNVERIFIED; }
+    if (why != CS_R_NONE) {
+        cs_send_plain_bye(s);
+        cs_p(s, CS_REASON, @as(u64, why));
+        ckh_go(s[0..EP_LEN], CK_EV_CODE_BAD);
+        return;
+    }
+    if (got and pid_auto_match(v) and cs_g(s, CS_N2) == 0) { cs_say(s, true); }
+}
+
+/// The call became ACTIVE after the person said "match": store the proven key of a friend that had none.
+fn cs_id_store(s: []u8) -> void {
+    if (s[CS_ID + CI_ON] == 0 or s[CS_ID + CI_PERSON] == 0 or s[CS_ID + CI_STORED] != 0) { return; }
+    if (!pid_pinnable(s[CS_ID + CI_PIN] != 0, s[CS_ID + CI_GOT] != 0, s[CS_ID + CI_OK] != 0)) { return; }
+    const r : u32 = ih_pin_put(s[EP_PEER..EP_PEER + 10], s[CS_ID + CI_RX..CS_ID + CI_RX + 65]);
+    if (r == PIN_NEW or r == PIN_SAME) { s[CS_ID + CI_STORED] = 1; }
 }
 
 // ---------------------------------------------------------------- the TONE test waveform
@@ -2139,6 +2364,7 @@ fn cs_link_tick(s: []u8, now: u64) -> void {
             cs_add(s, CS_ST_RESENDS, 1);
         }
         if (st == CK_VERIFY and cs_g(s, CS_N2) > 0) { cs_send(s, s[CS_L2..CS_L2 + @as(usize, @intCast(cs_g(s, CS_N2)))]); }
+        if (st == CK_VERIFY) { cs_id_send(s); }
     }
     const lim : u64 = cs_limit(st, cs_g(s, CS_K_CALLING_MS), cs_g(s, CS_K_RINGING_MS), cs_g(s, CS_K_VERIFY_MS));
     var timed_out : bool = lim > 0 and now - cs_g(s, CS_T_STATE) > lim;
@@ -2202,7 +2428,10 @@ test the_block_holds_its_parts_without_overlap {
     assert CS_AUD + CBP_F_BYTES == CS_GRP;
     assert CS_GRP + CS_GRP_LEN == CS_VID;
     assert CS_VID + CS_VSLOTS == CS_VASM;
-    assert CS_VASM + CS_VBUF == CS_VLAST and CS_VLAST + CS_VBUF == CS_VCAM and CS_VCAM + CS_VBUF == CS_LEN;
+    assert CS_VASM + CS_VBUF == CS_VLAST and CS_VLAST + CS_VBUF == CS_VCAM and CS_VCAM + CS_VBUF == CS_ID;
+    assert CS_ID + CS_ID_LEN == CS_LEN;
+    assert CI_MSGN + 2 <= CI_PUB and CI_PUB + 65 <= CI_PRIV and CI_PRIV + 97 <= CI_PEER and CI_PEER + 65 <= CI_RX;
+    assert CI_RX + 65 <= CI_MSG and CI_MSG + CK_HDR + CK_IDENT_PT + CK_TAG <= CS_ID_LEN;
     assert CS_VBUF >= VC_JPEG_MAX;
     assert VR_LEN + VT_END * 8 <= CS_VSLOTS;
     assert CS_K_VDROP < 64;
@@ -2362,10 +2591,9 @@ test two_members_of_three_never_add_up_past_the_ceiling {
 test a_window_slice_holds_one_to_three_links_and_a_member_survives_the_table {
     var a : [10]u8 = undefined;
     ck_fill_session(a[0..10], 3);
-    var blk : [165504]u8 = undefined;
+    var blk : [166528]u8 = undefined;
     ck_wipe(blk[0..CS_LEN]);
     assert cs_links(blk[0..CS_LEN]) == 1;
-    assert cs_links(blk[0..165504]) == 1;
     // the member table keeps fingerprint, address and port in two words
     gm_put(blk[0..CS_LEN], 0, a[0..10], 3232235787, 47743);
     cgp(blk[0..CS_LEN], gm_slot(0) + 2, 4);
@@ -2402,7 +2630,7 @@ fn cs_t_live(s: []u8) -> void {
 }
 
 test a_block_that_is_not_open_refuses_every_action {
-    var s : [165504]u8 = undefined;
+    var s : [166528]u8 = undefined;
     ck_wipe(s[0..CS_LEN]);
     var fp : [10]u8 = undefined;
     ck_fill_session(fp[0..10], 9);
@@ -2434,7 +2662,7 @@ test a_block_that_is_not_open_refuses_every_action {
 }
 
 test a_message_session_queues_text_and_a_call_refuses_it {
-    var s : [165504]u8 = undefined;
+    var s : [166528]u8 = undefined;
     cs_t_live(s[0..CS_LEN]);
     var pt : [720]u8 = undefined;
     var out : [720]u8 = undefined;
@@ -2475,7 +2703,7 @@ test a_message_session_queues_text_and_a_call_refuses_it {
 }
 
 test the_window_reads_state_peer_code_reason_mute_and_counters {
-    var s : [165504]u8 = undefined;
+    var s : [166528]u8 = undefined;
     cs_t_live(s[0..CS_LEN]);
     var fp : [10]u8 = undefined;
     var out : [10]u8 = undefined;
@@ -2521,7 +2749,7 @@ test the_window_reads_state_peer_code_reason_mute_and_counters {
 }
 
 test the_tunables_take_only_their_ranges_and_never_during_media {
-    var s : [165504]u8 = undefined;
+    var s : [166528]u8 = undefined;
     cs_t_live(s[0..CS_LEN]);
     const z : []u8 = s[0..CS_LEN];
     assert cs_set(z, CS_K_CALLING_MS, 999) == false;
@@ -2551,7 +2779,7 @@ test the_tunables_take_only_their_ranges_and_never_during_media {
 }
 
 test an_action_out_of_its_state_is_refused_and_moves_nothing {
-    var s : [165504]u8 = undefined;
+    var s : [166528]u8 = undefined;
     cs_t_live(s[0..CS_LEN]);
     const z : []u8 = s[0..CS_LEN];
     var fp : [10]u8 = undefined;
@@ -2595,7 +2823,7 @@ test an_action_out_of_its_state_is_refused_and_moves_nothing {
 }
 
 test the_group_and_video_counters_read_their_own_slots {
-    var s : [165504]u8 = undefined;
+    var s : [166528]u8 = undefined;
     cs_t_live(s[0..CS_LEN]);
     const z : []u8 = s[0..CS_LEN];
     assert csg_state(z) == GR_NONE;
@@ -2694,7 +2922,7 @@ test the_parts_of_a_frame_are_cut_as_before_whoever_made_its_jpeg {
 }
 
 test the_encoder_block_is_kept_across_calls_and_refused_without_a_session {
-    var s : [165504]u8 = undefined;
+    var s : [166528]u8 = undefined;
     ck_wipe(s[0..CS_LEN]);
     assert cs_video_encoder(s[0..CS_LEN], 4096) == false and cs_g(s[0..CS_LEN], CS_K_VENC) == 0;
     cs_t_live(s[0..CS_LEN]);
@@ -2708,4 +2936,67 @@ test the_encoder_block_is_kept_across_calls_and_refused_without_a_session {
     // cs_set cannot reach it: it is not a tunable
     assert cs_set(s[0..CS_LEN], CS_K_VENC, 1) == false and cs_g(s[0..CS_LEN], CS_K_VENC) == 4096;
     assert cs_video_encoder(s[0..CS_LEN], 0) and cs_g(s[0..CS_LEN], CS_K_VENC) == 0;
+}
+
+test a_message_session_never_takes_a_persons_match_and_a_refused_peer_takes_none {
+    var s : [166528]u8 = undefined;
+    cs_t_live(s[0..CS_LEN]);
+    s[1] = @as(u8, @intCast(CK_VERIFY));
+    s[EP_HAVE_CODE] = 1;
+    // a message session: "match" from outside is refused (only a trusted friend opens it, by itself)
+    cs_p(s[0..CS_LEN], CS_MODE, @as(u64, CS_AUDIO_NONE));
+    assert cs_confirm(s[0..CS_LEN], true) == false;
+    assert cs_g(s[0..CS_LEN], CS_N2) == 0 and s[CS_ID + CI_PERSON] == 0;
+    // and it shows no code to anyone
+    assert cs_id_show_code(s[0..CS_LEN]) == false;
+    // a call whose peer's identity was refused: "match" is refused too
+    cs_p(s[0..CS_LEN], CS_MODE, @as(u64, CS_AUDIO_TEST));
+    s[CS_ID + CI_GOT] = 1;
+    s[CS_ID + CI_VERDICT] = @as(u8, @intCast(PID_REFUSE));
+    assert cs_confirm(s[0..CS_LEN], true) == false;
+    assert cs_id_state(s[0..CS_LEN]) == CS_ID_REFUSED;
+    // a call with no identity handed in shows the code as before
+    s[CS_ID + CI_GOT] = 0;
+    s[CS_ID + CI_VERDICT] = 0;
+    assert cs_id_show_code(s[0..CS_LEN]);
+    assert cs_id_state(s[0..CS_LEN]) == CS_ID_UNVERIFIED;
+}
+
+test a_new_call_forgets_the_last_peers_proof_and_keeps_the_own_identity {
+    var s : [166528]u8 = undefined;
+    cs_t_live(s[0..CS_LEN]);
+    s[CS_ID + CI_ON] = 1;
+    ck_fill_session(s[CS_ID + CI_PUB..CS_ID + CI_PUB + 65], 4);
+    ck_fill_session(s[CS_ID + CI_PRIV..CS_ID + CI_PRIV + 97], 4);
+    s[CS_ID + CI_PIN] = 1;
+    s[CS_ID + CI_GOT] = 1;
+    s[CS_ID + CI_OK] = 1;
+    s[CS_ID + CI_SAME] = 1;
+    s[CS_ID + CI_VERDICT] = @as(u8, @intCast(PID_TRUSTED));
+    s[CS_ID + CI_STORED] = 1;
+    s[CS_ID + CI_MSGN] = 206;
+    ck_fill_session(s[CS_ID + CI_PEER..CS_ID + CI_PEER + 65], 8);
+    ck_fill_session(s[CS_ID + CI_RX..CS_ID + CI_RX + 65], 8);
+    assert cs_id_state(s[0..CS_LEN]) == CS_ID_STORED;
+    s[CS_ID + CI_STORED] = 0;
+    assert cs_id_state(s[0..CS_LEN]) == CS_ID_VERIFIED;
+    var keep : [97]u8 = undefined;
+    ck_put(keep[0..97], 0, s[CS_ID + CI_PRIV..CS_ID + CI_PRIV + 97]);
+    s[CS_ID + CI_STORED] = 1;
+    cs_id_fresh(s[0..CS_LEN]);
+    assert s[CS_ID + CI_ON] == 1;
+    assert ck_same(s[CS_ID + CI_PRIV..CS_ID + CI_PRIV + 97], keep[0..97]);
+    var z : u32 = 0;
+    var i : usize = CI_PIN;
+    while (i < CI_PUB) {
+        z = z + @as(u32, s[CS_ID + i]);
+        i = i + 1;
+    }
+    i = CI_PEER;
+    while (i < CS_ID_LEN) {
+        z = z + @as(u32, s[CS_ID + i]);
+        i = i + 1;
+    }
+    assert z == 0;
+    assert cs_id_state(s[0..CS_LEN]) == CS_ID_UNVERIFIED;
 }

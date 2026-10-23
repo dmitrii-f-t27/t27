@@ -10,10 +10,10 @@
 //     call port is not shared, so an INVITE that arrives here is a message session by construction). The same
 //     handshake, the same 6-digit code and the same AES-128-GCM channel as a call, with no audio and no video.
 //     chm_tick answers a RINGING session only when the caller is in the friends table and is the friend of this
-//     log, says "match" for the code by itself, and declines anyone else.
-//     NOTE: no person compares the code in a message session, and the call's fingerprints are not yet bound to the
-//     peer_identity keys (call_session.t27: "binding to keysync device keys is the next slice"), so a message
-//     session is encrypted but not authenticated against a man in the middle on the LAN. Behaviour, not an audit.
+//     log, and declines anyone else. It never says "match" itself: no person compares a code in a message session,
+//     so the session opens only when the friend proves the identity key stored for it (call_session cs_identity,
+//     peer_identity pid_verdict TRUSTED); a friend whose key is not stored yet (never compared a code in a call, or
+//     a v1 friends file) is refused with CS_R_UNVERIFIED and the messages wait. Behaviour, not an audit.
 // A window drives one friend's chat with chm_init, chm_addr (the friend's address changed), chm_send, chm_open (the chat
 // is shown: READ) and chm_tick from its main loop; chm_stat reads the counters. One log is open at a time: a session
 // from another friend is left ringing and reported (CHM_E_OTHER, chm_ringing) so the window can open that friend's log
@@ -42,13 +42,11 @@ use t27os::call_session::cs_state;
 use t27os::call_session::cs_peer;
 use t27os::call_session::cs_answer;
 use t27os::call_session::cs_decline;
-use t27os::call_session::cs_confirm;
 use t27os::call_session::cs_hangup;
 use t27os::call_session::cs_dismiss;
 use t27os::call_session::cs_text_send;
 use t27os::call_session::cs_text_take;
 use t27os::call_session::CS_EV_NONE;
-use t27os::call_session::CS_EV_CODE;
 use t27os::call_session::CS_EV_ACTIVE;
 use t27os::call_session::CS_EV_ENDED;
 use t27os::call_session::CS_EV_FAILED;
@@ -284,7 +282,7 @@ fn chm_tx(m: []u8, s: []u8, pt: []const u8) -> bool {
     return false;
 }
 
-/// One pass: run the session (answer a friend, confirm, dismiss an ended one), take every received chat frame,
+/// One pass: run the session (answer a friend, dismiss an ended one), take every received chat frame,
 /// send what is due, send a pending READ, dial when something waits, close when idle. me_fp is this device's
 /// fingerprint, friends the peer_identity table. Returns CHM_E_* bits.
 pub fn chm_tick(m: []u8, s: []u8, log: []u8, asm: []u8, friends: []const u8, me_fp: []const u8, now: u64) -> u32 {
@@ -292,9 +290,7 @@ pub fn chm_tick(m: []u8, s: []u8, log: []u8, asm: []u8, friends: []const u8, me_
     var e : u32 = cs_poll(s);
     var guard : u32 = 0;
     while (e != CS_EV_NONE and guard < 32) {
-        if (e == CS_EV_CODE) {
-            cs_confirm(s, true);
-        } else if (e == CS_EV_ACTIVE) {
+        if (e == CS_EV_ACTIVE) {
             ma(m, CHM_SESSIONS);
             mp(m, M_LAST, now);
             mp(m, M_READ_SENT, 0);

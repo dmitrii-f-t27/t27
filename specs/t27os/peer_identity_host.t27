@@ -4,7 +4,8 @@
 // is a tested fn of peer_identity.t27; this file only moves bytes:
 //   * the identity key pair: a P-256 pair from the OS (keysync_host.ks_gen_pair, Security.framework), fingerprint =
 //     first 10 bytes of CC_SHA256 over the layout peer_identity.fp_input makes;
-//   * ~/.t27os/identity and ~/.t27os/friends: read whole, checked by peer_identity, written atomically (creat of a
+//   * ~/.t27os/identity and ~/.t27os/friends (v1 or v2 read, v2 written, with the friends' stored keys): read whole,
+//     checked by peer_identity, written atomically (creat of a
 //     .tmp with mode 0600, write, fsync, rename), the directory made with mode 0700. A file that is there and does not
 //     check is NEVER written over: the open returns IH_REFUSED and the file stays as found. The private key sits in
 //     the identity file in the clear (the owner's file mode, as ssh keys do); the Keychain route is keysync_host's.
@@ -59,6 +60,15 @@ use t27os::peer_identity::id_check;
 use t27os::peer_identity::id_action;
 use t27os::peer_identity::ft_init;
 use t27os::peer_identity::ft_check;
+use t27os::peer_identity::FT_SHORT;
+use t27os::peer_identity::FT2_LEN;
+use t27os::peer_identity::FK_LEN;
+use t27os::peer_identity::PIN_NEW;
+use t27os::peer_identity::PIN_BAD;
+use t27os::peer_identity::ft2_split;
+use t27os::peer_identity::ft2_join;
+use t27os::peer_identity::fk_get;
+use t27os::peer_identity::fk_pin;
 
 pub const IH_CREATED : u32 = 1;
 pub const IH_LOADED : u32 = 2;
@@ -257,45 +267,122 @@ pub fn ih_identity_open(nick: []const u8, nn: usize, id: []u8, fp: []u8) -> u32 
     return IH_CREATED;
 }
 
-/// Open the friends table the same way: absent -> an empty table is written; damaged -> refused and left alone.
-pub fn ih_friends_open(t: []u8) -> u32 {
-    if (t.len < FT_LEN + 1) { return IH_IOERR; }
-    var home : [IH_PATH_MAX]u8 = undefined;
-    const hn : usize = ih_home(home[0..IH_PATH_MAX]);
-    if (hn == 0) { return IH_IOERR; }
-    var dir : [IH_PATH_MAX]u8 = undefined;
-    var path : [IH_PATH_MAX]u8 = undefined;
-    var tmp : [IH_PATH_MAX]u8 = undefined;
-    ih_path(home[0..IH_PATH_MAX], hn, 0, false, dir[0..IH_PATH_MAX]);
-    ih_path(home[0..IH_PATH_MAX], hn, 2, false, path[0..IH_PATH_MAX]);
-    ih_path(home[0..IH_PATH_MAX], hn, 2, true, tmp[0..IH_PATH_MAX]);
-    const exists : bool = ih_access(path[0..IH_PATH_MAX], 0) == 0;
-    var status : u32 = ID_SHORT;
-    if (exists) {
-        const got : i64 = ih_slurp(path[0..IH_PATH_MAX], t, FT_LEN + 1);
-        if (got >= 0) { status = ft_check(t[0..@as(usize, @intCast(got))]); }
-    }
-    const act : u32 = id_action(exists, status);
-    if (act == ACT_USE) { return IH_LOADED; }
-    if (act != ACT_CREATE) { return IH_REFUSED | (status << 8); }
-    if (ft_init(t) == false) { return IH_IOERR; }
-    if (ih_write_atomic(dir[0..IH_PATH_MAX], path[0..IH_PATH_MAX], tmp[0..IH_PATH_MAX], t, FT_LEN) == false) { return IH_IOERR; }
-    return IH_CREATED;
-}
-
-/// Save a table that checks; false when it does not or the write failed.
-pub fn ih_friends_save(t: []const u8) -> bool {
-    if (t.len < FT_LEN or ft_check(t[0..FT_LEN]) != FT_OK) { return false; }
+/// The paths of the friends file: dir, path, tmp. False when HOME is unusable.
+fn ih_friends_paths(dir: []u8, path: []u8, tmp: []u8) -> bool {
     var home : [IH_PATH_MAX]u8 = undefined;
     const hn : usize = ih_home(home[0..IH_PATH_MAX]);
     if (hn == 0) { return false; }
+    ih_path(home[0..IH_PATH_MAX], hn, 0, false, dir);
+    ih_path(home[0..IH_PATH_MAX], hn, 2, false, path);
+    ih_path(home[0..IH_PATH_MAX], hn, 2, true, tmp);
+    return true;
+}
+
+/// Read the friends file (v1 or v2) into the table t (the v1 shape) and the keys. FT_OK, the peer_identity status of
+/// what is wrong, or FT_SHORT when it cannot be read; exists says whether the file is there.
+fn ih_friends_read(path: []const u8, t: []u8, keys: []u8, exists: []u8) -> u32 {
+    exists[0] = 0;
+    if (ih_access(path, 0) != 0) { return FT_SHORT; }
+    exists[0] = 1;
+    var f : [3509]u8 = undefined;
+    const got : i64 = ih_slurp(path, f[0..3509], FT2_LEN + 1);
+    if (got < 0) { return FT_SHORT; }
+    return ft2_split(f[0..3509], @as(usize, @intCast(got)), t, keys);
+}
+
+/// Write the table and the keys as a v2 file, atomically.
+fn ih_friends_write(dir: []const u8, path: []const u8, tmp: []const u8, t: []const u8, keys: []const u8) -> bool {
+    var f : [3508]u8 = undefined;
+    if (ft2_join(t, keys, f[0..3508]) != FT2_LEN) { return false; }
+    return ih_write_atomic(dir, path, tmp, f[0..3508], FT2_LEN);
+}
+
+/// Open the friends table the same way: absent -> an empty table is written (v2); damaged -> refused and left alone.
+/// A v1 file is read as it is (its friends have no stored key) and stays v1 on disk until the next save. t gets the
+/// table in the v1 shape (FT_LEN bytes).
+pub fn ih_friends_open(t: []u8) -> u32 {
+    if (t.len < FT_LEN + 1) { return IH_IOERR; }
     var dir : [IH_PATH_MAX]u8 = undefined;
     var path : [IH_PATH_MAX]u8 = undefined;
     var tmp : [IH_PATH_MAX]u8 = undefined;
-    ih_path(home[0..IH_PATH_MAX], hn, 0, false, dir[0..IH_PATH_MAX]);
-    ih_path(home[0..IH_PATH_MAX], hn, 2, false, path[0..IH_PATH_MAX]);
-    ih_path(home[0..IH_PATH_MAX], hn, 2, true, tmp[0..IH_PATH_MAX]);
-    return ih_write_atomic(dir[0..IH_PATH_MAX], path[0..IH_PATH_MAX], tmp[0..IH_PATH_MAX], t, FT_LEN);
+    if (!ih_friends_paths(dir[0..IH_PATH_MAX], path[0..IH_PATH_MAX], tmp[0..IH_PATH_MAX])) { return IH_IOERR; }
+    var keys : [2400]u8 = undefined;
+    var ex : [1]u8 = undefined;
+    const status : u32 = ih_friends_read(path[0..IH_PATH_MAX], t, keys[0..FK_LEN], ex[0..1]);
+    const act : u32 = id_action(ex[0] != 0, status);
+    if (act == ACT_USE) { return IH_LOADED; }
+    if (act != ACT_CREATE) { return IH_REFUSED | (status << 8); }
+    if (ft_init(t) == false) { return IH_IOERR; }
+    var i : usize = 0;
+    while (i < FK_LEN) {
+        keys[i] = 0;
+        i = i + 1;
+    }
+    if (!ih_friends_write(dir[0..IH_PATH_MAX], path[0..IH_PATH_MAX], tmp[0..IH_PATH_MAX], t, keys[0..FK_LEN])) { return IH_IOERR; }
+    return IH_CREATED;
+}
+
+/// Save a table that checks, as v2, keeping the keys the file on disk holds for the friends still in the table (a
+/// removed friend loses its key). False when the table does not check or the write failed.
+pub fn ih_friends_save(t: []const u8) -> bool {
+    if (t.len < FT_LEN or ft_check(t[0..FT_LEN]) != FT_OK) { return false; }
+    var dir : [IH_PATH_MAX]u8 = undefined;
+    var path : [IH_PATH_MAX]u8 = undefined;
+    var tmp : [IH_PATH_MAX]u8 = undefined;
+    if (!ih_friends_paths(dir[0..IH_PATH_MAX], path[0..IH_PATH_MAX], tmp[0..IH_PATH_MAX])) { return false; }
+    var old : [1108]u8 = undefined;
+    var keys : [2400]u8 = undefined;
+    var ex : [1]u8 = undefined;
+    if (ih_friends_read(path[0..IH_PATH_MAX], old[0..FT_LEN], keys[0..FK_LEN], ex[0..1]) != FT_OK) {
+        var i : usize = 0;
+        while (i < FK_LEN) {
+            keys[i] = 0;
+            i = i + 1;
+        }
+    }
+    return ih_friends_write(dir[0..IH_PATH_MAX], path[0..IH_PATH_MAX], tmp[0..IH_PATH_MAX], t[0..FT_LEN], keys[0..FK_LEN]);
+}
+
+/// The key stored for this friend into out (65 bytes): true when there is one. A missing, v1 or damaged file has none.
+pub fn ih_pin_get(fp: []const u8, out: []u8) -> bool {
+    if (fp.len < FP_BYTES or out.len < PUB_BYTES) { return false; }
+    var dir : [IH_PATH_MAX]u8 = undefined;
+    var path : [IH_PATH_MAX]u8 = undefined;
+    var tmp : [IH_PATH_MAX]u8 = undefined;
+    if (!ih_friends_paths(dir[0..IH_PATH_MAX], path[0..IH_PATH_MAX], tmp[0..IH_PATH_MAX])) { return false; }
+    var t : [1108]u8 = undefined;
+    var keys : [2400]u8 = undefined;
+    var ex : [1]u8 = undefined;
+    if (ih_friends_read(path[0..IH_PATH_MAX], t[0..FT_LEN], keys[0..FK_LEN], ex[0..1]) != FT_OK) { return false; }
+    return fk_get(keys[0..FK_LEN], fp[0..FP_BYTES], out);
+}
+
+/// Store a friend's proven key: it must hash to fp (else PIN_BAD), fp must be in the friends file (else
+/// PIN_NOT_FRIEND), and a friend keeps its first key (PIN_CONFLICT). The file is written (v2) only on PIN_NEW; a file
+/// that does not check is never written over (PIN_BAD).
+pub fn ih_pin_put(fp: []const u8, pubk: []const u8) -> u32 {
+    if (fp.len < FP_BYTES or pubk.len != PUB_BYTES) { return PIN_BAD; }
+    var calc : [10]u8 = undefined;
+    if (!ih_fingerprint(pubk, calc[0..10])) { return PIN_BAD; }
+    var i : usize = 0;
+    var d : u32 = 0;
+    while (i < FP_BYTES) {
+        d = d | @as(u32, calc[i] ^ fp[i]);
+        i = i + 1;
+    }
+    if (d != 0) { return PIN_BAD; }
+    var dir : [IH_PATH_MAX]u8 = undefined;
+    var path : [IH_PATH_MAX]u8 = undefined;
+    var tmp : [IH_PATH_MAX]u8 = undefined;
+    if (!ih_friends_paths(dir[0..IH_PATH_MAX], path[0..IH_PATH_MAX], tmp[0..IH_PATH_MAX])) { return PIN_BAD; }
+    var t : [1108]u8 = undefined;
+    var keys : [2400]u8 = undefined;
+    var ex : [1]u8 = undefined;
+    if (ih_friends_read(path[0..IH_PATH_MAX], t[0..FT_LEN], keys[0..FK_LEN], ex[0..1]) != FT_OK) { return PIN_BAD; }
+    const r : u32 = fk_pin(t[0..FT_LEN], keys[0..FK_LEN], fp[0..FP_BYTES], pubk);
+    if (r != PIN_NEW) { return r; }
+    if (!ih_friends_write(dir[0..IH_PATH_MAX], path[0..IH_PATH_MAX], tmp[0..IH_PATH_MAX], t[0..FT_LEN], keys[0..FK_LEN])) { return PIN_BAD; }
+    return PIN_NEW;
 }
 
 // ---------------------------------------------------------------- mDNS state blocks

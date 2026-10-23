@@ -378,8 +378,8 @@ fn csp_inproc() -> bool {
     var fa : [10]u8 = undefined;
     var fb : [10]u8 = undefined;
     ckh_fps(fa[0..10], fb[0..10]);
-    var a : [165504]u8 = undefined;
-    var b : [165504]u8 = undefined;
+    var a : [166528]u8 = undefined;
+    var b : [166528]u8 = undefined;
     var da : [128]u8 = undefined;
     var db : [128]u8 = undefined;
     ck_wipe(da[0..D_LEN]);
@@ -540,7 +540,7 @@ fn csp_side(caller: bool) -> bool {
         ckh_num("peer port: ", peer_port);
     }
     ckh_num("frames: ", frames);
-    var s : [165504]u8 = undefined;
+    var s : [166528]u8 = undefined;
     var d : [128]u8 = undefined;
     ck_wipe(d[0..D_LEN]);
     dp(d[0..D_LEN], 0, what);

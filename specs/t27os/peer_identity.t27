@@ -23,7 +23,22 @@
 //   No file -> make a new identity. A file that does not check -> NEVER overwrite it, return the error (it may be the
 //   only copy of a key). The private half is the OS's X9.63 export; the file is mode 0600 and written atomically.
 // FRIENDS FILE  ~/.t27os/friends, 1108 bytes: magic "T27OSFR\n" (8) | version u32 LE (4) | count u32 LE (4) | 32 rows
-//   of fingerprint (10) + nick (24, zero padded) | CRC-32 of all before (4). The table in memory IS this buffer.
+//   of fingerprint (10) + nick (24, zero padded) | CRC-32 of all before (4). This is version 1; the table in memory
+//   keeps this shape (version 1, FT_LEN) for every caller.
+// FRIENDS FILE v2  3508 bytes: the v1 bytes up to the rows (version u32 = 2) | 32 key slots of fingerprint (10) + P-256
+//   public key (65, uncompressed, first byte 0x04), an all-zero slot is empty | CRC-32 of all before (4). A key is kept
+//   only for a friend in the rows, only one key per friend, and only after the host checked that the key hashes to
+//   that fingerprint (the fingerprint stays derived from the key). The keys live in memory as their own FK_LEN buffer;
+//   ft2_split reads a v1 or v2 file into the table and the keys (a v1 file: no keys, every friend "unverified"),
+//   ft2_join writes v2 and drops the key of a friend who is no longer in the rows. The first save writes v2.
+// IDENTITY IN A SESSION  after the keys of a call or a message session exist, each side sends its identity key and an
+//   ECDSA P-256 signature over the session's transcript (call_core ck_ident_input: the session id, the transcript hash
+//   that holds both ephemeral keys and nonces, the signer's own ephemeral key and both fingerprints). The host checks
+//   that the key hashes to the fingerprint the frames name and that the signature verifies; pid_verdict says what
+//   follows: TRUSTED (a stored key, the same key, a proof that checks: no code needed), CODE (the people compare the
+//   6 digits: a stranger, a friend with no stored key, no proof yet), REFUSE (a stored key and another key or a proof
+//   that does not check: the session ends). A message session has no person to compare the code, so only TRUSTED
+//   opens it. After the people said "match" in a call, a proven key of a friend is stored (pid_pinnable).
 // mDNS  service type _t27call._udp, TXT strings "fp=<invite>", "port=<udp port>", "nick=<nick>" (length-prefixed).
 
 module T27osPeerIdentity;
@@ -492,6 +507,229 @@ pub fn ft_fp_at(t: []const u8, i: usize, out: []u8) -> bool {
         out[k] = t[ft_row_at(i) + k];
         k = k + 1;
     }
+    return true;
+}
+
+// ---------------------------------------------------------------- friends file v2: the friends' public keys
+
+pub const FT2_VERSION : u32 = 2;
+pub const FK_SLOT : usize = 75;
+pub const FK_LEN : usize = 2400;
+pub const FT2_OFF_KEYS : usize = 1104;
+pub const FT2_OFF_CRC : usize = 3504;
+pub const FT2_LEN : usize = 3508;
+/// A v2 key slot that is malformed, names someone who is not a friend, or names a friend twice.
+pub const FT_KEY_BAD : u32 = 8;
+
+pub const PIN_NEW : u32 = 0;
+pub const PIN_SAME : u32 = 1;
+/// Another key is already stored for this friend: it is never replaced (remove and add the friend again).
+pub const PIN_CONFLICT : u32 = 2;
+pub const PIN_NOT_FRIEND : u32 = 3;
+pub const PIN_BAD : u32 = 4;
+pub const PIN_FULL : u32 = 5;
+
+fn fk_used(keys: []const u8, i: usize) -> bool {
+    var d : u32 = 0;
+    var k : usize = 0;
+    while (k < FK_SLOT) {
+        d = d | @as(u32, keys[i * FK_SLOT + k]);
+        k = k + 1;
+    }
+    return d != 0;
+}
+
+/// The slot holding the key of this fingerprint, FT_MAX when there is none.
+pub fn fk_find(keys: []const u8, fp: []const u8) -> usize {
+    if (keys.len < FK_LEN or fp.len < FP_BYTES) { return FT_MAX; }
+    var i : usize = 0;
+    while (i < FT_MAX) {
+        if (fk_used(keys, i) and same_range(keys, i * FK_SLOT, fp, 0, FP_BYTES)) { return i; }
+        i = i + 1;
+    }
+    return FT_MAX;
+}
+
+/// The stored key of this friend into out (65 bytes). False when none is stored.
+pub fn fk_get(keys: []const u8, fp: []const u8, out: []u8) -> bool {
+    const i : usize = fk_find(keys, fp);
+    if (i == FT_MAX or out.len < PUB_BYTES) { return false; }
+    var k : usize = 0;
+    while (k < PUB_BYTES) {
+        out[k] = keys[i * FK_SLOT + FP_BYTES + k];
+        k = k + 1;
+    }
+    return true;
+}
+
+/// How many keys are stored.
+pub fn fk_count(keys: []const u8) -> u32 {
+    if (keys.len < FK_LEN) { return 0; }
+    var n : u32 = 0;
+    var i : usize = 0;
+    while (i < FT_MAX) {
+        if (fk_used(keys, i)) { n = n + 1; }
+        i = i + 1;
+    }
+    return n;
+}
+
+/// Store the key of a friend. The caller (the host) has checked that the key hashes to fp. A friend keeps the first
+/// key stored for it: another key is PIN_CONFLICT and changes nothing.
+pub fn fk_pin(t: []const u8, keys: []u8, fp: []const u8, pubk: []const u8) -> u32 {
+    if (keys.len < FK_LEN or fp.len < FP_BYTES or pubk.len != PUB_BYTES or pubk[0] != 4) { return PIN_BAD; }
+    if (ft_find(t, fp) == FT_MAX) { return PIN_NOT_FRIEND; }
+    const at : usize = fk_find(keys, fp);
+    if (at != FT_MAX) {
+        if (same_range(keys, at * FK_SLOT + FP_BYTES, pubk, 0, PUB_BYTES)) { return PIN_SAME; }
+        return PIN_CONFLICT;
+    }
+    var i : usize = 0;
+    while (i < FT_MAX and fk_used(keys, i)) { i = i + 1; }
+    if (i == FT_MAX) { return PIN_FULL; }
+    var k : usize = 0;
+    while (k < FP_BYTES) {
+        keys[i * FK_SLOT + k] = fp[k];
+        k = k + 1;
+    }
+    k = 0;
+    while (k < PUB_BYTES) {
+        keys[i * FK_SLOT + FP_BYTES + k] = pubk[k];
+        k = k + 1;
+    }
+    return PIN_NEW;
+}
+
+/// Read a friends file of n bytes (v1 or v2) into the table t (v1 shape, sealed) and the keys. FT_OK or the first
+/// thing wrong; a v1 file gives empty keys.
+pub fn ft2_split(f: []const u8, n: usize, t: []u8, keys: []u8) -> u32 {
+    if (n > f.len or t.len < FT_LEN or keys.len < FK_LEN) { return FT_SHORT; }
+    zero_fill(keys[0..FK_LEN]);
+    if (n == FT_LEN) {
+        const r : u32 = ft_check(f[0..FT_LEN]);
+        if (r != FT_OK) { return r; }
+        var i : usize = 0;
+        while (i < FT_LEN) {
+            t[i] = f[i];
+            i = i + 1;
+        }
+        return FT_OK;
+    }
+    if (n < FT2_LEN) { return FT_SHORT; }
+    if (n > FT2_LEN) { return FT_LONG; }
+    if (magic_ok(f, 1) == false) { return FT_MAGIC; }
+    if (get_u32le(f, 8) != FT2_VERSION) { return FT_VERSION_BAD; }
+    if (get_u32le(f, 12) > 32) { return FT_COUNT; }
+    if (get_u32le(f, FT2_OFF_CRC) != crc32(f, FT2_OFF_CRC)) { return FT_CRC; }
+    zero_fill(t[0..FT_LEN]);
+    var i : usize = 0;
+    while (i < FT_OFF_CRC) {
+        t[i] = f[i];
+        i = i + 1;
+    }
+    put_u32le(t, 8, 1);
+    ft_seal(t);
+    const r : u32 = ft_check(t[0..FT_LEN]);
+    if (r != FT_OK) { return r; }
+    i = 0;
+    while (i < FT_MAX) {
+        const at : usize = FT2_OFF_KEYS + i * FK_SLOT;
+        if (fk_used(f[FT2_OFF_KEYS..FT2_OFF_CRC], i)) {
+            if (f[at + FP_BYTES] != 4) { return FT_KEY_BAD; }
+            if (ft_find(t, f[at..at + FP_BYTES]) == FT_MAX) { return FT_KEY_BAD; }
+            if (fk_find(keys, f[at..at + FP_BYTES]) != FT_MAX) { return FT_KEY_BAD; }
+            var k : usize = 0;
+            while (k < FK_SLOT) {
+                keys[i * FK_SLOT + k] = f[at + k];
+                k = k + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return FT_OK;
+}
+
+/// Lay out the v2 file from a table that checks and the keys: the key of a fingerprint that is not in the rows is
+/// left out, so is a second key for the same friend. FT2_LEN, or 0 on a bad table or size.
+pub fn ft2_join(t: []const u8, keys: []const u8, out: []u8) -> usize {
+    if (t.len < FT_LEN or keys.len < FK_LEN or out.len < FT2_LEN) { return 0; }
+    if (ft_check(t[0..FT_LEN]) != FT_OK) { return 0; }
+    zero_fill(out[0..FT2_LEN]);
+    var i : usize = 0;
+    while (i < FT_OFF_CRC) {
+        out[i] = t[i];
+        i = i + 1;
+    }
+    put_u32le(out, 8, FT2_VERSION);
+    var j : usize = 0;
+    i = 0;
+    while (i < FT_MAX) {
+        const a : usize = i * FK_SLOT;
+        if (fk_used(keys, i) and keys[a + FP_BYTES] == 4 and ft_find(t, keys[a..a + FP_BYTES]) != FT_MAX) {
+            if (fk_find(out[FT2_OFF_KEYS..FT2_OFF_CRC], keys[a..a + FP_BYTES]) == FT_MAX) {
+                var k : usize = 0;
+                while (k < FK_SLOT) {
+                    out[FT2_OFF_KEYS + j * FK_SLOT + k] = keys[a + k];
+                    k = k + 1;
+                }
+                j = j + 1;
+            }
+        }
+        i = i + 1;
+    }
+    put_u32le(out, FT2_OFF_CRC, crc32(out, FT2_OFF_CRC));
+    return FT2_LEN;
+}
+
+// ---------------------------------------------------------------- identity in a session: who may skip the code
+
+pub const PID_CODE : u32 = 0;
+pub const PID_TRUSTED : u32 = 1;
+pub const PID_REFUSE : u32 = 2;
+
+/// pinned: a key is stored for this peer. got: the peer's identity proof arrived. proof_ok: its key hashes to the
+/// fingerprint the frames name and its signature over this session's transcript verifies. same_key: that key is the
+/// stored one.
+pub fn pid_verdict(pinned: bool, got: bool, proof_ok: bool, same_key: bool) -> u32 {
+    if (got == false) { return PID_CODE; }
+    if (pinned) {
+        if (proof_ok and same_key) { return PID_TRUSTED; }
+        return PID_REFUSE;
+    }
+    return PID_CODE;
+}
+
+/// After the people compared the code and said "match": store the proven key of a peer that had none.
+pub fn pid_pinnable(pinned: bool, got: bool, proof_ok: bool) -> bool {
+    return pinned == false and got and proof_ok;
+}
+
+/// The session says "match" by itself only for a peer it already trusts.
+pub fn pid_auto_match(verdict: u32) -> bool { return verdict == PID_TRUSTED; }
+
+/// May a person's "match" count? Not after a refusal, and never in a message session (no person compares a code
+/// there: only TRUSTED opens it).
+pub fn pid_person_may_match(verdict: u32, message_session: bool) -> bool {
+    return verdict != PID_REFUSE and message_session == false;
+}
+
+/// A message session ends at once when the peer's proof arrived and does not make it TRUSTED, or when this device
+/// has no identity to prove itself with.
+pub fn pid_message_refused(have_own: bool, got: bool, verdict: u32) -> bool {
+    if (have_own == false) { return true; }
+    return got and verdict != PID_TRUSTED;
+}
+
+/// How long a session waits for the proof of a peer whose key is stored before it shows the code after all.
+pub const PID_WAIT_MS : u64 = 1500;
+
+/// Show the 6 digits now? Never for a refused peer. A trusted peer needs no code; it is shown only when the call is
+/// still not open after 2 * PID_WAIT_MS (the other side does not know this key yet and its person compares). A peer
+/// with a stored key whose proof has not come gets PID_WAIT_MS before the code is shown. Anyone else at once.
+pub fn pid_show_code(pinned: bool, got: bool, verdict: u32, waited_ms: u64) -> bool {
+    if (verdict == PID_REFUSE) { return false; }
+    if (got and verdict == PID_TRUSTED) { return waited_ms >= 2 * PID_WAIT_MS; }
+    if (pinned and got == false) { return waited_ms >= PID_WAIT_MS; }
     return true;
 }
 
@@ -1064,4 +1302,288 @@ test the_nick_is_printable_ascii_up_to_24 {
     }
     assert nick_ok(long[0..25], 24);
     assert nick_ok(long[0..25], 25) == false;
+}
+
+// ---------------------------------------------------------------- tests: friends file v2 and identity in a session
+
+/// A fake public key: 0x04 then bytes from a seed (the pure spec cannot make or hash keys; the host does).
+fn t_key(seed: u8, out: []u8) -> void {
+    out[0] = 4;
+    var i : usize = 1;
+    while (i < 65) {
+        out[i] = @as(u8, @intCast((@as(u32, seed) * 31 + @as(u32, @intCast(i)) * 7) & 255));
+        i = i + 1;
+    }
+}
+
+/// A table with two friends: T_FP and [50..59].
+fn t_two(t: []u8) -> void {
+    ft_init(t);
+    var own : [10]u8 = [9, 9, 9, 9, 9, 9, 9, 9, 9, 9];
+    var s : [25]u8 = undefined;
+    t_invite(s[0..25]);
+    ft_add(t, s[0..25], own[0..10]);
+    var fp : [10]u8 = [50, 51, 52, 53, 54, 55, 56, 57, 58, 59];
+    invite_make(fp[0..10], s[0..25]);
+    ft_add(t, s[0..25], own[0..10]);
+}
+
+test a_friend_keeps_the_first_key_stored_for_it {
+    var t : [1108]u8 = undefined;
+    t_two(t[0..1108]);
+    var keys : [2400]u8 = undefined;
+    zero_fill(keys[0..2400]);
+    var ka : [65]u8 = undefined;
+    var kb : [65]u8 = undefined;
+    t_key(1, ka[0..65]);
+    t_key(2, kb[0..65]);
+    assert fk_count(keys[0..2400]) == 0;
+    assert fk_pin(t[0..1108], keys[0..2400], T_FP[0..10], ka[0..65]) == PIN_NEW;
+    assert fk_pin(t[0..1108], keys[0..2400], T_FP[0..10], ka[0..65]) == PIN_SAME;
+    // someone else's key for the same friend is never stored over the first one
+    assert fk_pin(t[0..1108], keys[0..2400], T_FP[0..10], kb[0..65]) == PIN_CONFLICT;
+    var got : [65]u8 = undefined;
+    assert fk_get(keys[0..2400], T_FP[0..10], got[0..65]);
+    assert same_bytes(got[0..65], ka[0..65]);
+    assert fk_count(keys[0..2400]) == 1;
+    // a stranger gets no key; a key that is not an uncompressed point or not 65 bytes is refused
+    var stranger : [10]u8 = [7, 7, 7, 7, 7, 7, 7, 7, 7, 7];
+    assert fk_pin(t[0..1108], keys[0..2400], stranger[0..10], kb[0..65]) == PIN_NOT_FRIEND;
+    var bad : [65]u8 = kb;
+    bad[0] = 2;
+    var mid : [10]u8 = [50, 51, 52, 53, 54, 55, 56, 57, 58, 59];
+    assert fk_pin(t[0..1108], keys[0..2400], mid[0..10], bad[0..65]) == PIN_BAD;
+    assert fk_pin(t[0..1108], keys[0..2400], mid[0..10], kb[0..64]) == PIN_BAD;
+    assert fk_get(keys[0..2400], mid[0..10], got[0..65]) == false;
+    assert fk_get(keys[0..2400], stranger[0..10], got[0..65]) == false;
+}
+
+test the_v2_file_round_trips_the_rows_and_the_keys {
+    var t : [1108]u8 = undefined;
+    t_two(t[0..1108]);
+    const nick : [3]u8 = [66, 111, 98];
+    ft_set_nick(t[0..1108], T_FP[0..10], nick[0..3], 3);
+    var keys : [2400]u8 = undefined;
+    zero_fill(keys[0..2400]);
+    var ka : [65]u8 = undefined;
+    t_key(1, ka[0..65]);
+    assert fk_pin(t[0..1108], keys[0..2400], T_FP[0..10], ka[0..65]) == PIN_NEW;
+    var f : [3508]u8 = undefined;
+    assert ft2_join(t[0..1108], keys[0..2400], f[0..3508]) == FT2_LEN;
+    assert get_u32le(f[0..3508], 8) == 2;
+    var t2 : [1108]u8 = undefined;
+    var k2 : [2400]u8 = undefined;
+    assert ft2_split(f[0..3508], 3508, t2[0..1108], k2[0..2400]) == FT_OK;
+    // the table in memory is the v1 shape, byte for byte the one saved
+    assert same_bytes(t2[0..1108], t[0..1108]);
+    assert ft_check(t2[0..1108]) == FT_OK;
+    var got : [65]u8 = undefined;
+    assert fk_get(k2[0..2400], T_FP[0..10], got[0..65]);
+    assert same_bytes(got[0..65], ka[0..65]);
+    var mid : [10]u8 = [50, 51, 52, 53, 54, 55, 56, 57, 58, 59];
+    assert fk_get(k2[0..2400], mid[0..10], got[0..65]) == false;
+}
+
+test an_old_v1_file_reads_with_every_friend_unverified {
+    var t : [1108]u8 = undefined;
+    t_two(t[0..1108]);
+    // a v1 file on disk is the table itself
+    var t2 : [1108]u8 = undefined;
+    var k2 : [2400]u8 = undefined;
+    var i : usize = 0;
+    while (i < 2400) {
+        k2[i] = 255;
+        i = i + 1;
+    }
+    assert ft2_split(t[0..1108], 1108, t2[0..1108], k2[0..2400]) == FT_OK;
+    assert same_bytes(t2[0..1108], t[0..1108]);
+    assert ft_count(t2[0..1108]) == 2;
+    assert fk_count(k2[0..2400]) == 0;
+    var got : [65]u8 = undefined;
+    assert fk_get(k2[0..2400], T_FP[0..10], got[0..65]) == false;
+    // no stored key: even a proof that checks asks for the code
+    assert pid_verdict(false, true, true, false) == PID_CODE;
+    // a damaged v1 file is still refused, and a v1 file with version 2 written in it is not a v2 file
+    var bad : [1108]u8 = t;
+    bad[40] = bad[40] ^ 1;
+    assert ft2_split(bad[0..1108], 1108, t2[0..1108], k2[0..2400]) == FT_CRC;
+    // the next save is v2 and still has no keys
+    var f : [3508]u8 = undefined;
+    assert ft2_join(t[0..1108], k2[0..2400], f[0..3508]) == FT2_LEN;
+    assert ft2_split(f[0..3508], 3508, t2[0..1108], k2[0..2400]) == FT_OK;
+    assert fk_count(k2[0..2400]) == 0;
+}
+
+test every_flipped_byte_of_a_v2_file_is_refused_and_wrong_sizes_too {
+    var t : [1108]u8 = undefined;
+    t_two(t[0..1108]);
+    var keys : [2400]u8 = undefined;
+    zero_fill(keys[0..2400]);
+    var ka : [65]u8 = undefined;
+    t_key(3, ka[0..65]);
+    fk_pin(t[0..1108], keys[0..2400], T_FP[0..10], ka[0..65]);
+    var f : [3508]u8 = undefined;
+    ft2_join(t[0..1108], keys[0..2400], f[0..3508]);
+    var t2 : [1108]u8 = undefined;
+    var k2 : [2400]u8 = undefined;
+    var pos : usize = 0;
+    var refused : u32 = 0;
+    while (pos < 3508) {
+        var g : [3508]u8 = f;
+        g[pos] = g[pos] ^ 1;
+        if (ft2_split(g[0..3508], 3508, t2[0..1108], k2[0..2400]) != FT_OK) { refused = refused + 1; }
+        pos = pos + 1;
+    }
+    assert refused == 3508;
+    assert ft2_split(f[0..3508], 3507, t2[0..1108], k2[0..2400]) == FT_SHORT;
+    assert ft2_split(f[0..3508], 2000, t2[0..1108], k2[0..2400]) == FT_SHORT;
+    assert ft2_split(f[0..3508], 100, t2[0..1108], k2[0..2400]) == FT_SHORT;
+}
+
+test a_v2_key_slot_for_a_stranger_or_twice_for_a_friend_is_refused {
+    var t : [1108]u8 = undefined;
+    t_two(t[0..1108]);
+    var keys : [2400]u8 = undefined;
+    zero_fill(keys[0..2400]);
+    var ka : [65]u8 = undefined;
+    t_key(4, ka[0..65]);
+    fk_pin(t[0..1108], keys[0..2400], T_FP[0..10], ka[0..65]);
+    var f : [3508]u8 = undefined;
+    ft2_join(t[0..1108], keys[0..2400], f[0..3508]);
+    var t2 : [1108]u8 = undefined;
+    var k2 : [2400]u8 = undefined;
+    // slot 1 names a stranger (sealed again, so only the key rule can refuse it)
+    var a : [3508]u8 = f;
+    var i : usize = 0;
+    while (i < 75) {
+        a[FT2_OFF_KEYS + 75 + i] = f[FT2_OFF_KEYS + i];
+        i = i + 1;
+    }
+    a[FT2_OFF_KEYS + 75] = 7;
+    put_u32le(a[0..3508], FT2_OFF_CRC, crc32(a[0..3508], FT2_OFF_CRC));
+    assert ft2_split(a[0..3508], 3508, t2[0..1108], k2[0..2400]) == FT_KEY_BAD;
+    // slot 1 repeats the friend of slot 0
+    var b : [3508]u8 = a;
+    b[FT2_OFF_KEYS + 75] = f[FT2_OFF_KEYS];
+    put_u32le(b[0..3508], FT2_OFF_CRC, crc32(b[0..3508], FT2_OFF_CRC));
+    assert ft2_split(b[0..3508], 3508, t2[0..1108], k2[0..2400]) == FT_KEY_BAD;
+    // a key that is not an uncompressed point
+    var c : [3508]u8 = f;
+    c[FT2_OFF_KEYS + 10] = 3;
+    put_u32le(c[0..3508], FT2_OFF_CRC, crc32(c[0..3508], FT2_OFF_CRC));
+    assert ft2_split(c[0..3508], 3508, t2[0..1108], k2[0..2400]) == FT_KEY_BAD;
+}
+
+test removing_a_friend_drops_its_key_at_the_next_save {
+    var t : [1108]u8 = undefined;
+    t_two(t[0..1108]);
+    var keys : [2400]u8 = undefined;
+    zero_fill(keys[0..2400]);
+    var ka : [65]u8 = undefined;
+    var kb : [65]u8 = undefined;
+    t_key(5, ka[0..65]);
+    t_key(6, kb[0..65]);
+    var mid : [10]u8 = [50, 51, 52, 53, 54, 55, 56, 57, 58, 59];
+    fk_pin(t[0..1108], keys[0..2400], T_FP[0..10], ka[0..65]);
+    fk_pin(t[0..1108], keys[0..2400], mid[0..10], kb[0..65]);
+    assert ft_remove(t[0..1108], T_FP[0..10]);
+    var f : [3508]u8 = undefined;
+    assert ft2_join(t[0..1108], keys[0..2400], f[0..3508]) == FT2_LEN;
+    var t2 : [1108]u8 = undefined;
+    var k2 : [2400]u8 = undefined;
+    assert ft2_split(f[0..3508], 3508, t2[0..1108], k2[0..2400]) == FT_OK;
+    assert fk_count(k2[0..2400]) == 1;
+    var got : [65]u8 = undefined;
+    assert fk_get(k2[0..2400], T_FP[0..10], got[0..65]) == false;
+    assert fk_get(k2[0..2400], mid[0..10], got[0..65]);
+    assert same_bytes(got[0..65], kb[0..65]);
+}
+
+test the_identity_verdict_for_every_proof {
+    // no stored key: the code, whatever the proof says
+    assert pid_verdict(false, false, false, false) == PID_CODE;
+    assert pid_verdict(false, true, true, false) == PID_CODE;
+    assert pid_verdict(false, true, false, false) == PID_CODE;
+    // a stored key and the same key with a signature that verifies: no code
+    assert pid_verdict(true, true, true, true) == PID_TRUSTED;
+    // a stored key and no proof (yet, or an old build): the code
+    assert pid_verdict(true, false, false, false) == PID_CODE;
+    // a stored key and a signature that does not verify: refused
+    assert pid_verdict(true, true, false, true) == PID_REFUSE;
+    // a stored key and another key, even one with a good signature of its own: refused
+    assert pid_verdict(true, true, true, false) == PID_REFUSE;
+    assert pid_verdict(true, true, false, false) == PID_REFUSE;
+}
+
+test a_stranger_needs_the_code_and_a_message_session_needs_trust {
+    const v : u32 = pid_verdict(false, true, true, false);
+    assert pid_auto_match(v) == false;
+    assert pid_person_may_match(v, false);
+    assert pid_person_may_match(v, true) == false;
+    assert pid_message_refused(true, true, v);
+    // no proof yet in a message session: wait (the session times out if none comes)
+    assert pid_message_refused(true, false, PID_CODE) == false;
+    // no own identity: nothing to prove, the message session ends
+    assert pid_message_refused(false, false, PID_CODE);
+    // trusted: the message session opens by itself
+    assert pid_message_refused(true, true, PID_TRUSTED) == false;
+    assert pid_auto_match(PID_TRUSTED);
+    // refused: nobody's "match" counts
+    assert pid_person_may_match(PID_REFUSE, false) == false;
+    assert pid_auto_match(PID_REFUSE) == false;
+}
+
+test after_a_matched_code_the_key_is_stored_and_the_next_session_skips_the_code {
+    var t : [1108]u8 = undefined;
+    t_two(t[0..1108]);
+    var keys : [2400]u8 = undefined;
+    zero_fill(keys[0..2400]);
+    var ka : [65]u8 = undefined;
+    t_key(8, ka[0..65]);
+    // session 1: a friend from a v1 file, its proof checks; the people compare the code and say match
+    var stored : [65]u8 = undefined;
+    var pinned : bool = fk_get(keys[0..2400], T_FP[0..10], stored[0..65]);
+    var v : u32 = pid_verdict(pinned, true, true, false);
+    assert v == PID_CODE;
+    assert pid_person_may_match(v, false);
+    assert pid_pinnable(pinned, true, true);
+    assert fk_pin(t[0..1108], keys[0..2400], T_FP[0..10], ka[0..65]) == PIN_NEW;
+    var f : [3508]u8 = undefined;
+    ft2_join(t[0..1108], keys[0..2400], f[0..3508]);
+    // the app starts again: the file is read back
+    var t2 : [1108]u8 = undefined;
+    var k2 : [2400]u8 = undefined;
+    assert ft2_split(f[0..3508], 3508, t2[0..1108], k2[0..2400]) == FT_OK;
+    // session 2: the same key with a good signature -> no code, the session says match by itself
+    pinned = fk_get(k2[0..2400], T_FP[0..10], stored[0..65]);
+    assert pinned;
+    v = pid_verdict(pinned, true, true, same_bytes(stored[0..65], ka[0..65]));
+    assert v == PID_TRUSTED;
+    assert pid_auto_match(v);
+    assert pid_pinnable(pinned, true, true) == false;
+    assert pid_message_refused(true, true, v) == false;
+    // session 3: someone in the middle shows its own key with its own good signature -> refused, nothing stored
+    var km : [65]u8 = undefined;
+    t_key(9, km[0..65]);
+    v = pid_verdict(pinned, true, true, same_bytes(stored[0..65], km[0..65]));
+    assert v == PID_REFUSE;
+    assert fk_pin(t2[0..1108], k2[0..2400], T_FP[0..10], km[0..65]) == PIN_CONFLICT;
+    // a proof that does not verify stores nothing
+    assert pid_pinnable(false, true, false) == false;
+    assert pid_pinnable(false, false, false) == false;
+}
+
+test the_code_is_shown_to_strangers_at_once_and_to_a_trusted_friend_only_if_the_other_side_still_waits {
+    // a stranger or a friend with no stored key: at once
+    assert pid_show_code(false, false, PID_CODE, 0);
+    assert pid_show_code(false, true, PID_CODE, 0);
+    // a stored key: wait for its proof first
+    assert pid_show_code(true, false, PID_CODE, 0) == false;
+    assert pid_show_code(true, false, PID_CODE, PID_WAIT_MS - 1) == false;
+    assert pid_show_code(true, false, PID_CODE, PID_WAIT_MS);
+    // trusted: no code, unless the other side is still comparing much later
+    assert pid_show_code(true, true, PID_TRUSTED, PID_WAIT_MS) == false;
+    assert pid_show_code(true, true, PID_TRUSTED, 2 * PID_WAIT_MS);
+    // refused: never
+    assert pid_show_code(true, true, PID_REFUSE, 100000) == false;
 }

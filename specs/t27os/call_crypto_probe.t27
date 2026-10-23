@@ -77,6 +77,7 @@ use t27os::call_core::ck_send_seq;
 use t27os::call_core::ck_expand_input;
 use t27os::call_core::ck_tx_dir;
 use t27os::call_core::ck_nonce;
+use t27os::call_core::CK_T_IDENT;
 use t27os::call_core::CK_IDLE;
 use t27os::call_core::CK_CALLING;
 use t27os::call_core::CK_RINGING;
@@ -436,7 +437,7 @@ fn ckh_on_reveal(ep: []u8, m: []const u8) -> bool {
 /// allow this type, the counter is spent or the OS refuses.
 fn ckh_seal(ep: []u8, typ: u32, pt: []const u8, out: []u8) -> usize {
     const s : u32 = ckh_state(ep);
-    if (typ == CK_T_CONFIRM) {
+    if (typ == CK_T_CONFIRM or typ == CK_T_IDENT) {
         if (s != CK_VERIFY or ep[EP_HAVE_CODE] == 0) { return 0; }
     } else if (typ == CK_T_MEDIA or typ == CK_T_BYE or typ == CK_T_VIDEO or typ == CK_T_TEXT) {
         if (!ck_media_ok(s)) { return 0; }
@@ -466,7 +467,7 @@ fn ckh_open(ep: []u8, m: []const u8, out: []u8) -> i64 {
     const typ : u32 = ck_hdr_type(m);
     if (!ck_hdr_admit(m, ep[EP_ME..EP_ME + 10], ep[EP_PEER..EP_PEER + 10], ep[EP_SID..EP_SID + 16])) { return -1; }
     const s : u32 = ckh_state(ep);
-    if (typ == CK_T_CONFIRM) {
+    if (typ == CK_T_CONFIRM or typ == CK_T_IDENT) {
         if (s != CK_VERIFY or ep[EP_HAVE_CODE] == 0) { return -2; }
     } else if (typ == CK_T_MEDIA or typ == CK_T_BYE or typ == CK_T_VIDEO or typ == CK_T_TEXT) {
         if (!ck_media_ok(s)) { return -2; }

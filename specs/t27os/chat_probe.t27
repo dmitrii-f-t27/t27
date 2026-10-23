@@ -253,11 +253,11 @@ fn chp_side(is_a: bool) -> bool {
     const lr : u32 = chh_load(ffp[0..10], log[0..cl_bytes(CL_KEEP)], CL_KEEP, buf[0..CF_MAX + 1]);
     ok = ckh_check("a fresh log (no chat file yet)", lr == CHH_NEW and cl_count(log[0..cl_bytes(CL_KEEP)]) == 0) and ok;
     const L : usize = cl_bytes(CL_KEEP);
-    var s : [165504]u8 = undefined;
+    var s : [166528]u8 = undefined;
     const port : u64 = ckh_env_num("CHP_PORT", 47801);
-    if (!cs_open(s[0..165504], fp[0..10], 2130706433, port, CS_AUDIO_NONE)) { return ckh_check("message session opened", false); }
-    cs_set(s[0..165504], CS_K_CALLING_MS, CH_CALLING_MS);
-    cs_set(s[0..165504], CS_K_SILENT_MS, CH_SILENT_MS);
+    if (!cs_open(s[0..166528], fp[0..10], 2130706433, port, CS_AUDIO_NONE)) { return ckh_check("message session opened", false); }
+    cs_set(s[0..166528], CS_K_CALLING_MS, CH_CALLING_MS);
+    cs_set(s[0..166528], CS_K_SILENT_MS, CH_SILENT_MS);
     var m : [256]u8 = undefined;
     chm_init(m[0..CHM_LEN], ffp[0..10], ckh_env_num("CHP_PEER", 2130706433), ckh_env_num("CHP_PEER_PORT", 47802));
     chm_set(m[0..CHM_LEN], CHM_K_DROP, ckh_env_num("CHP_DROP", 0));
@@ -281,7 +281,7 @@ fn chp_side(is_a: bool) -> bool {
     while (!done) {
         const now : u64 = ckh_ms();
         if (now - t0 > limit) { break; }
-        const ev : u32 = chm_tick(m[0..CHM_LEN], s[0..165504], log[0..L], asm[0..CA_LEN], friends[0..FT_LEN], fp[0..10], now);
+        const ev : u32 = chm_tick(m[0..CHM_LEN], s[0..166528], log[0..L], asm[0..CA_LEN], friends[0..FT_LEN], fp[0..10], now);
         if ((ev & CHM_E_DIRTY) != 0) { dirty = true; }
         if (dirty and now - last_save >= 1000) {
             chh_save(log[0..L], buf[0..CF_MAX]);
@@ -304,12 +304,12 @@ fn chp_side(is_a: bool) -> bool {
         }
         if (t_all == 0 and opened and chp_count_dir(log[0..L], CH_DIR_OUT) == nout and chp_all_out(log[0..L], CH_S_READ)) { t_all = now - t0; }
         // finished: everything here and read both ways, and the session closed (idle) or ended by the peer
-        if (t_all != 0 and chm_stat(m[0..CHM_LEN], CHM_SESSIONS) > 0 and cs_state(s[0..165504]) == CK_IDLE) { done = true; }
+        if (t_all != 0 and chm_stat(m[0..CHM_LEN], CHM_SESSIONS) > 0 and cs_state(s[0..166528]) == CK_IDLE) { done = true; }
         ckh_usleep(2000);
     }
     const total : u64 = ckh_ms() - t0;
     chh_save(log[0..L], buf[0..CF_MAX]);
-    cs_close(s[0..165504]);
+    cs_close(s[0..166528]);
     ok = ckh_check("finished before the time limit", done) and ok;
     ok = ckh_check("every outgoing message delivered and read", chp_all_out(log[0..L], CH_S_READ) and chp_count_dir(log[0..L], CH_DIR_OUT) == nout) and ok;
     ok = ckh_check("unread counted before the chat was opened", unread_seen == nin) and ok;
@@ -344,9 +344,9 @@ fn chp_side(is_a: bool) -> bool {
     chp_stat("sessions", chm_stat(m[0..CHM_LEN], CHM_SESSIONS));
     chp_stat("dials", chm_stat(m[0..CHM_LEN], CHM_DIALS));
     chp_stat("idle_closed_here", chm_stat(m[0..CHM_LEN], CHM_IDLE_CLOSED));
-    chp_stat("sealed_text_tx", cs_stat(s[0..165504], CS_ST_TEXT_TX));
-    chp_stat("sealed_text_rx", cs_stat(s[0..165504], CS_ST_TEXT_RX));
-    chp_stat("replays_refused", cs_stat(s[0..165504], CS_ST_REJ_REPLAY));
+    chp_stat("sealed_text_tx", cs_stat(s[0..166528], CS_ST_TEXT_TX));
+    chp_stat("sealed_text_rx", cs_stat(s[0..166528], CS_ST_TEXT_RX));
+    chp_stat("replays_refused", cs_stat(s[0..166528], CS_ST_REJ_REPLAY));
     chp_stat("ms_to_all_read", t_all);
     chp_stat("ms_total", total);
     return ok;
