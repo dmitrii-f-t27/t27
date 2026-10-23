@@ -45,6 +45,8 @@ use t27os::nvidia_direct::NV_A_MODEL;
 use t27os::nvidia_direct::nv_model_for;
 use t27os::nvidia_direct::nv_status_line;
 use t27os::nvidia_direct::nv_live;
+use t27os::nvidia_direct::nv_answered;
+use t27os::nvidia_direct::nv_ok_keys;
 use t27os::nvidia_direct::nv_dead;
 use t27os::nvidia_direct::NV_S_N;
 use t27os::session_store::put_bytes;
@@ -194,12 +196,13 @@ pub fn nv_save(st: []const u32) -> bool {
 
 /// The KEYS panel's NVIDIA line into out (96 bytes); its length.
 pub fn nv_line(out: []u8) -> usize {
-    var cnt : [3]u32 = undefined;
-    return nv_line_counts(out, cnt[0..3]);
+    var cnt : [5]u32 = undefined;
+    return nv_line_counts(out, cnt[0..5]);
 }
 
 /// nv_line, and the numbers the line was made from (the same read, no other): cnt[0] = 1 when the key list was
-/// readable, cnt[1] = the keys, cnt[2] = the live ones (nv_live). The ACCOUNT cabinet's KEYS line shows them.
+/// readable, cnt[1] = the keys, cnt[2] = the live ones (nv_live), and with five words cnt[3] = the keys that
+/// answered (nv_answered), cnt[4] = those known to work (nv_ok_keys). The ACCOUNT cabinet's KEYS line shows them.
 pub fn nv_line_counts(out: []u8, cnt: []u32) -> usize {
     var st : [964]u32 = undefined;
     var json : [8192]u8 = undefined;
@@ -211,6 +214,10 @@ pub fn nv_line_counts(out: []u8, cnt: []u32) -> usize {
     if (listed == NV_BAD) { cnt[0] = 0; }
     cnt[1] = st[NV_S_N];
     cnt[2] = nv_live(st[0..964]);
+    if (cnt.len >= 5) {
+        cnt[3] = nv_answered(st[0..964]);
+        cnt[4] = nv_ok_keys(st[0..964]);
+    }
     return nv_status_line(st[0..964], listed, NV_MODEL_DEFAULT, out);
 }
 

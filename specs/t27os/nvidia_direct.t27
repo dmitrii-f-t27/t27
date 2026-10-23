@@ -333,6 +333,29 @@ pub fn nv_live(st: []const u32) -> u32 {
     return c;
 }
 
+/// How many keys have answered a request at least once (2xx, 429, 401/403), by the saved counters: the keys the
+/// rotation has checked. A key never sent, or sent only into no answer, 404 or 5xx, is not counted.
+pub fn nv_answered(st: []const u32) -> u32 {
+    var c : u32 = 0;
+    var i : u32 = 0;
+    while (i < st[NV_S_N]) {
+        if (nv_dead(st, i) or st[nv_at(i, NV_K_OK)] > 0 or st[nv_at(i, NV_K_RATE)] > 0 or st[nv_at(i, NV_K_AUTH)] > 0) { c = c + 1; }
+        i = i + 1;
+    }
+    return c;
+}
+
+/// How many keys are not dead and have answered 2xx at least once: the keys known to work.
+pub fn nv_ok_keys(st: []const u32) -> u32 {
+    var c : u32 = 0;
+    var i : u32 = 0;
+    while (i < st[NV_S_N]) {
+        if (nv_dead(st, i) == false and st[nv_at(i, NV_K_OK)] > 0) { c = c + 1; }
+        i = i + 1;
+    }
+    return c;
+}
+
 /// The first live key at `from` or after it, wrapping round; NV_NONE when none is live.
 fn nv_live_from(st: []const u32, from: u32) -> u32 {
     const n : u32 = st[NV_S_N];
@@ -824,6 +847,28 @@ test model_network_and_server_errors_move_no_key {
     assert st[NV_S_CUR] == 1 and nv_live(st[0..964]) == 2;
     assert nv_on_status(st[0..964], 5, 401) == NV_A_NONE;
     assert nv_on_status(st[0..964], 1, 200) == NV_A_OK and st[nv_at(1, NV_K_OK)] == 1;
+}
+
+test answered_counts_only_keys_that_answered_and_ok_only_live_ones_with_a_2xx {
+    var st : [964]u32 = undefined;
+    nv_state_init(st[0..964], 4, 1);
+    // never sent: nothing checked, nothing known to work, yet all four are "live" (not dead)
+    assert nv_answered(st[0..964]) == 0 and nv_ok_keys(st[0..964]) == 0 and nv_live(st[0..964]) == 4;
+    // no answer, 404 and 5xx check nothing
+    assert nv_on_status(st[0..964], 0, 0) == NV_A_NET;
+    assert nv_on_status(st[0..964], 0, 404) == NV_A_MODEL;
+    assert nv_on_status(st[0..964], 0, 503) == NV_A_RETRY;
+    assert nv_answered(st[0..964]) == 0;
+    // 200, 429 and 401 each check one key; only the 200 one is ok
+    assert nv_on_status(st[0..964], 0, 200) == NV_A_OK;
+    assert nv_on_status(st[0..964], 1, 429) == NV_A_NEXT;
+    assert nv_on_status(st[0..964], 2, 401) == NV_A_DEAD;
+    assert nv_answered(st[0..964]) == 3 and nv_ok_keys(st[0..964]) == 1;
+    // a key that once answered 200 and then 401 is dead, not ok
+    assert nv_on_status(st[0..964], 0, 403) == NV_A_DEAD;
+    assert nv_answered(st[0..964]) == 3 and nv_ok_keys(st[0..964]) == 0;
+    nv_state_init(st[0..964], 0, 0);
+    assert nv_answered(st[0..964]) == 0 and nv_ok_keys(st[0..964]) == 0;
 }
 
 test the_dead_model_is_never_sent {

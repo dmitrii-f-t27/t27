@@ -1235,6 +1235,7 @@ use t27os::account_view::ac_kp_provider;
 use t27os::account_view::ac_fit;
 use t27os::account_view::ac_fr_label;
 use t27os::account_view::ac_nv_pack;
+use t27os::account_view::ac_nv_pack_checked;
 use t27os::call_video::cv_probe_run;
 use t27os::call_video::cvl_new;
 use t27os::call_video::cvl_start;
@@ -6468,8 +6469,8 @@ fn keys_refresh(stored: []u32, mask: []u8, mlen: []u32) -> void {
 /// most). It rides at 544 of the KEYS mask buffer, after the Devices view.
 fn nv_mask_fill(m: []u8) -> void {
     var line : [96]u8 = undefined;
-    var cnt : [3]u32 = undefined;
-    var n : usize = nv_line_counts(line[0..96], cnt[0..3]);
+    var cnt : [5]u32 = undefined;
+    var n : usize = nv_line_counts(line[0..96], cnt[0..5]);
     if (n > m.len - 1) { n = m.len - 1; }
     // the counts the ACCOUNT cabinet shows ride after the text (account_view.t27 ac_nv_pack)
     if (m.len >= AC_NV_REGION and n > AC_NV_TEXT_MAX) { n = AC_NV_TEXT_MAX; }
@@ -6480,6 +6481,7 @@ fn nv_mask_fill(m: []u8) -> void {
         i = i + 1;
     }
     ac_nv_pack(m, cnt[0] == 1, cnt[1], cnt[2]);
+    ac_nv_pack_checked(m, cnt[3], cnt[4]);
 }
 
 /// Hand the server every stored key with its number (keys_host push_keys), then take back each key whose last
@@ -12561,22 +12563,22 @@ fn draw_account_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, 
     draw_bytes(c, kit, "KEYS", 4, x, t + AC_KEYS_LABEL_Y, 9.5, 0.0, false);
     cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
     draw_bytes(c, kit, "values are never shown", 22, x + 36.0, t + AC_KEYS_LABEL_Y, 9.0, 0.0, false);
-    var kf : [8]u64 = undefined;
+    var kf : [9]u64 = undefined;
     var kl : [128]u8 = undefined;
     var kp : usize = 0;
     while (kp < AC_KP_N) {
         const kb : f64 = ac_keys_row_base(t, kp);
-        ac_kp_facts(kp, kstored, khl, nvm, now, kf[0..8]);
-        ac_kp_seen(kp, kf[0..8], ac_kc_total(nvm, kp));
+        ac_kp_facts(kp, kstored, khl, nvm, now, kf[0..9]);
+        ac_kp_seen(kp, kf[0..9], ac_kc_total(nvm, kp));
         const kst0 : u32 = @as(u32, @intCast(kf[6]));
         const kdim : bool = ac_kp_dim(kst0);
-        draw_cl_dot(c, kit, x, kb - 7.0, ac_kp_live_kh(kp, kf[0..8], kh, now));
+        draw_cl_dot(c, kit, x, kb - 7.0, ac_kp_live_kh(kp, kf[0..9], kh, now));
         var kink : f64 = lv(kit, THV_TEXT_WHITE);
         if (kdim) { kink = lv(kit, THV_MUTED_WHITE); }
         cg_fill_rgba(c, 1.0, 1.0, 1.0, kink);
         const kname : []const u8 = ac_kp_name(kp);
         draw_bytes(c, kit, kname, kname.len, x + AC_KEYS_NAME_DX, kb, 9.5, WEIGHT_SEMIBOLD, false);
-        const kn : usize = ac_kp_line_kh(kp, kf[0..8], kh, now, kl[0..128]);
+        const kn : usize = ac_kp_line_kh(kp, kf[0..9], kh, now, kl[0..128]);
         cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
         if (kdim) { cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE)); }
         draw_ac_fit(c, kit, kl[0..128], kn, x + AC_KEYS_VALUE_DX, kb, AC_KEYS_SIZE, 0.0, false, right);
