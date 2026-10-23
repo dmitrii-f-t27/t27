@@ -22,6 +22,7 @@ use t27os::nvidia_direct::nv_pick;
 use t27os::nvidia_direct::NV_BAD;
 use t27os::nvidia_direct::NV_NONE;
 use t27os::keys_probe::probe_get;
+use t27os::keys_probe::probe_get_body;
 use t27os::keys_health::KH_ROWS;
 use t27os::keys_health::KH_TABLE;
 use t27os::keys_health::KH_TEXT_CAP;
@@ -34,6 +35,8 @@ use t27os::keys_health::KH_L_USE;
 use t27os::keys_health::KH_L_QUARANTINE;
 use t27os::keys_health::kh_clear;
 use t27os::keys_health::kh_set;
+use t27os::keys_health::kh_set_limits;
+use t27os::keys_health::kh_or_parse;
 use t27os::keys_health::kh_text;
 use t27os::keys_health::kh_parse;
 use t27os::keys_health::kh_load_plan;
@@ -243,7 +246,7 @@ fn kh_row_key(row: usize, key: []u8) -> usize {
 /// the file; then counted done.
 pub fn khq_job(st: u64) -> u64 {
     if (!khq_ok(st)) { return 0; }
-    var recs : [32]u64 = undefined;
+    var recs : [56]u64 = undefined;
     kh_file_load(recs[0..KH_TABLE]);
     var row : usize = 0;
     while (row < KH_ROWS) {
@@ -257,9 +260,26 @@ pub fn khq_job(st: u64) -> u64 {
             const un : usize = kh_url(row, ub[0..96]);
             const at : u64 = khq_time(0);
             const t0 : f64 = khq_clock();
-            const code : u32 = probe_get(ub[0..un], hv[0..hl], KH_TIMEOUT_S);
+            // OpenRouter's key answer carries the limit and what is left (its body is read, parsed, wiped); the other
+            // two providers say nothing of money, so their check is the status alone
+            var body : [1024]u8 = undefined;
+            var got : [1]u64 = undefined;
+            var code : u32 = 0;
+            if (row == 0) {
+                code = probe_get_body(ub[0..un], hv[0..hl], KH_TIMEOUT_S, body[0..1024], got[0..1]);
+            } else {
+                got[0] = 0;
+                code = probe_get(ub[0..un], hv[0..hl], KH_TIMEOUT_S);
+            }
             const ms : u64 = kh_ms(t0, khq_clock());
             kh_set(recs[0..KH_TABLE], row, @as(u64, code), at, ms, 1);
+            if (row == 0 and code >= 200 and code < 300 and got[0] > 0) {
+                var lim : [3]u64 = undefined;
+                if (kh_or_parse(body[0..@as(usize, got[0])], lim[0..3])) {
+                    kh_set_limits(recs[0..KH_TABLE], row, lim[0], lim[1], lim[2]);
+                }
+            }
+            kh_wipe(body[0..1024]);
         }
         kh_wipe(hv[0..300]);
         row = row + 1;

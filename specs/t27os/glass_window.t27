@@ -14596,7 +14596,7 @@ fn draw(c: u64, kit: [48]u64, frame: u32, state: u32, hov: u32, ma: f64, shown: 
             } else if (gv_new_shown(tb[TBO_GV .. TBO_GV + GV_CAP])) {
                 draw_gv_new(c, kit, sw, sh, mx, my, tb[TBO_CL .. TBO_CL + CL_CAP], tb[TBO_GV .. TBO_GV + GV_CAP]);
             } else {
-                draw_account_panel(c, kit, sw, sh, mx, my, tb[TBO_CL .. TBO_CL + CL_CAP], tb[TBO_PF .. TBO_PF + PF_CAP], tg[TPG_PF_IMG], tb[TBO_CH .. TBO_CH + CHV_CAP], kstored, kopen[KHL_AT .. KHL_AT + 144], kmask[544..640], kmask[640..736], now, tb[TBO_IV .. TBO_IV + IV_LEN], ckh_ms(), tb[TBO_BK .. TB_SIZE]);
+                draw_account_panel(c, kit, sw, sh, mx, my, tb[TBO_CL .. TBO_CL + CL_CAP], tb[TBO_PF .. TBO_PF + PF_CAP], tg[TPG_PF_IMG], tb[TBO_CH .. TBO_CH + CHV_CAP], kstored, kopen[KHL_AT .. KHL_AT + 144], kmask[544..640], kmask[640..808], now, tb[TBO_IV .. TBO_IV + IV_LEN], ckh_ms(), tb[TBO_BK .. TB_SIZE]);
             }
         } else {
             draw_call_panel(c, kit, sw, sh, mx, my, tb[TBO_CL .. TBO_CL + CL_CAP], tb[TBO_CH .. TBO_CH + CHV_CAP]);
@@ -16175,7 +16175,7 @@ pub fn main() -> void {
     // and the next number it reads), and the editors found
     var kyp : bool = false;
     var kstored : [9]u32 = undefined;
-    var kmask : [736]u8 = undefined;
+    var kmask : [808]u8 = undefined;
     var kmlen : [9]u32 = undefined;
     var kst : [144]u32 = undefined;
     var kfail : [9]u32 = undefined;
@@ -16223,17 +16223,17 @@ pub fn main() -> void {
     // the cabinet reads the key tables once in a run if KEYS was not opened before it (kseen)
     var kseen : bool = false;
     // KH. the cabinet's key health (keys_health.t27): the last check of each row from ~/.t27os/keyshealth.t27, packed in
-    // kmask[640..736] for draw(); the check runs on a queue of its own (khq), at most once an hour, while the cabinet is
+    // kmask[640..808] for draw(); the check runs on a queue of its own (khq), at most once an hour, while the cabinet is
     // open; khdone is the job count the table was last read at, khkick when this run last queued one
     var khq : u64 = khq_new();
-    var khrecs : [32]u64 = undefined;
+    var khrecs : [56]u64 = undefined;
     var khz : usize = 0;
-    while (khz < 32) {
+    while (khz < 56) {
         khrecs[khz] = 0;
         khz = khz + 1;
     }
     khz = 640;
-    while (khz < 736) {
+    while (khz < 808) {
         kmask[khz] = 0;
         khz = khz + 1;
     }
@@ -18333,12 +18333,12 @@ pub fn main() -> void {
         if (clp and tbv[TBO_CL + AC_ON] != 0) {
             const khd : u64 = khq_done(khq);
             if (khread == false or khd != khdone) {
-                kh_file_load(khrecs[0..32]);
-                kh_pack(khrecs[0..32], kmask[640..736]);
+                kh_file_load(khrecs[0..56]);
+                kh_pack(khrecs[0..56], kmask[640..808]);
                 khread = true;
                 khdone = khd;
             }
-            if (oncall == false and kh_due(khrecs[0..32], now, khq_busy(khq), khkick)) {
+            if (oncall == false and kh_due(khrecs[0..56], now, khq_busy(khq), khkick)) {
                 if (khq_kick(khq)) { khkick = now; }
             }
         }
@@ -18384,7 +18384,7 @@ pub fn main() -> void {
                 fks = fks + 1;
             }
             fks = 544;
-            while (fks < 736) {
+            while (fks < 808) {
                 fk = fg_mix(fk, @as(u64, kmask[fks]));
                 fks = fks + 1;
             }
@@ -18488,14 +18488,14 @@ pub fn main() -> void {
         }
         msg_flag(tx_cls, s_quiet, true);
         if (fdraw and narrow) {
-            draw(cc, kit, frame, state, hov, ma, shown, task, space, sp, ss, cur, collapsed, mx, my, z, sw, sh, ws, full, qp, ring, evn, now, sug, god, glow, dk, dp, darmed, doff, dgo, walking, dlabel, tst[0..32], tcells[0..960000], topen, tcur, kyp, kstored[0..9], kmask[0..736], kmlen[0..9], kst[0..144], kfail[0..9], kopen[0..153], kedit, kbuf[0..256], klen, karm, kbusy, kemask, kewhy, ktpick, hs, cons2, dcv[0..512], gal[0..49152], gt[0..2560], evd, @as(u64, evp) + @as(u64, evn2) * 1048576 + @as(u64, evpr) * 1099511627776, pbuf[0..4160], sst[0..560], tgv[0..256], tbv[0..TB_ALL]);
+            draw(cc, kit, frame, state, hov, ma, shown, task, space, sp, ss, cur, collapsed, mx, my, z, sw, sh, ws, full, qp, ring, evn, now, sug, god, glow, dk, dp, darmed, doff, dgo, walking, dlabel, tst[0..32], tcells[0..960000], topen, tcur, kyp, kstored[0..9], kmask[0..808], kmlen[0..9], kst[0..144], kfail[0..9], kopen[0..153], kedit, kbuf[0..256], klen, karm, kbusy, kemask, kewhy, ktpick, hs, cons2, dcv[0..512], gal[0..49152], gt[0..2560], evd, @as(u64, evp) + @as(u64, evn2) * 1048576 + @as(u64, evpr) * 1099511627776, pbuf[0..4160], sst[0..560], tgv[0..256], tbv[0..TB_ALL]);
             const whole : u64 = cg_image(cc);
             const img : u64 = cg_crop(whole, 0.0, 0.0, sw * RETINA, sh * RETINA);
             msg1(layer, s_contents, img);
             cg_image_release(img);
             cg_image_release(whole);
         } else if (fdraw) {
-            draw(c, kit, frame, state, hov, ma, shown, task, space, sp, ss, cur, collapsed, mx, my, z, sw, sh, ws, full, qp, ring, evn, now, sug, god, glow, dk, dp, darmed, doff, dgo, walking, dlabel, tst[0..32], tcells[0..960000], topen, tcur, kyp, kstored[0..9], kmask[0..736], kmlen[0..9], kst[0..144], kfail[0..9], kopen[0..153], kedit, kbuf[0..256], klen, karm, kbusy, kemask, kewhy, ktpick, hs, cons2, dcv[0..512], gal[0..49152], gt[0..2560], evd, @as(u64, evp) + @as(u64, evn2) * 1048576 + @as(u64, evpr) * 1099511627776, pbuf[0..4160], sst[0..560], tgv[0..256], tbv[0..TB_ALL]);
+            draw(c, kit, frame, state, hov, ma, shown, task, space, sp, ss, cur, collapsed, mx, my, z, sw, sh, ws, full, qp, ring, evn, now, sug, god, glow, dk, dp, darmed, doff, dgo, walking, dlabel, tst[0..32], tcells[0..960000], topen, tcur, kyp, kstored[0..9], kmask[0..808], kmlen[0..9], kst[0..144], kfail[0..9], kopen[0..153], kedit, kbuf[0..256], klen, karm, kbusy, kemask, kewhy, ktpick, hs, cons2, dcv[0..512], gal[0..49152], gt[0..2560], evd, @as(u64, evp) + @as(u64, evn2) * 1048576 + @as(u64, evpr) * 1099511627776, pbuf[0..4160], sst[0..560], tgv[0..256], tbv[0..TB_ALL]);
             const whole : u64 = cg_image(c);
             const img : u64 = cg_crop(whole, 0.0, 0.0, sw * WIDE_RETINA, sh * WIDE_RETINA);
             msg1(layer, s_contents, img);

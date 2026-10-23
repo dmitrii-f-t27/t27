@@ -113,6 +113,10 @@ use t27os::keys_health::kh_pack;
 use t27os::keys_health::kh_unpack;
 use t27os::keys_health::kh_state;
 use t27os::keys_health::kh_status;
+use t27os::keys_health::kh_status_left;
+use t27os::keys_health::kh_set_limits;
+use t27os::keys_health::KH_F_KNOWN;
+use t27os::keys_health::KH_F_FREE;
 use t27os::qr::QR_QUIET;
 use t27os::qr::qr_size;
 use t27os::qr::qr_version_for;
@@ -1173,7 +1177,7 @@ pub fn ac_kp_line_kh(i: usize, f: []const u64, kh: []const u8, now: u64, out: []
     var n : usize = put_dec(out, 0, f[0]);
     if (f[0] == 1) { n = put_bytes(out, n, " key, "); } else { n = put_bytes(out, n, " keys, "); }
     if (f[0] > 1 and kh_state(recs[0..32], i, now) != KH_S_NONE) { n = put_bytes(out, n, "last probe "); }
-    return kh_status(recs[0..32], i, now, out, n);
+    return kh_status_left(recs[0..32], i, now, out, n);
 }
 
 /// The row's dot is lit when its line says live: the health file's last check, or the KEYS panel's when that is later.
@@ -2278,7 +2282,7 @@ test ac_keys_line_says_the_health_files_last_check_without_the_keys_tab {
         hw[j] = 0;
         j = j + 1;
     }
-    var nv : [96]u8 = undefined;
+    var nv : [168]u8 = undefined;
     j = 0;
     while (j < 96) {
         nv[j] = 0;
@@ -2286,56 +2290,56 @@ test ac_keys_line_says_the_health_files_last_check_without_the_keys_tab {
     }
     var recs : [32]u64 = undefined;
     kh_clear(recs[0..32]);
-    var kh : [96]u8 = undefined;
-    kh_pack(recs[0..32], kh[0..96]);
+    var kh : [168]u8 = undefined;
+    kh_pack(recs[0..32], kh[0..168]);
     var f : [8]u64 = undefined;
     var o : [128]u8 = undefined;
     // no file yet: the count, then "not checked yet"; no key: as before
-    ac_kp_facts(0, stored[0..9], hw[0..144], nv[0..96], now, f[0..8]);
-    assert fv_eq(o[0..128], ac_kp_line_kh(0, f[0..8], kh[0..96], now, o[0..128]), "no key stored");
+    ac_kp_facts(0, stored[0..9], hw[0..144], nv[0..168], now, f[0..8]);
+    assert fv_eq(o[0..128], ac_kp_line_kh(0, f[0..8], kh[0..168], now, o[0..128]), "no key stored");
     stored[3] = 1;
-    ac_kp_facts(0, stored[0..9], hw[0..144], nv[0..96], now, f[0..8]);
+    ac_kp_facts(0, stored[0..9], hw[0..144], nv[0..168], now, f[0..8]);
     ac_kp_seen(0, f[0..8], 1);
-    assert fv_eq(o[0..128], ac_kp_line_kh(0, f[0..8], kh[0..96], now, o[0..128]), "1 key, not checked yet");
-    assert ac_kp_live_kh(0, f[0..8], kh[0..96], now) == false;
+    assert fv_eq(o[0..128], ac_kp_line_kh(0, f[0..8], kh[0..168], now, o[0..128]), "1 key, not checked yet");
+    assert ac_kp_live_kh(0, f[0..8], kh[0..168], now) == false;
     // the background check wrote the file: the next pass reads it and the line says live, with its age
     stored[4] = 255;
-    ac_nv_pack(nv[0..96], true, 34, 34);
+    ac_nv_pack(nv[0..168], true, 34, 34);
     kh_set(recs[0..32], 0, 200, now - 120, 300, 1);
     kh_set(recs[0..32], 1, 200, now - 3600, 410, 1);
     kh_set(recs[0..32], 2, 200, now - 720, 280, 1);
-    kh_pack(recs[0..32], kh[0..96]);
-    ac_kp_facts(0, stored[0..9], hw[0..144], nv[0..96], now, f[0..8]);
+    kh_pack(recs[0..32], kh[0..168]);
+    ac_kp_facts(0, stored[0..9], hw[0..144], nv[0..168], now, f[0..8]);
     ac_kp_seen(0, f[0..8], 1);
-    assert fv_eq(o[0..128], ac_kp_line_kh(0, f[0..8], kh[0..96], now, o[0..128]), "1 key, live (200, checked 2 min ago)");
-    assert ac_kp_live_kh(0, f[0..8], kh[0..96], now);
-    ac_kp_facts(1, stored[0..9], hw[0..144], nv[0..96], now, f[0..8]);
+    assert fv_eq(o[0..128], ac_kp_line_kh(0, f[0..8], kh[0..168], now, o[0..128]), "1 key, live (200, checked 2 min ago)");
+    assert ac_kp_live_kh(0, f[0..8], kh[0..168], now);
+    ac_kp_facts(1, stored[0..9], hw[0..144], nv[0..168], now, f[0..8]);
     ac_kp_seen(1, f[0..8], 11);
-    assert fv_eq(o[0..128], ac_kp_line_kh(1, f[0..8], kh[0..96], now, o[0..128]), "11 keys, last probe live (200, checked 1 h ago)");
-    ac_kp_facts(2, stored[0..9], hw[0..144], nv[0..96], now, f[0..8]);
-    assert fv_eq(o[0..128], ac_kp_line_kh(2, f[0..8], kh[0..96], now, o[0..128]), "34 keys, last probe live (200, checked 12 min ago)");
+    assert fv_eq(o[0..128], ac_kp_line_kh(1, f[0..8], kh[0..168], now, o[0..128]), "11 keys, last probe live (200, checked 1 h ago)");
+    ac_kp_facts(2, stored[0..9], hw[0..144], nv[0..168], now, f[0..8]);
+    assert fv_eq(o[0..128], ac_kp_line_kh(2, f[0..8], kh[0..168], now, o[0..128]), "34 keys, last probe live (200, checked 12 min ago)");
     // the same file a day and more later: stale, the dot goes out
     const later : u64 = now + 86400 + 1;
-    assert fv_eq(o[0..128], ac_kp_line_kh(2, f[0..8], kh[0..96], later, o[0..128]), "34 keys, last probe stale (200, checked 1 day ago)");
-    assert ac_kp_live_kh(2, f[0..8], kh[0..96], later) == false;
+    assert fv_eq(o[0..128], ac_kp_line_kh(2, f[0..8], kh[0..168], later, o[0..128]), "34 keys, last probe stale (200, checked 1 day ago)");
+    assert ac_kp_live_kh(2, f[0..8], kh[0..168], later) == false;
     // a refused key is said, its dot stays out
     kh_set(recs[0..32], 0, 401, now - 60, 90, 1);
-    kh_pack(recs[0..32], kh[0..96]);
-    ac_kp_facts(0, stored[0..9], hw[0..144], nv[0..96], now, f[0..8]);
+    kh_pack(recs[0..32], kh[0..168]);
+    ac_kp_facts(0, stored[0..9], hw[0..144], nv[0..168], now, f[0..8]);
     ac_kp_seen(0, f[0..8], 1);
-    assert fv_eq(o[0..128], ac_kp_line_kh(0, f[0..8], kh[0..96], now, o[0..128]), "1 key, refused (401, checked 1 min ago)");
-    assert ac_kp_live_kh(0, f[0..8], kh[0..96], now) == false;
+    assert fv_eq(o[0..128], ac_kp_line_kh(0, f[0..8], kh[0..168], now, o[0..128]), "1 key, refused (401, checked 1 min ago)");
+    assert ac_kp_live_kh(0, f[0..8], kh[0..168], now) == false;
     // a later check from the KEYS panel wins for its row
     hw[key_index(3, 0)] = health_pack(now - 10, 200);
-    ac_kp_facts(0, stored[0..9], hw[0..144], nv[0..96], now, f[0..8]);
+    ac_kp_facts(0, stored[0..9], hw[0..144], nv[0..168], now, f[0..8]);
     ac_kp_seen(0, f[0..8], 1);
-    assert fv_eq(o[0..128], ac_kp_line_kh(0, f[0..8], kh[0..96], now, o[0..128]), "1 key, ok, checked 10 s ago");
-    assert ac_kp_live_kh(0, f[0..8], kh[0..96], now);
+    assert fv_eq(o[0..128], ac_kp_line_kh(0, f[0..8], kh[0..168], now, o[0..128]), "1 key, ok, checked 10 s ago");
+    assert ac_kp_live_kh(0, f[0..8], kh[0..168], now);
     // an unread NVIDIA list stays "not read yet"
-    ac_nv_pack(nv[0..96], false, 0, 0);
+    ac_nv_pack(nv[0..168], false, 0, 0);
     nv[AC_NV_FLAG] = AC_NV_UNREAD;
-    ac_kp_facts(2, stored[0..9], hw[0..144], nv[0..96], now, f[0..8]);
-    assert fv_eq(o[0..128], ac_kp_line_kh(2, f[0..8], kh[0..96], now, o[0..128]), "not read yet");
+    ac_kp_facts(2, stored[0..9], hw[0..144], nv[0..168], now, f[0..8]);
+    assert fv_eq(o[0..128], ac_kp_line_kh(2, f[0..8], kh[0..168], now, o[0..128]), "not read yet");
 }
 
 test ac_the_key_code_sits_right_of_the_lines_under_the_key_and_grows_where_the_friends_stand {
@@ -2438,4 +2442,49 @@ test ac_kp_uses_kh_takes_the_file_only_for_a_read_stored_key_the_panel_has_not_c
     assert ac_kp_uses_kh(1, f[0..8], recs[0..32]) == false;
     f[3] = 1;
     assert ac_kp_uses_kh(1, f[0..8], recs[0..32]) == false;
+}
+
+test ac_the_openrouter_row_says_what_is_left_after_the_check_and_nothing_made_up {
+    const now : u64 = 1800000000;
+    var stored : [9]u32 = [0, 0, 0, 0, 255, 0, 0, 0, 0];
+    stored[3] = 1;
+    var hw : [144]u64 = undefined;
+    var j : usize = 0;
+    while (j < 144) { hw[j] = 0; j = j + 1; }
+    var nv : [96]u8 = undefined;
+    j = 0;
+    while (j < 96) { nv[j] = 0; j = j + 1; }
+    var recs : [32]u64 = undefined;
+    kh_clear(recs[0..32]);
+    var kh : [168]u8 = undefined;
+    var f : [8]u64 = undefined;
+    var o : [128]u8 = undefined;
+    // checked, limits not read (an older file, or an answer without them): the line is the status alone
+    kh_set(recs[0..32], 0, 200, now - 120, 300, 1);
+    kh_pack(recs[0..32], kh[0..168]);
+    ac_kp_facts(0, stored[0..9], hw[0..144], nv[0..96], now, f[0..8]);
+    ac_kp_seen(0, f[0..8], 1);
+    assert fv_eq(o[0..128], ac_kp_line_kh(0, f[0..8], kh[0..168], now, o[0..128]), "1 key, live (200, checked 2 min ago)");
+    // limit 100, 99.71 left
+    kh_set_limits(recs[0..32], 0, 10000, 9971, KH_F_KNOWN);
+    kh_pack(recs[0..32], kh[0..168]);
+    assert fv_eq(o[0..128], ac_kp_line_kh(0, f[0..8], kh[0..168], now, o[0..128]), "1 key, live (200), $99.71 left");
+    assert ac_kp_live_kh(0, f[0..8], kh[0..168], now);
+    kh_set_limits(recs[0..32], 0, 0, 0, KH_F_KNOWN);
+    kh_pack(recs[0..32], kh[0..168]);
+    assert fv_eq(o[0..128], ac_kp_line_kh(0, f[0..8], kh[0..168], now, o[0..128]), "1 key, live (200), no limit");
+    kh_set_limits(recs[0..32], 0, 1000, 950, KH_F_KNOWN + KH_F_FREE);
+    kh_pack(recs[0..32], kh[0..168]);
+    assert fv_eq(o[0..128], ac_kp_line_kh(0, f[0..8], kh[0..168], now, o[0..128]), "1 key, live (200), free tier");
+    // a day later the check is stale: no money said; a refused key says no money either
+    kh_set_limits(recs[0..32], 0, 10000, 9971, KH_F_KNOWN);
+    kh_pack(recs[0..32], kh[0..168]);
+    assert fv_eq(o[0..128], ac_kp_line_kh(0, f[0..8], kh[0..168], now + 86400 + 121, o[0..128]), "1 key, stale (200, checked 1 day ago)");
+    // Z.ai and NVIDIA never carry money
+    kh_set(recs[0..32], 1, 200, now - 60, 410, 11);
+    kh_pack(recs[0..32], kh[0..168]);
+    stored[4] = 255;
+    ac_kp_facts(1, stored[0..9], hw[0..144], nv[0..96], now, f[0..8]);
+    ac_kp_seen(1, f[0..8], 11);
+    assert fv_eq(o[0..128], ac_kp_line_kh(1, f[0..8], kh[0..168], now, o[0..128]), "11 keys, last probe live (200, checked 1 min ago)");
 }

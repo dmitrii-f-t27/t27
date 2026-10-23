@@ -72,6 +72,14 @@ fn add_header(req: u64, name: []const u8, value: []const u8) -> void {
 /// Send one request: `url`, one key header, a JSON body when `post`, the anthropic-version header when `version`;
 /// the HTTP status, 0 when nothing answered within `timeout_s`.
 fn send_req(url_b: []const u8, hn: []const u8, hv: []const u8, post: bool, body: []const u8, version: bool, timeout_s: u32) -> u32 {
+    var none : [1]u8 = undefined;
+    var got : [1]u64 = undefined;
+    return send_req_x(url_b, hn, hv, post, body, version, timeout_s, none[0..0], got[0..1]);
+}
+
+/// send_req, and the answer's body (at most out.len bytes) into `out`; the byte count into got[0] (0 when none).
+fn send_req_x(url_b: []const u8, hn: []const u8, hv: []const u8, post: bool, body: []const u8, version: bool, timeout_s: u32, out: []u8, got: []u64) -> u32 {
+    got[0] = 0;
     const us : u64 = cf(url_b);
     const url : u64 = msg1(cls("NSURL"), sel("URLWithString:"), us);
     cf_release(us);
@@ -99,9 +107,17 @@ fn send_req(url_b: []const u8, hn: []const u8, hv: []const u8, post: bool, body:
         err[i] = 0;
         i = i + 1;
     }
-    msg3(cls("NSURLConnection"), sel("sendSynchronousRequest:returningResponse:error:"), req, sys_addr(resp[0..8], resp[0..8], 0), sys_addr(err[0..8], err[0..8], 0));
+    const data : u64 = msg3(cls("NSURLConnection"), sel("sendSynchronousRequest:returningResponse:error:"), req, sys_addr(resp[0..8], resp[0..8], 0), sys_addr(err[0..8], err[0..8], 0));
     const r : u64 = get_u64(resp[0..8], 0);
     if (r == 0) { return 0; }
+    if (data != 0 and out.len > 0) {
+        var want : u64 = msg0(data, sel("length"));
+        if (want > @as(u64, out.len)) { want = @as(u64, out.len); }
+        if (want > 0) {
+            msg2(data, sel("getBytes:length:"), sys_addr(out, out, 0), want);
+            got[0] = want;
+        }
+    }
     return @as(u32, @intCast(msg0(r, sel("statusCode"))));
 }
 
@@ -125,6 +141,12 @@ pub fn probe(p: u32, key: []const u8) -> u32 {
 /// HTTP status, 0 when nothing answered in `timeout_s`. The caller wipes `auth`.
 pub fn probe_get(url: []const u8, auth: []const u8, timeout_s: u32) -> u32 {
     return send_req(url, "Authorization", auth, false, "", false, timeout_s);
+}
+
+/// probe_get, and the answer's body (at most out.len bytes) into out; its length into got[0]. The body of the key
+/// check holds the limit and the usage, never the key.
+pub fn probe_get_body(url: []const u8, auth: []const u8, timeout_s: u32, out: []u8, got: []u64) -> u32 {
+    return send_req_x(url, "Authorization", auth, false, "", false, timeout_s, out, got);
 }
 
 /// One NVIDIA direct check (nvidia_direct.t27): a one-token chat completion of `model` (a dead-listed or empty
