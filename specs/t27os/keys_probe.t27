@@ -121,6 +121,12 @@ pub fn probe(p: u32, key: []const u8) -> u32 {
     return send_req(ub[0..un], hn[0..nl], hv[0..vl], probe_post(p), bb[0..bl], probe_needs_version(p), PROBE_TIMEOUT_S);
 }
 
+/// The cabinet's health check (keys_health.t27): one GET of `url` with the Authorization value `auth` (kh_bearer); the
+/// HTTP status, 0 when nothing answered in `timeout_s`. The caller wipes `auth`.
+pub fn probe_get(url: []const u8, auth: []const u8, timeout_s: u32) -> u32 {
+    return send_req(url, "Authorization", auth, false, "", false, timeout_s);
+}
+
 /// One NVIDIA direct check (nvidia_direct.t27): a one-token chat completion of `model` (a dead-listed or empty
 /// model becomes NV_MODEL_DEFAULT) with `key` as a Bearer token; the HTTP status, 0 when nothing answered in
 /// NV_TIMEOUT_S. The key is wiped from the header buffer before return.
