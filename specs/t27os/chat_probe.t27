@@ -45,6 +45,9 @@ use t27os::call_session::cs_set;
 use t27os::call_session::cs_state;
 use t27os::call_session::cs_stat;
 use t27os::call_session::cs_close;
+use t27os::call_session::cs_identity;
+use t27os::peer_identity::ID_OFF_PUB;
+use t27os::peer_identity::ID_OFF_PRIV;
 use t27os::call_session::CS_AUDIO_NONE;
 use t27os::call_session::CS_K_CALLING_MS;
 use t27os::call_session::CS_K_SILENT_MS;
@@ -75,6 +78,7 @@ use t27os::chat_core::CA_LEN;
 use t27os::chat_core::CF_MAX;
 use t27os::chat_core::cl_bytes;
 use t27os::chat_core::cl_count;
+use t27os::chat_core::cl_count_dir;
 use t27os::chat_core::cl_dir;
 use t27os::chat_core::cl_state;
 use t27os::chat_core::cl_msg;
@@ -147,17 +151,6 @@ pub fn chp_text(who: u8, k: u32, out: []u8) -> usize {
     }
     out[n] = 48 + @as(u8, @intCast(k % 10));
     return n + 1;
-}
-
-fn chp_count_dir(log: []const u8, dir: u32) -> u32 {
-    const n : usize = @as(usize, cl_count(log));
-    var c : u32 = 0;
-    var i : usize = 0;
-    while (i < n) {
-        if (cl_dir(log, i) == dir) { c = c + 1; }
-        i = i + 1;
-    }
-    return c;
 }
 
 fn chp_all_out(log: []const u8, st: u32) -> bool {
@@ -256,6 +249,9 @@ fn chp_side(is_a: bool) -> bool {
     var s : [166528]u8 = undefined;
     const port : u64 = ckh_env_num("CHP_PORT", 47801);
     if (!cs_open(s[0..166528], fp[0..10], 2130706433, port, CS_AUDIO_NONE)) { return ckh_check("message session opened", false); }
+    // the session proves this device's identity: since the friends file v2 a message session opens only between
+    // proven friends (the first proof of a friend with no stored key is stored)
+    ok = ckh_check("identity handed to the session", cs_identity(s[0..166528], id[ID_OFF_PUB..ID_OFF_PUB + 65], id[ID_OFF_PRIV..ID_OFF_PRIV + 97])) and ok;
     cs_set(s[0..166528], CS_K_CALLING_MS, CH_CALLING_MS);
     cs_set(s[0..166528], CS_K_SILENT_MS, CH_SILENT_MS);
     var m : [256]u8 = undefined;
@@ -288,7 +284,7 @@ fn chp_side(is_a: bool) -> bool {
             last_save = now;
             dirty = false;
         }
-        const got_in : u32 = chp_count_dir(log[0..L], CH_DIR_IN);
+        const got_in : u32 = cl_count_dir(log[0..L], CH_DIR_IN);
         if (!opened and got_in == nin) {
             unread_seen = cl_unread(log[0..L]);
             chm_open(m[0..CHM_LEN], log[0..L]);
@@ -302,7 +298,7 @@ fn chp_side(is_a: bool) -> bool {
                 }
             }
         }
-        if (t_all == 0 and opened and chp_count_dir(log[0..L], CH_DIR_OUT) == nout and chp_all_out(log[0..L], CH_S_READ)) { t_all = now - t0; }
+        if (t_all == 0 and opened and cl_count_dir(log[0..L], CH_DIR_OUT) == nout and chp_all_out(log[0..L], CH_S_READ)) { t_all = now - t0; }
         // finished: everything here and read both ways, and the session closed (idle) or ended by the peer
         if (t_all != 0 and chm_stat(m[0..CHM_LEN], CHM_SESSIONS) > 0 and cs_state(s[0..166528]) == CK_IDLE) { done = true; }
         ckh_usleep(2000);
@@ -311,7 +307,7 @@ fn chp_side(is_a: bool) -> bool {
     chh_save(log[0..L], buf[0..CF_MAX]);
     cs_close(s[0..166528]);
     ok = ckh_check("finished before the time limit", done) and ok;
-    ok = ckh_check("every outgoing message delivered and read", chp_all_out(log[0..L], CH_S_READ) and chp_count_dir(log[0..L], CH_DIR_OUT) == nout) and ok;
+    ok = ckh_check("every outgoing message delivered and read", chp_all_out(log[0..L], CH_S_READ) and cl_count_dir(log[0..L], CH_DIR_OUT) == nout) and ok;
     ok = ckh_check("unread counted before the chat was opened", unread_seen == nin) and ok;
     ok = ckh_check("no unread after opening", cl_unread(log[0..L]) == 0) and ok;
     ok = ckh_check("every line once and in order, texts intact", chp_order_ok(log[0..L], me, peer, nin, nout)) and ok;

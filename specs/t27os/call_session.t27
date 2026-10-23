@@ -419,8 +419,10 @@ pub const CS_ST_TEXT_DROP : u32 = 56;
 /// CS_TXQ_N entries of CS_TXE bytes (length u16 LE, the opened payload).
 pub const CS_TXQ : usize = 10240;
 pub const CS_TXQ_N : u64 = 64;
-pub const CS_TXE : usize = 736;
-pub const CS_TXT_MAX : usize = 720;
+pub const CS_TXE : usize = 744;
+/// The largest text payload: a group part (group_core GM_PAYLOAD_MAX 738) fits, and its sealed frame (52 + 740 + 16)
+/// fits the 808 bytes cs_text_send seals into.
+pub const CS_TXT_MAX : usize = 740;
 
 pub const CS_EV_NONE : u32 = 0;
 pub const CS_EV_CALLING : u32 = 1;
@@ -2492,6 +2494,7 @@ test the_block_holds_its_parts_without_overlap {
     // the text queue of a message session sits in the audio block, past every slot the audio code writes
     assert CS_TXQ >= 8192 and CS_TXQ + 16 + @as(usize, @intCast(CS_TXQ_N)) * CS_TXE <= CBP_F_BYTES;
     assert CS_TXE >= 2 + CS_TXT_MAX;
+    assert CK_HDR + CS_TXT_MAX + CK_TAG <= 808;
     assert CS_K_VENC < CS_ST_TEXT_TX and CS_ST_TEXT_DROP < 64;
 }
 

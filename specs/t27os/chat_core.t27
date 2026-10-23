@@ -28,6 +28,8 @@
 //   floor u32 (the highest incoming msg trimmed away) | cap u32 (lines kept, <= CL_KEEP) | peer fingerprint (10) |
 //   0 0; then cap lines of CL_LINE (2032) bytes: dir u8 | state u8 | len u16 | msg u32 | time u64 | tries u8 |
 //   acked parts mask u8 | parts u8 | 0 (5) | last send ms u64 | text (2000). A full log drops its oldest line.
+//   The 5 zero bytes (CL_EXT) stay zero in a person to person log; a group log (group_core.t27) keeps its per-member
+//   send and ACK state there. Neither the file nor this layout changes.
 // LOG ON DISK  ~/.t27os/chat/<20 hex of the fingerprint>.t27 (cf_name), written whole and atomically by the host:
 //   magic "T27OSCH\n" (8) | version u32 (4) | count u32 | last outgoing msg u32 | incoming floor u32 | peer
 //   fingerprint (10) | 0 0 | count records of dir u8 | state u8 | len u16 | msg u32 | time u64 | len bytes | CRC-32
@@ -147,6 +149,15 @@ pub fn ch_put_text(out: []u8, msg: u32, part: u32, time: u64, text: []const u8) 
     return CH_PHDR + n;
 }
 
+/// One part already cut (`bytes`, part `part` of `parts`) into out: CH_PHDR + its bytes, 0 when it cannot be one.
+pub fn ch_put_part(out: []u8, msg: u32, part: u32, parts: u32, time: u64, bytes: []const u8) -> usize {
+    if (msg == 0 or parts == 0 or parts > CH_PARTS_MAX or part >= parts or bytes.len == 0 or bytes.len > CH_PART_MAX) { return 0; }
+    if (out.len < CH_PHDR + bytes.len) { return 0; }
+    put_phdr(out, CH_K_TEXT, msg, part, parts, time, bytes.len);
+    copy(out, CH_PHDR, bytes, 0, bytes.len);
+    return CH_PHDR + bytes.len;
+}
+
 pub fn ch_put_ack(out: []u8, msg: u32, part: u32) -> usize {
     if (out.len < CH_PHDR or msg == 0) { return 0; }
     put_phdr(out, CH_K_ACK, msg, part, 0, 0, 0);
@@ -219,6 +230,9 @@ const LN_TRIES : usize = 16;
 const LN_ACKED : usize = 17;
 const LN_PARTS : usize = 18;
 const LN_LAST : usize = 24;
+/// The spare bytes of a line (offset in the line, length): zero here, group_core's in a group log.
+pub const CL_EXT : usize = 19;
+pub const CL_EXT_LEN : usize = 5;
 
 /// Bytes a log of cap lines needs.
 pub fn cl_bytes(cap: u32) -> usize { return CL_HDR + @as(usize, cap) * CL_LINE; }
@@ -251,6 +265,8 @@ pub fn cl_count(log: []const u8) -> u32 { return get32(log, 12); }
 pub fn cl_cap(log: []const u8) -> u32 { return get32(log, 24); }
 pub fn cl_last_out(log: []const u8) -> u32 { return get32(log, 16); }
 pub fn cl_floor(log: []const u8) -> u32 { return get32(log, 20); }
+/// A group log keeps the floor per sender itself (group_core) and clears this one after a drop.
+pub fn cl_set_floor(log: []u8, v: u32) -> void { put32(log, 20, v); }
 
 fn ln(i: usize) -> usize { return CL_HDR + i * CL_LINE; }
 
@@ -262,6 +278,9 @@ pub fn cl_time(log: []const u8, i: usize) -> u64 { return get_u64(log, ln(i) + L
 pub fn cl_tries(log: []const u8, i: usize) -> u32 { return @as(u32, log[ln(i) + LN_TRIES]); }
 pub fn cl_acked(log: []const u8, i: usize) -> u32 { return @as(u32, log[ln(i) + LN_ACKED]); }
 pub fn cl_parts(log: []const u8, i: usize) -> u32 { return @as(u32, log[ln(i) + LN_PARTS]); }
+pub fn cl_last_send(log: []const u8, i: usize) -> u64 { return get_u64(log, ln(i) + LN_LAST); }
+/// Where line i starts in the log.
+pub fn cl_line_at(i: usize) -> usize { return ln(i); }
 /// The text of line i.
 pub fn cl_text(log: []const u8, i: usize) -> []const u8 { return log[ln(i) + CL_TEXT..ln(i) + CL_TEXT + cl_len(log, i)]; }
 
@@ -472,6 +491,18 @@ pub fn ch_rx_read(log: []u8, p: []const u8) -> u32 {
 
 // ---------------------------------------------------------------- unread
 
+/// Lines of direction dir.
+pub fn cl_count_dir(log: []const u8, dir: u32) -> u32 {
+    const n : usize = @as(usize, cl_count(log));
+    var c : u32 = 0;
+    var i : usize = 0;
+    while (i < n) {
+        if (cl_dir(log, i) == dir) { c = c + 1; }
+        i = i + 1;
+    }
+    return c;
+}
+
 /// Incoming lines not yet shown.
 pub fn cl_unread(log: []const u8) -> u32 {
     const n : usize = @as(usize, cl_count(log));
@@ -550,6 +581,13 @@ pub fn cl_mark_sent(log: []u8, i: usize, now: u64) -> void {
     if (cl_state(log, i) == CH_S_PENDING) { set_state(log, i, CH_S_SENT); }
 }
 
+/// Line i goes out again from the start: PENDING, no tries, never sent.
+pub fn cl_restart(log: []u8, i: usize) -> void {
+    set_state(log, i, CH_S_PENDING);
+    log[ln(i) + LN_TRIES] = 0;
+    put_u64(log, ln(i) + LN_LAST, 0);
+}
+
 /// A session came up: every outgoing line not yet delivered starts again (PENDING, no tries, no ACKs kept from a
 /// session whose parts may not all have arrived). The number of lines that will go out.
 pub fn cl_session_start(log: []u8) -> u32 {
@@ -559,9 +597,7 @@ pub fn cl_session_start(log: []u8) -> u32 {
     while (i < n) {
         const st : u32 = cl_state(log, i);
         if (cl_dir(log, i) == CH_DIR_OUT and (st == CH_S_PENDING or st == CH_S_SENT or st == CH_S_FAILED)) {
-            set_state(log, i, CH_S_PENDING);
-            log[ln(i) + LN_TRIES] = 0;
-            put_u64(log, ln(i) + LN_LAST, 0);
+            cl_restart(log, i);
             c = c + 1;
         }
         i = i + 1;
@@ -886,6 +922,7 @@ test incoming_lines_stand_in_the_order_they_were_sent {
     cl_out_add(lb[0..T_LOG], ok[0..2], 4);
     t_carry(la[0..T_LOG], 1, lb[0..T_LOG], asm[0..CA_LEN], one[0..1]);
     assert cl_count(lb[0..T_LOG]) == 4;
+    assert cl_count_dir(lb[0..T_LOG], CH_DIR_IN) == 3 and cl_count_dir(lb[0..T_LOG], CH_DIR_OUT) == 1;
     assert cl_msg(lb[0..T_LOG], 0) == 1 and cl_dir(lb[0..T_LOG], 0) == CH_DIR_IN;
     assert cl_msg(lb[0..T_LOG], 1) == 2 and cl_dir(lb[0..T_LOG], 1) == CH_DIR_IN;
     assert cl_text(lb[0..T_LOG], 1)[0] == 121;
