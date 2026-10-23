@@ -17820,7 +17820,11 @@ pub fn main() -> void {
         // K. a check button: the frame after the click shows "checking", then one number of the provider is
         // read and probed per frame (a probe blocks up to PROBE_TIMEOUT_S); its HTTP answer sets that key's status
         // and feeds the circuit breaker (keys.t27). Every stored key of the provider is checked, none is skipped.
-        if (kbusy != KY_NONE) {
+        // While a call is up no probe is sent: a check begun before the call (the start pre-flight below) waits on the
+        // same key and goes on when the call ends. Measured on build 7121: a call dialled at launch met the pre-flight,
+        // the probes held this loop 6.4 s, the caller sent 23 packets a second instead of 100 and the other side
+        // ended the call as silent.
+        if (kbusy != KY_NONE and oncall == false) {
             if (kpend == 0) {
                 kpend = 1;
             } else if (kbk >= MAX_KEYS) {
