@@ -394,6 +394,53 @@ pub fn cv_strip_h(tw: f64) -> f64 { return tw * 0.75; }
 
 /// The left edge of tile i of a strip starting at x.
 pub fn cv_strip_x(i: u32, x: f64, tw: f64) -> f64 { return x + @as(f64, @floatFromInt(i)) * (tw + CV_STRIP_GAP); }
+
+// Self-view (owner, 2026-10-23): in a one to one call with video the remote picture is large and the user's own camera
+// is a small mirrored inset in its bottom-right corner, named YOU. What the inset is (picture, waiting for the first
+// frame, or a "camera off" note) is cv_self_mode; where it goes is cv_self_*. The window only draws what these say.
+pub const CV_SELF_NONE : u32 = 0;
+pub const CV_SELF_PIP : u32 = 1;
+pub const CV_SELF_WAIT : u32 = 2;
+pub const CV_SELF_OFF : u32 = 3;
+/// The gap between the inset and the remote picture's edges.
+pub const CV_SELF_PAD : f64 = 6.0;
+pub const CV_SELF_MIN : f64 = 40.0;
+pub const CV_SELF_MAX : f64 = 120.0;
+
+/// What the self-view shows. `vsend`: the call sends video; `cam_cfg_off`: the camera is switched off for the run
+/// (T27OS_CALL_CAMERA=0, a generator is the source); `voice`: a voice-only call; `failed`: the camera gave up or was
+/// refused; `have_pic`: a local picture is held. A call with video and a running camera shows the picture (PIP) or, before
+/// the first frame, an empty inset (WAIT); every other case says "camera off" (OFF). NONE: not a call with video panel.
+pub fn cv_self_mode(view: u32, group: bool, vsend: bool, cam_cfg_off: bool, voice: bool, failed: bool, have_pic: bool) -> u32 {
+    if (view != CV_ACTIVE or group) { return CV_SELF_NONE; }
+    if (!vsend or cam_cfg_off or voice or failed) { return CV_SELF_OFF; }
+    if (have_pic) { return CV_SELF_PIP; }
+    return CV_SELF_WAIT;
+}
+
+/// The width of the inset for a remote picture rw wide: 30 %, between CV_SELF_MIN and CV_SELF_MAX.
+pub fn cv_self_w(rw: f64) -> f64 {
+    var w : f64 = rw * 0.3;
+    if (w < CV_SELF_MIN) { w = CV_SELF_MIN; }
+    if (w > CV_SELF_MAX) { w = CV_SELF_MAX; }
+    return w;
+}
+
+/// The inset takes at most half the remote picture's width and height (4:3 like the picture).
+pub fn cv_self_fits(rw: f64, rh: f64) -> bool {
+    const w : f64 = cv_self_w(rw);
+    return w * 2.0 <= rw and cv_strip_h(w) * 2.0 <= rh;
+}
+
+/// The left edge of the inset: the right edge of the remote picture less the inset and the gap.
+pub fn cv_self_x(rx: f64, rw: f64, sw: f64) -> f64 { return rx + rw - sw - CV_SELF_PAD; }
+
+/// The top of the inset: the bottom edge of the remote picture less the inset's height and the gap.
+pub fn cv_self_y(ry: f64, rh: f64, sw: f64) -> f64 { return ry + rh - cv_strip_h(sw) - CV_SELF_PAD; }
+
+pub fn cv_self_label() -> str { return "YOU"; }
+pub fn cv_self_off_text() -> str { return "camera off"; }
+
 pub fn cv_btn_x(l: f64, w: f64, b: u32) -> f64 { return l + QP_PAD + @as(f64, @floatFromInt(b)) * (cv_btn_w(w) + CV_BTN_GAP); }
 
 /// The top of the button row: under the field while IDLE, under the big digits otherwise.
@@ -1245,4 +1292,34 @@ test cv_the_strip_holds_one_wide_tile_or_two_side_by_side_and_fits_the_room {
     assert ws == 120.0 and cv_strip_h(ws) + CV_STRIP_LABEL == 104.0;
     assert cv_strip_w(2, 300.0, 104.0) == 120.0;
     assert cv_strip_w(2, 300.0, 10.0) == 0.0;
+}
+
+test cv_self_view_shows_the_picture_waits_for_it_or_says_camera_off {
+    // not a one to one call with the ACTIVE panel: nothing
+    assert cv_self_mode(CV_IDLE, false, true, false, false, false, true) == CV_SELF_NONE;
+    assert cv_self_mode(CV_ACTIVE, true, true, false, false, false, true) == CV_SELF_NONE;
+    // video and a running camera: the picture, or an empty inset until the first frame
+    assert cv_self_mode(CV_ACTIVE, false, true, false, false, false, true) == CV_SELF_PIP;
+    assert cv_self_mode(CV_ACTIVE, false, true, false, false, false, false) == CV_SELF_WAIT;
+    // camera off for the run, no video sent, a voice call, a camera that gave up: the note
+    assert cv_self_mode(CV_ACTIVE, false, true, true, false, false, false) == CV_SELF_OFF;
+    assert cv_self_mode(CV_ACTIVE, false, false, false, false, false, false) == CV_SELF_OFF;
+    assert cv_self_mode(CV_ACTIVE, false, true, false, true, false, false) == CV_SELF_OFF;
+    assert cv_self_mode(CV_ACTIVE, false, true, false, false, true, true) == CV_SELF_OFF;
+    assert cv_self_label() == "YOU" and cv_self_off_text() == "camera off";
+}
+
+test cv_self_view_sits_in_the_bottom_right_corner_and_never_covers_more_than_a_quarter {
+    // a 300 wide remote picture: a 90 wide inset (30 %), 4:3
+    const sw : f64 = cv_self_w(300.0);
+    assert sw == 90.0 and cv_strip_h(sw) == 67.5;
+    assert cv_self_x(20.0, 300.0, sw) == 20.0 + 300.0 - 90.0 - CV_SELF_PAD;
+    assert cv_self_y(50.0, 225.0, sw) == 50.0 + 225.0 - 67.5 - CV_SELF_PAD;
+    // the inset ends inside the remote picture, the gap away from both edges
+    assert cv_self_x(20.0, 300.0, sw) + sw + CV_SELF_PAD == 320.0;
+    // clamps: a wide picture caps at CV_SELF_MAX, a narrow one floors at CV_SELF_MIN
+    assert cv_self_w(1000.0) == CV_SELF_MAX and cv_self_w(100.0) == CV_SELF_MIN;
+    assert cv_self_fits(300.0, 225.0) and cv_self_fits(120.0, 90.0);
+    // too small a picture: the inset would take more than half of it, so it is not drawn
+    assert cv_self_fits(60.0, 45.0) == false and cv_self_fits(300.0, 60.0) == false;
 }

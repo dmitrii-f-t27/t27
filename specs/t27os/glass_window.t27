@@ -353,6 +353,17 @@ use t27os::call_session::CS_VBUF;
 use t27os::call_view::cv_strip_w;
 use t27os::call_view::cv_strip_h;
 use t27os::call_view::cv_strip_x;
+use t27os::call_view::cv_self_mode;
+use t27os::call_view::cv_self_w;
+use t27os::call_view::cv_self_fits;
+use t27os::call_view::cv_self_x;
+use t27os::call_view::cv_self_y;
+use t27os::call_view::cv_self_label;
+use t27os::call_view::cv_self_off_text;
+use t27os::call_view::CV_SELF_NONE;
+use t27os::call_view::CV_SELF_PIP;
+use t27os::call_view::CV_SELF_WAIT;
+use t27os::call_view::CV_SELF_OFF;
 use t27os::call_view::CV_STRIP_LABEL;
 use t27os::call_core::VG_SHOW;
 use t27os::call_core::VG_NO_LINK;
@@ -10159,6 +10170,11 @@ pub const CL_CAMP : usize = 152;
 pub const CL_CAMTRY : usize = 160;
 /// Not drawn: the address of the test picture's encoder block (call_vid.t27 vgq_new), two u32, low then high; 0 = none.
 pub const CL_VENC : usize = 161;
+/// Self-view (owner, 2026-10-23), drawn: the decoded CGImage of the user's own last camera frame (two u32, low then
+/// high; 0 = none; not drawn, past the group video's links) and a counter of the frames decoded (one drawn byte after the
+/// account block, wraps; a new frame redraws). Released when the call is over.
+pub const CL_SELF : usize = 800;
+pub const CL_SELF_N : usize = 229;
 /// Not drawn: 1 while the call started by CALL on a friend's card (a voice call) runs: no camera, no video sent; back to
 /// 0 (and video as launched) once the call block is idle again (ch_tick).
 pub const CL_NOCAM : usize = 228;
@@ -10699,12 +10715,34 @@ pub fn cl_camera(cl: []u8, s: []u8) -> void {
     if (!cvs_use_camera(cs, 1)) { return; }
     var jpeg : [24000]u8 = undefined;
     const n : usize = cvl_take(cp, jpeg[0..24000]);
-    if (cvs_use_camera(cs, @as(u64, n))) { cs_video_feed(s, jpeg[0..n]); }
+    if (cvs_use_camera(cs, @as(u64, n))) {
+        cs_video_feed(s, jpeg[0..n]);
+        // the user's own picture for the self-view, one to one calls only
+        if (!csg_on(s)) {
+            const own : u64 = vid_decode(jpeg[0..n]);
+            if (own != 0) {
+                cl_self_set(cl, own);
+                cl[CL_SELF_N] = @as(u8, @intCast((@as(u64, cl[CL_SELF_N]) + 1) & 255));
+            }
+        }
+    }
 }
 
 /// The video line names a camera that gave up (FAILED) while the call goes on with the generator.
 pub fn cl_cam_unavailable(cl: []const u8) -> bool {
     return cl[CL_VSEND] != 0 and cl[CL_CAMOFF] == 0 and @as(u32, cl[CL_CAMSTATE]) == CVS_FAILED;
+}
+
+/// The decoded picture of the user's own camera, 0 when none.
+pub fn cl_self_img(cl: []const u8) -> u64 {
+    return cl_get32(cl, CL_SELF) | (cl_get32(cl, CL_SELF + 4) << 32);
+}
+
+fn cl_self_set(cl: []u8, img: u64) -> void {
+    const old : u64 = cl_self_img(cl);
+    if (old != 0 and old != img) { vid_release_image(old); }
+    cl_put32(cl, CL_SELF, img & 4294967295);
+    cl_put32(cl, CL_SELF + 4, img >> 32);
 }
 
 /// The decoded picture held in the snapshot, 0 when none.
@@ -10728,6 +10766,7 @@ pub fn cl_video(cl: []u8, s: []u8, now: u64) -> void {
     }
     cl_gvideo_clear(cl);
     if (st != CK_ACTIVE) {
+        cl_self_set(cl, 0);
         const old : u64 = cl_vimg(cl);
         if (old != 0) {
             vid_release_image(old);
@@ -11368,6 +11407,41 @@ fn draw_cl_video(c: u64, kit: [48]u64, x: f64, right: f64, y: f64, sh: f64, cl: 
     }
     if (h < 24.0) { return; }
     draw_cl_pic(c, kit, x, top, w, h, cl_vimg(cl), right);
+    draw_cl_self(c, kit, x, top, w, h, cl);
+}
+
+/// The self-view over the remote picture's bottom-right corner (call_view cv_self_*): the user's own camera, mirrored,
+/// named YOU; an empty inset before the first frame; "camera off" when there is no camera picture to show.
+fn draw_cl_self(c: u64, kit: [48]u64, rx: f64, ry: f64, rw: f64, rh: f64, cl: []const u8) -> void {
+    const mode : u32 = cv_self_mode(CV_ACTIVE, cl[CL_GV] != 0, cl[CL_VSEND] != 0, cl[CL_CAMOFF] != 0, cl[CL_NOCAM] != 0,
+        cl_cam_unavailable(cl), cl_self_img(cl) != 0);
+    if (mode == CV_SELF_NONE) { return; }
+    if (mode == CV_SELF_OFF) {
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+        draw_fit(c, kit, cv_self_off_text(), 10, rx + 8.0, ry + rh - 8.0, 9.0, 0.0, true, rx + rw);
+        return;
+    }
+    if (!cv_self_fits(rw, rh)) { return; }
+    const sw : f64 = cv_self_w(rw);
+    const sh : f64 = sw * 0.75;
+    const sx : f64 = cv_self_x(rx, rw, sw);
+    const sy : f64 = cv_self_y(ry, rh, sw);
+    cg_fill_rgba(c, 0.0, 0.0, 0.0, 0.55);
+    cg_fill_rect(c, sx, sy, sw, sh);
+    if (mode == CV_SELF_PIP) {
+        cg_save(c);
+        cg_translate(c, sx + sw, sy + sh);
+        cg_scale(c, -1.0, -1.0);
+        cg_draw_image(c, 0.0, 0.0, sw, sh, cl_self_img(cl));
+        cg_restore(c);
+    }
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, 0.85);
+    cg_fill_rect(c, sx, sy, sw, HAIR);
+    cg_fill_rect(c, sx, sy + sh - HAIR, sw, HAIR);
+    cg_fill_rect(c, sx, sy, HAIR, sh);
+    cg_fill_rect(c, sx + sw - HAIR, sy, HAIR, sh);
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+    draw_fit(c, kit, cv_self_label(), 3, sx + 4.0, sy + 11.0, 9.0, WEIGHT_SEMIBOLD, true, sx + sw);
 }
 
 /// A picture in a box of w x h at (x, top), drawn upright, with a hairline frame; a dark box with a word without one.
@@ -19894,6 +19968,7 @@ test the_call_region_ends_the_text_store_and_draw_reads_only_folded_bytes {
     assert CL_CODE + 6 <= CL_PFP;
     assert CL_KEY_N <= CL_CAP;
     // the video slots stand between the call counters and the friends snapshot, and are folded into the frame key
+    assert AC_END <= CL_SELF_N and CL_SELF_N < CL_BPORT and CL_NOCAM < CL_SELF_N and CL_GVLINK + VG_SHOW <= CL_SELF and CL_SELF + 8 <= FE_ID;
     assert CL_AUTO < CL_VLIVE and CL_VSEND < CL_VSER and CL_VSER + 4 <= CL_VSHOWN and CL_VSHOWN + 4 <= CL_VSKIP;
     assert CL_VSKIP + 4 <= CL_VIMG and CL_VIMG + 8 == CL_VIMG_END and CL_VIMG_END <= 256 and CL_VIMG_END <= CL_KEY_N;
     assert CL_VSEND < CL_CAMOFF and CL_CAMST < CL_VSER and CL_CAMP == CL_VIMG_END and CL_CAMP + 8 <= CL_CAMTRY and CL_CAMTRY < FV_COUNT;
