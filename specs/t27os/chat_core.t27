@@ -1665,6 +1665,28 @@ fn t_zero(b: []const u8) -> bool {
     return true;
 }
 
+test every_hidden_range_starts_and_ends_where_it_says_and_its_neighbours_are_text {
+    // C0: 0 and 31 are hidden, the space is not (LF and TAB are taken by ch_clean before this test)
+    assert ch_hidden(0) and ch_hidden(9) and ch_hidden(10) and ch_hidden(31);
+    assert ch_hidden(32) == false and ch_hidden(126) == false;
+    // DEL and C1 (128..159); 160 (no-break space) is text
+    assert ch_hidden(127) and ch_hidden(128) and ch_hidden(159);
+    assert ch_hidden(160) == false;
+    // U+061C, not its neighbours
+    assert ch_hidden(1564) and ch_hidden(1563) == false and ch_hidden(1565) == false;
+    // U+200B..U+200F
+    assert ch_hidden(8202) == false and ch_hidden(8203) and ch_hidden(8207) and ch_hidden(8208) == false;
+    // U+202A..U+202E
+    assert ch_hidden(8233) == false and ch_hidden(8234) and ch_hidden(8238) and ch_hidden(8239) == false;
+    // U+2060..U+206F
+    assert ch_hidden(8287) == false and ch_hidden(8288) and ch_hidden(8303) and ch_hidden(8304) == false;
+    // U+FEFF only; the line breaks U+2028 and U+2029 are not hidden (ch_clean makes them LF)
+    assert ch_hidden(65279) and ch_hidden(65278) == false and ch_hidden(65280) == false;
+    assert ch_hidden(8232) == false and ch_hidden(8233) == false;
+    // Cyrillic, an emoji and the last code point are text
+    assert ch_hidden(1044) == false and ch_hidden(128512) == false and ch_hidden(1114111) == false;
+}
+
 test the_cleaner_drops_bidi_zero_width_and_controls_and_keeps_text_cyrillic_and_emoji {
     var o : [2100]u8 = undefined;
     // "A" U+202E "B": the override that would show the rest backwards goes

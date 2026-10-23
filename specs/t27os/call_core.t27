@@ -1638,6 +1638,33 @@ test a_link_has_its_list_taken_at_most_every_two_seconds {
     assert gr_list_due(6000, 4000);
 }
 
+test a_list_is_known_by_its_marker_and_version_alone_and_a_short_body_is_not_one {
+    var l : [72]u8 = undefined;
+    const n : usize = gr_test_list(l[0..72], 2);
+    assert gr_list_kind(l[0..n]);
+    // the header alone is enough: a list with no members still looks like one (gr_list_admit then says FORM)
+    assert gr_list_kind(l[0..GR_LIST_HDR]);
+    l[6] = 0;
+    assert gr_list_kind(l[0..n]) and gr_list_ok(l[0..n]) == false;
+    assert gr_list_admit(l[0..n], true, true) == GR_LR_FORM;
+    // one byte short of the header, or nothing at all
+    assert gr_list_kind(l[0..GR_LIST_HDR - 1]) == false;
+    assert gr_list_kind(l[0..0]) == false;
+    // the marker: media (192) and the next byte (194) are not a list
+    l[4] = 192;
+    assert gr_list_kind(l[0..n]) == false;
+    l[4] = 194;
+    assert gr_list_kind(l[0..n]) == false;
+    l[4] = GR_LIST_KIND;
+    // the version: only 3
+    l[5] = 2;
+    assert gr_list_kind(l[0..n]) == false;
+    l[5] = 4;
+    assert gr_list_kind(l[0..n]) == false;
+    l[5] = 3;
+    assert gr_list_kind(l[0..n]);
+}
+
 fn vc_fake(j: []u8, n: usize, seed: u8) -> void {
     var i : usize = 0;
     while (i < n) {
