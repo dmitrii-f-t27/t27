@@ -185,6 +185,7 @@ use t27os::call_core::gr_list_ok;
 use t27os::call_core::gr_list_count;
 use t27os::call_core::gr_list_ip;
 use t27os::call_core::gr_list_port;
+use t27os::call_core::gr_list_reach;
 use t27os::call_core::GR_LIST_MAX;
 use t27os::call_core::GR_ENTRY;
 use t27os::call_core::GR_LIST_HDR;
@@ -2004,11 +2005,13 @@ fn csg_tick(s: []u8, now: u64) -> void {
             }
             put_u64(s, a + CS_GRP + @as(usize, LG_LIST_LEN) * 8, 0);
             if (gr_list_ok(lb[0..ln])) {
+                // a 127.x (or empty) address is where the sender reaches that member, not where I do
+                const from : u64 = cs_g(s[a..a + CS_LEN], CS_PEER_IP);
                 var i : usize = 0;
                 while (i < gr_list_count(lb[0..ln])) {
                     const at : usize = GR_LIST_HDR + i * GR_ENTRY;
                     if (!ck_same(lb[at..at + 10], s[EP_ME..EP_ME + 10])) {
-                        csg_member(s, lb[at..at + 10], gr_list_ip(lb[0..ln], i), gr_list_port(lb[0..ln], i), false, now);
+                        csg_member(s, lb[at..at + 10], gr_list_reach(gr_list_ip(lb[0..ln], i), from), gr_list_port(lb[0..ln], i), false, now);
                     }
                     i = i + 1;
                 }
