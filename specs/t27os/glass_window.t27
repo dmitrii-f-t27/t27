@@ -673,6 +673,12 @@ use t27os::chat_host::chm_ringing;
 use t27os::chat_host::chm_send;
 use t27os::chat_host::chm_open;
 use t27os::chat_host::chm_tick;
+use t27os::chat_host::chm_stat;
+use t27os::chat_core::cl_init;
+use t27os::chat_core::cl_state;
+use t27os::chat_core::ch_put_text;
+use t27os::chat_core::ch_rx_text;
+use t27os::chat_core::CH_RX_NEW;
 use t27os::call_session::CS_AUDIO_NONE;
 use t27os::call_session::CS_K_CALLING_MS;
 use t27os::call_session::CS_K_SILENT_MS;
@@ -11213,6 +11219,11 @@ pub fn ch_call(cl: []u8, v: []u8, s: []u8, log: []u8, buf: []u8, w: []u64, cs: [
 
 /// MESSAGE: the chat with the card's friend, its log open, every incoming line READ (sent with the next session).
 pub fn ch_message(cl: []const u8, v: []u8, s: []u8, m: []u8, log: []u8, buf: []u8, w: []u64) -> void {
+    ch_message_at(cl, v, s, m, log, buf, w, ckh_ms());
+}
+
+/// ch_message at the time now.
+pub fn ch_message_at(cl: []const u8, v: []u8, s: []u8, m: []u8, log: []u8, buf: []u8, w: []u64, now: u64) -> void {
     var fp : [10]u8 = undefined;
     var i : usize = 0;
     while (i < 10) {
@@ -11221,7 +11232,7 @@ pub fn ch_message(cl: []const u8, v: []u8, s: []u8, m: []u8, log: []u8, buf: []u
     }
     chv_open_chat(v);
     if (ch_open_log(cl, v, s, m, log, buf, w, fp[0..10])) {
-        if (chm_open(m, log)) { w[CHW_SAVE_AT] = ckh_ms() + CH_SAVE_MS; }
+        if (chm_open(m, log)) { w[CHW_SAVE_AT] = now + CH_SAVE_MS; }
         chv_unr_set(v, fp[0..10], 0);
     } else {
         v[CHV_NOTE] = @as(u8, @intCast(CHV_N_NOSAVE));
@@ -11258,9 +11269,16 @@ pub fn ch_do(cl: []u8, v: []u8, s: []u8, m: []u8, log: []u8, buf: []u8, w: []u64
 }
 
 /// One pass of the main loop: the friend of the card (its name, online, the card closes when it left the list), the
-/// message session (not while a call is up), the save, the history in view. tz is CHV_TZ_BIAS + seconds east of UTC,
-/// h the panel's height.
+/// message session, the save, the history in view. tz is CHV_TZ_BIAS + seconds east of UTC, h the panel's height.
+/// The message session is served on every pass while messages are up, whatever the panel shows and whatever the call
+/// block holds: a call that ended stays CK_ENDED until its CLOSE is clicked, and an incoming session from a friend must
+/// still be answered, its lines logged and ACKed, the unread count kept (READ goes out only once the chat is opened).
 pub fn ch_tick(cl: []u8, v: []u8, s: []u8, m: []u8, log: []u8, asm: []u8, buf: []u8, w: []u64, cs: []u8, tz: u64, h: f64) -> void {
+    ch_tick_at(cl, v, s, m, log, asm, buf, w, cs, tz, h, ckh_ms());
+}
+
+/// ch_tick at the time now (ms of ckh_ms).
+pub fn ch_tick_at(cl: []u8, v: []u8, s: []u8, m: []u8, log: []u8, asm: []u8, buf: []u8, w: []u64, cs: []u8, tz: u64, h: f64, now: u64) -> void {
     // the call block goes back to its launch setting once a call is over (CALL turned video and the camera off for it)
     if (cl[CL_NOCAM] != 0 and cs_state(cs) == CK_IDLE) {
         cl[CL_NOCAM] = 0;
@@ -11269,14 +11287,13 @@ pub fn ch_tick(cl: []u8, v: []u8, s: []u8, m: []u8, log: []u8, asm: []u8, buf: [
     // the test aid: the first friend's card or chat once the list is known
     if (w[CHW_AID] != 0 and cl[FV_SHOWN] > 0 and cl[CL_OPEN] != 0 and cl[AC_ON] != 0) {
         ch_card(cl, v, 0);
-        if (w[CHW_AID] == 2) { ch_message(cl, v, s, m, log, buf, w); }
+        if (w[CHW_AID] == 2) { ch_message_at(cl, v, s, m, log, buf, w, now); }
         w[CHW_AID] = 0;
     }
     // trust: the list changed (a friend added or removed) -> read the keys again; each session's verdict on its peer
     if (w[CHW_TR_N] != @as(u64, ft_count(cl[FE_FT .. FE_FT + FT_LEN])) + 1) { ch_trust_load(cl, v, w); }
-    const tnow : u64 = ckh_ms();
-    ch_trust_session(cl, v, w, cs, tnow);
-    ch_trust_session(cl, v, w, s, tnow);
+    ch_trust_session(cl, v, w, cs, now);
+    ch_trust_session(cl, v, w, s, now);
     if (chv_mode(v) != CHV_M_OFF) {
         const row : usize = fv_find_fp(cl, v[CHV_FP .. CHV_FP + 10]);
         if (row >= FV_ROWS_SNAP) {
@@ -11287,44 +11304,41 @@ pub fn ch_tick(cl: []u8, v: []u8, s: []u8, m: []u8, log: []u8, asm: []u8, buf: [
         }
     }
     if (v[CHV_UP] == 0) { return; }
-    const now : u64 = ckh_ms();
-    if (cs_state(cs) == CK_IDLE) {
-        if (w[CHW_LOADED] == 0) {
-            // no log open: read the socket; a friend whose session rings gets its log opened (answered next pass)
-            var e : u32 = cs_poll(s);
-            var g : u32 = 0;
-            while (e != CS_EV_NONE and g < 32) {
-                if (e == CS_EV_ENDED or e == CS_EV_FAILED) { cs_dismiss(s); }
-                e = cs_poll(s);
-                g = g + 1;
+    if (w[CHW_LOADED] == 0) {
+        // no log open: read the socket; a friend whose session rings gets its log opened (answered next pass)
+        var e : u32 = cs_poll(s);
+        var g : u32 = 0;
+        while (e != CS_EV_NONE and g < 32) {
+            if (e == CS_EV_ENDED or e == CS_EV_FAILED) { cs_dismiss(s); }
+            e = cs_poll(s);
+            g = g + 1;
+        }
+        var rf : [10]u8 = undefined;
+        if (chm_ringing(s, rf[0..10])) {
+            if (ft_find(cl[FE_FT .. FE_FT + FT_LEN], rf[0..10]) == FT_MAX) {
+                cs_decline(s);
+            } else {
+                ch_open_log(cl, v, s, m, log, buf, w, rf[0..10]);
             }
-            var rf : [10]u8 = undefined;
-            if (chm_ringing(s, rf[0..10])) {
-                if (ft_find(cl[FE_FT .. FE_FT + FT_LEN], rf[0..10]) == FT_MAX) {
-                    cs_decline(s);
-                } else {
-                    ch_open_log(cl, v, s, m, log, buf, w, rf[0..10]);
-                }
-            }
-        } else {
-            var lf : [10]u8 = undefined;
-            var i : usize = 0;
-            while (i < 10) {
-                lf[i] = log[28 + i];
-                i = i + 1;
-            }
-            const a : u64 = ch_friend_addr(cl, lf[0..10]);
-            chm_addr(m, a / 65536, a % 65536);
-            const ev : u32 = chm_tick(m, s, log, asm, cl[FE_FT .. FE_FT + FT_LEN], cl[FE_FP .. FE_FP + 10], now);
-            const shown : bool = chv_mode(v) == CHV_M_CHAT and chv_is(v, lf[0..10]);
-            if ((ev & CHM_E_NEW) != 0 and shown) { chm_open(m, log); }
-            if ((ev & (CHM_E_NEW | CHM_E_STATUS | CHM_E_DIRTY)) != 0) { v[CHV_DIRTY] = 1; }
-            if ((ev & CHM_E_DIRTY) != 0 and w[CHW_SAVE_AT] == 0) { w[CHW_SAVE_AT] = now + CH_SAVE_MS; }
-            chv_unr_set(v, lf[0..10], cl_unread(log));
-            if ((ev & CHM_E_OTHER) != 0 and shown == false and cl_pending(log) == 0) {
-                var of : [10]u8 = undefined;
-                if (chm_ringing(s, of[0..10])) { ch_open_log(cl, v, s, m, log, buf, w, of[0..10]); }
-            }
+        }
+    } else {
+        var lf : [10]u8 = undefined;
+        var i : usize = 0;
+        while (i < 10) {
+            lf[i] = log[28 + i];
+            i = i + 1;
+        }
+        const a : u64 = ch_friend_addr(cl, lf[0..10]);
+        chm_addr(m, a / 65536, a % 65536);
+        const ev : u32 = chm_tick(m, s, log, asm, cl[FE_FT .. FE_FT + FT_LEN], cl[FE_FP .. FE_FP + 10], now);
+        const shown : bool = chv_mode(v) == CHV_M_CHAT and chv_is(v, lf[0..10]);
+        if ((ev & CHM_E_NEW) != 0 and shown) { chm_open(m, log); }
+        if ((ev & (CHM_E_NEW | CHM_E_STATUS | CHM_E_DIRTY)) != 0) { v[CHV_DIRTY] = 1; }
+        if ((ev & CHM_E_DIRTY) != 0 and w[CHW_SAVE_AT] == 0) { w[CHW_SAVE_AT] = now + CH_SAVE_MS; }
+        chv_unr_set(v, lf[0..10], cl_unread(log));
+        if ((ev & CHM_E_OTHER) != 0 and shown == false and cl_pending(log) == 0) {
+            var of : [10]u8 = undefined;
+            if (chm_ringing(s, of[0..10])) { ch_open_log(cl, v, s, m, log, buf, w, of[0..10]); }
         }
     }
     if (w[CHW_LOADED] != 0 and w[CHW_SAVE_AT] != 0 and now >= w[CHW_SAVE_AT]) {
@@ -17097,4 +17111,69 @@ test ch_trust_turns_verified_once_the_key_is_stored_and_follows_the_list {
     ch_trust_from_keys(cl[0..8192], v[0..8192], keys[0..FK_LEN]);
     assert chv_tr_get(v[0..8192], a[0..10]) == 0 and chv_trust(v[0..8192], b[0..10]) == FV_T_UNVERIFIED;
     assert CHW_TR_AT < CHW_N and CHW_TR_N != CHW_AID and FV_T_VERIFIED != FV_T_MISMATCH;
+}
+
+test ch_messages_are_served_with_the_panel_shut_and_after_a_call_that_ended {
+    var cl : [8192]u8 = undefined;
+    var v : [8192]u8 = undefined;
+    var i : usize = 0;
+    while (i < 8192) {
+        cl[i] = 0;
+        v[i] = 0;
+        i = i + 1;
+    }
+    var s : [166528]u8 = undefined;
+    var cs : [166528]u8 = undefined;
+    i = 0;
+    while (i < CS_LEN) {
+        s[i] = 0;
+        cs[i] = 0;
+        i = i + 1;
+    }
+    var m : [256]u8 = undefined;
+    var asm : [8064]u8 = undefined;
+    var log : [8192]u8 = undefined;
+    var buf : [16]u8 = undefined;
+    var w : [8]u64 = undefined;
+    i = 0;
+    while (i < CHW_N) {
+        w[i] = 0;
+        i = i + 1;
+    }
+    var own : [10]u8 = undefined;
+    var a : [10]u8 = undefined;
+    i = 0;
+    while (i < 10) {
+        own[i] = @as(u8, @intCast(200 + i));
+        a[i] = @as(u8, @intCast(10 + i));
+        i = i + 1;
+    }
+    var inv : [25]u8 = undefined;
+    assert ft_init(cl[FE_FT .. FE_FT + FT_LEN]);
+    assert invite_make(a[0..10], inv[0..25]) == 25 and ft_add(cl[FE_FT .. FE_FT + FT_LEN], inv[0..25], own[0..10]) == FA_OK;
+    // messages are up, the cabinet is shut (no card, no chat), the last call ended and nobody clicked its CLOSE
+    v[CHV_UP] = 1;
+    w[CHW_TR_N] = @as(u64, ft_count(cl[FE_FT .. FE_FT + FT_LEN])) + 1;
+    cs[1] = @as(u8, @intCast(CK_ENDED));
+    assert cs_state(cs[0..CS_LEN]) == CK_ENDED and cl[CL_OPEN] == 0 and chv_mode(v[0..8192]) == CHV_M_OFF;
+    // a's log is open and one line of a's came in (as the session would hand it over)
+    assert cl_init(log[0..8192], a[0..10], 4) and chm_init(m[0..256], a[0..10], 0, 0);
+    w[CHW_LOADED] = 1;
+    var p : [720]u8 = undefined;
+    const pn : usize = ch_put_text(p[0..720], 1, 0, 1000, "hi");
+    assert pn > 0 and ch_rx_text(log[0..8192], asm[0..8064], p[0..pn]) == CH_RX_NEW;
+    // the pass serves the session: the unread count reaches a's row although the panel is shut; no READ yet
+    ch_tick_at(cl[0..8192], v[0..8192], s[0..CS_LEN], m[0..256], log[0..cl_bytes(4)], asm[0..8064], buf[0..16], w[0..CHW_N], cs[0..CS_LEN], CHV_TZ_BIAS, 400.0, 5000);
+    assert chv_unr_get(v[0..8192], a[0..10]) == 1;
+    assert chm_stat(m[0..256], 4) == 0 and cl_state(log[0..8192], 0) != CH_S_READ;
+    // the same during a call that is up
+    cs[1] = @as(u8, @intCast(CK_ACTIVE));
+    ch_tick_at(cl[0..8192], v[0..8192], s[0..CS_LEN], m[0..256], log[0..cl_bytes(4)], asm[0..8064], buf[0..16], w[0..CHW_N], cs[0..CS_LEN], CHV_TZ_BIAS, 400.0, 5000);
+    assert chv_unr_get(v[0..8192], a[0..10]) == 1 and chm_stat(m[0..256], 4) == 0;
+    // opening the chat is what makes the line READ (sent with the next session): unread 0, READ up to message 1
+    cs[1] = @as(u8, @intCast(CK_IDLE));
+    chv_open_card(v[0..8192], a[0..10]);
+    ch_message_at(cl[0..8192], v[0..8192], s[0..CS_LEN], m[0..256], log[0..cl_bytes(4)], buf[0..16], w[0..CHW_N], 6000);
+    w[CHW_SAVE_AT] = 0;
+    assert chv_unr_get(v[0..8192], a[0..10]) == 0 and chm_stat(m[0..256], 4) == 1 and cl_state(log[0..8192], 0) == CH_S_READ;
 }
