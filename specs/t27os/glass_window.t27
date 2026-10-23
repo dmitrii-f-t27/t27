@@ -291,6 +291,23 @@ use t27os::call_view::cv_hit;
 use t27os::call_view::cv_head_x;
 use t27os::call_view::cv_head_y;
 use t27os::call_view::cv_head_hit;
+use t27os::call_view::CV_N_PORTS;
+use t27os::call_view::CV_PORT_TRIES;
+use t27os::call_view::CV_PS_USED;
+use t27os::call_view::CV_PS_BUSY;
+use t27os::call_view::CV_PS_TRIED;
+use t27os::call_view::CV_PS_LEN;
+use t27os::call_view::CV_CP_LEAF;
+use t27os::call_view::CV_CP_LEAF_TMP;
+use t27os::call_view::CV_CP_CAP;
+use t27os::call_view::CV_PORT_NOTE_CAP;
+use t27os::call_view::cv_port_plan;
+use t27os::call_view::cv_port_step;
+use t27os::call_view::cv_port_busy_text;
+use t27os::call_view::cv_port_line;
+use t27os::call_view::cv_port_all_busy_text;
+use t27os::call_view::cv_cp_parse;
+use t27os::call_view::cv_port_save_text;
 use t27os::call_session::CS_LEN;
 use t27os::call_session::CS_AUDIO_DEV;
 use t27os::call_session::CS_AUDIO_TEST;
@@ -9578,6 +9595,8 @@ fn draw_profile_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, 
 //     fingerprint, then the view of call_view (address field and CALL; CANCEL; ANSWER / DECLINE; the 6 digits large
 //     with CODES MATCH / CODES DIFFER; the duration with MUTE / END CALL; the reason with CLOSE).
 //   - where it listens: T27OS_CALL_BIND (default 127.0.0.1, only a private network or 127.x, call_view cv_lan_ok), T27OS_CALL_PORT (47727);
+//     a taken port moves on to the next of at most ten (call_view section 6, cl_port_open), the one that opened is
+//     kept in ~/.t27os/callport.t27 and said in the panel and the cabinet;
 //     T27OS_CALL_AUDIO=test sends call_session's numbered test pattern instead of the microphone; T27OS_CALL_PEER
 //     fills the address field at launch.
 // The session block (CS_LEN bytes) is a local of main(): it never moves, as the audio callbacks need.
@@ -9648,6 +9667,13 @@ pub const CL_VENC : usize = 161;
 /// Not drawn: 1 while the call started by CALL on a friend's card (a voice call) runs: no camera, no video sent; back to
 /// 0 (and video as launched) once the call block is idle again (ch_tick).
 pub const CL_NOCAM : usize = 228;
+/// Drawn: the configured call port (big-endian, like CL_ME_PORT, which holds the port that opened), the mask of the
+/// ports tried that did not open (call_view cv_port_bit, two bytes) and how many were tried (call_view section 6).
+pub const CL_BPORT : usize = 232;
+/// The CALL panel's port line, between the title (25) and THIS DEVICE (call_view CV_ME_Y).
+pub const CL_PORT_Y : f64 = 39.0;
+pub const CL_PBUSY : usize = 234;
+pub const CL_PTRIED : usize = 236;
 pub const CLW_AUTO_T : usize = 9;
 /// The window's own call clock (main's [10]u64): when ACTIVE began, when the last poll returned, the longest gap from
 /// the end of one poll to the start of the next while ACTIVE, the state the last snapshot saw, the system activity
@@ -9697,6 +9723,114 @@ pub fn cl_put_ip(cl: []u8, at: usize, ip: u64) -> void {
 }
 
 pub fn cl_me_port(cl: []const u8) -> u64 { return (@as(u64, cl[CL_ME_PORT]) << 8) | @as(u64, cl[CL_ME_PORT + 1]); }
+pub fn cl_base_port(cl: []const u8) -> u64 { return (@as(u64, cl[CL_BPORT]) << 8) | @as(u64, cl[CL_BPORT + 1]); }
+pub fn cl_port_busy(cl: []const u8) -> u64 { return (@as(u64, cl[CL_PBUSY]) << 8) | @as(u64, cl[CL_PBUSY + 1]); }
+
+/// Keep port (0..65535) big-endian at cl[at].
+pub fn cl_put_port(cl: []u8, at: usize, port: u64) -> void {
+    cl[at] = @as(u8, @intCast((port >> 8) & 255));
+    cl[at + 1] = @as(u8, @intCast(port & 255));
+}
+
+/// "port 47727 busy, using 47728" when the port that opened is not the configured one (call_view cv_port_busy_text).
+pub fn cl_port_busy_line(cl: []const u8, out: []u8) -> usize {
+    if (cl[CL_UP] == 0) { return 0; }
+    return cv_port_busy_text(cl_base_port(cl), cl_me_port(cl), cl_port_busy(cl), out);
+}
+
+/// The panel's port line: "ONLINE  port 47728", then the busy text when there was one; "OFFLINE  10 call ports busy".
+pub fn cl_port_status(cl: []const u8, out: []u8) -> usize {
+    var used : u64 = 0;
+    if (cl[CL_UP] != 0) { used = cl_me_port(cl); }
+    var n : usize = cv_port_line(cl[CL_UP] != 0, used, cl_port_busy(cl), @as(u64, cl[CL_PTRIED]), out);
+    var b : [96]u8 = undefined;
+    const bn : usize = cl_port_busy_line(cl, b[0..96]);
+    if (bn > 0 and n + 2 + bn <= out.len) {
+        n = put_bytes(out, n, "  ");
+        n = put_bytes(out, n, b[0..bn]);
+    }
+    return n;
+}
+
+/// ~/.t27os, then `leaf` after a slash, NUL-ended in out; the length without the NUL, 0 without HOME.
+fn cl_state_path(leaf: []const u8, out: []u8) -> usize {
+    const a : u64 = sys_getenv("HOME");
+    if (a == 0) { return 0; }
+    const hn : u64 = sys_strlen(a);
+    if (hn == 0 or hn + 8 + @as(u64, leaf.len) + 2 > @as(u64, out.len)) { return 0; }
+    sys_peek(out, a, hn);
+    var n : usize = put_bytes(out, @as(usize, @intCast(hn)), "/.t27os");
+    if (leaf.len > 0) {
+        n = put_bytes(out, n, "/");
+        n = put_bytes(out, n, leaf);
+    }
+    out[n] = 0;
+    return n;
+}
+
+/// The port the last launch opened (~/.t27os/callport.t27, call_view cv_cp_parse); 0 for no file or a broken one
+/// (left as found: the next launch that opens a port writes over it).
+fn cl_port_saved() -> u64 {
+    var p : [320]u8 = undefined;
+    if (cl_state_path(CV_CP_LEAF, p[0..320]) == 0) { return 0; }
+    const fd : i32 = sys_open_ro(p[0..320], 0);
+    if (fd < 0) { return 0; }
+    var t : [96]u8 = undefined;
+    var got : i64 = 0;
+    var more : bool = true;
+    // one byte past the cap: a longer file is broken, not cut to fit
+    while (more and got < 96) {
+        const r : i64 = sys_read(fd, t[@as(usize, @intCast(got)) .. 96], @as(u64, @intCast(96 - got)));
+        if (r <= 0) { more = false; } else { got = got + r; }
+    }
+    sys_close(fd);
+    return cv_cp_parse(t[0 .. @as(usize, @intCast(got))]);
+}
+
+/// Write the port that opened (st, call_view cv_port_save_text): a temporary file of mode 0600 renamed over the old.
+fn cl_port_save(st: []const u64) -> bool {
+    var t : [96]u8 = undefined;
+    const n : usize = cv_port_save_text(st, unix_time(0), t[0..96]);
+    if (n == 0) { return false; }
+    var d : [320]u8 = undefined;
+    if (cl_state_path("", d[0..320]) == 0) { return false; }
+    sys_mkdir(d[0..320], 448);
+    var tmp : [320]u8 = undefined;
+    var fin : [320]u8 = undefined;
+    cl_state_path(CV_CP_LEAF_TMP, tmp[0..320]);
+    cl_state_path(CV_CP_LEAF, fin[0..320]);
+    const fd : i32 = sys_creat(tmp[0..320], 384);
+    if (fd < 0) { return false; }
+    const w : i64 = sys_write(fd, t[0..96], @as(u64, n));
+    sys_close(fd);
+    if (w != @as(i64, @intCast(n))) { return false; }
+    return sys_rename(tmp[0..320], fin[0..320]) == 0;
+}
+
+/// Open the session on the configured port or, when it is taken, on the next of at most CV_PORT_TRIES (call_view
+/// cv_port_plan: the base, the saved port, the rest); the port that opened goes to CL_ME_PORT and to the file, the
+/// ports that did not to CL_PBUSY. True when one opened.
+fn cl_port_open(cl: []u8, s: []u8, me: []const u8, bind: u64, base: u64, audio: u32) -> bool {
+    var plan : [10]u64 = undefined;
+    const np : usize = cv_port_plan(base, cl_port_saved(), plan[0..CV_PORT_TRIES]);
+    var st : [3]u64 = undefined;
+    st[CV_PS_USED] = 0;
+    st[CV_PS_BUSY] = 0;
+    st[CV_PS_TRIED] = 0;
+    var i : usize = 0;
+    var go : bool = np > 0;
+    while (go and i < np) {
+        const ok : bool = cs_open(s, me, bind, plan[i], audio);
+        go = cv_port_step(st[0..CV_PS_LEN], base, plan[i], ok);
+        i = i + 1;
+    }
+    cl_put_port(cl, CL_PBUSY, st[CV_PS_BUSY]);
+    cl[CL_PTRIED] = @as(u8, @intCast(st[CV_PS_TRIED] & 255));
+    if (st[CV_PS_USED] == 0) { return false; }
+    cl_put_port(cl, CL_ME_PORT, st[CV_PS_USED]);
+    cl_port_save(st[0..CV_PS_LEN]);
+    return true;
+}
 
 /// Why the last call ended, one fixed line per call_session reason.
 pub fn cl_reason_text(r: u32) -> str {
@@ -9756,8 +9890,8 @@ pub fn cl_port_of(t: []const u8, n: usize) -> u64 {
     return v;
 }
 
-/// Launch: where this window listens, the audio mode, the session opened once. A refused address or a taken port
-/// leaves calls off with a note; nothing else depends on it.
+/// Launch: where this window listens, the audio mode, the session opened once. A refused address, or ten taken ports
+/// (cl_port_open), leaves calls off with a note; nothing else depends on it.
 pub fn cl_boot(cl: []u8, s: []u8) -> void {
     var e : [32]u8 = undefined;
     var bind : u64 = 2130706433;
@@ -9767,8 +9901,8 @@ pub fn cl_boot(cl: []u8, s: []u8) -> void {
     n = cl_env("T27OS_CALL_PORT", e[0..32]);
     if (n > 0) { port = cl_port_of(e[0..32], n); }
     cl_put_ip(cl, CL_ME_IP, bind);
-    cl[CL_ME_PORT] = @as(u8, @intCast((port >> 8) & 255));
-    cl[CL_ME_PORT + 1] = @as(u8, @intCast(port & 255));
+    cl_put_port(cl, CL_ME_PORT, port);
+    cl_put_port(cl, CL_BPORT, port);
     n = cl_env("T27OS_CALL_PEER", e[0..32]);
     if (n > 0 and n <= CV_ADDR_MAX) {
         var i : usize = 0;
@@ -9803,7 +9937,9 @@ pub fn cl_boot(cl: []u8, s: []u8) -> void {
         cl[CL_NOTE] = @as(u8, @intCast(FN_IDENT));
         return;
     }
-    if (cs_open(s, me[0..10], bind, port, audio)) {
+    if (cl_port_open(cl, s, me[0..10], bind, port, audio)) {
+        // the port that opened is the one listened on and announced (TXT `port`), the base when it was free
+        port = cl_me_port(cl);
         cl[CL_UP] = 1;
         // the identity key pair signs this device's part of every call (peer_identity: the key the friends stored)
         cs_identity(s, cl[FE_ID + ID_OFF_PUB .. FE_ID + ID_OFF_PUB + 65], cl[FE_ID + ID_OFF_PRIV .. FE_ID + ID_OFF_PRIV + 97]);
@@ -9827,6 +9963,8 @@ pub fn cl_boot(cl: []u8, s: []u8) -> void {
         rt_init(cl[FE_TONE .. FE_TONE + RT_BLOCK]);
         ug_listen(cl, bind);
         fe_net(cl, bind, port);
+    } else if (cl[CL_PTRIED] > 1) {
+        cl[CL_NOTE] = @as(u8, @intCast(CV_N_PORTS));
     } else {
         cl[CL_NOTE] = @as(u8, @intCast(CV_N_SOCKET));
     }
@@ -10497,7 +10635,7 @@ fn draw_cl_front(c: u64, kit: [48]u64, sh: f64, mx: f64, my: f64, l: f64, t: f64
     } else if (fv_note_is_mine(code)) {
         draw_cl_wrap(c, kit, fv_note_text(code), x, right, t + FV_NOTE_Y, 9.5, 3, sh);
     } else {
-        draw_cl_wrap(c, kit, cv_note_text(code), x, right, t + FV_NOTE_Y, 9.5, 3, sh);
+        draw_cl_note(c, kit, cl, code, x, right, t + FV_NOTE_Y, sh);
     }
     if (debug) {
         cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
@@ -10552,6 +10690,19 @@ fn draw_cl_video(c: u64, kit: [48]u64, x: f64, right: f64, y: f64, sh: f64, cl: 
     cg_fill_rect(c, x + w - HAIR, top, HAIR, h);
 }
 
+/// A note of call_view; CV_N_PORTS names every port that was tried and taken.
+fn draw_cl_note(c: u64, kit: [48]u64, cl: []const u8, code: u32, x: f64, right: f64, y: f64, sh: f64) -> void {
+    if (code == CV_N_PORTS) {
+        var t : [200]u8 = undefined;
+        const n : usize = cv_port_all_busy_text(cl_base_port(cl), 0, cl_port_busy(cl), @as(u64, cl[CL_PTRIED]), t[0..CV_PORT_NOTE_CAP]);
+        if (n > 0) {
+            draw_cl_wrap(c, kit, t[0..n], x, right, y, 9.5, 3, sh);
+            return;
+        }
+    }
+    draw_cl_wrap(c, kit, cv_note_text(code), x, right, y, 9.5, 3, sh);
+}
+
 fn draw_call_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, cl: []const u8, ch: []const u8) -> void {
     const l : f64 = qp_left(sw);
     const t : f64 = WS_TOP;
@@ -10565,6 +10716,12 @@ fn draw_call_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, cl:
     const view : u32 = @as(u32, cl[CL_VIEW]);
     var line : [96]u8 = undefined;
     // this device: where it listens and the fingerprint of its identity (the key a friend calls)
+    // online or not and on which port; when the configured port was taken, which one and which is used instead
+    var pl : [160]u8 = undefined;
+    const pn : usize = cl_port_status(cl, pl[0..160]);
+    draw_cl_dot(c, kit, x, t + CL_PORT_Y - 8.0, cl[CL_UP] != 0);
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+    draw_fit(c, kit, pl[0..160], pn, x + 14.0, t + CL_PORT_Y, 9.5, WEIGHT_SEMIBOLD, false, right);
     var n : usize = put_bytes(line[0..96], 0, "THIS DEVICE  ");
     n = n + cv_addr_text(cl_ip(cl, CL_ME_IP), cl_me_port(cl), line[n..96]);
     cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
@@ -10654,7 +10811,7 @@ fn draw_call_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, cl:
     }
     if (view == CV_IDLE) {
         cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
-        draw_cl_wrap(c, kit, cv_note_text(@as(u32, cl[CL_NOTE])), x, right, t + CV_NOTE_Y, 9.5, 3, sh);
+        draw_cl_note(c, kit, cl, @as(u32, cl[CL_NOTE]), x, right, t + CV_NOTE_Y, sh);
         return;
     }
     cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
@@ -11005,7 +11162,9 @@ fn ac_log(cl: []const u8) -> void {
     n = put_dec(line[0..384], n, @as(u64, cl[FV_COUNT]));
     n = put_bytes(line[0..384], n, " state=");
     n = n + ac_state_line(cl[CL_UP] != 0, cl[FV_NET] == @as(u8, @intCast(FV_NET_UP)), cl_me_port(cl), line[n..384]);
-    n = put_bytes(line[0..384], n, " ");
+    n = put_bytes(line[0..384], n, " port=[");
+    n = n + cl_port_status(cl, line[n..384]);
+    n = put_bytes(line[0..384], n, "] ");
     n = n + ac_build_line(cl, line[n..384]);
     sys_write(2, line[0..n], @as(u64, n));
     sys_write(2, "\n", 1);
@@ -11275,9 +11434,14 @@ fn draw_account_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, 
     const up : bool = cl[CL_UP] != 0 and cl[FV_NET] == @as(u8, @intCast(FV_NET_UP));
     draw_cl_dot(c, kit, x, t + AC_STATE_Y - 8.0, up);
     n = ac_state_line(cl[CL_UP] != 0, cl[FV_NET] == @as(u8, @intCast(FV_NET_UP)), cl_me_port(cl), line[0..96]);
+    // every call port tried was taken: the line says how many (the CALL panel lists them)
+    if (cl[CL_UP] == 0 and cl[CL_PTRIED] > 1) { n = cl_port_status(cl, line[0..96]); }
     cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
     draw_fit(c, kit, line[0..96], n, x + 14.0, t + AC_STATE_Y, 9.5, WEIGHT_SEMIBOLD, false, qright);
-    n = ac_build_line(cl, line[0..96]);
+    // the configured call port was taken: that comes first on the build line, the version and the build after it
+    n = cl_port_busy_line(cl, line[0..96]);
+    if (n > 0) { n = put_bytes(line[0..96], n, "  "); }
+    n = n + ac_build_line(cl, line[n..96]);
     cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
     draw_fit(c, kit, line[0..96], n, x + 14.0, t + AC_BUILD_Y, 9.0, 0.0, true, qright);
     // UPDATE: a friend's newer build and its one button (UPDATE / CANCEL / RESTART), the progress or the reason, or what
@@ -17316,6 +17480,45 @@ test the_call_region_ends_the_text_store_and_draw_reads_only_folded_bytes {
     assert CL_VSKIP + 4 <= CL_CAMSTATE and CL_CAMSTATE < CL_VIMG;
     // the encoder's address stands after the camera's try flag and before the account panel
     assert CL_CAMTRY < CL_VENC and CL_VENC + 8 <= AC_ON;
+    // the call port bytes stand after the account panel and the voice flag, before the friends snapshot, folded
+    assert AC_END <= CL_NOCAM and CL_NOCAM < CL_BPORT and CL_BPORT + 2 <= CL_PBUSY and CL_PBUSY + 2 <= CL_PTRIED;
+    assert CL_PTRIED < FV_BASE and CL_PTRIED < CL_KEY_N;
+}
+
+test a_taken_call_port_is_said_in_the_panel_and_the_cabinet {
+    var cl : [256]u8 = undefined;
+    var i : usize = 0;
+    while (i < 256) {
+        cl[i] = 0;
+        i = i + 1;
+    }
+    var o : [160]u8 = undefined;
+    // 47727 was taken, 47728 opened
+    cl_put_port(cl[0..256], CL_BPORT, 47727);
+    cl_put_port(cl[0..256], CL_ME_PORT, 47728);
+    cl_put_port(cl[0..256], CL_PBUSY, 1);
+    cl[CL_PTRIED] = 2;
+    cl[CL_UP] = 1;
+    assert cl_base_port(cl[0..256]) == 47727 and cl_me_port(cl[0..256]) == 47728 and cl_port_busy(cl[0..256]) == 1;
+    var n : usize = cl_port_busy_line(cl[0..256], o[0..160]);
+    assert n == 28 and o[0] == 112 and o[5] == 52 and o[9] == 55 and o[23] == 52 and o[27] == 56;
+    n = cl_port_status(cl[0..256], o[0..160]);
+    // "ONLINE  port 47728  port 47727 busy, using 47728"
+    assert n == 18 + 2 + 28 and o[0] == 79 and o[17] == 56 and o[20] == 112;
+    // the configured port opened: no busy text
+    cl_put_port(cl[0..256], CL_ME_PORT, 47727);
+    cl_put_port(cl[0..256], CL_PBUSY, 0);
+    cl[CL_PTRIED] = 1;
+    assert cl_port_busy_line(cl[0..256], o[0..160]) == 0;
+    assert cl_port_status(cl[0..256], o[0..160]) == 18;
+    // all ten taken: offline, how many; nothing about a port in use
+    cl[CL_UP] = 0;
+    cl_put_port(cl[0..256], CL_PBUSY, 1023);
+    cl[CL_PTRIED] = 10;
+    assert cl_port_busy_line(cl[0..256], o[0..160]) == 0;
+    n = cl_port_status(cl[0..256], o[0..160]);
+    // "OFFLINE  10 call ports busy"
+    assert n == 27 and o[1] == 70 and o[9] == 49 and o[10] == 48;
 }
 
 test video_in_a_call_is_on_unless_the_variable_says_0 {

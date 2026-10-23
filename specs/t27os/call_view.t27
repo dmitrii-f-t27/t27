@@ -33,6 +33,8 @@ use t27os::call_core::CK_FAILED;
 use t27os::call_core::CK_FP;
 use t27os::queen::QP_PAD;
 use t27os::session_store::put_dec;
+use t27os::session_store::put_bytes;
+use t27os::peer_identity::crc32;
 
 // ---------------------------------------------------------------- 1. views and actions
 
@@ -169,6 +171,8 @@ pub const CV_N_SOCKET : u32 = 3;
 pub const CV_N_BIND : u32 = 4;
 pub const CV_N_REFUSED : u32 = 5;
 pub const CV_N_SELF : u32 = 6;
+/// Every call port tried was taken (section 6); the window draws the list, cv_port_all_busy_text.
+pub const CV_N_PORTS : u32 = 7;
 
 pub fn cv_note_text(note: u32) -> str {
     if (note == CV_N_ADDR) { return "Type an address like 192.168.1.10:47727."; }
@@ -177,6 +181,7 @@ pub fn cv_note_text(note: u32) -> str {
     if (note == CV_N_BIND) { return "Calls are off: T27OS_CALL_BIND must be a private network address (10.x, 172.16-31.x, 192.168.x or 127.x)."; }
     if (note == CV_N_REFUSED) { return "The call could not be started."; }
     if (note == CV_N_SELF) { return "That is this device's own address."; }
+    if (note == CV_N_PORTS) { return "Calls are off: every call port tried is taken."; }
     return "";
 }
 
@@ -384,6 +389,202 @@ pub fn cv_head_x(right: f64) -> f64 { return right - CV_HEAD_W; }
 pub fn cv_head_y(title_h: f64) -> f64 { return 0.5 * (title_h - CV_HEAD_H); }
 pub fn cv_head_hit(x: f64, y: f64, right: f64, title_h: f64) -> bool {
     return cv_in(x, y, cv_head_x(right), cv_head_y(title_h), CV_HEAD_W, CV_HEAD_H);
+}
+
+// ---------------------------------------------------------------- 6. the call port when it is taken
+// Owner, 2026-10-23: a taken call port must not turn calls off. A launch tries at most CV_PORT_TRIES ports
+// (cv_port_plan): the configured base (T27OS_CALL_PORT, else CV_PORT) first, so a base that is free again is taken
+// back; then the port the last launch opened (~/.t27os/callport.t27) when it is one of base+1..base+9, as it was
+// proven to open; then the rest of base+1..base+9 upwards, never past 65535. The port that opens is the one the
+// session listens on and the one the mDNS TXT record names (friends_engine fe_net); the base is never rewritten.
+// What the launch keeps (cv_port_step, CV_PS_LEN words): the port that opened (0 = none), a mask with bit k set when
+// base+k was tried and did not open, and how many ports were tried.
+//
+// The file, version 1 (ASCII, three lines, no key):
+//   t27os-callport v1
+//   <port> <at>
+//   crc <crc32>
+// port 1..65535; at: unix seconds of the launch that opened it (never 0); crc: CRC-32 (peer_identity crc32) of every
+// byte before the crc line, in decimal. Anything else is ignored: the plan is then the base and its next nine.
+
+pub const CV_PORT_TRIES : usize = 10;
+pub const CV_PS_USED : usize = 0;
+pub const CV_PS_BUSY : usize = 1;
+pub const CV_PS_TRIED : usize = 2;
+pub const CV_PS_LEN : usize = 3;
+pub const CV_CP_MAGIC : str = "t27os-callport v1\n";
+pub const CV_CP_LEAF : str = "callport.t27";
+pub const CV_CP_LEAF_TMP : str = "callport.t27.tmp";
+/// The longest file: the head, two numbers of at most 20 digits, the crc line.
+pub const CV_CP_CAP : usize = 80;
+
+/// The ports a launch tries, in order, into out; how many (at most CV_PORT_TRIES and out.len, 0 for a bad base).
+pub fn cv_port_plan(base: u64, saved: u64, out: []u64) -> usize {
+    if (base == 0 or base > 65535 or out.len == 0) { return 0; }
+    const tries : u64 = @as(u64, CV_PORT_TRIES);
+    out[0] = base;
+    var n : usize = 1;
+    var keep : u64 = 0;
+    if (saved > base and saved - base < tries and saved <= 65535) { keep = saved; }
+    if (keep != 0 and n < out.len) {
+        out[n] = keep;
+        n = n + 1;
+    }
+    var k : u64 = 1;
+    while (k < tries and n < out.len and base + k <= 65535) {
+        if (base + k != keep) {
+            out[n] = base + k;
+            n = n + 1;
+        }
+        k = k + 1;
+    }
+    return n;
+}
+
+/// The bit of port in the busy mask: 2^(port - base) for base..base+9, 0 for any other port.
+pub fn cv_port_bit(base: u64, port: u64) -> u64 {
+    if (port < base or port - base >= @as(u64, CV_PORT_TRIES)) { return 0; }
+    var b : u64 = 1;
+    var k : u64 = 0;
+    while (k < port - base) {
+        b = b * 2;
+        k = k + 1;
+    }
+    return b;
+}
+
+/// One try of the launch: port was tried and opened (ok) or not; st (CV_PS_LEN words) is updated. True when the next
+/// port of the plan is to be tried: this one did not open and fewer than CV_PORT_TRIES were tried.
+pub fn cv_port_step(st: []u64, base: u64, port: u64, ok: bool) -> bool {
+    if (st.len < CV_PS_LEN) { return false; }
+    st[CV_PS_TRIED] = st[CV_PS_TRIED] + 1;
+    if (ok) {
+        st[CV_PS_USED] = port;
+        return false;
+    }
+    st[CV_PS_BUSY] = st[CV_PS_BUSY] | cv_port_bit(base, port);
+    return st[CV_PS_TRIED] < @as(u64, CV_PORT_TRIES);
+}
+
+/// How many bits of the busy mask are set.
+pub fn cv_port_nbusy(busy: u64) -> u64 {
+    var n : u64 = 0;
+    var x : u64 = busy;
+    while (x > 0) {
+        n = n + (x & 1);
+        x = x / 2;
+    }
+    return n;
+}
+
+/// The busy ports, ascending, "47727" or "47727, 47728", at out[at]; the index after them.
+fn cv_port_list(base: u64, busy: u64, out: []u8, at: usize) -> usize {
+    var n : usize = at;
+    var first : bool = true;
+    var k : u64 = 0;
+    var x : u64 = busy;
+    while (x > 0) {
+        if ((x & 1) != 0) {
+            if (!first) { n = put_bytes(out, n, ", "); }
+            n = put_dec(out, n, base + k);
+            first = false;
+        }
+        x = x / 2;
+        k = k + 1;
+    }
+    return n;
+}
+
+/// "port 47727 busy, using 47728" (or "ports 47727, 47728 busy, using 47729") when the port that opened is not the
+/// base; nothing (0) when the base opened or none did.
+pub fn cv_port_busy_text(base: u64, used: u64, busy: u64, out: []u8) -> usize {
+    if (used == 0 or used == base or busy == 0) { return 0; }
+    var n : usize = 0;
+    if (cv_port_nbusy(busy) == 1) { n = put_bytes(out, 0, "port "); } else { n = put_bytes(out, 0, "ports "); }
+    n = cv_port_list(base, busy, out, n);
+    n = put_bytes(out, n, " busy, using ");
+    return put_dec(out, n, used);
+}
+
+/// "ONLINE  port 47728" while calls are up; "OFFLINE  10 call ports busy" when every port tried was taken;
+/// "OFFLINE  calls are off" otherwise.
+pub fn cv_port_line(up: bool, used: u64, busy: u64, tried: u64, out: []u8) -> usize {
+    if (up and used != 0) { return put_dec(out, put_bytes(out, 0, "ONLINE  port "), used); }
+    if (tried > 0 and cv_port_nbusy(busy) == tried) {
+        const n : usize = put_dec(out, put_bytes(out, 0, "OFFLINE  "), tried);
+        return put_bytes(out, n, " call ports busy");
+    }
+    return put_bytes(out, 0, "OFFLINE  calls are off");
+}
+
+/// The note when every port tried was taken, with each of them: "Calls are off: every call port tried is taken:
+/// 47727, 47728, ... 47736. Close what holds one, or set T27OS_CALL_PORT." 0 when one opened or none was tried; out
+/// needs CV_PORT_NOTE_CAP bytes.
+pub const CV_PORT_NOTE_CAP : usize = 200;
+pub fn cv_port_all_busy_text(base: u64, used: u64, busy: u64, tried: u64, out: []u8) -> usize {
+    if (used != 0 or tried == 0 or cv_port_nbusy(busy) != tried or out.len < CV_PORT_NOTE_CAP) { return 0; }
+    var n : usize = put_bytes(out, 0, "Calls are off: every call port tried is taken: ");
+    n = cv_port_list(base, busy, out, n);
+    return put_bytes(out, n, ". Close what holds one, or set T27OS_CALL_PORT.");
+}
+
+/// The file for the port that opened at unix second at; its length (at most CV_CP_CAP), 0 for a bad port or at = 0.
+pub fn cv_cp_text(port: u64, at: u64, out: []u8) -> usize {
+    if (port == 0 or port > 65535 or at == 0 or out.len < CV_CP_CAP) { return 0; }
+    var n : usize = put_bytes(out, 0, CV_CP_MAGIC);
+    n = put_dec(out, n, port);
+    n = put_bytes(out, n, " ");
+    n = put_dec(out, n, at);
+    n = put_bytes(out, n, "\n");
+    const c : u32 = crc32(out[0..n], n);
+    n = put_bytes(out, n, "crc ");
+    n = put_dec(out, n, @as(u64, c));
+    return put_bytes(out, n, "\n");
+}
+
+/// The decimal number at text[at] (1..19 digits) into v[0]; the index after it, text.len + 1 when there is none.
+fn cv_cp_num(text: []const u8, at: usize, v: []u64) -> usize {
+    var i : usize = at;
+    var x : u64 = 0;
+    while (i < text.len and text[i] >= 48 and text[i] <= 57 and i - at < 19) {
+        x = x * 10 + @as(u64, text[i] - 48);
+        i = i + 1;
+    }
+    if (i == at or (i < text.len and text[i] >= 48 and text[i] <= 57)) { return text.len + 1; }
+    v[0] = x;
+    return i;
+}
+
+/// The port a version 1 file names; 0 for anything else (another head, a bad number, a wrong CRC, bytes after it).
+pub fn cv_cp_parse(text: []const u8) -> u64 {
+    const ml : usize = CV_CP_MAGIC.len;
+    if (text.len > CV_CP_CAP or text.len < ml) { return 0; }
+    var i : usize = 0;
+    while (i < ml) {
+        if (text[i] != CV_CP_MAGIC[i]) { return 0; }
+        i = i + 1;
+    }
+    var v : [1]u64 = undefined;
+    i = cv_cp_num(text, i, v[0..1]);
+    if (i >= text.len or text[i] != 32) { return 0; }
+    const port : u64 = v[0];
+    i = cv_cp_num(text, i + 1, v[0..1]);
+    if (i >= text.len or text[i] != 10) { return 0; }
+    const at : u64 = v[0];
+    const body : usize = i + 1;
+    if (body + 4 > text.len or text[body] != 99 or text[body + 1] != 114 or text[body + 2] != 99 or text[body + 3] != 32) { return 0; }
+    i = cv_cp_num(text, body + 4, v[0..1]);
+    if (i >= text.len or text[i] != 10 or i + 1 != text.len) { return 0; }
+    if (v[0] != @as(u64, crc32(text[0..body], body))) { return 0; }
+    if (port == 0 or port > 65535 or at == 0) { return 0; }
+    return port;
+}
+
+/// What the launch writes once a port opened: the file naming that port (never the base unless the base opened);
+/// 0 when none opened (the file is then left as it was).
+pub fn cv_port_save_text(st: []const u64, at: u64, out: []u8) -> usize {
+    if (st.len < CV_PS_LEN or st[CV_PS_USED] == 0) { return 0; }
+    return cv_cp_text(st[CV_PS_USED], at, out);
 }
 
 // ---------------------------------------------------------------- tests
@@ -602,6 +803,154 @@ test cv_every_window_note_has_its_text_and_no_note_is_empty {
     assert cv_note_text(CV_N_BIND) == "Calls are off: T27OS_CALL_BIND must be a private network address (10.x, 172.16-31.x, 192.168.x or 127.x).";
     assert cv_note_text(CV_N_REFUSED) == "The call could not be started.";
     assert cv_note_text(CV_N_SELF) == "That is this device's own address.";
-    assert cv_note_text(CV_N_SELF + 1).len == 0;
+    assert cv_note_text(CV_N_PORTS) == "Calls are off: every call port tried is taken.";
+    assert cv_note_text(CV_N_PORTS + 1).len == 0;
     assert cv_note_text(4294967295).len == 0;
+}
+
+test cv_the_port_plan_is_the_base_then_the_saved_port_then_the_next_nine {
+    var p : [16]u64 = undefined;
+    // no saved port: the base and its next nine, ten in all, never more
+    assert cv_port_plan(47727, 0, p[0..16]) == CV_PORT_TRIES;
+    assert p[0] == 47727 and p[1] == 47728 and p[9] == 47736;
+    // the saved port comes right after the base, and only once
+    assert cv_port_plan(47727, 47731, p[0..16]) == CV_PORT_TRIES;
+    assert p[0] == 47727 and p[1] == 47731 and p[2] == 47728 and p[5] == 47732 and p[9] == 47736;
+    var k : usize = 2;
+    while (k < 10) {
+        assert p[k] != 47731;
+        k = k + 1;
+    }
+    // a saved port that is the base or outside base+1..base+9 is not tried
+    assert cv_port_plan(47727, 47727, p[0..16]) == 10 and p[1] == 47728;
+    assert cv_port_plan(47727, 47737, p[0..16]) == 10 and p[1] == 47728 and p[9] == 47736;
+    assert cv_port_plan(47727, 1, p[0..16]) == 10 and p[1] == 47728;
+    // never past 65535, never past out, nothing for a bad base
+    assert cv_port_plan(65533, 0, p[0..16]) == 3 and p[2] == 65535;
+    assert cv_port_plan(47727, 0, p[0..4]) == 4;
+    assert cv_port_plan(0, 0, p[0..16]) == 0;
+    assert cv_port_plan(65536, 0, p[0..16]) == 0;
+}
+
+test cv_a_taken_port_moves_on_and_ten_taken_ports_stop {
+    var st : [3]u64 = undefined;
+    st[0] = 0;
+    st[1] = 0;
+    st[2] = 0;
+    // the base is taken: the next one is tried and opens
+    assert cv_port_step(st[0..3], 47727, 47727, false) == true;
+    assert cv_port_step(st[0..3], 47727, 47728, true) == false;
+    assert st[CV_PS_USED] == 47728 and st[CV_PS_BUSY] == 1 and st[CV_PS_TRIED] == 2;
+    // every one of the ten is taken: the tenth stops the launch, nothing is used
+    var p : [10]u64 = undefined;
+    const n : usize = cv_port_plan(47727, 0, p[0..10]);
+    st[0] = 0;
+    st[1] = 0;
+    st[2] = 0;
+    var i : usize = 0;
+    var go : bool = true;
+    while (go and i < n) {
+        go = cv_port_step(st[0..3], 47727, p[i], false);
+        i = i + 1;
+    }
+    assert i == 10 and go == false;
+    assert st[CV_PS_USED] == 0 and st[CV_PS_BUSY] == 1023 and st[CV_PS_TRIED] == 10;
+    assert cv_port_nbusy(1023) == 10 and cv_port_nbusy(0) == 0 and cv_port_nbusy(5) == 2;
+    // even past the plan a caller is told to stop
+    assert cv_port_step(st[0..3], 47727, 47737, false) == false;
+    assert cv_port_step(st[0..2], 47727, 47727, false) == false;
+    assert cv_port_bit(47727, 47727) == 1 and cv_port_bit(47727, 47736) == 512;
+    assert cv_port_bit(47727, 47737) == 0 and cv_port_bit(47727, 47726) == 0;
+}
+
+test cv_a_launch_takes_the_first_free_port_and_goes_back_to_a_free_base {
+    // the launch as the window runs it, over a set of taken ports
+    var taken : [3]u64 = undefined;
+    taken[0] = 47727;
+    taken[1] = 47729;
+    taken[2] = 0;
+    var round : usize = 0;
+    var saved : u64 = 0;
+    while (round < 2) {
+        var p : [10]u64 = undefined;
+        const n : usize = cv_port_plan(47727, saved, p[0..10]);
+        var st : [3]u64 = undefined;
+        st[0] = 0;
+        st[1] = 0;
+        st[2] = 0;
+        var i : usize = 0;
+        var go : bool = true;
+        while (go and i < n) {
+            const ok : bool = p[i] != taken[0] and p[i] != taken[1];
+            go = cv_port_step(st[0..3], 47727, p[i], ok);
+            i = i + 1;
+        }
+        var f : [80]u8 = undefined;
+        const fl : usize = cv_port_save_text(st[0..3], 1792000000, f[0..80]);
+        if (round == 0) {
+            // 47727 taken: 47728 opens, the file names it, the panel says so
+            assert st[CV_PS_USED] == 47728 and fl > 0;
+            var t : [96]u8 = undefined;
+            assert cv_eq(t[0..96], cv_port_busy_text(47727, st[CV_PS_USED], st[CV_PS_BUSY], t[0..96]), "port 47727 busy, using 47728");
+            assert cv_eq(t[0..96], cv_port_line(true, st[CV_PS_USED], st[CV_PS_BUSY], st[CV_PS_TRIED], t[0..96]), "ONLINE  port 47728");
+            // the next launch: the base is free again
+            taken[0] = 0;
+        } else {
+            assert st[CV_PS_USED] == 47727 and st[CV_PS_TRIED] == 1 and st[CV_PS_BUSY] == 0;
+            assert cv_cp_parse(f[0..fl]) == 47727;
+        }
+        saved = cv_cp_parse(f[0..fl]);
+        round = round + 1;
+    }
+}
+
+test cv_the_port_texts_name_what_is_busy_and_what_is_used {
+    var t : [200]u8 = undefined;
+    assert cv_port_busy_text(47727, 47727, 0, t[0..200]) == 0;
+    assert cv_port_busy_text(47727, 0, 1023, t[0..200]) == 0;
+    assert cv_eq(t[0..200], cv_port_busy_text(47727, 47729, 3, t[0..200]), "ports 47727, 47728 busy, using 47729");
+    assert cv_eq(t[0..200], cv_port_line(true, 47727, 0, 1, t[0..200]), "ONLINE  port 47727");
+    assert cv_eq(t[0..200], cv_port_line(false, 0, 1023, 10, t[0..200]), "OFFLINE  10 call ports busy");
+    assert cv_eq(t[0..200], cv_port_line(false, 0, 0, 0, t[0..200]), "OFFLINE  calls are off");
+    assert cv_eq(t[0..200], cv_port_line(false, 0, 1, 2, t[0..200]), "OFFLINE  calls are off");
+    assert cv_eq(t[0..200], cv_port_all_busy_text(47727, 0, 1023, 10, t[0..200]), "Calls are off: every call port tried is taken: 47727, 47728, 47729, 47730, 47731, 47732, 47733, 47734, 47735, 47736. Close what holds one, or set T27OS_CALL_PORT.");
+    assert cv_port_all_busy_text(47727, 47728, 1, 2, t[0..200]) == 0;
+    assert cv_port_all_busy_text(47727, 0, 0, 0, t[0..200]) == 0;
+    assert cv_port_all_busy_text(47727, 0, 1023, 10, t[0..199]) == 0;
+}
+
+test cv_the_port_file_reads_back_and_refuses_anything_else {
+    var f : [80]u8 = undefined;
+    const n : usize = cv_cp_text(47728, 1792000000, f[0..80]);
+    assert n > CV_CP_MAGIC.len and n <= CV_CP_CAP;
+    assert f[0] == 116 and f[n - 1] == 10;
+    assert cv_cp_parse(f[0..n]) == 47728;
+    // one byte changed, cut short, a byte after it: refused
+    f[CV_CP_MAGIC.len] = 57;
+    assert cv_cp_parse(f[0..n]) == 0;
+    f[CV_CP_MAGIC.len] = 52;
+    assert cv_cp_parse(f[0..n]) == 47728;
+    assert cv_cp_parse(f[0..n - 1]) == 0;
+    var g : [81]u8 = undefined;
+    var i : usize = 0;
+    while (i < n) {
+        g[i] = f[i];
+        i = i + 1;
+    }
+    g[n] = 10;
+    assert cv_cp_parse(g[0..n + 1]) == 0;
+    assert cv_cp_parse("t27os-callport v2\n47728 1\ncrc 0\n") == 0;
+    assert cv_cp_parse("") == 0;
+    // nothing to write for a bad port, a zero time or a launch where no port opened
+    assert cv_cp_text(0, 1792000000, f[0..80]) == 0;
+    assert cv_cp_text(65536, 1792000000, f[0..80]) == 0;
+    assert cv_cp_text(47728, 0, f[0..80]) == 0;
+    var st : [3]u64 = undefined;
+    st[0] = 0;
+    st[1] = 1023;
+    st[2] = 10;
+    assert cv_port_save_text(st[0..3], 1792000000, f[0..80]) == 0;
+    st[0] = 47730;
+    const m : usize = cv_port_save_text(st[0..3], 1792000000, f[0..80]);
+    assert cv_cp_parse(f[0..m]) == 47730;
 }
