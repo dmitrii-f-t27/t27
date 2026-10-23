@@ -58,6 +58,10 @@ mod land; // t27c gen-rust of specs/tri/land/land.t27: every rule and command li
 mod golden_land; // t27c gen-rust of specs/tri/land/golden_land.t27: the verbs and command lines of `tri golden` (#11275)
 #[path = "../../../gen/rust/t27os/release.rs"] #[allow(dead_code, unused_parens, unused_mut, unused_variables, non_snake_case, unused_assignments, clippy::all)]
 mod t27rel; // t27c gen-rust of specs/t27os/release.t27: the release plan and manifest text of `tri t27os` (#11315)
+#[path = "../../../gen/rust/t27os/status.rs"] #[allow(dead_code, unused_parens, unused_mut, unused_variables, non_snake_case, unused_assignments, clippy::all)] mod t27st; // specs/t27os/status.t27: `tri t27os status`
+#[path = "../../../gen/rust/t27os/fn_coverage.rs"] #[allow(dead_code, unused_parens, unused_mut, unused_variables, non_snake_case, unused_assignments, clippy::all)] mod t27fc; // specs/t27os/fn_coverage.t27: `tri t27os coverage`
+#[path = "../../../gen/rust/t27os/shot.rs"] #[allow(dead_code, unused_parens, unused_mut, unused_variables, non_snake_case, unused_assignments, clippy::all)] mod t27sh; // specs/t27os/shot.t27: `tri t27os shot`
+mod t27osx; // the processes of `tri t27os status | coverage | shot`
 #[path = "../../../bootstrap/gen/rust/verified/gen_hash_cache.rs"] #[allow(dead_code, unused_parens, unused_mut, unused_variables, non_snake_case, clippy::all)]
 mod gen_cache; // the gen-hash cache's eviction limit, for `tri hot caches` (#8952)
 #[path = "../../../bootstrap/gen/rust/verified/bitstream_reuse.rs"] #[allow(dead_code, unused_parens, unused_mut, unused_variables, non_snake_case, clippy::all)]
@@ -459,8 +463,8 @@ enum Commands {
     Land { branch: Option<String>, #[arg(long, default_value_t = 0)] issue: u64, #[arg(long)] plan: bool, #[arg(long)] check: bool },
     /// The golden chain's front door: `land` verifies each queued claude/evolve-* branch locally and lands the ready ones on refs/golden/head by compare-and-swap (--plan writes nothing), `push` sends the unpushed links to GitHub as one `tri land` pull request when the window is due (--queued N overrides the Actions queue count, --issue N is the Closes #N), `status` prints head, queue and the next push time (rules: specs/queen/golden_chain.t27 section 6, hosted by specs/tri/land/golden_land.t27, #11275).
     Golden { action: String, #[arg(long)] plan: bool, #[arg(long)] queued: Option<u64>, #[arg(long, default_value_t = 0)] issue: u64 },
-    /// T27 OS release front door: `release --plan` prints the numbered steps; `manifest --build N --sums FILE` prints the release manifest, a t27 module the app reads; `publish --yes` builds app and toolchain from one clean commit and creates the t27os-v<version>-b<build> release and the t27os-latest pointer; without --yes it is refused (rules: specs/t27os/release.t27, #11315, #11403).
-    T27os { action: String, #[arg(long)] plan: bool, #[arg(long)] yes: bool, #[arg(long, default_value_t = 0)] build: u32, #[arg(long, default_value = "")] sums: String },
+    /// T27 OS release front door: `release --plan` prints the numbered steps; `manifest --build N --sums FILE` prints the release manifest, a t27 module the app reads; `publish --yes` builds app and toolchain from one clean commit and creates the t27os-v<version>-b<build> release and the t27os-latest pointer; without --yes it is refused (rules: specs/t27os/release.t27, #11315, #11403). `status` prints branch, commit, app build, tree, tests and the fork release; `coverage` prints how many pub fns of each specs/t27os spec without @extern its tests call (exit 1 below 100%); `shot --panel account|keys|chat|call [--out FILE] [--home DIR]` runs target/t27os/T27OS.app with its own HOME and prints the screenshot path (specs/t27os/status.t27, fn_coverage.t27, shot.t27).
+    T27os { action: String, #[arg(long)] plan: bool, #[arg(long)] yes: bool, #[arg(long, default_value_t = 0)] build: u32, #[arg(long, default_value = "")] sums: String, #[arg(long, default_value = "")] panel: String, #[arg(long, default_value = "")] out: String, #[arg(long, default_value = "")] home: String },
     /// Coverage of a set of specs by five facts each, one row per spec and a total: the tests ran and none failed, no vacuous pass, a test named for a refusal or a planted fault (negative control), the seal verifies, and the header names an issue. PATTERN is a path or a glob (`specs/lab/*.t27`); the last line is `gaps G  coverage N/D`, never rounded. Exit 0 once printed, 1 on a gap with --strict, 2 when no spec matched; --t27c names the t27c program (default target/release/t27c, then t27c on PATH) (rules: specs/tri/coverage/coverage.t27, #11061).
     Coverage { patterns: Vec<String>, #[arg(long)] strict: bool, #[arg(long)] t27c: Option<String> },
     /// Add one lesson to the Traps section of a skill unless the section already says it; `tri learn add --help` has the refusals (rules: specs/tri/loop/lesson.t27, #11060).
@@ -1386,7 +1390,8 @@ fn main() -> Result<()> {
         Commands::T27o { file, name, oracle, check, t27c, emit_cell } => std::process::exit(cmd_t27o(file, name.as_deref(), *oracle, *check, t27c.as_deref(), *emit_cell)? as i32),
         Commands::T27oSweep { paths, repo, max_bytes, cache, top } => std::process::exit(cmd_t27o_sweep(paths, repo, *max_bytes, cache.as_deref(), *top)? as i32),
         Commands::Golden { action, plan, queued, issue } => std::process::exit(cmd_golden(action, *plan, *queued, *issue)? as i32),
-        Commands::T27os { action, plan, yes, build, sums } => std::process::exit(cmd_t27os(action, *plan, *yes, *build, sums)),
+        Commands::T27os { action, panel, out, home, .. } if action == "status" || action == "coverage" || action == "shot" => std::process::exit(match action.as_str() { "status" => t27osx::status(), "coverage" => t27osx::coverage(), _ => t27osx::shot(panel, out, home) }),
+        Commands::T27os { action, plan, yes, build, sums, .. } => std::process::exit(cmd_t27os(action, *plan, *yes, *build, sums)),
         Commands::Land { branch, issue, plan, check } => std::process::exit(cmd_land(branch.as_deref(), *issue, *plan, *check, false)? as i32),
         Commands::Coverage { patterns, strict, t27c } => std::process::exit(seals::coverage_run(patterns, *strict, t27c.as_deref())?),
         Commands::Learn { action } => loopclaim::learn_run(action)?,

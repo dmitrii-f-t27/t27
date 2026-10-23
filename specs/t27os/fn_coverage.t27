@@ -1,0 +1,381 @@
+// SPDX-License-Identifier: Apache-2.0
+; specs/t27os/fn_coverage.t27 -- the rules of `tri t27os coverage`: how many `pub fn` of a T27 OS spec are called from
+; its own `test` blocks (Refs gHashTag/t27#11560, part of the T27 OS epic #11037).
+; --
+; WHAT IS DECIDED HERE (every rule has a test below):
+; - Which bytes are code: fc_code_mask marks 1 for code, 0 for a comment (`//` to the end of the line, or a line whose
+;   first non-blank byte is `;`), a string ("..." with \ escapes) or a character literal ('x', '\n'). Every other rule
+;   reads only code bytes, so a `pub fn` or a call written in a comment or a string is not counted.
+; - Which bytes are test code: fc_test_mask marks the bytes between the braces of every `test NAME {` that starts a
+;   line; braces nest, and a brace in a string or a comment does not count.
+; - A `pub fn` is the code text "pub fn " at a word start; its name is the identifier after it.
+; - A pub fn is covered when its name, at a word start and not followed by an identifier byte, is followed (after
+;   blanks) by `(` somewhere in test code. A name passed as a value is not a call.
+; - A spec is judged only when it holds no `@extern` in code (the host files are tested by running the app).
+; - The report line is "FILE: N/M (P.D%)": the percentage is cut, never rounded, so 100.0% means every pub fn is
+;   covered; a spec with no pub fn is 0/0 (100.0%). The exit code is 1 when any judged file is below 100%.
+; --
+; WHAT IS NOT HERE: listing the directory and reading the files; cli/tri does it and calls these functions.
+; ASCII only (L3). phi^2 + 1/phi^2 = 3 | TRINITY
+
+module T27osFnCoverage;
+
+use claw::text;
+use t27os::release::put_number;
+use tri::loop::lesson::is_alnum;
+
+/// No such pub fn (fc_pub_fn_name past the last one).
+pub const FC_NO_NAME : u64 = 18446744073709551615;
+
+/// An identifier byte: a letter, a digit (lesson.t27 is_alnum) or `_`.
+pub fn fc_is_ident(c : u8) -> bool {
+    return is_alnum(c) or c == '_';
+}
+
+/// Fills m[0..n]: 1 for a code byte, 0 for a byte of a comment, a string or a character literal.
+pub fn fc_code_mask(t : []const u8, n : usize, m : []u8) -> void {
+    var i : usize = 0;
+    var line_start : bool = true;
+    while (i < n) {
+        const c : u8 = t[i];
+        if (c == '\n') {
+            m[i] = 1;
+            line_start = true;
+            i += 1;
+        } else if (line_start and (c == ' ' or c == '\t')) {
+            m[i] = 1;
+            i += 1;
+        } else if ((line_start and c == ';') or (c == '/' and i + 1 < n and t[i + 1] == '/')) {
+            while (i < n and t[i] != '\n') {
+                m[i] = 0;
+                i += 1;
+            }
+        } else if (c == '"') {
+            m[i] = 0;
+            i += 1;
+            while (i < n and t[i] != '"' and t[i] != '\n') {
+                if (t[i] == '\\' and i + 1 < n) {
+                    m[i] = 0;
+                    i += 1;
+                }
+                m[i] = 0;
+                i += 1;
+            }
+            if (i < n and t[i] == '"') {
+                m[i] = 0;
+                i += 1;
+            }
+            line_start = false;
+        } else if (c == '\'' and i + 2 < n and t[i + 1] != '\\' and t[i + 2] == '\'') {
+            m[i] = 0;
+            m[i + 1] = 0;
+            m[i + 2] = 0;
+            i += 3;
+            line_start = false;
+        } else if (c == '\'' and i + 3 < n and t[i + 1] == '\\' and t[i + 3] == '\'') {
+            m[i] = 0;
+            m[i + 1] = 0;
+            m[i + 2] = 0;
+            m[i + 3] = 0;
+            i += 4;
+            line_start = false;
+        } else {
+            m[i] = 1;
+            line_start = false;
+            i += 1;
+        }
+    }
+}
+
+/// The code text w (of length wl) starts at i, every byte of it code.
+pub fn fc_code_at(t : []const u8, n : usize, m : []const u8, i : usize, w : []const u8, wl : usize) -> bool {
+    if (i + wl > n) { return false; }
+    var k : usize = 0;
+    while (k < wl) {
+        if (t[i + k] != w[k] or m[i + k] == 0) { return false; }
+        k += 1;
+    }
+    return true;
+}
+
+/// Fills tm[0..n]: 1 for a byte inside the braces of a `test NAME {` that starts a line, else 0.
+pub fn fc_test_mask(t : []const u8, n : usize, m : []const u8, tm : []u8) -> void {
+    var i : usize = 0;
+    while (i < n) {
+        tm[i] = 0;
+        i += 1;
+    }
+    i = 0;
+    while (i < n) {
+        if ((i == 0 or t[i - 1] == '\n') and fc_code_at(t, n, m, i, "test ", 5)) {
+            var j : usize = i + 5;
+            while (j < n and (t[j] != '{' or m[j] == 0)) { j += 1; }
+            var depth : u32 = 0;
+            if (j < n) { depth = 1; j += 1; }
+            while (j < n and depth > 0) {
+                if (m[j] == 1 and t[j] == '{') { depth += 1; }
+                if (m[j] == 1 and t[j] == '}') { depth -= 1; }
+                if (depth > 0) { tm[j] = 1; }
+                j += 1;
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+}
+
+/// "pub fn " starts at i as code, at a word start.
+pub fn fc_pub_fn_at(t : []const u8, n : usize, m : []const u8, i : usize) -> bool {
+    if (i > 0 and fc_is_ident(t[i - 1])) { return false; }
+    return fc_code_at(t, n, m, i, "pub fn ", 7);
+}
+
+/// The k-th pub fn's name (from 0): start << 32 | length; FC_NO_NAME past the last one.
+pub fn fc_pub_fn_name(t : []const u8, n : usize, m : []const u8, k : u32) -> u64 {
+    var i : usize = 0;
+    var seen : u32 = 0;
+    while (i < n) {
+        if (fc_pub_fn_at(t, n, m, i)) {
+            var s : usize = i + 7;
+            while (s < n and t[s] == ' ') { s += 1; }
+            var e : usize = s;
+            while (e < n and fc_is_ident(t[e])) { e += 1; }
+            if (e > s) {
+                if (seen == k) { return ((s as u64) << 32) | ((e - s) as u64); }
+                seen += 1;
+            }
+            i = e;
+        } else {
+            i += 1;
+        }
+    }
+    return FC_NO_NAME;
+}
+
+pub fn fc_pub_fn_count(t : []const u8, n : usize, m : []const u8) -> u32 {
+    var k : u32 = 0;
+    while (fc_pub_fn_name(t, n, m, k) != FC_NO_NAME) { k += 1; }
+    return k;
+}
+
+/// The name t[s..s+len] is called in test code: at a word start, whole, then blanks and `(`.
+pub fn fc_called_in_tests(t : []const u8, n : usize, m : []const u8, tm : []const u8, s : usize, len : usize) -> bool {
+    var i : usize = 0;
+    while (i + len <= n) {
+        if (tm[i] == 1 and m[i] == 1 and (i == 0 or fc_is_ident(t[i - 1]) == false)) {
+            var k : usize = 0;
+            while (k < len and t[i + k] == t[s + k] and m[i + k] == 1) { k += 1; }
+            if (k == len) {
+                var j : usize = i + len;
+                if (j < n and fc_is_ident(t[j]) == false) {
+                    while (j < n and (t[j] == ' ' or t[j] == '\t')) { j += 1; }
+                    if (j < n and t[j] == '(' and m[j] == 1) { return true; }
+                }
+            }
+        }
+        i += 1;
+    }
+    return false;
+}
+
+/// How many pub fns are called in test code.
+pub fn fc_covered_count(t : []const u8, n : usize, m : []const u8, tm : []const u8) -> u32 {
+    var k : u32 = 0;
+    var c : u32 = 0;
+    var f : u64 = fc_pub_fn_name(t, n, m, 0);
+    while (f != FC_NO_NAME) {
+        if (fc_called_in_tests(t, n, m, tm, (f >> 32) as usize, (f & 4294967295) as usize)) { c += 1; }
+        k += 1;
+        f = fc_pub_fn_name(t, n, m, k);
+    }
+    return c;
+}
+
+/// The spec holds `@extern` in code: it is a host file and is not judged.
+pub fn fc_has_extern(t : []const u8, n : usize, m : []const u8) -> bool {
+    var i : usize = 0;
+    while (i < n) {
+        if (fc_code_at(t, n, m, i, "@extern", 7)) { return true; }
+        i += 1;
+    }
+    return false;
+}
+
+/// The percentage in tenths, cut: 0/0 is 1000.
+pub fn fc_tenths(covered : u32, total : u32) -> u32 {
+    if (total == 0) { return 1000; }
+    return ((covered as u64) * 1000 / (total as u64)) as u32;
+}
+
+/// Writes "NAME: N/M (P.D%)\n" at w, clipped at cap; the new cursor.
+pub fn fc_line(out : []u8, cap : usize, w : usize, name : []const u8, nl : usize, covered : u32, total : u32) -> usize {
+    var k : usize = w;
+    var i : usize = 0;
+    while (i < nl) {
+        if (k < cap) { out[k] = name[i]; }
+        k += 1;
+        i += 1;
+    }
+    k = put_str(out, cap, k, ": ", 2);
+    k = put_number(out, cap, k, covered);
+    k = put_str(out, cap, k, "/", 1);
+    k = put_number(out, cap, k, total);
+    k = put_str(out, cap, k, " (", 2);
+    const p : u32 = fc_tenths(covered, total);
+    k = put_number(out, cap, k, p / 10);
+    k = put_str(out, cap, k, ".", 1);
+    k = put_number(out, cap, k, p % 10);
+    return put_str(out, cap, k, "%)\n", 3);
+}
+
+/// 1 when any judged file is below 100%, else 0.
+pub fn fc_exit(below : u32) -> i32 {
+    if (below > 0) { return 1; }
+    return 0;
+}
+
+// ---------------------------------------------------------------- tests
+
+/// Test helper: the covered count of a text, with the two masks in the caller's buffers.
+fn fc_t_cov(t : []const u8, n : usize, m : []u8, tm : []u8) -> u32 {
+    fc_code_mask(t, n, m);
+    fc_test_mask(t, n, m, tm);
+    return fc_covered_count(t, n, m, tm);
+}
+
+fn fc_t_cnt(t : []const u8, n : usize, m : []u8) -> u32 {
+    fc_code_mask(t, n, m);
+    return fc_pub_fn_count(t, n, m);
+}
+
+test fc_one_pub_fn_called_in_a_test_is_covered {
+    var mm : [512]u8 = undefined;
+    var tt : [512]u8 = undefined;
+    const s : str = "pub fn a() -> u32 { return 1; }\ntest t1 {\n    assert(a() == 1);\n}\n";
+    assert(fc_t_cnt(s, s.len, mm[0..512]) == 1);
+    assert(fc_t_cov(s, s.len, mm[0..512], tt[0..512]) == 1);
+    var m : [512]u8 = undefined;
+    fc_code_mask(s, s.len, m[0..512]);
+    const f : u64 = fc_pub_fn_name(s, s.len, m[0..512], 0);
+    assert((f >> 32) == 7);
+    assert((f & 4294967295) == 1);
+    assert(fc_pub_fn_name(s, s.len, m[0..512], 1) == FC_NO_NAME);
+    // the same steps called one by one: count, test mask (the body of t1 only), the call, the covered count
+    var tm : [512]u8 = undefined;
+    assert(fc_pub_fn_count(s, s.len, m[0..512]) == 1);
+    fc_test_mask(s, s.len, m[0..512], tm[0..512]);
+    assert(tm[0] == 0 and tm[40] == 0 and tm[41] == 1 and tm[s.len - 2] == 0);
+    assert(fc_called_in_tests(s, s.len, m[0..512], tm[0..512], 7, 1));
+    assert(fc_covered_count(s, s.len, m[0..512], tm[0..512]) == 1);
+}
+
+test fc_one_pub_fn_not_called_is_not_covered {
+    var mm : [512]u8 = undefined;
+    var tt : [512]u8 = undefined;
+    const s : str = "pub fn a() -> u32 { return 1; }\ntest t1 {\n    assert(1 == 1);\n}\n";
+    assert(fc_t_cnt(s, s.len, mm[0..512]) == 1);
+    assert(fc_t_cov(s, s.len, mm[0..512], tt[0..512]) == 0);
+}
+
+test fc_several_pub_fns_count_each_and_private_fns_are_not_counted {
+    var mm : [512]u8 = undefined;
+    var tt : [512]u8 = undefined;
+    const s : str = "pub fn ab() -> u32 { return 1; }\nfn hid() -> u32 { return 2; }\npub fn cd(x : u32) -> u32 { return x; }\npub fn abc() -> u32 { return 3; }\ntest t1 {\n    assert(cd(ab()) == 1);\n    assert(hid() == 2);\n}\n";
+    assert(fc_t_cnt(s, s.len, mm[0..512]) == 3);
+    // ab and cd are called; abc is not (ab is not a prefix match of abc, nor abc of ab)
+    assert(fc_t_cov(s, s.len, mm[0..512], tt[0..512]) == 2);
+}
+
+test fc_a_call_outside_a_test_does_not_cover {
+    var mm : [512]u8 = undefined;
+    var tt : [512]u8 = undefined;
+    const s : str = "pub fn a() -> u32 { return 1; }\npub fn b() -> u32 { return a(); }\ntest t1 {\n    assert(b() == 1);\n}\n";
+    assert(fc_t_cov(s, s.len, mm[0..512], tt[0..512]) == 1);
+}
+
+test fc_nested_braces_keep_the_test_open_until_its_own_close {
+    var mm : [512]u8 = undefined;
+    var tt : [512]u8 = undefined;
+    const s : str = "pub fn a() -> u32 { return 1; }\npub fn b() -> u32 { return 2; }\ntest t1 {\n    if (1 == 1) { while (false) { } }\n    assert(a() == 1);\n}\nfn after() -> u32 { return b(); }\n";
+    assert(fc_t_cov(s, s.len, mm[0..512], tt[0..512]) == 1);
+}
+
+test fc_calls_in_comments_do_not_cover_and_pub_fn_in_a_comment_is_not_counted {
+    var mm : [512]u8 = undefined;
+    var tt : [512]u8 = undefined;
+    const s : str = "; pub fn ghost() is prose\npub fn a() -> u32 { return 1; }\n// pub fn ghost2()\ntest t1 {\n    // a()\n    ; a()\n    assert(1 == 1);\n}\n";
+    assert(fc_t_cnt(s, s.len, mm[0..512]) == 1);
+    assert(fc_t_cov(s, s.len, mm[0..512], tt[0..512]) == 0);
+}
+
+test fc_calls_in_strings_do_not_cover_and_braces_in_strings_do_not_close {
+    var mm : [512]u8 = undefined;
+    var tt : [512]u8 = undefined;
+    const s : str = "pub fn a() -> u32 { return 1; }\npub fn b() -> u32 { return 2; }\ntest t1 {\n    const q : str = \"} a() \\\" pub fn z(\";\n    const c : u8 = '}';\n    assert(b() == 2);\n}\n";
+    assert(fc_t_cnt(s, s.len, mm[0..512]) == 2);
+    assert(fc_t_cov(s, s.len, mm[0..512], tt[0..512]) == 1);
+}
+
+test fc_a_name_passed_as_a_value_or_as_a_longer_word_is_not_a_call {
+    var mm : [512]u8 = undefined;
+    var tt : [512]u8 = undefined;
+    const s : str = "pub fn a() -> u32 { return 1; }\ntest t1 {\n    const x = a;\n    assert(ab() == 1);\n    assert(x_a() == 1);\n}\n";
+    assert(fc_t_cov(s, s.len, mm[0..512], tt[0..512]) == 0);
+    const s2 : str = "pub fn a() -> u32 { return 1; }\ntest t1 {\n    assert(a  () == 1);\n}\n";
+    assert(fc_t_cov(s2, s2.len, mm[0..512], tt[0..512]) == 1);
+}
+
+test fc_extern_counts_only_in_code {
+    var m : [512]u8 = undefined;
+    const s : str = "; no @extern here\nfn f() -> u64 { return 1; } // @extern\n";
+    fc_code_mask(s, s.len, m[0..512]);
+    assert(fc_has_extern(s, s.len, m[0..512]) == false);
+    const s2 : str = "fn t(x: u64) -> u64 { return @extern(\"time\"); }\n";
+    fc_code_mask(s2, s2.len, m[0..512]);
+    assert(fc_has_extern(s2, s2.len, m[0..512]));
+}
+
+test fc_char_literals_and_escapes_are_not_code {
+    var m : [64]u8 = undefined;
+    const s : str = "x '{' '\\n' y";
+    fc_code_mask(s, s.len, m[0..64]);
+    assert(m[0] == 1);
+    assert(m[2] == 0 and m[3] == 0 and m[4] == 0);
+    assert(m[6] == 0 and m[9] == 0);
+    assert(m[11] == 1);
+}
+
+test fc_the_line_is_cut_never_rounded_and_0_of_0_is_full {
+    var out : [64]u8 = undefined;
+    var n : usize = fc_line(out[0..64], 64, 0, "keys.t27", 8, 120, 120);
+    assert(n == 27);
+    assert(buf_has(out[0..64], n, "keys.t27: 120/120 (100.0%)\n", 27));
+    n = fc_line(out[0..64], 64, 0, "a", 1, 2, 3);
+    assert(buf_has(out[0..64], n, "a: 2/3 (66.6%)\n", 15));
+    n = fc_line(out[0..64], 64, 0, "a", 1, 999, 1000);
+    assert(buf_has(out[0..64], n, "(99.9%)", 7));
+    n = fc_line(out[0..64], 64, 0, "e", 1, 0, 0);
+    assert(buf_has(out[0..64], n, "e: 0/0 (100.0%)\n", 16));
+    assert(fc_tenths(0, 5) == 0);
+}
+
+test fc_the_exit_is_1_when_any_file_is_below_full {
+    assert(fc_exit(0) == 0);
+    assert(fc_exit(1) == 1);
+    assert(fc_exit(7) == 1);
+}
+
+test fc_the_line_is_clipped_at_cap_and_still_counts {
+    var out : [8]u8 = undefined;
+    const n : usize = fc_line(out[0..8], 8, 0, "long.t27", 8, 1, 2);
+    assert(n > 8);
+    assert(out[0] == 'l' and out[7] == '7');
+    assert(put_number(out[0..8], 8, 0, 0) == 1 and out[0] == '0');
+    assert(fc_is_ident('_') and fc_is_ident('Z') and fc_is_ident('(') == false);
+    var m : [16]u8 = undefined;
+    fc_code_mask("ab", 2, m[0..16]);
+    assert(fc_code_at("ab", 2, m[0..16], 0, "ab", 2));
+    assert(fc_code_at("ab", 2, m[0..16], 1, "ab", 2) == false);
+    assert(fc_pub_fn_at("xpub fn a", 9, m[0..16], 1) == false);
+}

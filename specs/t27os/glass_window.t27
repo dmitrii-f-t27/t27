@@ -13631,6 +13631,22 @@ pub fn main() -> void {
     var kdir : [512]u8 = undefined;
     var ktmp : [256]u8 = undefined;
     var auto_open : bool = true;
+    // T27OS_PANEL=keys (a test aid for `tri t27os shot`, specs/t27os/shot.t27; off by default, not product behavior):
+    // the KEYS panel is open at launch as the KEYS click in the foot opens it; no pane server is connected yet, so no sync
+    var kpe : [8]u8 = undefined;
+    const kpen : usize = cl_env("T27OS_PANEL", kpe[0..8]);
+    if (kpen == 4 and kpe[0] == 107 and kpe[1] == 101 and kpe[2] == 121 and kpe[3] == 115) {
+        kyp = true;
+        qp = false;
+        god = false;
+        pfp = false;
+        clp = false;
+        dp = false;
+        keys_refresh(kstored[0..9], kmask[0..144], kmlen[0..9]);
+        nv_mask_fill(kmask[544..640]);
+        const kpn : usize = ns_bytes(home_dir(), khome[0..256]);
+        kemask = installed_mask(khome[0..kpn]);
+    }
     // the terminal pane: the vt grid, the session it shows, offline or live, the server's pane id,
     // frames since the last key (the cursor stays solid while typing), the bytes in and out, the socket,
     // the read cursor into the pane's output and frames since the last connect attempt

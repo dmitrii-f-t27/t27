@@ -1,0 +1,212 @@
+// SPDX-License-Identifier: Apache-2.0
+; specs/t27os/status.t27 -- the rules of `tri t27os status`: one table of where this checkout stands (Refs gHashTag/t27#11560,
+; part of the T27 OS epic #11037).
+; --
+; WHAT IS DECIDED HERE (every rule has a test below):
+; - The rows, in this order: branch, commit, app build (CFBundleVersion of target/t27os/T27OS.app), tree (clean or
+;   dirty), tests (the test blocks of specs/t27os/*.t27, summed, and over how many files), fork release (the newest
+;   t27os-v<semver>-b<build> tag of dmitrii-f-t27/t27) and its build, then how the app build stands against it.
+; - A test is a line that starts with "test " (tests are top level; an indented or quoted "test " is not one).
+; - The newest release is the tag with the highest build among the lines of `gh release list --json tagName` that start with
+;   "t27os-v" and end their first field in "-b<digits>"; t27os-latest and GoldenFloat's v-tags are not releases here.
+; - A value that is not known is printed as "none" with the reason, never as 0.
+; --
+; WHAT IS NOT HERE: running git, PlistBuddy and gh, and reading the files; cli/tri does it and hands the texts here.
+; ASCII only (L3). phi^2 + 1/phi^2 = 3 | TRINITY
+
+module T27osStatus;
+
+use claw::text;
+use t27os::release::put_number;
+
+pub const ST_LABEL_W : usize = 14;
+
+/// The test blocks in a spec text: lines that start with "test ".
+pub fn st_count_tests(t : []const u8, n : usize) -> u32 {
+    var c : u32 = 0;
+    var i : usize = 0;
+    while (i + 5 <= n) {
+        if ((i == 0 or t[i - 1] == '\n') and t[i] == 't' and t[i + 1] == 'e' and t[i + 2] == 's' and t[i + 3] == 't' and t[i + 4] == ' ') {
+            c += 1;
+        }
+        i += 1;
+    }
+    return c;
+}
+
+/// The build of a field t[s..e] shaped t27os-v<...>-b<digits>; 0 when it is not one.
+pub fn st_tag_build(t : []const u8, s : usize, e : usize) -> u32 {
+    if (e < s + 10) { return 0; }
+    if (t[s] != 't' or t[s + 1] != '2' or t[s + 2] != '7' or t[s + 3] != 'o' or t[s + 4] != 's' or t[s + 5] != '-' or t[s + 6] != 'v') { return 0; }
+    var j : usize = e;
+    while (j > s and t[j - 1] >= '0' and t[j - 1] <= '9') { j -= 1; }
+    if (j == e or e - j > 9 or j < s + 9 or t[j - 1] != 'b' or t[j - 2] != '-') { return 0; }
+    var v : u32 = 0;
+    var k : usize = j;
+    while (k < e) {
+        v = v * 10 + ((t[k] - '0') as u32);
+        k += 1;
+    }
+    return v;
+}
+
+/// The newest release tag in a list (one release per line, the tag the first field up to a blank or tab):
+/// start << 32 | length, or 0 when the list holds none.
+pub fn st_newest_tag(t : []const u8, n : usize) -> u64 {
+    var best : u32 = 0;
+    var at : u64 = 0;
+    var i : usize = 0;
+    while (i < n) {
+        var e : usize = i;
+        while (e < n and t[e] != '\n' and t[e] != '\t' and t[e] != ' ') { e += 1; }
+        const b : u32 = st_tag_build(t, i, e);
+        if (b > best) {
+            best = b;
+            at = ((i as u64) << 32) | ((e - i) as u64);
+        }
+        while (e < n and t[e] != '\n') { e += 1; }
+        i = e + 1;
+    }
+    return at;
+}
+
+/// Writes a label padded to ST_LABEL_W after two blanks.
+pub fn st_label(out : []u8, cap : usize, w : usize, label : str, ll : usize) -> usize {
+    var k : usize = put_str(out, cap, w, "  ", 2);
+    k = put_str(out, cap, k, label, ll);
+    var p : usize = ll;
+    while (p < ST_LABEL_W) {
+        k = put_str(out, cap, k, " ", 1);
+        p += 1;
+    }
+    return k;
+}
+
+pub fn st_bytes(out : []u8, cap : usize, w : usize, b : []const u8, bl : usize) -> usize {
+    var k : usize = w;
+    var i : usize = 0;
+    while (i < bl) {
+        if (k < cap) { out[k] = b[i]; }
+        k += 1;
+        i += 1;
+    }
+    return k;
+}
+
+/// The table. tags is the release list text; app_build 0 means no app bundle was found.
+pub fn st_text(out : []u8, cap : usize, branch : []const u8, bl : usize, commit : []const u8, cl : usize, app_build : u32, dirty : bool, tests : u32, files : u32, tags : []const u8, tl : usize) -> usize {
+    var k : usize = put_str(out, cap, 0, "T27 OS status\n", 14);
+    k = st_label(out, cap, k, "branch", 6);
+    if (bl == 0) { k = put_str(out, cap, k, "none (detached or no git)", 25); } else { k = st_bytes(out, cap, k, branch, bl); }
+    k = put_str(out, cap, k, "\n", 1);
+    k = st_label(out, cap, k, "commit", 6);
+    if (cl == 0) { k = put_str(out, cap, k, "none", 4); } else { k = st_bytes(out, cap, k, commit, cl); }
+    k = put_str(out, cap, k, "\n", 1);
+    k = st_label(out, cap, k, "app build", 9);
+    if (app_build == 0) { k = put_str(out, cap, k, "none (no target/t27os/T27OS.app; make t27os)", 44); } else { k = put_number(out, cap, k, app_build); }
+    k = put_str(out, cap, k, "\n", 1);
+    k = st_label(out, cap, k, "tree", 4);
+    if (dirty) { k = put_str(out, cap, k, "dirty", 5); } else { k = put_str(out, cap, k, "clean", 5); }
+    k = put_str(out, cap, k, "\n", 1);
+    k = st_label(out, cap, k, "tests", 5);
+    k = put_number(out, cap, k, tests);
+    k = put_str(out, cap, k, " in ", 4);
+    k = put_number(out, cap, k, files);
+    k = put_str(out, cap, k, " specs/t27os files\n", 19);
+    k = st_label(out, cap, k, "fork release", 12);
+    const at : u64 = st_newest_tag(tags, tl);
+    var rb : u32 = 0;
+    if (at == 0) {
+        k = put_str(out, cap, k, "none (no t27os-v tag read from dmitrii-f-t27/t27)\n", 50);
+    } else {
+        const s : usize = (at >> 32) as usize;
+        const e : usize = s + (at & 4294967295) as usize;
+        k = st_bytes(out, cap, k, tags[s..e], e - s);
+        rb = st_tag_build(tags, s, e);
+        k = put_str(out, cap, k, "  build ", 8);
+        k = put_number(out, cap, k, rb);
+        k = put_str(out, cap, k, "\n", 1);
+    }
+    k = st_label(out, cap, k, "app vs fork", 11);
+    if (app_build == 0 or rb == 0) { k = put_str(out, cap, k, "unknown", 7); }
+    else if (app_build > rb) { k = put_str(out, cap, k, "app is newer", 12); }
+    else if (app_build == rb) { k = put_str(out, cap, k, "same build", 10); }
+    else { k = put_str(out, cap, k, "fork is newer", 13); }
+    return put_str(out, cap, k, "\n", 1);
+}
+
+// ---------------------------------------------------------------- tests
+
+test st_tests_are_lines_that_start_with_test {
+    const s : str = "test a {\n}\n    test b\n; test c\nconst x : str = \"\\ntest d\";\ntest e {}\ntestx\n";
+    assert(st_count_tests(s, s.len) == 2);
+    assert(st_count_tests("", 0) == 0);
+    assert(st_count_tests("test", 4) == 0);
+    assert(st_count_tests("test ", 5) == 1);
+}
+
+test st_a_release_tag_names_its_build_and_other_tags_do_not {
+    const s : str = "t27os-v0.1.3-b7080";
+    assert(st_tag_build(s, 0, s.len) == 7080);
+    assert(st_tag_build("t27os-latest", 0, 12) == 0);
+    assert(st_tag_build("v0.1.0-b12", 0, 10) == 0);
+    assert(st_tag_build("t27os-v0.1.3-b", 0, 14) == 0);
+    assert(st_tag_build("t27os-v0.1.3-x7", 0, 15) == 0);
+    assert(st_tag_build("t27os-v0.1.3-b1234567890", 0, 24) == 0);
+}
+
+test st_the_newest_release_is_the_highest_build_not_the_first_line {
+    const s : str = "t27os-latest\tLatest\tt27os-latest\nt27os-v0.1.2-b6900\t\tt27os-v0.1.2-b6900\nt27os-v0.1.3-b7080\t\tt27os-v0.1.3-b7080\nv0.1.0\t\tv0.1.0\n";
+    const at : u64 = st_newest_tag(s, s.len);
+    assert(at != 0);
+    assert(st_tag_build(s, (at >> 32) as usize, ((at >> 32) + (at & 4294967295)) as usize) == 7080);
+    assert(st_newest_tag("v0.1.0\nt27os-latest\n", 20) == 0);
+    assert(st_newest_tag("", 0) == 0);
+}
+
+test st_the_table_has_every_row_in_order {
+    var out : [1024]u8 = undefined;
+    const tags : str = "t27os-v0.1.3-b7080\t\t\n";
+    const n : usize = st_text(out[0..1024], 1024, "feat/x", 6, "9ef9df8c1", 9, 7088, false, 473, 82, tags, tags.len);
+    assert(n < 1024);
+    assert(buf_has(out[0..1024], n, "T27 OS status\n  branch        feat/x\n  commit        9ef9df8c1\n", 58));
+    assert(buf_has(out[0..1024], n, "  app build     7088\n  tree          clean\n", 42));
+    assert(buf_has(out[0..1024], n, "  tests         473 in 82 specs/t27os files\n", 44));
+    assert(buf_has(out[0..1024], n, "  fork release  t27os-v0.1.3-b7080  build 7080\n", 47));
+    assert(buf_has(out[0..1024], n, "  app vs fork   app is newer\n", 29));
+}
+
+test st_unknown_values_print_none_with_the_reason {
+    var out : [1024]u8 = undefined;
+    const n : usize = st_text(out[0..1024], 1024, "", 0, "", 0, 0, true, 0, 0, "", 0);
+    assert(buf_has(out[0..1024], n, "branch        none (detached or no git)\n", 40));
+    assert(buf_has(out[0..1024], n, "commit        none\n", 19));
+    assert(buf_has(out[0..1024], n, "app build     none (no target/t27os/T27OS.app; make t27os)\n", 59));
+    assert(buf_has(out[0..1024], n, "tree          dirty\n", 20));
+    assert(buf_has(out[0..1024], n, "fork release  none (no t27os-v tag read from dmitrii-f-t27/t27)\n", 64));
+    assert(buf_has(out[0..1024], n, "app vs fork   unknown\n", 22));
+}
+
+test st_the_app_against_the_fork_is_same_or_fork_newer {
+    var out : [1024]u8 = undefined;
+    const tags : str = "t27os-v0.1.3-b7080\n";
+    var n : usize = st_text(out[0..1024], 1024, "m", 1, "c", 1, 7080, false, 1, 1, tags, tags.len);
+    assert(buf_has(out[0..1024], n, "app vs fork   same build\n", 25));
+    n = st_text(out[0..1024], 1024, "m", 1, "c", 1, 7000, false, 1, 1, tags, tags.len);
+    assert(buf_has(out[0..1024], n, "app vs fork   fork is newer\n", 28));
+}
+
+test st_labels_pad_to_one_column_and_bytes_clip_at_cap {
+    var out : [32]u8 = undefined;
+    var n : usize = st_label(out[0..32], 32, 0, "tree", 4);
+    assert(n == 2 + ST_LABEL_W);
+    n = st_label(out[0..32], 32, 0, "a-label-longer-than-w", 21);
+    assert(n == 23);
+    var o2 : [4]u8 = undefined;
+    n = st_bytes(o2[0..4], 4, 0, "abcdef", 6);
+    assert(n == 6 and o2[3] == 'd');
+    n = put_number(out[0..32], 32, 0, 0);
+    assert(n == 1 and out[0] == '0');
+    n = put_number(out[0..32], 32, 0, 4294967295);
+    assert(n == 10 and out[9] == '5');
+}

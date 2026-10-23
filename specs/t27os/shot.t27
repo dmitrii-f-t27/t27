@@ -1,0 +1,167 @@
+// SPDX-License-Identifier: Apache-2.0
+; specs/t27os/shot.t27 -- the rules of `tri t27os shot --panel account|keys|chat|call [--out FILE] [--home DIR]`: a
+; screenshot of one panel of the app built in this checkout (Refs gHashTag/t27#11560, part of the T27 OS epic #11037).
+; --
+; WHAT IS DECIDED HERE (every rule has a test below):
+; - The panels and the test aid that opens each at launch (all off by default, none is product behavior):
+;   account T27OS_ACCOUNT=open (the cabinet), keys T27OS_PANEL=keys (the KEYS panel, glass_window.t27), chat
+;   T27OS_CHAT=chat (the first friend's chat), call T27OS_CHAT=card (the first friend's card, where CALL is). chat and
+;   call need a friend in that HOME; a fresh HOME has none, so pass --home with a prepared one.
+; - The app is the copy this checkout built, SH_APP_EXE, never an installed one; it runs with HOME set to a directory
+;   of its own (SH_HOME_HEAD<stamp> unless --home names one) and T27OS_QUIET_JOBS=1 (no background jobs).
+; - The shot is taken SH_WAIT_S seconds after the launch with `screencapture -x` (no sound) to --out, else to
+;   SH_OUT_HEAD<panel>-<stamp>.png; then the app is stopped, and so is a pane server it started from SH_PTY_EXE (only a
+;   process that was not running before the launch). The path of the picture is printed.
+; --
+; WHAT IS NOT HERE: spawning, waiting, killing, screencapture; cli/tri does it with these texts.
+; ASCII only (L3). phi^2 + 1/phi^2 = 3 | TRINITY
+
+module T27osShot;
+
+use claw::text;
+
+pub const SH_NONE : u32 = 0;
+pub const SH_ACCOUNT : u32 = 1;
+pub const SH_KEYS : u32 = 2;
+pub const SH_CHAT : u32 = 3;
+pub const SH_CALL : u32 = 4;
+
+pub const SH_WAIT_S : u64 = 6;
+pub const SH_APP_EXE : str = "target/t27os/T27OS.app/Contents/MacOS/T27OS";
+pub const SH_PTY_EXE : str = "target/t27os/t27os-pty";
+pub const SH_OUT_HEAD : str = "/tmp/t27os-shot-";
+pub const SH_HOME_HEAD : str = "/tmp/t27os-shot-home-";
+pub const SH_USAGE : str = "tri t27os shot: --panel account|keys|chat|call is required ([--out FILE] [--home DIR])";
+
+fn sh_is(t : []const u8, n : usize, w : str, wl : usize) -> bool {
+    if (n != wl) { return false; }
+    var i : usize = 0;
+    while (i < n) {
+        if (t[i] != w[i]) { return false; }
+        i += 1;
+    }
+    return true;
+}
+
+/// The panel a --panel value names; SH_NONE for anything else.
+pub fn sh_panel(t : []const u8, n : usize) -> u32 {
+    if (sh_is(t, n, "account", 7)) { return SH_ACCOUNT; }
+    if (sh_is(t, n, "keys", 4)) { return SH_KEYS; }
+    if (sh_is(t, n, "chat", 4)) { return SH_CHAT; }
+    if (sh_is(t, n, "call", 4)) { return SH_CALL; }
+    return SH_NONE;
+}
+
+/// Writes the panel's word; the new cursor.
+pub fn sh_word(out : []u8, cap : usize, w : usize, p : u32) -> usize {
+    if (p == SH_ACCOUNT) { return put_str(out, cap, w, "account", 7); }
+    if (p == SH_KEYS) { return put_str(out, cap, w, "keys", 4); }
+    if (p == SH_CHAT) { return put_str(out, cap, w, "chat", 4); }
+    if (p == SH_CALL) { return put_str(out, cap, w, "call", 4); }
+    return w;
+}
+
+/// The name of the environment variable that opens the panel; 0 bytes for SH_NONE.
+pub fn sh_env_key(out : []u8, cap : usize, p : u32) -> usize {
+    if (p == SH_ACCOUNT) { return put_str(out, cap, 0, "T27OS_ACCOUNT", 13); }
+    if (p == SH_KEYS) { return put_str(out, cap, 0, "T27OS_PANEL", 11); }
+    if (p == SH_CHAT or p == SH_CALL) { return put_str(out, cap, 0, "T27OS_CHAT", 10); }
+    return 0;
+}
+
+/// Its value.
+pub fn sh_env_val(out : []u8, cap : usize, p : u32) -> usize {
+    if (p == SH_ACCOUNT) { return put_str(out, cap, 0, "open", 4); }
+    if (p == SH_KEYS) { return put_str(out, cap, 0, "keys", 4); }
+    if (p == SH_CHAT) { return put_str(out, cap, 0, "chat", 4); }
+    if (p == SH_CALL) { return put_str(out, cap, 0, "card", 4); }
+    return 0;
+}
+
+fn sh_num(out : []u8, cap : usize, w : usize, v : u64) -> usize {
+    var scale : u64 = 1;
+    while (v / scale >= 10) { scale = scale * 10; }
+    var k : usize = w;
+    var rest : u64 = v;
+    while (scale > 0) {
+        const d : u64 = rest / scale;
+        if (k < cap) { out[k] = (48 + d) as u8; }
+        k += 1;
+        rest = rest - d * scale;
+        scale = scale / 10;
+    }
+    return k;
+}
+
+/// The default picture: SH_OUT_HEAD<panel>-<stamp>.png.
+pub fn sh_out_name(out : []u8, cap : usize, p : u32, stamp : u64) -> usize {
+    var k : usize = put_str(out, cap, 0, SH_OUT_HEAD, 16);
+    k = sh_word(out, cap, k, p);
+    k = put_str(out, cap, k, "-", 1);
+    k = sh_num(out, cap, k, stamp);
+    return put_str(out, cap, k, ".png", 4);
+}
+
+/// The default HOME of the run: SH_HOME_HEAD<stamp>.
+pub fn sh_home(out : []u8, cap : usize, stamp : u64) -> usize {
+    const k : usize = put_str(out, cap, 0, SH_HOME_HEAD, 21);
+    return sh_num(out, cap, k, stamp);
+}
+
+// ---------------------------------------------------------------- tests
+
+test sh_the_four_panels_parse_and_nothing_else_does {
+    assert(sh_panel("account", 7) == SH_ACCOUNT);
+    assert(sh_panel("keys", 4) == SH_KEYS);
+    assert(sh_panel("chat", 4) == SH_CHAT);
+    assert(sh_panel("call", 4) == SH_CALL);
+    assert(sh_panel("", 0) == SH_NONE);
+    assert(sh_panel("Keys", 4) == SH_NONE);
+    assert(sh_panel("keys ", 5) == SH_NONE);
+    assert(sh_panel("acc", 3) == SH_NONE);
+}
+
+test sh_each_panel_opens_through_its_test_aid {
+    var k : [32]u8 = undefined;
+    var v : [32]u8 = undefined;
+    var kn : usize = sh_env_key(k[0..32], 32, SH_ACCOUNT);
+    var vn : usize = sh_env_val(v[0..32], 32, SH_ACCOUNT);
+    assert(buf_has(k[0..32], kn, "T27OS_ACCOUNT", 13) and kn == 13);
+    assert(buf_has(v[0..32], vn, "open", 4) and vn == 4);
+    kn = sh_env_key(k[0..32], 32, SH_KEYS);
+    vn = sh_env_val(v[0..32], 32, SH_KEYS);
+    assert(buf_has(k[0..32], kn, "T27OS_PANEL", 11) and buf_has(v[0..32], vn, "keys", 4));
+    kn = sh_env_key(k[0..32], 32, SH_CHAT);
+    vn = sh_env_val(v[0..32], 32, SH_CHAT);
+    assert(buf_has(k[0..32], kn, "T27OS_CHAT", 10) and buf_has(v[0..32], vn, "chat", 4));
+    kn = sh_env_key(k[0..32], 32, SH_CALL);
+    vn = sh_env_val(v[0..32], 32, SH_CALL);
+    assert(buf_has(k[0..32], kn, "T27OS_CHAT", 10) and buf_has(v[0..32], vn, "card", 4));
+    assert(sh_env_key(k[0..32], 32, SH_NONE) == 0);
+    assert(sh_env_val(v[0..32], 32, SH_NONE) == 0);
+}
+
+test sh_the_default_picture_and_home_carry_the_panel_and_the_stamp {
+    var o : [96]u8 = undefined;
+    var n : usize = sh_out_name(o[0..96], 96, SH_KEYS, 1792000000);
+    assert(n == 35);
+    assert(buf_has(o[0..96], n, "/tmp/t27os-shot-keys-1792000000.png", 35));
+    n = sh_out_name(o[0..96], 96, SH_ACCOUNT, 0);
+    assert(buf_has(o[0..96], n, "/tmp/t27os-shot-account-0.png", 29));
+    n = sh_home(o[0..96], 96, 42);
+    assert(n == 23 and buf_has(o[0..96], n, "/tmp/t27os-shot-home-42", 23));
+    assert(sh_word(o[0..96], 96, 0, SH_NONE) == 0);
+    assert(sh_word(o[0..96], 96, 0, SH_CALL) == 4);
+    assert(sh_word(o[0..96], 96, 0, SH_CHAT) == 4);
+}
+
+test sh_the_app_is_this_checkouts_copy_and_the_wait_is_seconds {
+    assert(buf_has(SH_APP_EXE, 43, "target/t27os/T27OS.app/Contents/MacOS/T27OS", 43));
+    assert(buf_has(SH_PTY_EXE, 22, "target/t27os/t27os-pty", 22));
+    assert(SH_WAIT_S >= 3 and SH_WAIT_S <= 30);
+    assert(buf_has(SH_USAGE, 86, "account|keys|chat|call", 22));
+    var o : [8]u8 = undefined;
+    assert(sh_num(o[0..8], 8, 0, 9) == 1 and o[0] == '9');
+    assert(sh_num(o[0..8], 8, 0, 10) == 2 and o[0] == '1' and o[1] == '0');
+    assert(sh_is("ab", 2, "ab", 2) and sh_is("ab", 2, "abc", 3) == false);
+}
