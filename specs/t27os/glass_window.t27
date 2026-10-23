@@ -1272,6 +1272,44 @@ use t27os::qr_cam::qc_cancel_x;
 use t27os::qr_cam::qc_cancel_y;
 use t27os::qr_cam::qc_shade_y;
 use t27os::qr_cam::qc_shade_h;
+use t27os::help_view::HV_FLAGS;
+use t27os::help_view::HV_SCROLL;
+use t27os::help_view::HV_N;
+use t27os::help_view::HV_TITLE_SIZE;
+use t27os::help_view::HV_BODY_SIZE;
+use t27os::help_view::HV_TITLE_H;
+use t27os::help_view::HV_LINE_H;
+use t27os::help_view::HV_LINES_MAX;
+use t27os::help_view::HV_BTN_D;
+use t27os::help_view::HV_HEAD_SHIFT;
+use t27os::help_view::HV_H_BTN;
+use t27os::help_view::HV_H_AREA;
+use t27os::help_view::hv_on;
+use t27os::help_view::hv_busy;
+use t27os::help_view::hv_open;
+use t27os::help_view::hv_close;
+use t27os::help_view::hv_esc;
+use t27os::help_view::hv_sync;
+use t27os::help_view::hv_title;
+use t27os::help_view::hv_body;
+use t27os::help_view::hv_foot;
+use t27os::help_view::hv_more;
+use t27os::help_view::hv_text_w;
+use t27os::help_view::hv_lines;
+use t27os::help_view::hv_content_h;
+use t27os::help_view::hv_top;
+use t27os::help_view::hv_foot_y;
+use t27os::help_view::hv_view_h;
+use t27os::help_view::hv_max_scroll;
+use t27os::help_view::hv_block_y;
+use t27os::help_view::hv_line_in;
+use t27os::help_view::hv_btn_x;
+use t27os::help_view::hv_btn_y;
+use t27os::help_view::hv_hit;
+use t27os::help_view::hv_is_hit;
+use t27os::help_view::hv_wheel_here;
+use t27os::help_view::hv_wheel;
+use t27os::help_view::hv_click;
 use t27os::qr_scan::qs_scan_key;
 use t27os::qr_scan::qs_pgm;
 use t27os::peer_identity_host::ih_slurp;
@@ -11306,6 +11344,7 @@ pub fn ac_leave(cl: []u8, pf: []u8) -> void {
     cl[AC_ON] = 0;
     cl[CL_FOCUS] = 0;
     ac_conf_clear(cl);
+    hv_close(cl);
     pf_leave(pf, PRF_EV_CLOSE);
     fe_scroll(cl, 0, ckh_ms());
 }
@@ -12047,6 +12086,9 @@ fn draw_account_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, 
         if (ghit != GV_H_NONE) { hit = ghit; }
     }
     hit = qc_hit(mx, my, l, QP_W, t, h, qc_open(qc), hit);
+    // HELP: "?" in the head, and its area in place of the friends while it is open (help_view.t27)
+    const hvs : bool = hv_on(cl);
+    hit = hv_hit(mx, my, l, QP_W, t, h, dy, cl, hit);
     // the key as a QR code (qr.t27): small in ME, large in place of the friends after a click on it
     var qm : [QR_CELLS_MAX]u8 = undefined;
     var qn : usize = 0;
@@ -12065,17 +12107,18 @@ fn draw_account_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, 
     cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
     draw_bytes(c, kit, "ACCOUNT", 7, x, t + 25.0, 11.5, WEIGHT_SEMIBOLD, false);
     draw_close_x(c, sw - QP_PAD - 8.0, t + 20.0, on_panel_close(mx, my, sw, t), 1.0);
-    // the number of invitations waiting, right of the title; then the unread lines of the groups (GR)
-    var headx : f64 = x + AC_INV_HEAD_DX;
+    // "?" right of the title (HELP); the number of invitations waiting right of it; then the unread lines of the groups (GR)
+    draw_hv_btn(c, kit, hv_btn_x(l), hv_btn_y(t), hvs, hv_busy(cl) == false, hit == HV_H_BTN);
+    var headx : f64 = x + AC_INV_HEAD_DX + HV_HEAD_SHIFT;
     if (ivn > 0) {
         var hb : [32]u8 = undefined;
         const hn : usize = ac_inv_head_text(ivn, hb[0..32]);
         const hw : f64 = bytes_w(kit, hb[0..32], hn, 8.5, WEIGHT_SEMIBOLD, false) + 12.0;
-        round_rect(c, x + AC_INV_HEAD_DX, t + 13.0, hw, 15.0, 7.5);
+        round_rect(c, headx, t + 13.0, hw, 15.0, 7.5);
         cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
         cg_fill_path(c);
         cg_fill_rgba(c, 0.0, 0.0, 0.0, 0.85);
-        draw_bytes(c, kit, hb[0..32], hn, x + AC_INV_HEAD_DX + 6.0, t + 24.0, 8.5, WEIGHT_SEMIBOLD, false);
+        draw_bytes(c, kit, hb[0..32], hn, headx + 6.0, t + 24.0, 8.5, WEIGHT_SEMIBOLD, false);
         headx = headx + hw + 6.0;
     }
     if (grv.len >= GV_CAP) { headx = draw_gv_head(c, kit, headx, t, grv); }
@@ -12265,8 +12308,10 @@ fn draw_account_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, 
             ik = ik + 1;
         }
     }
-    // the backup panel, or the large code, in place of the friends
-    if (bk_open_shown(bk)) {
+    // HELP, the backup panel, or the large code, in place of the friends
+    if (hvs) {
+        draw_hv_part(c, kit, l, t, h, dy, cl);
+    } else if (bk_open_shown(bk)) {
         draw_bk_sheet(c, kit, l, tf, bk, hit);
     } else if (qbig) {
         const fs : f64 = ac_qr_frame_side(qbmod);
@@ -12377,6 +12422,71 @@ fn draw_account_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, 
     }
     // QC. SCAN on the label line, and the preview over the friends part while a scan runs
     draw_qc_part(c, kit, l, t, h, qc, hit, cl[CL_VIEW] != 0);
+}
+
+/// "?" right of the title ACCOUNT: a circle, filled while HELP is open, dim during a call (it does nothing then).
+fn draw_hv_btn(c: u64, kit: [48]u64, bx: f64, by: f64, open: bool, live: bool, over: bool) -> void {
+    round_rect(c, bx, by, HV_BTN_D, HV_BTN_D, 0.5 * HV_BTN_D);
+    var ink : f64 = lv(kit, THV_TEXT_WHITE);
+    if (live == false) { ink = lv(kit, THV_MUTED_WHITE); }
+    if (open and live) {
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, ink);
+        cg_fill_path(c);
+        cg_fill_rgba(c, 0.0, 0.0, 0.0, 0.85);
+    } else {
+        cg_line_width(c, 1.0);
+        cg_stroke_rgba(c, 1.0, 1.0, 1.0, STRICT_HOVER_EDGE);
+        if (over and live) { cg_stroke_rgba(c, 1.0, 1.0, 1.0, ink); }
+        cg_stroke_path(c);
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, ink);
+    }
+    const qw : f64 = bytes_w(kit, "?", 1, 11.0, WEIGHT_SEMIBOLD, false);
+    draw_bytes(c, kit, "?", 1, bx + 0.5 * (HV_BTN_D - qw), by + 13.0, 11.0, WEIGHT_SEMIBOLD, false);
+}
+
+/// HELP in place of the friends: the five blocks (a title, its lines cut to the text width), scrolled by the state's
+/// steps; a line not wholly inside the area is not drawn; "Esc - back" and, while more is below, "scroll for more".
+fn draw_hv_part(c: u64, kit: [48]u64, l: f64, t: f64, h: f64, dy: f64, cl: []const u8) -> void {
+    const x : f64 = l + QP_PAD;
+    const right : f64 = l + QP_W - QP_PAD;
+    const maxw : f64 = hv_text_w(QP_W);
+    const top : f64 = hv_top(t, dy);
+    const foot : f64 = hv_foot_y(t, h);
+    const max : usize = hv_max_scroll(hv_content_h(maxw), hv_view_h(t, h, dy));
+    var sc : usize = @as(usize, cl[HV_SCROLL]);
+    if (sc > max) { sc = max; }
+    var st : [8]u32 = undefined;
+    var ln : [8]u32 = undefined;
+    var k : usize = 0;
+    while (k < HV_N) {
+        const by : f64 = hv_block_y(k, maxw, t, dy, sc);
+        const tt : []const u8 = hv_title(k);
+        const ty : f64 = by + HV_TITLE_H - 3.0;
+        if (hv_line_in(ty, HV_TITLE_SIZE, top, foot)) {
+            cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+            draw_bytes(c, kit, tt, tt.len, x, ty, HV_TITLE_SIZE, WEIGHT_SEMIBOLD, false);
+        }
+        const b : []const u8 = hv_body(k);
+        const n : usize = hv_lines(k, maxw, st[0..8], ln[0..8]);
+        var i : usize = 0;
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+        while (i < n) {
+            const ly : f64 = by + HV_TITLE_H + HV_LINE_H * @as(f64, @floatFromInt(i + 1)) - 3.0;
+            if (hv_line_in(ly, HV_BODY_SIZE, top, foot)) {
+                draw_bytes(c, kit, b[st[i] .. st[i] + ln[i]], @as(usize, ln[i]), x, ly, HV_BODY_SIZE, 0.0, false);
+            }
+            i = i + 1;
+        }
+        k = k + 1;
+    }
+    const fw : []const u8 = hv_foot();
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+    draw_bytes(c, kit, fw, fw.len, x, foot + HV_LINE_H, 9.0, 0.0, false);
+    if (sc < max) {
+        const mw : []const u8 = hv_more();
+        const mww : f64 = bytes_w(kit, mw, mw.len, 9.0, 0.0, false);
+        draw_bytes(c, kit, mw, mw.len, right - mww, foot + HV_LINE_H, 9.0, 0.0, false);
+    }
 }
 
 // ======================================================================================================
@@ -15520,6 +15630,9 @@ pub fn main() -> void {
         ac_open(tbv[TBO_CL .. TBO_CL + CL_CAP]);
         if (acen == 4 and ace[0] == 99 and ace[1] == 111 and ace[2] == 112 and ace[3] == 121) { ac_copy_mine(tbv[TBO_CL .. TBO_CL + CL_CAP], ckh_ms()); }
         ac_log(tbv[TBO_CL .. TBO_CL + CL_CAP]);
+        // T27OS_HELP=1 (a test aid for the shot): the cabinet opens with HELP in place of the friends
+        var hve : [8]u8 = undefined;
+        if (cl_env("T27OS_HELP", hve[0..8]) == 1 and hve[0] == 49 and hv_open(tbv[TBO_CL .. TBO_CL + CL_CAP])) { tbv[TBO_CL + CL_FOCUS] = 0; }
     }
     if (bkopen) {
         clp = true;
@@ -16024,13 +16137,18 @@ pub fn main() -> void {
                         } else if (clv == CV_IDLE and tbv[TBO_CL + AC_ON] != 0) {
                             // A. the cabinet: a hit is the nickname, the key, a friend's row or one of its marks, the add part
                             // QC. SCAN, CANCEL and the preview's shade stand over the cabinet's own boxes
-                            const ach : u32 = qc_hit(mx, my, qp_left(sw), QP_W, WS_TOP, sh - WS_TOP, qc_open(tbv[TBO_QC .. TBO_QC + QC_CAP]), ac_hit_now_bk_g(mx, my, sw, sh, tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_IV .. TBO_IV + IV_LEN], tbv[TBO_BK .. TBO_BK + BK_CAP], tbv[TBO_GV .. TBO_GV + GV_CAP]));
+                            const ach0 : u32 = qc_hit(mx, my, qp_left(sw), QP_W, WS_TOP, sh - WS_TOP, qc_open(tbv[TBO_QC .. TBO_QC + QC_CAP]), ac_hit_now_bk_g(mx, my, sw, sh, tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_IV .. TBO_IV + IV_LEN], tbv[TBO_BK .. TBO_BK + BK_CAP], tbv[TBO_GV .. TBO_GV + GV_CAP]));
+                            // HELP: "?" toggles it; while open its area takes the clicks of the friends' place
+                            const ach : u32 = hv_hit(mx, my, qp_left(sw), QP_W, WS_TOP, sh - WS_TOP, ac_inv_dy(ac_inv_rows(iv_waiting(tbv[TBO_IV .. TBO_IV + IV_LEN]))), tbv[TBO_CL .. TBO_CL + CL_CAP], ach0);
                             if (bk_is_hit(ach) == false) { tbv[TBO_BK + BK_FOCUS] = 0; }
                             if (qc_is_hit(ach) == false) { qc_msg_clear(tbv[TBO_QC .. TBO_QC + QC_CAP]); }
                             // UPD. UPDATE / CANCEL / RESTART; RESTART started the installed copy, this one quits
                             if (ach == AC_H_UPD and ug_click(tbv[TBO_CL .. TBO_CL + CL_CAP], ugp[0..2304])) { sys_exit(0); }
                             var acr : u32 = 0;
-                            if (qc_is_hit(ach)) {
+                            if (hv_is_hit(ach)) {
+                                // an opened HELP drops the focus of a field typed in
+                                if (hv_click(tbv[TBO_CL .. TBO_CL + CL_CAP], ach)) { tbv[TBO_CL + CL_FOCUS] = 0; }
+                            } else if (qc_is_hit(ach)) {
                                 qw_click(tbv[TBO_QC .. TBO_QC + QC_CAP], tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN * 3], qcw[0..QW_N], ach, ckh_ms());
                             } else if (gv_is_hit(ach)) {
                                 // GR. the GROUPS part: "+", the arrows, a group's row
@@ -16616,7 +16734,28 @@ pub fn main() -> void {
                 if (hst >= 1.0) { chv_scroll_by(tbv[TBO_CH .. TBO_CH + CHV_CAP], @as(u64, @intFromFloat(hst)), hwy > 0.0); }
                 used = true;
             }
-            if (ty == EV_SCROLL and clp and ac_shown(tbv[TBO_CL .. TBO_CL + CL_CAP]) and chv_mode(tbv[TBO_CH .. TBO_CH + CHV_CAP]) == CHV_M_OFF and ac_wheel_now_g(mx, my, sw, sh, tbv[TBO_IV .. TBO_IV + IV_LEN], tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_GV .. TBO_GV + GV_CAP])) {
+            if (ty == EV_SCROLL and clp and ac_shown(tbv[TBO_CL .. TBO_CL + CL_CAP]) and chv_mode(tbv[TBO_CH .. TBO_CH + CHV_CAP]) == CHV_M_OFF and hv_wheel_here(mx, my, qp_left(sw), QP_W, WS_TOP, sh - WS_TOP, ac_inv_dy(ac_inv_rows(iv_waiting(tbv[TBO_IV .. TBO_IV + IV_LEN]))), tbv[TBO_CL .. TBO_CL + CL_CAP])) {
+                // HELP. a notch moves the blocks a step; a trackpad gathers travel as for the friends
+                const hvwy : f64 = msg_real(ev, s_scroll_y);
+                var hvstep : bool = false;
+                var hvup : bool = hvwy > 0.0;
+                if (msg0(ev, s_precise) % 256 == 0) {
+                    hvstep = hvwy != 0.0;
+                } else {
+                    acwheel = acwheel + hvwy;
+                    if (acwheel >= AC_WHEEL_STEP) {
+                        acwheel = acwheel - AC_WHEEL_STEP;
+                        hvstep = true;
+                        hvup = true;
+                    } else if (acwheel <= 0.0 - AC_WHEEL_STEP) {
+                        acwheel = acwheel + AC_WHEEL_STEP;
+                        hvstep = true;
+                        hvup = false;
+                    }
+                }
+                if (hvstep) { hv_wheel(tbv[TBO_CL .. TBO_CL + CL_CAP], hvup, QP_W, WS_TOP, sh - WS_TOP, ac_inv_dy(ac_inv_rows(iv_waiting(tbv[TBO_IV .. TBO_IV + IV_LEN])))); }
+                used = true;
+            } else if (ty == EV_SCROLL and clp and ac_shown(tbv[TBO_CL .. TBO_CL + CL_CAP]) and chv_mode(tbv[TBO_CH .. TBO_CH + CHV_CAP]) == CHV_M_OFF and ac_wheel_now_g(mx, my, sw, sh, tbv[TBO_IV .. TBO_IV + IV_LEN], tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_GV .. TBO_GV + GV_CAP])) {
                 // A. the wheel over the cabinet's friends moves the list a row; a notch is a row, a trackpad gathers travel
                 const awy : f64 = msg_real(ev, s_scroll_y);
                 var astep : bool = false;
@@ -16925,6 +17064,9 @@ pub fn main() -> void {
                     } else {
                         used = false;
                     }
+                } else if (clp and key == KEY_ESCAPE and cmd == false and hv_esc(tbv[TBO_CL .. TBO_CL + CL_CAP])) {
+                    // HELP. Escape gives the friends list back; the next Escape closes the panel
+                    used = true;
                 } else if (clp and key == KEY_ESCAPE and cmd == false) {
                     // CL. Escape outside the field closes the CALL panel; a call that is up goes on
                     clp = false;
@@ -17707,6 +17849,8 @@ pub fn main() -> void {
         ch_tick(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_CH .. TBO_CH + CHV_CAP], chs[0..CS_LEN], chm[0..CHM_LEN], chlog[0..CH_LOG_LEN], chasm[0..CA_LEN], chbuf[0..CH_BUF_LEN], chw[0..CHW_N], csv[0..CS_LEN * 3], tbv[TBO_IV .. TBO_IV + IV_LEN], tbv[TBO_GV .. TBO_GV + GV_CAP], gxb[0..GX_LEN], tgv[TPG_Q_TZ] + CHV_TZ_BIAS - TG_TZ_BIAS, sh - WS_TOP, tbv[TBO_TRU .. TBO_TRU + TRU_LEN]);
         // QC. SCAN: the camera's state, the 20 s, at most one frame in 100 ms read for the key
         qw_tick(tbv[TBO_QC .. TBO_QC + QC_CAP], tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN * 3], qcw[0..QW_N], qcg[0..QC_FRAME_N], qcb[0..QC_FRAME_N], qcf[0..QW_FILE_CAP], ckh_ms());
+        // HELP. a call (its view or its session) turns "?" off and closes HELP
+        hv_sync(tbv[TBO_CL .. TBO_CL + CL_CAP], qw_in_call(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN * 3]));
         // U. the frame gate: fold what this frame shows into a key; an unchanged key with nothing
         // animating keeps the image already on the layer (frame_gate.t27)
         var fk : u64 = fg_mix(fg_mix(fg_mix(fg_mix(0, @as(u64, state)), @as(u64, hov)), fg_level(ma)), @as(u64, shown));
@@ -19154,6 +19298,43 @@ test typing_joins_units_cuts_at_24_characters_and_goes_back_one_code_point {
     assert pf_shown_len(pf[0..512]) == 25;
     assert prf_nick_cp_count(pf[PF_TYPED .. PF_TYPED + 25]) == 24;
     assert pf_shown_len(pf[0..512]) <= PRF_NICK_MAX_BYTES;
+}
+
+test help_takes_the_friends_place_and_a_call_turns_it_off {
+    // HELP's two bytes stand between the encoder's address and the call port bytes of the CALL region
+    assert CL_VENC + 8 <= HV_FLAGS and HV_SCROLL < AC_END and AC_END <= CL_NOCAM;
+    var cl : [8192]u8 = undefined;
+    var cs : [4096]u8 = undefined;
+    var i : usize = 0;
+    while (i < 8192) {
+        cl[i] = 0;
+        if (i < 4096) { cs[i] = 0; }
+        i = i + 1;
+    }
+    cl[AC_ON] = 1;
+    cl[FV_COUNT] = 2;
+    cl[FV_SHOWN] = 2;
+    const sw : f64 = 960.0;
+    const sh : f64 = 700.0;
+    const l : f64 = qp_left(sw);
+    const h : f64 = sh - WS_TOP;
+    // a friend's row answers as a row until HELP opens; then the same point is HELP's, and "?" closes it again
+    const ry : f64 = ac_row_y(WS_TOP, 0) + 6.0;
+    assert ac_hit_now(l + 40.0, ry, sw, sh, cl[0..8192]) == AC_H_ROW;
+    const bh : u32 = hv_hit(hv_btn_x(l) + 9.0, hv_btn_y(WS_TOP) + 9.0, l, QP_W, WS_TOP, h, 0.0, cl[0..8192], ac_hit_now(hv_btn_x(l) + 9.0, hv_btn_y(WS_TOP) + 9.0, sw, sh, cl[0..8192]));
+    assert bh == HV_H_BTN and hv_click(cl[0..8192], bh);
+    assert hv_hit(l + 40.0, ry, l, QP_W, WS_TOP, h, 0.0, cl[0..8192], ac_hit_now(l + 40.0, ry, sw, sh, cl[0..8192])) == HV_H_AREA;
+    // the add field under HELP stays the cabinet's
+    const fy : f64 = ac_ifield_y(WS_TOP, h) + 4.0;
+    assert hv_hit(l + 40.0, fy, l, QP_W, WS_TOP, h, 0.0, cl[0..8192], ac_hit_now(l + 40.0, fy, sw, sh, cl[0..8192])) == AC_H_IFIELD;
+    // a call that comes (the CALL view up) closes HELP and turns "?" off
+    cl[CL_VIEW] = 1;
+    hv_sync(cl[0..8192], qw_in_call(cl[0..8192], cs[0..4096]));
+    assert hv_on(cl[0..8192]) == false and hv_busy(cl[0..8192]);
+    assert hv_hit(hv_btn_x(l) + 9.0, hv_btn_y(WS_TOP) + 9.0, l, QP_W, WS_TOP, h, 0.0, cl[0..8192], 0) != HV_H_BTN;
+    cl[CL_VIEW] = 0;
+    hv_sync(cl[0..8192], qw_in_call(cl[0..8192], cs[0..4096]));
+    assert hv_busy(cl[0..8192]) == false;
 }
 
 test escape_and_cancel_bring_the_saved_nickname_back_and_write_nothing {
