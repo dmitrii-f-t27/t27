@@ -7,9 +7,15 @@
 // audio test pattern runs beside it, so the sound and the video share the sealed channel exactly as in a call.
 //   CS_ROLE=caller|callee   (required) CS_PORT / CS_PEER_PORT (127.0.0.1; caller 47791, callee 47792)
 //   CS_HSECS=20              seconds of video after the call is ACTIVE (the caller hangs up then)
+//   CS_PEER_INVITE=T27-...   (caller) the callee is a T27 OS window on this machine, known by its invite key: the
+//                            probe dials it at 127.0.0.1:CS_PEER_PORT (47727) with that key's fingerprint; the window
+//                            answers with T27OS_CALL_AUTOTEST=1 and T27OS_QA=1 (a test aid), its people compare the
+//                            code (the probe has no identity), and its camera and layers carry the other side of the
+//                            test. This is how the window's video path is tried with one window per machine.
 // Each side prints HSTAT lines once a second (pictures decoded in that second, the session's numbers) and checks:
 // both ends agreed on H.264, at least 28 pictures a second on average and 25 in the slowest 5 seconds, 1280x720,
-// nothing lost, no decoder refusal (at most a second held back at the start), the sound kept flowing (at least 95 frames a second accepted).
+// nothing lost, no decoder refusal (at most a second held back at the start), the sound kept flowing (at least 490 of
+// 500 frames accepted in every 5 seconds).
 // Build (Apple silicon):
 //   t27b build specs/t27os/call_h264_probe.t27 -o chp.o --macho
 //   ld -arch arm64 -platform_version macos 11.0 $(xcrun --show-sdk-version) -syslibroot $(xcrun --show-sdk-path) \
@@ -105,6 +111,9 @@ use t27os::call_vt::vt_pb_w;
 use t27os::call_vt::vt_pb_h;
 use t27os::call_vt::vt_pb_release;
 use t27os::call_vt::vt_konst;
+use t27os::peer_identity::invite_parse;
+use t27os::peer_identity::INVITE_LEN;
+use t27os::peer_identity::INV_OK;
 
 fn hp_dlsym(h: u64, name: []const u8) -> u64 { return @extern("dlsym"); }
 fn hp_calloc(n: u64, size: u64) -> u64 { return @extern("calloc"); }
@@ -174,6 +183,11 @@ fn hp_side(caller: bool) -> bool {
         my_port = 47791;
         peer_port = 47792;
     }
+    var inv : [32]u8 = undefined;
+    const invn : usize = ckh_env("CS_PEER_INVITE", inv[0..32]);
+    var wfp : [10]u8 = undefined;
+    const window : bool = caller and invn == INVITE_LEN and invite_parse(inv[0..INVITE_LEN], wfp[0..10]) == INV_OK;
+    if (window) { peer_port = 47727; }
     my_port = ckh_env_num("CS_PORT", my_port);
     peer_port = ckh_env_num("CS_PEER_PORT", peer_port);
     const secs : u64 = ckh_env_num("CS_HSECS", 20);
@@ -187,6 +201,7 @@ fn hp_side(caller: bool) -> bool {
     var i : usize = 0;
     while (i < 10) {
         if (caller) { me[i] = fa[i]; peer[i] = fb[i]; } else { me[i] = fb[i]; peer[i] = fa[i]; }
+        if (window) { peer[i] = wfp[i]; }
         i = i + 1;
     }
     if (!cs_open(s[0..CS_LEN], me[0..10], 2130706433, my_port, CS_AUDIO_TEST)) {
@@ -215,8 +230,9 @@ fn hp_side(caller: bool) -> bool {
     var wbad : u64 = 0;
     // pictures decoded per whole second of video (the decoder's own count), and the slowest 5-second window
     var per : [600]u64 = undefined;
+    var aper : [600]u64 = undefined;
     var z : usize = 0;
-    while (z < 600) { per[z] = 0; z = z + 1; }
+    while (z < 600) { per[z] = 0; aper[z] = 0; z = z + 1; }
     var sec_mark : u64 = 0;
     var out_mark : u64 = 0;
     var acc_mark : u64 = 0;
@@ -267,7 +283,7 @@ fn hp_side(caller: bool) -> bool {
                 // the first two seconds are the codecs' start (sessions are made): not counted
                 if (now - t_act >= 3000) {
                     per[@as(usize, nsec)] = o - out_mark;
-                    if (acc - acc_mark < acc_min) { acc_min = acc - acc_mark; }
+                    aper[@as(usize, nsec)] = acc - acc_mark;
                     nsec = nsec + 1;
                 }
                 hp_tag(caller);
@@ -297,9 +313,15 @@ fn hp_side(caller: bool) -> bool {
         sum = sum + per[@as(usize, k)];
         if (k + 5 <= nsec) {
             var w5 : u64 = 0;
+            var a5 : u64 = 0;
             var j : u64 = 0;
-            while (j < 5) { w5 = w5 + per[@as(usize, k + j)]; j = j + 1; }
+            while (j < 5) {
+                w5 = w5 + per[@as(usize, k + j)];
+                a5 = a5 + aper[@as(usize, k + j)];
+                j = j + 1;
+            }
             if (w5 < wmin) { wmin = w5; }
+            if (a5 < acc_min) { acc_min = a5; }
         }
         k = k + 1;
     }
@@ -329,7 +351,7 @@ fn hp_side(caller: bool) -> bool {
     hp_n(caller, "decoded pictures a second, mean x10: ", avg10);
     hp_n(caller, "decoded pictures in the slowest 5 s: ", wmin);
     hp_n(caller, "audio frames sent / accepted: ", cs_stat(s[0..CS_LEN], CS_ST_SENT) * 100000 + cs_stat(s[0..CS_LEN], CS_ST_ACCEPTED));
-    hp_n(caller, "audio accepted in the slowest second: ", acc_min);
+    hp_n(caller, "audio accepted in the slowest 5 s: ", acc_min);
     hp_n(caller, "refused: AEAD / replay: ", cs_stat(s[0..CS_LEN], CS_ST_REJ_AEAD) * 1000 + cs_stat(s[0..CS_LEN], CS_ST_REJ_REPLAY));
     all = ckh_check("the call ended and the session is back in IDLE", ended) and all;
     all = ckh_check("both ends agreed on H.264", cs_vh_stat(v, CS_H_MODE) == @as(u64, VN_H264)) and all;
@@ -339,7 +361,8 @@ fn hp_side(caller: bool) -> bool {
     // the start: the encoder's session takes up to a second to make, and the first key frame can go stale behind it;
     // the gate then holds the P-frames back until the requested key frame comes (at most a second of them)
     all = ckh_check("nothing lost, no decoder refusal, at most a second held back at the start", cs_vh_stat(v, CS_H_RX_LOST) + cs_vh_stat(v, CS_H_RX_DROPPED) + vtd_errors(d) == 0 and cs_vh_stat(v, CS_H_RX_HELD) <= 30) and all;
-    all = ckh_check("the sound kept flowing (95+ frames accepted in every counted second)", nsec >= 5 and acc_min >= 95) and all;
+    // a second's count wobbles by a few frames with the moment it is read (94 then 106); five seconds do not
+    all = ckh_check("the sound kept flowing (490+ of 500 frames accepted in every 5 counted seconds)", nsec >= 5 and acc_min >= 490) and all;
     all = ckh_check("0 AEAD failures, 0 replays", cs_stat(s[0..CS_LEN], CS_ST_REJ_AEAD) + cs_stat(s[0..CS_LEN], CS_ST_REJ_REPLAY) == 0) and all;
     if (last_pb != 0) { vt_pb_release(last_pb); }
     vtd_close(d);

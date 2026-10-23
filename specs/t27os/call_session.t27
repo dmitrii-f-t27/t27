@@ -2889,7 +2889,9 @@ fn cs_vh_control(s: []u8, now: u64, caps: u8) -> void {
     const ss : []u8 = s[CS_VH + CS_VH_SS..CS_VH + CS_VH_SS + VS_LEN];
     const pver : u64 = vs_get(ss, VN_PVER);
     const heard : bool = pver != 0;
-    if (vn_hello_due(pver, vs_get(ss, VN_PHEARD), vs_get(ss, VN_SAIDHEARD), vs_get(ss, VN_HELLO_AT), now)) {
+    var since : u64 = 0;
+    if (now > vs_get(ss, VN_T0)) { since = now - vs_get(ss, VN_T0); }
+    if (vn_hello_due(pver, vs_get(ss, VN_PHEARD), vs_get(ss, VN_SAIDHEARD), vs_get(ss, VN_HELLO_AT), now, since)) {
         put_u64(ss, VN_HELLO_AT * 8, now);
         vx_hello(b[0..32], caps, vl_rung(ss));
         vx_heard(b[0..32], heard);
@@ -3019,7 +3021,7 @@ fn cs_vh_tick(s: []u8, now: u64) -> bool {
     const caps : u8 = cs_vh_caps(cs_g(s, CS_K_VHDEC), cs_g(s, CS_K_VHENC), video_on);
     if (vs_get(s[CS_VH + CS_VH_SS..CS_VH + CS_VH_SS + VS_LEN], VN_T0) == 0) {
         put_u64(s, CS_VH + CS_VH_SS + VN_T0 * 8, now);
-        vl_init(s[CS_VH + CS_VH_SS..CS_VH + CS_VH_SS + VS_LEN], VL_720);
+        vl_init(s[CS_VH + CS_VH_SS..CS_VH + CS_VH_SS + VS_LEN], VL_720, now);
     }
     cs_vh_control(s, now, caps);
     const ss : []u8 = s[CS_VH + CS_VH_SS..CS_VH + CS_VH_SS + VS_LEN];
@@ -3027,7 +3029,9 @@ fn cs_vh_tick(s: []u8, now: u64) -> bool {
     if (@as(u64, mode) != cvx(s, VX_MODE)) {
         cvxp(s, VX_MODE, @as(u64, mode));
         if (mode == VN_H264) {
-            // a new stream: the encoder at the ladder's rung and bitrate, its first frame a key frame
+            // a new stream: the ladder starts again (its warm-up counts from now), the encoder at its rung and
+            // bitrate, the first frame a key frame
+            vl_init(ss, VL_720, now);
             vte_want(cs_g(s, CS_K_VHENC), vl_rung(ss), vl_kbps(ss));
             vte_force(cs_g(s, CS_K_VHENC));
         }

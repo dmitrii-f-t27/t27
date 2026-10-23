@@ -548,6 +548,9 @@ pub const VL_FPS_MIN : u64 = 20;
 /// After a step down, no step up for this long.
 pub const VL_HOLD_MS : u64 = 10000;
 pub const VL_FLOOR_KBPS : u64 = 300;
+/// The first reports of a stream count its start (the encoder's session, the first key frame): too few frames a second
+/// in them is not a reason to step down.
+pub const VL_WARM_MS : u64 = 3000;
 pub const VL_TOP_KBPS : u64 = 2500;
 
 pub const VL_RUNG : usize = 30;
@@ -560,6 +563,8 @@ pub const VL_DOWNS : usize = 36;
 pub const VL_UPS : usize = 37;
 pub const VL_CUTS : usize = 38;
 pub const VL_RAISES : usize = 39;
+/// When the stream started (vl_init).
+pub const VL_T0 : usize = 46;
 pub const VL_A_RATE : u32 = 1;
 pub const VL_A_RUNG : u32 = 2;
 
@@ -601,8 +606,8 @@ fn vl_clamp(v: u64, r: u32) -> u64 {
     return v;
 }
 
-/// The ladder at the start of a call, on rung r (720p when the camera gives it, else 480p).
-pub fn vl_init(ss: []u8, r: u32) -> void {
+/// The ladder at the start of a stream (now), on rung r (720p when the camera gives it, else 480p).
+pub fn vl_init(ss: []u8, r: u32, now: u64) -> void {
     if (ss.len < VS_LEN) { return; }
     var rr : u32 = r;
     if (rr >= VL_RUNGS) { rr = VL_360; }
@@ -611,7 +616,8 @@ pub fn vl_init(ss: []u8, r: u32) -> void {
     put_u64(ss, VL_GOOD * 8, 0);
     put_u64(ss, VL_STREAK * 8, 0);
     put_u64(ss, VL_LOWFPS * 8, 0);
-    put_u64(ss, VL_AT * 8, 0);
+    put_u64(ss, VL_AT * 8, now);
+    put_u64(ss, VL_T0 * 8, now);
 }
 
 pub fn vl_rung(ss: []const u8) -> u32 { return @as(u32, @intCast(vs_get(ss, VL_RUNG))); }
@@ -630,8 +636,9 @@ pub fn vl_loss_pm(done: u64, lost: u64) -> u64 {
 ///   mild (loss over 1.5 % or an underrun): hold
 ///   good: after three good reports in a row, bitrate x 1.15 (+50 at least), up to the rung's top
 ///   step down when the bitrate is under the rung's floor, or when fewer than VL_FPS_MIN frames a second got through
-///   (sent or shown) in two reports in a row; step up from a smaller rung after 8 good reports in a row at its top,
-///   28+ frames a second both ways, and VL_HOLD_MS since the last change.
+///   (sent or shown) in two reports in a row (not in the stream's first VL_WARM_MS); step up from a smaller rung after
+///   8 good reports in a row at its top, 28+ frames a second both ways, and VL_HOLD_MS since the last change (or the
+///   start).
 pub fn vl_step(ss: []u8, done: u64, lost: u64, under: u64, rx_fps: u64, tx_fps: u64, now: u64) -> u32 {
     if (ss.len < VS_LEN) { return 0; }
     var r : u32 = vl_rung(ss);
@@ -667,7 +674,7 @@ pub fn vl_step(ss: []u8, done: u64, lost: u64, under: u64, rx_fps: u64, tx_fps: 
     var low : u64 = vs_get(ss, VL_LOWFPS);
     var slow : u64 = rx_fps;
     if (tx_fps < slow) { slow = tx_fps; }
-    if (done + lost > 0 and slow < VL_FPS_MIN) { low = low + 1; } else { low = 0; }
+    if (done + lost > 0 and slow < VL_FPS_MIN and now >= vs_get(ss, VL_T0) + VL_WARM_MS) { low = low + 1; } else { low = 0; }
     if (r + 1 < VL_RUNGS and (k < vl_min(r) or low >= 2)) {
         r = r + 1;
         k = vl_clamp(k, r);
@@ -814,10 +821,15 @@ pub fn vn_mode(my_caps: u8, peer_ver: u64, peer_caps: u64, since_ms: u64) -> u32
     return VN_H264;
 }
 
+/// A peer silent this long after the call became ACTIVE is an older build: no more HELLOs to it (it only counts them).
+pub const VN_HELLO_STOP_MS : u64 = 10000;
+
 /// A HELLO is due every VN_HELLO_MS until the peer has said something, said it heard this side, and this side has said
-/// in a HELLO that it heard the peer. Then none: the REPORTs carry the caps from there on.
-pub fn vn_hello_due(peer_ver: u64, peer_heard: u64, said_heard: u64, last_at: u64, now: u64) -> bool {
+/// in a HELLO that it heard the peer. Then none: the REPORTs carry the caps from there on. None either to a peer that
+/// said nothing for VN_HELLO_STOP_MS since the call became ACTIVE (since_ms).
+pub fn vn_hello_due(peer_ver: u64, peer_heard: u64, said_heard: u64, last_at: u64, now: u64, since_ms: u64) -> bool {
     if (peer_ver != 0 and peer_heard != 0 and said_heard != 0) { return false; }
+    if (peer_ver == 0 and since_ms >= VN_HELLO_STOP_MS) { return false; }
     return last_at == 0 or now < last_at or now - last_at >= VN_HELLO_MS;
 }
 
@@ -952,7 +964,7 @@ test the_sealed_part_fits_one_datagram_and_the_largest_frame_fits_the_mask {
     assert CK_T_H264 == 35 and CK_T_VCTL == 36 and VH_VERSION == 2;
     // every slot stands inside its block
     assert VA_DROPPED * 8 + 8 <= VA_LEN and VK_SENT * 8 + 8 <= VA_LEN and VA_DROPPED < VD_NEED;
-    assert VS_STALE < VP_CREDIT and VP_AT < VL_RUNG and VL_RAISES < VN_PVER and VN_SAIDHEARD * 8 + 8 <= VS_LEN;
+    assert VS_STALE < VP_CREDIT and VP_AT < VL_RUNG and VL_RAISES < VN_PVER and VN_SAIDHEARD < VL_T0 and VL_T0 * 8 + 8 <= VS_LEN;
 }
 
 test a_part_says_its_frame_index_count_total_key_and_rung {
@@ -1187,12 +1199,12 @@ test the_rungs_are_720p_480p_360p_with_their_bitrates {
 test a_bad_second_cuts_the_bitrate_and_good_ones_raise_it {
     var ss : [512]u8 = undefined;
     t_zero(ss[0..512]);
-    vl_init(ss[0..512], VL_720);
+    vl_init(ss[0..512], VL_720, 0);
     assert vl_kbps(ss[0..512]) == 1200 and vl_rung(ss[0..512]) == VL_720;
     // 10 % loss: x0.7
     assert vl_step(ss[0..512], 27, 3, 0, 27, 30, 1000) == VL_A_RATE;
     assert vl_kbps(ss[0..512]) == 840;
-    // 4 underruns with no loss: bad too
+    // 4 underruns with no loss: bad too (the floor's step down needs no warm-up)
     assert vl_step(ss[0..512], 30, 0, 4, 30, 30, 2000) == VL_A_RUNG | VL_A_RATE;
     // 840 * 0.7 = 588, under 720p's floor of 700: down to 480p
     assert vl_rung(ss[0..512]) == VL_480 and vl_kbps(ss[0..512]) == 588;
@@ -1209,7 +1221,7 @@ test a_bad_second_cuts_the_bitrate_and_good_ones_raise_it {
 test the_bitrate_never_falls_under_the_floor_nor_climbs_over_the_top {
     var ss : [512]u8 = undefined;
     t_zero(ss[0..512]);
-    vl_init(ss[0..512], VL_360);
+    vl_init(ss[0..512], VL_360, 0);
     var i : u64 = 0;
     while (i < 10) {
         vl_step(ss[0..512], 10, 10, 9, 10, 30, 1000 * i);
@@ -1217,7 +1229,7 @@ test the_bitrate_never_falls_under_the_floor_nor_climbs_over_the_top {
     }
     assert vl_kbps(ss[0..512]) == VL_FLOOR_KBPS and vl_rung(ss[0..512]) == VL_360;
     t_zero(ss[0..512]);
-    vl_init(ss[0..512], VL_720);
+    vl_init(ss[0..512], VL_720, 0);
     i = 0;
     while (i < 60) {
         vl_step(ss[0..512], 30, 0, 0, 30, 30, 1000 * i);
@@ -1229,45 +1241,50 @@ test the_bitrate_never_falls_under_the_floor_nor_climbs_over_the_top {
 test too_few_frames_a_second_twice_steps_the_picture_down {
     var ss : [512]u8 = undefined;
     t_zero(ss[0..512]);
-    vl_init(ss[0..512], VL_720);
+    vl_init(ss[0..512], VL_720, 0);
+    // the stream's start: few frames a second in its first 3 s are not a reason to step down
+    // (one underrun in each: a held bitrate, so only the frames a second are looked at)
+    assert vl_step(ss[0..512], 5, 0, 1, 5, 18, 1000) == 0 and vl_step(ss[0..512], 12, 0, 1, 12, 18, 2000) == 0;
+    assert vl_step(ss[0..512], 15, 0, 1, 15, 30, 2999) == 0 and vl_rung(ss[0..512]) == VL_720;
+    assert vs_get(ss[0..512], VL_LOWFPS) == 0;
     // the camera or the encoder gives only 18 a second: once is not enough
-    assert vl_step(ss[0..512], 18, 0, 0, 18, 18, 1000) == 0;
-    assert vl_step(ss[0..512], 18, 0, 0, 18, 18, 2000) == VL_A_RUNG;
+    assert vl_step(ss[0..512], 18, 0, 0, 18, 18, 4000) == 0;
+    assert vl_step(ss[0..512], 18, 0, 0, 18, 18, 5000) == VL_A_RUNG;
     assert vl_rung(ss[0..512]) == VL_480 and vl_kbps(ss[0..512]) == 1200;
     // a report with no frames at all (video paused) does not count as slow
-    assert vl_step(ss[0..512], 0, 0, 0, 0, 0, 3000) == 0 and vs_get(ss[0..512], VL_LOWFPS) == 0;
+    assert vl_step(ss[0..512], 0, 0, 0, 0, 0, 6000) == 0 and vs_get(ss[0..512], VL_LOWFPS) == 0;
     // slow on the receiving side only counts as well
-    vl_step(ss[0..512], 30, 0, 0, 15, 30, 4000);
-    assert vl_step(ss[0..512], 30, 0, 0, 15, 30, 5000) == VL_A_RUNG | VL_A_RATE;
+    vl_step(ss[0..512], 30, 0, 0, 15, 30, 7000);
+    assert vl_step(ss[0..512], 30, 0, 0, 15, 30, 8000) == VL_A_RUNG | VL_A_RATE;
     assert vl_rung(ss[0..512]) == VL_360 and vl_kbps(ss[0..512]) == 800;
     // 360p is the last rung
-    vl_step(ss[0..512], 30, 0, 0, 15, 30, 6000);
-    vl_step(ss[0..512], 30, 0, 0, 15, 30, 7000);
+    vl_step(ss[0..512], 30, 0, 0, 15, 30, 9000);
+    vl_step(ss[0..512], 30, 0, 0, 15, 30, 10000);
     assert vl_rung(ss[0..512]) == VL_360;
 }
 
 test the_picture_steps_up_only_after_a_long_clean_run_at_the_rungs_top {
     var ss : [512]u8 = undefined;
     t_zero(ss[0..512]);
-    vl_init(ss[0..512], VL_720);
-    vl_step(ss[0..512], 18, 0, 0, 18, 18, 1000);
-    vl_step(ss[0..512], 18, 0, 0, 18, 18, 2000);
+    vl_init(ss[0..512], VL_720, 0);
+    vl_step(ss[0..512], 18, 0, 0, 18, 18, 4000);
+    vl_step(ss[0..512], 18, 0, 0, 18, 18, 5000);
     assert vl_rung(ss[0..512]) == VL_480 and vl_kbps(ss[0..512]) == 1200;
-    // at 480p's top, 30 both ways, clean: but not before 10 s since the step down (at 2000)
-    var t : u64 = 3000;
-    while (t <= 11000) {
+    // at 480p's top, 30 both ways, clean: but not before 10 s since the step down (at 5000)
+    var t : u64 = 6000;
+    while (t <= 14000) {
         assert vl_step(ss[0..512], 30, 0, 0, 30, 30, t) == 0;
         t = t + 1000;
     }
     assert vl_rung(ss[0..512]) == VL_480;
-    assert vl_step(ss[0..512], 30, 0, 0, 30, 30, 12000) == VL_A_RUNG;
+    assert vl_step(ss[0..512], 30, 0, 0, 30, 30, 15000) == VL_A_RUNG;
     assert vl_rung(ss[0..512]) == VL_720 and vl_kbps(ss[0..512]) == 1200 and vs_get(ss[0..512], VL_UPS) == 1;
 }
 
 test a_slow_side_keeps_the_smaller_picture {
     var ss : [512]u8 = undefined;
     t_zero(ss[0..512]);
-    vl_init(ss[0..512], VL_480);
+    vl_init(ss[0..512], VL_480, 0);
     put_u64(ss[0..512], VL_KBPS * 8, 1200);
     var t : u64 = 20000;
     while (t <= 40000) {
@@ -1320,9 +1337,12 @@ test an_old_build_gets_the_jpeg_and_a_new_one_h264 {
     assert vn_note(VN_H264).len == 0 and vn_note(VN_WAIT).len == 0;
     assert vn_note(VN_JPEG_OLD).len > 20 and vn_note(VN_JPEG_HERE).len > 20 and vn_note(VN_JPEG_PEER).len > 20;
     // the HELLO repeats every 500 ms until the peer answered, said it heard us, and we said we heard it
-    assert vn_hello_due(0, 0, 0, 0, 5) and !vn_hello_due(0, 0, 0, 1000, 1499) and vn_hello_due(0, 0, 0, 1000, 1500);
-    assert vn_hello_due(2, 0, 1, 1000, 1500) and vn_hello_due(2, 1, 0, 1000, 1500) and vn_hello_due(0, 1, 1, 1000, 1500);
-    assert !vn_hello_due(2, 1, 1, 0, 5);
+    assert vn_hello_due(0, 0, 0, 0, 5, 0) and !vn_hello_due(0, 0, 0, 1000, 1499, 499) and vn_hello_due(0, 0, 0, 1000, 1500, 500);
+    assert vn_hello_due(2, 0, 1, 1000, 1500, 500) and vn_hello_due(2, 1, 0, 1000, 1500, 500) and vn_hello_due(0, 1, 1, 1000, 1500, 500);
+    assert !vn_hello_due(2, 1, 1, 0, 5, 0);
+    // an older build never answers: after 10 s it gets no more HELLOs; a peer that answered still gets the last ones
+    assert vn_hello_due(0, 0, 0, 9000, 9999, 9999) and !vn_hello_due(0, 0, 0, 9000, 10000, 10000);
+    assert vn_hello_due(2, 0, 0, 20000, 20500, 20500);
     var ss : [512]u8 = undefined;
     t_zero(ss[0..512]);
     var b : [32]u8 = undefined;
