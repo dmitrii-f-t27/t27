@@ -895,6 +895,110 @@ use t27os::account_view::ac_qr_frame_y;
 use t27os::account_view::ac_qr_big_mod;
 use t27os::account_view::ac_qr_is_big;
 use t27os::account_view::ac_qr_toggle;
+use t27os::account_view::AC_PIC_H;
+use t27os::peer_identity::ID_LEN;
+use t27os::peer_identity::ID_OK;
+use t27os::peer_identity::id_check;
+use t27os::id_backup::BK_BTN_W;
+use t27os::id_backup::BK_CANCEL_W;
+use t27os::id_backup::BK_CAP;
+use t27os::id_backup::BK_FIELD_H;
+use t27os::id_backup::BK_FOCUS;
+use t27os::id_backup::BK_F_PASS;
+use t27os::id_backup::BK_F_PATH;
+use t27os::id_backup::BK_GO_W;
+use t27os::id_backup::BK_H_BACKUP;
+use t27os::id_backup::BK_H_CANCEL;
+use t27os::id_backup::BK_H_GO;
+use t27os::id_backup::BK_H_NO;
+use t27os::id_backup::BK_H_PASS;
+use t27os::id_backup::BK_H_PATH;
+use t27os::id_backup::BK_H_RESTORE;
+use t27os::id_backup::BK_H_YES;
+use t27os::id_backup::BK_KEY_END;
+use t27os::id_backup::BK_L_ASK;
+use t27os::id_backup::BK_L_CONFIRM;
+use t27os::id_backup::BK_L_NONE;
+use t27os::id_backup::BK_MODE;
+use t27os::id_backup::BK_M_BACKUP;
+use t27os::id_backup::BK_M_CONFIRM;
+use t27os::id_backup::BK_M_RESTORE;
+use t27os::id_backup::BK_NEWFP;
+use t27os::id_backup::BK_NOTE;
+use t27os::id_backup::BK_N_KEPT;
+use t27os::id_backup::BK_N_PASS;
+use t27os::id_backup::BK_N_RESTORED;
+use t27os::id_backup::BK_N_SAME;
+use t27os::id_backup::BK_N_SAVED;
+use t27os::id_backup::BK_N_SWAP;
+use t27os::id_backup::BK_OK;
+use t27os::id_backup::BK_OLDFP;
+use t27os::id_backup::BK_OUT;
+use t27os::id_backup::BK_OUTLEN;
+use t27os::id_backup::BK_OUT_CAP;
+use t27os::id_backup::BK_PASS;
+use t27os::id_backup::BK_PASS_MAX;
+use t27os::id_backup::BK_PATH;
+use t27os::id_backup::BK_PATHLEN;
+use t27os::id_backup::BK_PATH_CAP;
+use t27os::id_backup::BK_PATH_MAX;
+use t27os::id_backup::BK_PEND;
+use t27os::id_backup::BK_PLEN;
+use t27os::id_backup::BK_PT_LEN;
+use t27os::id_backup::BK_YES_W;
+use t27os::id_backup::bk_back;
+use t27os::id_backup::bk_backup_x;
+use t27os::id_backup::bk_btn_y;
+use t27os::id_backup::bk_cancel_word;
+use t27os::id_backup::bk_cancel_x;
+use t27os::id_backup::bk_cancel_y;
+use t27os::id_backup::bk_close;
+use t27os::id_backup::bk_field_w;
+use t27os::id_backup::bk_focus_hit;
+use t27os::id_backup::bk_forget;
+use t27os::id_backup::bk_go_word;
+use t27os::id_backup::bk_go_x;
+use t27os::id_backup::bk_held;
+use t27os::id_backup::bk_hit;
+use t27os::id_backup::bk_hold;
+use t27os::id_backup::bk_is_hit;
+use t27os::id_backup::bk_launch;
+use t27os::id_backup::bk_mask;
+use t27os::id_backup::bk_may_replace;
+use t27os::id_backup::bk_mode;
+use t27os::id_backup::bk_no_x;
+use t27os::id_backup::bk_note;
+use t27os::id_backup::bk_note2_text;
+use t27os::id_backup::bk_note2_y;
+use t27os::id_backup::bk_note_of;
+use t27os::id_backup::bk_note_text;
+use t27os::id_backup::bk_note_y;
+use t27os::id_backup::bk_open;
+use t27os::id_backup::bk_open_shown;
+use t27os::id_backup::bk_pass_ok;
+use t27os::id_backup::bk_pass_w;
+use t27os::id_backup::bk_pass_y;
+use t27os::id_backup::bk_path_y;
+use t27os::id_backup::bk_q1_y;
+use t27os::id_backup::bk_q2_y;
+use t27os::id_backup::bk_restore_x;
+use t27os::id_backup::bk_set_out;
+use t27os::id_backup::bk_set_path;
+use t27os::id_backup::bk_tab;
+use t27os::id_backup::bk_title;
+use t27os::id_backup::bk_title_y;
+use t27os::id_backup::bk_type;
+use t27os::id_backup::bk_typing;
+use t27os::id_backup::bk_wipe;
+use t27os::id_backup::bk_yes_x;
+use t27os::id_backup::bk_yes_y;
+use t27os::id_backup_host::bkh_current;
+use t27os::id_backup_host::bkh_env;
+use t27os::id_backup_host::bkh_env_pass;
+use t27os::id_backup_host::bkh_fp_hex;
+use t27os::id_backup_host::bkh_open;
+use t27os::id_backup_host::bkh_replace;
+use t27os::id_backup_host::bkh_save;
 use t27os::account_view::ac_qr_small_word;
 use t27os::account_view::ac_qr_big_title;
 use t27os::account_view::ac_qr_big_word;
@@ -6379,7 +6483,9 @@ pub const TBO_HLANES : usize = 71680;
 pub const TBO_HLANES_N : usize = 256;
 /// IV. the invitations table (invites.t27) after the chat region.
 pub const TBO_IV : usize = 93696;
-pub const TB_SIZE : usize = 101908;
+/// A. the BACKUP / RESTORE panel's block (id_backup.t27 section 3): after the invitations, BK_CAP bytes.
+pub const TBO_BK : usize = 101908;
+pub const TB_SIZE : usize = 102932;
 pub const TG_KEY_RETURN : u64 = 36;
 pub const TG_KEY_BACKSPACE : u64 = 51;
 pub const TG_EV_CHAR : u32 = 99;
@@ -11144,6 +11250,274 @@ pub fn ac_call_or_message(cl: []u8, v: []u8, s: []u8, m: []u8, log: []u8, buf: [
     return true;
 }
 
+// ---------------------------------------------------------------- A. BACKUP and RESTORE of the identity (id_backup.t27)
+// The person keeps the identity in a file under a password and brings it back on a new device. id_backup.t27 decides
+// the layout, the checks and the panel; id_backup_host.t27 seals, opens and moves the files. The password is in the
+// panel's block only while typed, never drawn (stars), logged or folded into the frame key.
+
+/// There is an identity to save: the one the friends engine opened checks (peer_identity id_check; public bytes only).
+pub fn bk_have_id(cl: []const u8) -> bool { return id_check(cl[FE_ID .. FE_ID + ID_LEN]) == ID_OK; }
+
+/// ac_hit_now_iv with BACKUP, RESTORE and the backup panel over it.
+pub fn ac_hit_now_bk(x: f64, y: f64, sw: f64, sh: f64, cl: []const u8, iv: []const u8, bk: []const u8) -> u32 {
+    const dy : f64 = ac_inv_dy(ac_inv_rows(iv_waiting(iv)));
+    return bk_hit(x, y, qp_left(sw), QP_W, WS_TOP, sh - WS_TOP, dy, bk_have_id(cl), bk_mode(bk), ac_hit_now_iv(x, y, sw, sh, cl, iv));
+}
+
+/// After an opening: a refusal leaves its note; the identity already in use says so; else the bytes wait for YES.
+fn bk_settle(bk: []u8, st: u32, pt: []const u8, nfp: []const u8) -> void {
+    if (st != BK_OK) {
+        bk[BK_NOTE] = @as(u8, @intCast(bk_note_of(st)));
+        return;
+    }
+    var id : [208]u8 = undefined;
+    var ofp : [10]u8 = undefined;
+    bk_wipe(ofp[0..10], 0, 10);
+    const have : bool = bkh_current(id[0..208], ofp[0..10]);
+    bk_wipe(id[0..208], 0, 208);
+    var same : bool = have;
+    var i : usize = 0;
+    while (i < 10) {
+        if (ofp[i] != nfp[i]) { same = false; }
+        i = i + 1;
+    }
+    if (same) {
+        bk[BK_NOTE] = @as(u8, @intCast(BK_N_SAME));
+        return;
+    }
+    bk_hold(bk, pt, ofp[0..10], nfp);
+}
+
+/// SAVE (BACKUP) or OPEN (RESTORE), or Return in the password field. The password is wiped whatever happens.
+pub fn bk_go(cl: []u8, bk: []u8) -> void {
+    const m : u32 = bk_mode(bk);
+    const pn : usize = @as(usize, bk[BK_PLEN]);
+    if (m != BK_M_BACKUP and m != BK_M_RESTORE) { return; }
+    if (bk_pass_ok(bk[BK_PASS .. BK_PASS + BK_PASS_MAX], pn) == false) {
+        bk[BK_NOTE] = @as(u8, @intCast(BK_N_PASS));
+        return;
+    }
+    if (m == BK_M_BACKUP) {
+        var out : [BK_PATH_MAX]u8 = undefined;
+        const note : u32 = bkh_save(bk[BK_PASS .. BK_PASS + BK_PASS_MAX], pn, out[0..BK_PATH_MAX]);
+        bk_forget(bk);
+        bk[BK_FOCUS] = 0;
+        bk[BK_NOTE] = @as(u8, @intCast(note));
+        if (note == BK_N_SAVED) {
+            var k : usize = 0;
+            while (k < BK_PATH_MAX and out[k] != 0) { k = k + 1; }
+            bk_set_out(bk, out[0..BK_PATH_MAX], k);
+        }
+        return;
+    }
+    var pt : [237]u8 = undefined;
+    var nfp : [10]u8 = undefined;
+    const st : u32 = bkh_open(bk[BK_PATH .. BK_PATH + BK_PATH_CAP], @as(usize, bk[BK_PATHLEN]), bk[BK_PASS .. BK_PASS + BK_PASS_MAX], pn, pt[0..237], nfp[0..10]);
+    bk_forget(bk);
+    bk[BK_FOCUS] = 0;
+    bk_settle(bk, st, pt[0..237], nfp[0..10]);
+    bk_wipe(pt[0..237], 0, 237);
+}
+
+/// YES: the bytes that opened and checked replace ~/.t27os/identity (the old one to identity.bak); then wiped.
+pub fn bk_yes(bk: []u8) -> void {
+    if (bk_may_replace(BK_OK, bk_held(bk)) == false) { return; }
+    const r : u32 = bkh_replace(bk[BK_PEND .. BK_PEND + BK_PT_LEN]);
+    bk_forget(bk);
+    bk[BK_MODE] = @as(u8, @intCast(BK_M_RESTORE));
+    bk[BK_FOCUS] = 0;
+    if (r == BK_OK) { bk[BK_NOTE] = @as(u8, @intCast(BK_N_RESTORED)); } else { bk[BK_NOTE] = @as(u8, @intCast(BK_N_SWAP)); }
+}
+
+/// NO: nothing changes; the opened bytes are wiped.
+pub fn bk_no(bk: []u8) -> void {
+    bk_forget(bk);
+    bk[BK_MODE] = @as(u8, @intCast(BK_M_RESTORE));
+    bk[BK_FOCUS] = 0;
+    bk[BK_NOTE] = @as(u8, @intCast(BK_N_KEPT));
+}
+
+/// One hit of BACKUP, RESTORE or the panel as one action. A second press of the open panel's button closes it.
+pub fn bk_click(cl: []u8, bk: []u8, hit: u32) -> void {
+    cl[CL_FOCUS] = 0;
+    if (hit == BK_H_BACKUP or hit == BK_H_RESTORE) {
+        var m : u32 = BK_M_BACKUP;
+        if (hit == BK_H_RESTORE) { m = BK_M_RESTORE; }
+        if (bk_mode(bk) == m) {
+            bk_close(bk);
+        } else {
+            bk_open(bk, m);
+            if (ac_qr_is_big(cl)) { ac_qr_toggle(cl); }
+        }
+    } else if (hit == BK_H_PATH or hit == BK_H_PASS) {
+        bk_focus_hit(bk, hit);
+    } else if (hit == BK_H_GO) {
+        bk_go(cl, bk);
+    } else if (hit == BK_H_CANCEL) {
+        bk_close(bk);
+    } else if (hit == BK_H_YES) {
+        bk_yes(bk);
+    } else if (hit == BK_H_NO) {
+        bk_no(bk);
+    } else {
+        bk[BK_FOCUS] = 0;
+    }
+}
+
+fn bk_log(line: []const u8, n: usize) -> void {
+    sys_write(2, line[0..n], @as(u64, n));
+    sys_write(2, "\n", 1);
+}
+
+/// At launch (id_backup bk_launch): T27OS_ID_RESTORE=<file> opens the cabinet's RESTORE panel with the path; with
+/// T27OS_ID_PASSWORD the file is opened and YES / NO asked; with T27OS_ID_CONFIRM=yes too it replaces the identity
+/// here, before the identity is opened, so this run uses it. T27OS_ID_BACKUP=save with T27OS_ID_PASSWORD saves a
+/// backup (test aids; the password is read once and removed from the environment). One stderr line each, IDBACKUP /
+/// IDRESTORE, with the note or verdict and public fingerprints, never the password. True when the cabinet should open.
+pub fn bk_boot(bk: []u8) -> bool {
+    var p : [BK_PATH_MAX]u8 = undefined;
+    const pn : usize = bkh_env("T27OS_ID_RESTORE", p[0..BK_PATH_MAX]);
+    var pw : [80]u8 = undefined;
+    bk_wipe(pw[0..80], 0, 80);
+    const wn : usize = bkh_env_pass(pw[0..80]);
+    var e : [8]u8 = undefined;
+    const en : usize = bkh_env("T27OS_ID_CONFIRM", e[0..8]);
+    const yes : bool = en == 3 and e[0] == 121 and e[1] == 101 and e[2] == 115;
+    var line : [400]u8 = undefined;
+    var n : usize = 0;
+    const bn : usize = bkh_env("T27OS_ID_BACKUP", e[0..8]);
+    if (bn == 4 and e[0] == 115 and e[1] == 97 and e[2] == 118 and e[3] == 101) {
+        var out : [BK_PATH_MAX]u8 = undefined;
+        const note : u32 = bkh_save(pw[0..80], wn, out[0..BK_PATH_MAX]);
+        n = put_bytes(line[0..400], 0, "IDBACKUP note=");
+        n = put_dec(line[0..400], n, @as(u64, note));
+        if (note == BK_N_SAVED) {
+            var k : usize = 0;
+            while (k < BK_PATH_MAX and out[k] != 0) { k = k + 1; }
+            n = put_bytes(line[0..400], n, " path=");
+            n = put_bytes(line[0..400], n, out[0..k]);
+        }
+        bk_log(line[0..400], n);
+    }
+    const plan : u32 = bk_launch(pn, wn, yes);
+    if (plan == BK_L_NONE) {
+        bk_wipe(pw[0..80], 0, 80);
+        return false;
+    }
+    bk_open(bk, BK_M_RESTORE);
+    bk_set_path(bk, p[0..BK_PATH_MAX], pn);
+    if (plan == BK_L_ASK) {
+        bk[BK_FOCUS] = @as(u8, @intCast(BK_F_PASS));
+        return true;
+    }
+    var pt : [237]u8 = undefined;
+    var nfp : [10]u8 = undefined;
+    const st : u32 = bkh_open(p[0..BK_PATH_MAX], pn, pw[0..80], wn, pt[0..237], nfp[0..10]);
+    bk_wipe(pw[0..80], 0, 80);
+    n = put_bytes(line[0..400], 0, "IDRESTORE open=");
+    n = put_dec(line[0..400], n, @as(u64, st));
+    if (st == BK_OK) {
+        n = put_bytes(line[0..400], n, " fp=");
+        n = n + bkh_fp_hex(nfp[0..10], line[n..400]);
+    }
+    bk_settle(bk, st, pt[0..237], nfp[0..10]);
+    if (plan == BK_L_CONFIRM or bk_held(bk) == false) {
+        bk_wipe(pt[0..237], 0, 237);
+        if (bk_note(bk) == BK_N_SAME) { n = put_bytes(line[0..400], n, " same"); }
+        bk_log(line[0..400], n);
+        return true;
+    }
+    // T27OS_ID_CONFIRM=yes: the person's yes, given on the command line
+    bk_wipe(pt[0..237], 0, 237);
+    const r : u32 = bkh_replace(bk[BK_PEND .. BK_PEND + BK_PT_LEN]);
+    n = put_bytes(line[0..400], n, " replace=");
+    n = put_dec(line[0..400], n, @as(u64, r));
+    bk_log(line[0..400], n);
+    if (r != BK_OK) {
+        bk_forget(bk);
+        bk[BK_MODE] = @as(u8, @intCast(BK_M_RESTORE));
+        bk[BK_NOTE] = @as(u8, @intCast(BK_N_SWAP));
+        return true;
+    }
+    bk_close(bk);
+    return false;
+}
+
+/// A fingerprint as the account token ("a944-ca2d-cee5"), or "(none)" when it is all zero (no identity was there).
+fn bk_fp_token(fp: []const u8, out: []u8) -> usize {
+    var z : u32 = 0;
+    var i : usize = 0;
+    while (i < 10) {
+        z = z | @as(u32, fp[i]);
+        i = i + 1;
+    }
+    if (z == 0) { return put_bytes(out, 0, "(none)"); }
+    return ac_token_text(fp, out);
+}
+
+/// BACKUP and RESTORE in ME, right of CHANGE PICTURE (BACKUP only while there is an identity to save); the button of
+/// the open panel is filled.
+fn draw_bk_buttons(c: u64, kit: [48]u64, l: f64, t: f64, have: bool, mode: u32, hit: u32) -> void {
+    const by : f64 = bk_btn_y(t);
+    if (have) { draw_ac_btn_h(c, kit, bk_backup_x(l, QP_W), by, BK_BTN_W, AC_PIC_H, "BACKUP", mode == BK_M_BACKUP, hit == BK_H_BACKUP); }
+    draw_ac_btn_h(c, kit, bk_restore_x(l, QP_W), by, BK_BTN_W, AC_PIC_H, "RESTORE", mode == BK_M_RESTORE or mode == BK_M_CONFIRM, hit == BK_H_RESTORE);
+}
+
+/// The panel in the friends' place: the title and CANCEL; RESTORE's path field; the password as stars with SAVE /
+/// OPEN; the note (and the path saved). CONFIRM: the identity in use and the one restored, YES and NO.
+fn draw_bk_sheet(c: u64, kit: [48]u64, l: f64, tf: f64, bk: []const u8, hit: u32) -> void {
+    const x : f64 = l + QP_PAD;
+    const right : f64 = l + QP_W - QP_PAD;
+    const m : u32 = bk_mode(bk);
+    const ti : []const u8 = bk_title(m);
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+    draw_bytes(c, kit, ti, ti.len, x, bk_title_y(tf), 9.5, WEIGHT_SEMIBOLD, false);
+    draw_ac_btn_h(c, kit, bk_cancel_x(l, QP_W), bk_cancel_y(tf), BK_CANCEL_W, 16.0, bk_cancel_word(bk), false, hit == BK_H_CANCEL);
+    var line : [96]u8 = undefined;
+    var n : usize = 0;
+    if (m == BK_M_CONFIRM) {
+        n = put_bytes(line[0..96], 0, "in use now:  ");
+        n = n + bk_fp_token(bk[BK_OLDFP .. BK_OLDFP + 10], line[n..96]);
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+        draw_ac_fit(c, kit, line[0..96], n, x, bk_q1_y(tf), 9.5, 0.0, true, right);
+        n = put_bytes(line[0..96], 0, "in backup:   ");
+        n = n + bk_fp_token(bk[BK_NEWFP .. BK_NEWFP + 10], line[n..96]);
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+        draw_ac_fit(c, kit, line[0..96], n, x, bk_q2_y(tf), 9.5, WEIGHT_SEMIBOLD, true, right);
+        draw_ac_btn_h(c, kit, bk_yes_x(l), bk_yes_y(tf), BK_YES_W, BK_FIELD_H, "YES", true, hit == BK_H_YES);
+        draw_ac_btn_h(c, kit, bk_no_x(l), bk_yes_y(tf), BK_YES_W, BK_FIELD_H, "NO", false, hit == BK_H_NO);
+        return;
+    }
+    if (m == BK_M_RESTORE) {
+        // a long path shows its end, where the file name is
+        const pl : usize = @as(usize, bk[BK_PATHLEN]);
+        var from : usize = 0;
+        if (pl > 30) { from = pl - 30; }
+        draw_cl_field(c, kit, x, bk_path_y(tf), bk_field_w(QP_W), bk[BK_FOCUS] == @as(u8, @intCast(BK_F_PATH)), hit == BK_H_PATH, bk[BK_PATH + from .. BK_PATH + BK_PATH_CAP], pl - from, "~/Desktop/t27-backup-....t27id");
+    }
+    var stars : [64]u8 = undefined;
+    const sn : usize = bk_mask(@as(usize, bk[BK_PLEN]), stars[0..64]);
+    const py : f64 = bk_pass_y(tf, m);
+    draw_cl_field(c, kit, x, py, bk_pass_w(QP_W), bk[BK_FOCUS] == @as(u8, @intCast(BK_F_PASS)), hit == BK_H_PASS, stars[0..64], sn, "password, 8 to 64 characters");
+    draw_cl_btn(c, kit, bk_go_x(l, QP_W), py, BK_GO_W, bk_go_word(m), hit == BK_H_GO);
+    const note : u32 = bk_note(bk);
+    const nt : []const u8 = bk_note_text(note);
+    cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
+    if (note == BK_N_SAVED) { cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE)); }
+    draw_ac_fit(c, kit, nt, nt.len, x, bk_note_y(tf, m), 9.0, 0.0, false, right);
+    if (note == BK_N_SAVED) {
+        const ol : usize = @as(usize, bk[BK_OUTLEN]);
+        var of : usize = 0;
+        if (ol > 46) { of = ol - 46; }
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+        draw_ac_fit(c, kit, bk[BK_OUT + of .. BK_OUT + BK_OUT_CAP], ol - of, x, bk_note2_y(tf, m), 9.0, 0.0, true, right);
+    } else {
+        const n2 : []const u8 = bk_note2_text(note);
+        cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+        draw_ac_fit(c, kit, n2, n2.len, x, bk_note2_y(tf, m), 9.0, 0.0, false, right);
+    }
+}
+
 /// T27OS_ACCOUNT (a test aid, off by default): one line with what the cabinet shows, once at launch.
 fn ac_log(cl: []const u8) -> void {
     var line : [384]u8 = undefined;
@@ -11282,7 +11656,7 @@ fn draw_ac_qr(c: u64, qm: []const u8, n: usize, qx: f64, qy: f64, md: f64, over:
     }
 }
 
-fn draw_account_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, cl: []const u8, pf: []const u8, img: u64, ch: []const u8, kstored: []const u32, khl: []const u64, nvm: []const u8, kh: []const u8, now: u64, iv: []const u8, cnow: u64) -> void {
+fn draw_account_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, cl: []const u8, pf: []const u8, img: u64, ch: []const u8, kstored: []const u32, khl: []const u64, nvm: []const u8, kh: []const u8, now: u64, iv: []const u8, cnow: u64, bk: []const u8) -> void {
     const l : f64 = qp_left(sw);
     const t : f64 = WS_TOP;
     const h : f64 = sh - t;
@@ -11299,7 +11673,8 @@ fn draw_account_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, 
     const count : usize = @as(usize, cl[FV_COUNT]);
     const scroll : usize = @as(usize, cl[FV_SCROLL]);
     const conf : usize = ac_conf_row(cl);
-    const hit : u32 = ac_hit_qr(mx, my, l, QP_W, t, h, dy, cl[CL_UP] != 0, ac_qr_is_big(cl), ac_hit_inv(mx, my, l, QP_W, t, h, inv, drawn, count, vis, conf, ac_upd_shown(cl)));
+    const bkhave : bool = bk_have_id(cl);
+    const hit : u32 = bk_hit(mx, my, l, QP_W, t, h, dy, bkhave, bk_mode(bk), ac_hit_qr(mx, my, l, QP_W, t, h, dy, cl[CL_UP] != 0, ac_qr_is_big(cl), ac_hit_inv(mx, my, l, QP_W, t, h, inv, drawn, count, vis, conf, ac_upd_shown(cl))));
     // the key as a QR code (qr.t27): small in ME, large in place of the friends after a click on it
     var qm : [QR_CELLS_MAX]u8 = undefined;
     var qn : usize = 0;
@@ -11407,6 +11782,8 @@ fn draw_account_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, 
         draw_bytes(c, kit, "no key: calls are off", 21, x + 7.0, t + AC_KEY_BASE, 10.0, 0.0, false);
     }
     draw_ac_btn_h(c, kit, ac_copy_x(l, QP_W), t + AC_COPY_Y, AC_COPY_W, AC_KEY_H, "COPY", false, hit == AC_H_COPYKEY);
+    // BACKUP and RESTORE of the identity, right of CHANGE PICTURE (id_backup.t27)
+    draw_bk_buttons(c, kit, l, t, bkhave, bk_mode(bk), hit);
     var gv : []const u8 = ac_give_text();
     var av : []const u8 = ac_account_text(false);
     if (qn > 0) {
@@ -11513,8 +11890,10 @@ fn draw_account_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, 
             ik = ik + 1;
         }
     }
-    // the large code in place of the friends: the title, the frame, the light square with the modules, what a click does
-    if (qbig) {
+    // the backup panel, or the large code, in place of the friends
+    if (bk_open_shown(bk)) {
+        draw_bk_sheet(c, kit, l, tf, bk, hit);
+    } else if (qbig) {
         const fs : f64 = ac_qr_frame_side(qbmod);
         const fx : f64 = ac_qr_frame_x(l, QP_W, qbmod);
         const fy : f64 = ac_qr_frame_y(tf);
@@ -12335,7 +12714,7 @@ fn draw(c: u64, kit: [48]u64, frame: u32, state: u32, hov: u32, ma: f64, shown: 
             } else if (chm0 == CHV_M_CHAT) {
                 draw_ch_chat(c, kit, sw, sh, mx, my, tb[TBO_CH .. TBO_CH + CHV_CAP]);
             } else {
-                draw_account_panel(c, kit, sw, sh, mx, my, tb[TBO_CL .. TBO_CL + CL_CAP], tb[TBO_PF .. TBO_PF + PF_CAP], tg[TPG_PF_IMG], tb[TBO_CH .. TBO_CH + CHV_CAP], kstored, kopen[KHL_AT .. KHL_AT + 72], kmask[544..640], kmask[640..736], now, tb[TBO_IV .. TBO_IV + IV_LEN], ckh_ms());
+                draw_account_panel(c, kit, sw, sh, mx, my, tb[TBO_CL .. TBO_CL + CL_CAP], tb[TBO_PF .. TBO_PF + PF_CAP], tg[TPG_PF_IMG], tb[TBO_CH .. TBO_CH + CHV_CAP], kstored, kopen[KHL_AT .. KHL_AT + 72], kmask[544..640], kmask[640..736], now, tb[TBO_IV .. TBO_IV + IV_LEN], ckh_ms(), tb[TBO_BK .. TBO_BK + BK_CAP]);
             }
         } else {
             draw_call_panel(c, kit, sw, sh, mx, my, tb[TBO_CL .. TBO_CL + CL_CAP], tb[TBO_CH .. TBO_CH + CHV_CAP]);
@@ -13720,7 +14099,7 @@ pub fn main() -> void {
     }
     // the tool pages (B, K, Q): their state words and text store, all zero, counters "not measured"
     var tgv : [256]u64 = undefined;
-    var tbv : [101908]u8 = undefined;
+    var tbv : [102932]u8 = undefined;
     var tgz : usize = 0;
     while (tgz < 256) {
         tgv[tgz] = 0;
@@ -13794,6 +14173,9 @@ pub fn main() -> void {
     var ugp : [2304]u8 = undefined;
     ugp[0] = 0;
     ug_boot(tbv[TBO_CL .. TBO_CL + CL_CAP], ugp[0..2304], ubp[0..ubn], ubp[0..bundle_len(ubp[0..ubn], ubn)], acv[0..acn], tgv[TPG_U_CUR]);
+    // A. T27OS_ID_RESTORE / T27OS_ID_BACKUP (id_backup.t27): before cl_boot, so a confirmed restore is the identity
+    // this run opens
+    const bkopen : bool = bk_boot(tbv[TBO_BK .. TBO_BK + BK_CAP]);
     cl_boot(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN * 3]);
     ch_boot(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_CH .. TBO_CH + CHV_CAP], chs[0..CS_LEN], chlog[0..CH_LOG_LEN], chbuf[0..CH_BUF_LEN], chw[0..CHW_N]);
     ug_serve_start(tbv[TBO_CL .. TBO_CL + CL_CAP], ugp[0..2304], tbv[TBO_CL + CL_UP] != 0 and tbv[TBO_CL + FV_NET] == @as(u8, @intCast(FV_NET_UP)));
@@ -13822,6 +14204,10 @@ pub fn main() -> void {
         ac_open(tbv[TBO_CL .. TBO_CL + CL_CAP]);
         if (acen == 4 and ace[0] == 99 and ace[1] == 111 and ace[2] == 112 and ace[3] == 121) { ac_copy_mine(tbv[TBO_CL .. TBO_CL + CL_CAP], ckh_ms()); }
         ac_log(tbv[TBO_CL .. TBO_CL + CL_CAP]);
+    }
+    if (bkopen) {
+        clp = true;
+        ac_open(tbv[TBO_CL .. TBO_CL + CL_CAP]);
     }
     tgv[TPG_U_BLEN] = @as(u64, bundle_len(ubp[0..ubn], ubn));
     // T27OS_UPDATE_CHANNEL (a service key): upstream, fork, or auto when unset or anything else
@@ -14115,7 +14501,7 @@ pub fn main() -> void {
         // CL. the call: every event of the session, then the snapshot draw() reads; a call that rings here opens the
         // CALL panel in the place of the other right-hand panels (it is never answered for the person)
         if (cl_tick(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN * 3], clw[0..10]) or clring) {
-            if (clp == false) { ac_leave(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_PF .. TBO_PF + PF_CAP]); }
+            if (clp == false) { ac_leave(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_PF .. TBO_PF + PF_CAP]); bk_close(tbv[TBO_BK .. TBO_BK + BK_CAP]); }
             clp = true;
             qp = false;
             god = false;
@@ -14157,7 +14543,7 @@ pub fn main() -> void {
                     tgv[TPG_U_GO] = 1;
                 } else if (on_cl_head(mx, my, sw)) {
                     // CL. the CALL pill opens or closes the CALL panel; it takes the place of the other right-hand panels
-                    ac_leave(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_PF .. TBO_PF + PF_CAP]);
+                    ac_leave(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_PF .. TBO_PF + PF_CAP]); bk_close(tbv[TBO_BK .. TBO_BK + BK_CAP]);
                     clp = clp == false;
                     tbv[TBO_CL + CL_FOCUS] = 0;
                     if (clp) {
@@ -14179,7 +14565,7 @@ pub fn main() -> void {
                     if (pfp) {
                         pfp = false;
                     } else if (clp and ac_shown_mode(tbv[TBO_CL .. TBO_CL + CL_CAP])) {
-                        ac_leave(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_PF .. TBO_PF + PF_CAP]);
+                        ac_leave(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_PF .. TBO_PF + PF_CAP]); bk_close(tbv[TBO_BK .. TBO_BK + BK_CAP]);
                         clp = false;
                     } else {
                         clp = true;
@@ -14297,7 +14683,7 @@ pub fn main() -> void {
                 } else if (clp and on_panel(mx, my, sw, WS_TOP)) {
                     // CL. the CALL panel: close, the address field and the buttons of the view (call_view cv_action)
                     if (on_panel_close(mx, my, sw, WS_TOP)) {
-                        ac_leave(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_PF .. TBO_PF + PF_CAP]);
+                        ac_leave(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_PF .. TBO_PF + PF_CAP]); bk_close(tbv[TBO_BK .. TBO_BK + BK_CAP]);
                         chv_close(tbv[TBO_CH .. TBO_CH + CHV_CAP]);
                         clp = false;
                         tbv[TBO_CL + CL_FOCUS] = 0;
@@ -14308,11 +14694,15 @@ pub fn main() -> void {
                             ch_do(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_CH .. TBO_CH + CHV_CAP], chs[0..CS_LEN], chm[0..CHM_LEN], chlog[0..CH_LOG_LEN], chbuf[0..CH_BUF_LEN], chw[0..CHW_N], csv[0..CS_LEN * 3], clw[0..10], ch_hit_now(mx, my, sw, sh, tbv[TBO_CH .. TBO_CH + CHV_CAP]));
                         } else if (clv == CV_IDLE and tbv[TBO_CL + AC_ON] != 0) {
                             // A. the cabinet: a hit is the nickname, the key, a friend's row or one of its marks, the add part
-                            const ach : u32 = ac_hit_now_iv(mx, my, sw, sh, tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_IV .. TBO_IV + IV_LEN]);
+                            const ach : u32 = ac_hit_now_bk(mx, my, sw, sh, tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_IV .. TBO_IV + IV_LEN], tbv[TBO_BK .. TBO_BK + BK_CAP]);
+                            if (bk_is_hit(ach) == false) { tbv[TBO_BK + BK_FOCUS] = 0; }
                             // UPD. UPDATE / CANCEL / RESTART; RESTART started the installed copy, this one quits
                             if (ach == AC_H_UPD and ug_click(tbv[TBO_CL .. TBO_CL + CL_CAP], ugp[0..2304])) { sys_exit(0); }
                             var acr : u32 = 0;
-                            if (ac_hit_invite(ach)) {
+                            if (bk_is_hit(ach)) {
+                                // A. BACKUP, RESTORE and the backup panel (id_backup.t27)
+                                bk_click(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_BK .. TBO_BK + BK_CAP], ach);
+                            } else if (ac_hit_invite(ach)) {
                                 // IV. ACCEPT or DECLINE of an invitation
                                 ivw_click(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_IV .. TBO_IV + IV_LEN], ach, ckh_ms());
                             } else if (ac_call_or_message(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_CH .. TBO_CH + CHV_CAP], chs[0..CS_LEN], chm[0..CHM_LEN], chlog[0..CH_LOG_LEN], chbuf[0..CH_BUF_LEN], chw[0..CHW_N], csv[0..CS_LEN * 3], clw[0..10], tbv[TBO_PF .. TBO_PF + PF_CAP], ach, ac_vis_now(sh, tbv[TBO_IV .. TBO_IV + IV_LEN]))) {
@@ -14326,7 +14716,7 @@ pub fn main() -> void {
                                 acr = ac_do(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN * 3], clw[0..10], tbv[TBO_PF .. TBO_PF + PF_CAP], ach, ac_vis_now(sh, tbv[TBO_IV .. TBO_IV + IV_LEN]));
                             }
                             if (acr == 1) {
-                                ac_leave(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_PF .. TBO_PF + PF_CAP]);
+                                ac_leave(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_PF .. TBO_PF + PF_CAP]); bk_close(tbv[TBO_BK .. TBO_BK + BK_CAP]);
                                 clp = false;
                                 pfp = true;
                             }
@@ -15088,6 +15478,41 @@ pub fn main() -> void {
                         while (hj2 < hn2) {
                             chv_type_unit(tbv[TBO_CH .. TBO_CH + CHV_CAP], @as(u32, @intCast(msg_char(hc2, s_char_at, hj2) & 65535)));
                             hj2 = hj2 + 1;
+                        }
+                    } else {
+                        used = false;
+                    }
+                } else if (clp and ac_shown(tbv[TBO_CL .. TBO_CL + CL_CAP]) and bk_typing(tbv[TBO_BK .. TBO_BK + BK_CAP])) {
+                    // A. the backup panel's field: Return presses SAVE / OPEN, Esc closes the panel, Backspace drops a
+                    // character, Tab moves between the path and the password, Cmd+V pastes (printable ASCII only)
+                    const bkk : u32 = ky_key(@as(u32, @intCast(key)), cmd);
+                    if (bkk == KE_CANCEL) {
+                        bk_close(tbv[TBO_BK .. TBO_BK + BK_CAP]);
+                    } else if (bkk == KE_BACK) {
+                        bk_back(tbv[TBO_BK .. TBO_BK + BK_CAP]);
+                    } else if (bkk == KE_SAVE) {
+                        bk_go(tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_BK .. TBO_BK + BK_CAP]);
+                    } else if (bkk == KE_PASTE) {
+                        const bpb : u64 = msg0(cls("NSPasteboard"), sel("generalPasteboard"));
+                        const bps : u64 = msg1(bpb, sel("stringForType:"), cf("public.utf8-plain-text"));
+                        if (bps != 0) {
+                            const bpn : usize = ns_bytes(bps, ktmp[0..256]);
+                            var bpj : usize = 0;
+                            while (bpj < bpn) {
+                                bk_type(tbv[TBO_BK .. TBO_BK + BK_CAP], @as(u32, ktmp[bpj]));
+                                ktmp[bpj] = 0;
+                                bpj = bpj + 1;
+                            }
+                        }
+                    } else if (bkk == KE_CHAR) {
+                        const bc2 : u64 = msg0(ev, s_chars);
+                        var bn2 : u64 = 0;
+                        if (bc2 != 0) { bn2 = dk_len(dk, bc2); }
+                        var bj2 : u64 = 0;
+                        while (bj2 < bn2) {
+                            const bu : u32 = @as(u32, @intCast(msg_char(bc2, s_char_at, bj2) & 65535));
+                            if (bu == 9) { bk_tab(tbv[TBO_BK .. TBO_BK + BK_CAP]); } else { bk_type(tbv[TBO_BK .. TBO_BK + BK_CAP], bu); }
+                            bj2 = bj2 + 1;
                         }
                     } else {
                         used = false;
@@ -15952,6 +16377,12 @@ pub fn main() -> void {
         fkc = UPV_BASE;
         while (fkc < UPV_KEY_END) {
             fk = fg_mix(fk, @as(u64, tbv[TBO_CL + fkc]));
+            fkc = fkc + 1;
+        }
+        // A. the backup panel: what it draws, never the password (id_backup BK_KEY_END)
+        fkc = 0;
+        while (fkc < BK_KEY_END) {
+            fk = fg_mix(fk, @as(u64, tbv[TBO_BK + fkc]));
             fkc = fkc + 1;
         }
         var fki2 : usize = 0;
@@ -17385,7 +17816,7 @@ test the_profile_region_fits_the_text_store_and_its_words_are_free {
     assert TBO_PF == TBO_QD_HIVE + QD_HIVE_CAP;
     // the CALL region (CL) follows it and ends the store
     assert TBO_PF + PF_CAP == TBO_CL;
-    assert TBO_CL + CL_CAP == TBO_CH and TBO_CH + CHV_CAP == TBO_IV and TBO_IV + IV_LEN == TB_SIZE;
+    assert TBO_CL + CL_CAP == TBO_CH and TBO_CH + CHV_CAP == TBO_IV and TBO_IV + IV_LEN == TBO_BK and TBO_BK + BK_CAP == TB_SIZE;
     assert PF_TYPED + PRF_NICK_MAX_BYTES <= PF_SAVED;
     assert PF_SAVED + PRF_NICK_MAX_BYTES <= PF_CAP;
     assert PF_HOLD_HI < PF_TYPED;
@@ -17440,7 +17871,7 @@ test the_queen_control_dashboard_is_where_it_is_drawn_and_nothing_overlaps_the_f
     assert qd_open(z[0..560], false, WS_EXPANDED) == false;
     // the dashboard's words and buffers do not collide with the other feeds
     assert TPG_QD_PLANN > TPG_G_NEXT and TPG_QD_FLAGS < TPG_N and SST_QDASH < SST_SIZE and SST_QDASH != SST_DISK;
-    assert TBO_QD_PLAN >= TB_LANES_END and TBO_QD_HIVE + QD_HIVE_CAP == TBO_PF and TBO_PF + PF_CAP == TBO_CL and TBO_CL + CL_CAP == TBO_CH and TBO_CH + CHV_CAP == TBO_IV and TBO_IV + IV_LEN == TB_SIZE;
+    assert TBO_QD_PLAN >= TB_LANES_END and TBO_QD_HIVE + QD_HIVE_CAP == TBO_PF and TBO_PF + PF_CAP == TBO_CL and TBO_CL + CL_CAP == TBO_CH and TBO_CH + CHV_CAP == TBO_IV and TBO_IV + IV_LEN == TBO_BK and TBO_BK + BK_CAP == TB_SIZE;
     assert TBO_QD_TRIG == TBO_QD_PLAN + QD_PLAN_CAP and TBO_QD_BOARD == TBO_QD_TRIG + QD_TRIG_CAP and TBO_QD_HIVE == TBO_QD_BOARD + QD_BOARD_CAP;
     // the lanes table lists only work rows
     assert qd_lane_index(z[0..560], 0) == LV_NONE;
@@ -17456,7 +17887,7 @@ test the_queen_control_dashboard_is_where_it_is_drawn_and_nothing_overlaps_the_f
 // screen): that a call rings, shows its code and carries audio from this window is a live check, not a test here.
 test the_call_region_ends_the_text_store_and_draw_reads_only_folded_bytes {
     assert TBO_CL == TBO_PF + PF_CAP;
-    assert TBO_CL + CL_CAP == TBO_CH and TBO_CH + CHV_CAP == TBO_IV and TBO_IV + IV_LEN == TB_SIZE;
+    assert TBO_CL + CL_CAP == TBO_CH and TBO_CH + CHV_CAP == TBO_IV and TBO_IV + IV_LEN == TBO_BK and TBO_BK + BK_CAP == TB_SIZE;
     assert CL_ADDR + CV_ADDR_MAX + 1 <= CL_NPOLL;
     assert CL_NPOLL + 4 <= CL_CAPT and CL_TXO + 4 <= CL_STATS and CL_STATS < CL_KEY_N;
     // the friends snapshot (friends_view) follows the call core and is folded into the frame key; the engine's blocks
@@ -17950,7 +18381,7 @@ test the_footer_update_item_follows_the_friends_offer_before_the_self_updater {
 }
 
 test ch_the_chat_region_follows_the_call_region_and_mains_buffers_have_their_sizes {
-    assert TBO_CH == TBO_CL + CL_CAP and TBO_CH + CHV_CAP == TBO_IV and TBO_IV + IV_LEN == TB_SIZE;
+    assert TBO_CH == TBO_CL + CL_CAP and TBO_CH + CHV_CAP == TBO_IV and TBO_IV + IV_LEN == TBO_BK and TBO_BK + BK_CAP == TB_SIZE;
     assert CH_LOG_LEN == cl_bytes(CL_KEEP) and CH_BUF_LEN == CF_MAX + 1;
     assert CS_LEN == 166528 and CA_LEN == 8064 and CHM_LEN == 256 and CHW_AID < CHW_N;
     // the voice-call byte stands after the cabinet's bytes and before the friends snapshot, inside the folded bytes
@@ -18199,4 +18630,62 @@ test an_invitation_makes_no_friend_until_accept_and_accept_makes_the_one_who_wro
     assert ivw_record(cl[0..8192], iv[0..IV_LEN], b[0..10], kb[0..65], "", 0, 9000) == 0;
     assert ivw_accept_core(cl[0..8192], iv[0..IV_LEN], 0, 9000, fp[0..10], k[0..65]) == 0;
     assert ft_find(cl[FE_FT .. FE_FT + FT_LEN], c[0..10]) == FT_MAX;
+}
+
+test bk_backup_and_restore_open_the_panel_in_the_friends_place_and_close_with_their_secrets {
+    // the panel's block is the last region of the tool pages
+    assert TBO_IV + IV_LEN == TBO_BK and TBO_BK + BK_CAP == TB_SIZE;
+    var cl : [8192]u8 = undefined;
+    var iv : [8212]u8 = undefined;
+    var bk : [1024]u8 = undefined;
+    var i : usize = 0;
+    while (i < 8192) {
+        cl[i] = 0;
+        i = i + 1;
+    }
+    bk_wipe(bk[0..1024], 0, 1024);
+    iv_init(iv[0..IV_LEN]);
+    cl[AC_ON] = 1;
+    cl[FV_COUNT] = 2;
+    cl[FV_SHOWN] = 2;
+    const sw : f64 = 960.0;
+    const sh : f64 = 800.0;
+    const l : f64 = qp_left(sw);
+    const by : f64 = WS_TOP + AC_PIC_Y + 4.0;
+    // no identity open: RESTORE answers, BACKUP does not (nothing to save)
+    assert bk_have_id(cl[0..8192]) == false;
+    assert ac_hit_now_bk(bk_backup_x(l, QP_W) + 4.0, by, sw, sh, cl[0..8192], iv[0..IV_LEN], bk[0..1024]) != BK_H_BACKUP;
+    assert ac_hit_now_bk(bk_restore_x(l, QP_W) + 4.0, by, sw, sh, cl[0..8192], iv[0..IV_LEN], bk[0..1024]) == BK_H_RESTORE;
+    // RESTORE opens the panel with the path field focused; the row under it answers nothing; a second press closes it
+    const ry : f64 = ac_row_y(WS_TOP, 1) + 4.0;
+    assert ac_hit_now_bk(l + 40.0, ry, sw, sh, cl[0..8192], iv[0..IV_LEN], bk[0..1024]) == AC_H_ROW + 1;
+    cl[CL_FOCUS] = 2;
+    bk_click(cl[0..8192], bk[0..1024], BK_H_RESTORE);
+    assert bk_mode(bk[0..1024]) == BK_M_RESTORE and bk[BK_FOCUS] == 1 and cl[CL_FOCUS] == 0;
+    assert ac_hit_now_bk(l + 40.0, ry, sw, sh, cl[0..8192], iv[0..IV_LEN], bk[0..1024]) == BK_H_SHEET;
+    assert ac_hit_now_bk(l + 40.0, bk_pass_y(WS_TOP, BK_M_RESTORE) + 4.0, sw, sh, cl[0..8192], iv[0..IV_LEN], bk[0..1024]) == BK_H_PASS;
+    bk_click(cl[0..8192], bk[0..1024], BK_H_RESTORE);
+    assert bk_open_shown(bk[0..1024]) == false;
+    // BACKUP with a short password: the note, nothing written, the large QR code gives way to the panel
+    ac_qr_toggle(cl[0..8192]);
+    bk_click(cl[0..8192], bk[0..1024], BK_H_BACKUP);
+    assert bk_mode(bk[0..1024]) == BK_M_BACKUP and ac_qr_is_big(cl[0..8192]) == false and bk_typing(bk[0..1024]);
+    bk_type(bk[0..1024], 97);
+    bk_type(bk[0..1024], 98);
+    bk_click(cl[0..8192], bk[0..1024], BK_H_GO);
+    assert bk_note(bk[0..1024]) == BK_N_PASS and bk[BK_OUTLEN] == 0;
+    // CANCEL wipes the password
+    bk_click(cl[0..8192], bk[0..1024], BK_H_CANCEL);
+    assert bk_open_shown(bk[0..1024]) == false and bk[BK_PLEN] == 0 and bk[BK_PASS] == 0;
+    // YES with nothing opened replaces nothing; NO says nothing changed
+    bk_open(bk[0..1024], BK_M_RESTORE);
+    bk_click(cl[0..8192], bk[0..1024], BK_H_YES);
+    assert bk_note(bk[0..1024]) == 0 and bk_mode(bk[0..1024]) == BK_M_RESTORE;
+    bk_click(cl[0..8192], bk[0..1024], BK_H_NO);
+    assert bk_note(bk[0..1024]) == BK_N_KEPT and bk_held(bk[0..1024]) == false;
+    // a click elsewhere in the panel takes the focus away from its fields
+    bk_click(cl[0..8192], bk[0..1024], BK_H_PASS);
+    assert bk[BK_FOCUS] == 2;
+    bk_click(cl[0..8192], bk[0..1024], BK_H_SHEET);
+    assert bk[BK_FOCUS] == 0 and bk_typing(bk[0..1024]) == false;
 }

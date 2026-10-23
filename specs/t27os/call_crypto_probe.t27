@@ -163,7 +163,7 @@ fn ckh_num(label: []const u8, v: u64) -> void {
 
 // ---------------------------------------------------------------- the system primitives
 
-fn ckh_rand(b: []u8) -> bool { return ckh_rand_raw(0, @as(u64, b.len), b) == 0; }
+pub fn ckh_rand(b: []u8) -> bool { return ckh_rand_raw(0, @as(u64, b.len), b) == 0; }
 
 /// HMAC-SHA256(key, data) into out[0..32].
 fn ckh_hmac(key: []const u8, data: []const u8, out: []u8) -> void {
@@ -172,7 +172,7 @@ fn ckh_hmac(key: []const u8, data: []const u8, out: []u8) -> void {
 
 /// AES-128-GCM, 16-byte tag. enc: src -> out, tag written; else src -> out and the OS checks tag. 0 = kCCSuccess;
 /// the CCCryptorStatus as an unsigned 32-bit value otherwise; 1 when a size is wrong or libffi cannot be set up.
-fn ckh_gcm(enc: bool, key: []const u8, iv: []const u8, aad: []const u8, src: []const u8, out: []u8, tag: []u8) -> u64 {
+pub fn ckh_gcm(enc: bool, key: []const u8, iv: []const u8, aad: []const u8, src: []const u8, out: []u8, tag: []u8) -> u64 {
     if (key.len != CK_KEY or iv.len != CK_IV or tag.len != CK_TAG or src.len == 0 or out.len < src.len) { return 1; }
     var f : u64 = 0;
     if (enc) { f = ckh_dlsym(CKH_RTLD_DEFAULT, "CCCryptorGCMOneshotEncrypt"); } else { f = ckh_dlsym(CKH_RTLD_DEFAULT, "CCCryptorGCMOneshotDecrypt"); }
