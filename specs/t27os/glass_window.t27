@@ -7928,6 +7928,9 @@ pub const TPG_U_TSEC : u32 = 184;
 pub const TPG_U_CHAN : u32 = 185;
 pub const TPG_U_SRC : u32 = 186;
 pub const TPG_U_OWN : u32 = 187;
+/// T27OS_QA=1 at launch (1) and the last UPDTICK signature logged (up_qa_sig + 1; 0 = none yet).
+pub const TPG_U_QA : u32 = 188;
+pub const TPG_U_QAL : u32 = 189;
 pub const UP_CHECK : u64 = 1;
 pub const UP_DOWNLOAD : u64 = 2;
 pub const UP_STAGE : u64 = 3;
@@ -8208,6 +8211,60 @@ fn update_tick(tg: []u64, tb: []u8, hb: []const u8, bp: []const u8, now: u64, bu
         }
         tg_bump(tg);
     }
+}
+
+/// What one UPDTICK line says, packed: state, reason, job kind, a job running, a poll due, the updater held (a call
+/// or T27OS_QUIET_JOBS), the updater on, and the candidate build. A new line is logged only when this changes.
+pub fn up_qa_sig(tg: []const u64, due: bool, held: bool) -> u64 {
+    var s : u64 = (tg[TPG_U_ST] % 256) + 256 * (tg[TPG_U_WHY] % 256) + 65536 * (tg[TPG_U_KIND] % 256);
+    if (tg[TPG_U_PID] != 0) { s = s + 16777216; }
+    if (due) { s = s + 33554432; }
+    if (held) { s = s + 67108864; }
+    if (tg[TPG_U_ON] != 0) { s = s + 134217728; }
+    return s + 268435456 * (tg[TPG_U_CAND] % 16777216);
+}
+
+/// "UPDTICK on=1 held=0 st=1 why=0 job=1 run=1 due=0 last=.. fails=0 chan=2 cur=7107 cand=0\n", its length.
+pub fn up_qa_line(tg: []const u64, due: bool, held: bool, out: []u8) -> usize {
+    if (out.len < 200) { return 0; }
+    var n : usize = put_bytes(out, 0, "UPDTICK on=");
+    n = put_dec(out, n, tg[TPG_U_ON]);
+    n = put_bytes(out, n, " held=");
+    if (held) { n = put_bytes(out, n, "1"); } else { n = put_bytes(out, n, "0"); }
+    n = put_bytes(out, n, " st=");
+    n = put_dec(out, n, tg[TPG_U_ST]);
+    n = put_bytes(out, n, " why=");
+    n = put_dec(out, n, tg[TPG_U_WHY]);
+    n = put_bytes(out, n, " job=");
+    n = put_dec(out, n, tg[TPG_U_KIND]);
+    n = put_bytes(out, n, " run=");
+    if (tg[TPG_U_PID] != 0) { n = put_bytes(out, n, "1"); } else { n = put_bytes(out, n, "0"); }
+    n = put_bytes(out, n, " due=");
+    if (due) { n = put_bytes(out, n, "1"); } else { n = put_bytes(out, n, "0"); }
+    n = put_bytes(out, n, " last=");
+    n = put_dec(out, n, tg[TPG_U_LAST]);
+    n = put_bytes(out, n, " fails=");
+    n = put_dec(out, n, tg[TPG_U_FAILS]);
+    n = put_bytes(out, n, " chan=");
+    n = put_dec(out, n, tg[TPG_U_CHAN]);
+    n = put_bytes(out, n, " cur=");
+    n = put_dec(out, n, tg[TPG_U_CUR]);
+    n = put_bytes(out, n, " cand=");
+    n = put_dec(out, n, tg[TPG_U_CAND]);
+    return put_bytes(out, n, "\n");
+}
+
+/// T27OS_QA=1 (a test aid): one UPDTICK line to stderr each time the GitHub updater's state, reason, job or hold
+/// changes. That path logs nothing else (the UPDATE* lines are the friends' updater, update_agent.t27).
+fn up_qa(tg: []u64, now: u64, held: bool) -> void {
+    if (tg[TPG_U_QA] == 0) { return; }
+    const due : bool = check_due(now, tg[TPG_U_LAST], @as(u32, @intCast(tg[TPG_U_FAILS])));
+    const s : u64 = up_qa_sig(tg, due, held) + 1;
+    if (s == tg[TPG_U_QAL]) { return; }
+    tg[TPG_U_QAL] = s;
+    var line : [200]u8 = undefined;
+    const n : usize = up_qa_line(tg, due, held, line[0..200]);
+    if (n > 0) { sys_write(2, line[0..n], @as(u64, n)); }
 }
 
 // ---- the live layer (hot_reload.t27): the data the window re-reads while it runs --------------------------------
@@ -16010,6 +16067,7 @@ pub fn main() -> void {
     pack8(tgv[0..256], TPG_SB_COMMIT as usize, scb[0..16], scn);
     tgv[TPG_SB_COMMITN] = scn as u64;
     if (tgv[TPG_U_CUR] > 0) { tgv[TPG_U_ON] = 1; }
+    if (qa_env()) { tgv[TPG_U_QA] = 1; }
     tgv[TPG_V_DIRTY] = 1;
     var dpath : [300]u8 = undefined;
     put_bytes(dpath[0..300], put_bytes(dpath[0..300], 0, dhb[0..dhn]), "/.t27os");
@@ -17681,6 +17739,7 @@ pub fn main() -> void {
             hive_tick(tgv[0..256], tbv[0..71936], dhb[0..dhn], now, hv_up);
             update_tick(tgv[0..256], tbv[0..49152], dhb[0..dhn], ubp[0..ubn], now, up_busy(sst[0..560]));
         }
+        up_qa(tgv[0..256], now, bgoff);
         // the live data (hot_reload.t27): read again after every poll (and once at launch), applied on the next frame
         if (tgv[TPG_V_DIRTY] != 0) {
             tgv[TPG_V_DIRTY] = 0;
@@ -19768,6 +19827,7 @@ test the_header_cluster_and_the_footer_bar_are_where_they_are_drawn_and_a_merge_
     assert TPG_SB_AT > TPG_SB_COMMITN and TPG_G_NEXT < TPG_N and TPG_SB_HOST > TPG_U_STAGED;
     // the update channel, source and owner sit in the free run after TPG_U_TSEC, below TPG_O_HP
     assert TPG_U_CHAN > TPG_U_TSEC and TPG_U_SRC == TPG_U_CHAN + 1 and TPG_U_OWN == TPG_U_SRC + 1 and TPG_U_OWN < TPG_O_HP;
+    assert TPG_U_QA == TPG_U_OWN + 1 and TPG_U_QAL == TPG_U_QA + 1 and TPG_U_QAL < TPG_O_HP;
     assert UP_KILL_CHECK_S >= 3 * 20;
     assert SST_QRUN > SST_LV + 64 * LV_F - 1 and SST_DISK < SST_SIZE and SST_QFEED > SST_SRV;
     // the footer's items all have a page and the right end keeps its three links
@@ -20355,6 +20415,42 @@ test the_footer_update_item_follows_the_friends_offer_before_the_self_updater {
     // the self-updater off and the friend's part done still shows
     tg[TPG_U_ON] = 0;
     assert sb_upd_text(tg[0..256], cl[0..8192], o[0..64]) == 17;
+}
+
+test up_qa_line_names_the_updater_state_and_its_signature_moves_with_it {
+    var tg : [256]u64 = undefined;
+    var i : usize = 0;
+    while (i < 256) {
+        tg[i] = 0;
+        i = i + 1;
+    }
+    var o : [200]u8 = undefined;
+    assert up_qa_line(tg[0..256], false, false, o[0..100]) == 0;
+    tg[TPG_U_ON] = 1;
+    tg[TPG_U_CUR] = 7107;
+    tg[TPG_U_CHAN] = 2;
+    const s0 : u64 = up_qa_sig(tg[0..256], true, false);
+    // a held updater, a running check, a reason, a candidate: each one is a new line
+    assert up_qa_sig(tg[0..256], true, true) != s0;
+    assert up_qa_sig(tg[0..256], false, false) != s0;
+    tg[TPG_U_ST] = 1;
+    tg[TPG_U_KIND] = UP_CHECK;
+    tg[TPG_U_PID] = 42;
+    const s1 : u64 = up_qa_sig(tg[0..256], false, false);
+    assert s1 != s0;
+    tg[TPG_U_PID] = 0;
+    assert up_qa_sig(tg[0..256], false, false) != s1;
+    tg[TPG_U_WHY] = 3;
+    tg[TPG_U_CAND] = 7117;
+    assert up_qa_sig(tg[0..256], false, false) != s1;
+    // the time of the last poll alone is not a new line
+    const s2 : u64 = up_qa_sig(tg[0..256], false, false);
+    tg[TPG_U_LAST] = 1000;
+    assert up_qa_sig(tg[0..256], false, false) == s2;
+    const n : usize = up_qa_line(tg[0..256], false, true, o[0..200]);
+    // "UPDTICK on=1 held=1 st=1 why=3 job=1 run=0 due=0 last=1000 fails=0 chan=2 cur=7107 cand=7117\n"
+    assert n == 93 and o[0] == 85 and o[n - 1] == 10;
+    assert o[18] == 49 and o[23] == 49 and o[29] == 51;
 }
 
 test ch_the_chat_region_follows_the_call_region_and_mains_buffers_have_their_sizes {
