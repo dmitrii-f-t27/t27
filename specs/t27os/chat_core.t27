@@ -598,6 +598,7 @@ pub fn cl_session_start(log: []u8) -> u32 {
         const st : u32 = cl_state(log, i);
         if (cl_dir(log, i) == CH_DIR_OUT and (st == CH_S_PENDING or st == CH_S_SENT or st == CH_S_FAILED)) {
             cl_restart(log, i);
+            log[ln(i) + LN_ACKED] = 0;
             c = c + 1;
         }
         i = i + 1;
@@ -1490,4 +1491,39 @@ test cl_last_send_and_cl_restart_follow_each_send_and_a_restart_clears_the_tries
     assert cl_msg(log[0..T_LOG], 0) == 1 and cl_text(log[0..T_LOG], 0)[0] == 97 and cl_time(log[0..T_LOG], 0) == 7;
     assert cl_due(log[0..T_LOG], 0, 1) == CH_R_SEND;
     assert cl_state(log[0..T_LOG], 1) == CH_S_PENDING and cl_msg(log[0..T_LOG], 1) == 2;
+}
+
+test a_receiver_that_lost_its_half_built_message_gets_every_part_again_in_the_next_session {
+    var la : [16296]u8 = undefined;
+    var lb : [16296]u8 = undefined;
+    var asm : [8064]u8 = undefined;
+    ck_wipe(asm[0..CA_LEN]);
+    assert cl_init(la[0..T_LOG], T_B[0..10], T_CAP);
+    assert cl_init(lb[0..T_LOG], T_A[0..10], T_CAP);
+    var t : [1500]u8 = undefined;
+    t_fill(t[0..1500], 1500, 6);
+    assert cl_out_add(la[0..T_LOG], t[0..1500], 1) == 1;
+    // part 0 arrives and is acknowledged; the others are lost
+    const zero : [1]u32 = [0];
+    assert t_carry(la[0..T_LOG], 0, lb[0..T_LOG], asm[0..CA_LEN], zero[0..1]) == CH_RX_PART;
+    var ack : [20]u8 = undefined;
+    assert ch_put_ack(ack[0..20], 1, 0) == CH_PHDR;
+    assert ch_rx_ack(la[0..T_LOG], ack[0..20]);
+    assert cl_part_due(la[0..T_LOG], 0, 0) == false and cl_part_due(la[0..T_LOG], 0, 1);
+    // the receiver restarts: its assembly is empty again; a new session comes up
+    ck_wipe(asm[0..CA_LEN]);
+    assert cl_session_start(la[0..T_LOG]) == 1;
+    // the sender sends every part it now holds as due; the receiver must end with the message
+    var r : u32 = CH_RX_BAD;
+    var k : u32 = 0;
+    while (k < cl_parts(la[0..T_LOG], 0)) {
+        if (cl_part_due(la[0..T_LOG], 0, k)) {
+            var p : [720]u8 = undefined;
+            const n : usize = ch_put_text(p[0..720], 1, k, cl_time(la[0..T_LOG], 0), cl_text(la[0..T_LOG], 0));
+            r = ch_rx_text(lb[0..T_LOG], asm[0..CA_LEN], p[0..n]);
+        }
+        k = k + 1;
+    }
+    assert r == CH_RX_NEW;
+    assert cl_count(lb[0..T_LOG]) == 1 and cl_len(lb[0..T_LOG], 0) == 1500 and cl_text(lb[0..T_LOG], 0)[0] == t[0];
 }
