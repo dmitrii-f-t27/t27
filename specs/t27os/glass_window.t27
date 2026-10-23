@@ -2430,6 +2430,8 @@ use t27os::term_pane::tp_retry_hit;
 use t27os::term_pane::tp_server_step;
 use t27os::term_pane::tp_server_spawn_due;
 use t27os::term_pane::tp_server_cmd;
+use t27os::pty_home_host::ph_ensure;
+use t27os::pty_home_host::ph_ensure_line;
 use t27os::term_pane::TP_RETRY;
 use t27os::term_pane::PANE_LIVE;
 use t27os::term_pane::PANE_NONE;
@@ -16152,6 +16154,15 @@ pub fn main() -> void {
     put_bytes(dpath[0..300], put_bytes(dpath[0..300], 0, dhb[0..dhn]), "/.t27os/cards");
     dpath[dhn + 13] = 0;
     sys_mkdir(dpath[0..300], T27OS_HOME_MODE);
+    // P. the pane server in HOME (pty_home.t27): ~/.t27os/t27os-pty becomes the server this bundle carries, once a
+    // start and before the server is first started (the hooks, the update poll and the start job name that path);
+    // one line to stderr says what was done
+    var phi : [3]u64 = undefined;
+    const phr : u32 = ph_ensure(ubp[0..ubn], dhb[0..dhn], phi[0..3]);
+    var phl : [200]u8 = undefined;
+    const phn : usize = ph_ensure_line(phl[0..199], phr, phi[0..3]);
+    phl[phn] = 10;
+    sys_write(2, phl[0..phn + 1], @as(u64, phn + 1));
     dcv[D_PINN] = @as(u64, pins_load(dhb[0..dhn], letter_of_petal(shown), pbuf[0..4160]));
     dcv[D_PINLET] = @as(u64, letter_of_petal(shown));
     gallery_load(dcv[0..512], gal[0..49152], gt[0..2560], dhb[0..dhn]);
@@ -18042,7 +18053,7 @@ pub fn main() -> void {
         // output from the server's ring; an offline pane tries the server again every TP_RETRY frames.
         // The same code shows the editor pane when the strip's "T27 OS" chip opened one (view_key): `want` is
         // the chat index, VIEW_EDITOR or nothing; the editor view ends when the screen leaves its chat or space.
-        // T. the pane server starts itself: if ~/.t27os/pty.sock does not answer, the t27os-pty next to the app is started
+        // T. the pane server starts itself: if ~/.t27os/pty.sock does not answer, ~/.t27os/t27os-pty (else the one next to the app) is started
         // by one backgrounded `sh -c` job (it outlives the app: the app never stops it, it owns the panes' history)
         if (srvpid != 0 and tg_done(srvpid) != 0) { srvpid = 0; }
         if (screen) {

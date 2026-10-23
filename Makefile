@@ -60,7 +60,7 @@ t27os:
 	$$LD -o $$O/plist_main $$O/plist_main.o; \
 	$$LD -lobjc -lffi -stack_size $(T27OS_STACK_SIZE) $(foreach f,$(T27OS_FRAMEWORKS),-framework $(f)) -o $$A/MacOS/T27OS $$O/glass_window.o; \
 	T27OS_BUILD=$(T27OS_BUILD) $$O/plist_main > $$A/Info.plist; plutil -lint $$A/Info.plist >/dev/null; \
-	ID="$${T27OS_SIGN_ID:--}"; codesign --force --sign "$$ID" $$O/T27OS.app; codesign --force --sign "$$ID" $$O/t27os-pty; \
+	ID="$${T27OS_SIGN_ID:--}"; codesign --force --sign "$$ID" $$O/t27os-pty; cp $$O/t27os-pty $$A/MacOS/t27os-pty; codesign --force --sign "$$ID" $$O/T27OS.app; \
 	echo "built $$O/T27OS.app and $$O/t27os-pty (build $(T27OS_BUILD), signed with $$ID)"
 
 # Advisory umbrella: seal freshness, warnings baseline and a quick test; always exits 0.
