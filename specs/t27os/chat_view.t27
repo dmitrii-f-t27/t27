@@ -9,8 +9,9 @@
 //     sends); the wheel scrolls the history; an empty log says "No messages yet. Write the first one."
 //   * the unread count of every friend (a small table in this region), drawn as a badge on the friend's row.
 //   * the trust of every friend (another small table, friends_view FV_TB_* bits): the card and the rows say verified,
-//     not verified or key mismatch; MESSAGE of a friend who is not verified says why instead of opening a session that
-//     would be refused (CS_R_UNVERIFIED).
+//     not verified or key mismatch. MESSAGE opens the chat for every friend (owner, 2026-10-22): to a friend who is
+//     not verified the first message is the invitation (invites.t27 on the friend's side): its session proves the
+//     friend's key against the fingerprint the person pasted, and it opens once the friend accepted.
 // The window (glass_window.t27) owns the log, the message session (chat_host.t27 chm_*) and the call; it calls
 // chv_layout after the log or the scroll changed, and draw() only paints the items chv_layout left in the region.
 // Text widths here are an estimate per code point (chv_cp_w), on the wide side, so a line never runs past its bubble;
@@ -315,9 +316,10 @@ pub fn chv_tr_step(v: []u8, fp: []const u8, stored: bool, proven: bool, refused:
     return true;
 }
 
-/// MESSAGE is open to a friend whose key is stored (a mismatch keeps it: the stored key still opens the session, an
-/// impostor is refused by it). For a friend who is not verified the click says why: CHV_N_UNVERIFIED.
-pub fn chv_message_ok(trust: u32) -> bool { return trust != FV_T_UNVERIFIED; }
+/// MESSAGE is open to every friend: a stored key opens the session (a mismatch keeps it: an impostor is refused by the
+/// stored key); to a friend who is not verified the messages wait as an invitation until the friend accepts it
+/// (invites.t27). CHV_N_UNVERIFIED stays for a session refused for want of an identity (CS_R_UNVERIFIED).
+pub fn chv_message_ok(trust: u32) -> bool { return trust == FV_T_UNVERIFIED or trust == FV_T_VERIFIED or trust == FV_T_MISMATCH; }
 
 pub fn chv_message_note(trust: u32) -> u32 {
     if (chv_message_ok(trust)) { return CHV_N_NONE; }
@@ -1493,11 +1495,11 @@ test chv_the_card_says_whose_key_is_verified_and_message_waits_for_it {
     t_fp(10, a[0..10]);
     t_fp(50, b[0..10]);
     var o : [128]u8 = undefined;
-    // a new friend: not verified; the hint is the message session's own refusal line; MESSAGE says it and opens nothing
+    // a new friend: not verified; MESSAGE opens the chat (the first message is the invitation) and the hint says so
     assert chv_trust(v[0..8192], a[0..10]) == FV_T_UNVERIFIED;
-    assert fv_eq(o[0..128], put_bytes(o[0..128], 0, chv_card_hint(true, FV_T_UNVERIFIED)), "Not verified yet: call once and compare the code.");
-    assert chv_message_ok(FV_T_UNVERIFIED) == false and chv_message_note(FV_T_UNVERIFIED) == CHV_N_UNVERIFIED;
-    assert fv_eq(o[0..128], put_bytes(o[0..128], 0, chv_note_text(chv_message_note(FV_T_UNVERIFIED))), "Not verified yet: call once and compare the code.");
+    assert fv_eq(o[0..128], put_bytes(o[0..128], 0, chv_card_hint(true, FV_T_UNVERIFIED)), "Not verified yet: your first message asks them to accept you; a call compares a code.");
+    assert chv_message_ok(FV_T_UNVERIFIED) and chv_message_note(FV_T_UNVERIFIED) == CHV_N_NONE;
+    assert fv_eq(o[0..128], put_bytes(o[0..128], 0, chv_note_text(CHV_N_UNVERIFIED)), "Not verified yet: your first message asks them to accept you; a call compares a code.");
     // a call with a compared code stored a's key: the card reads verified without a restart, MESSAGE opens
     assert chv_tr_step(v[0..8192], a[0..10], true, false, false);
     assert chv_trust(v[0..8192], a[0..10]) == FV_T_VERIFIED and chv_trust(v[0..8192], b[0..10]) == FV_T_UNVERIFIED;

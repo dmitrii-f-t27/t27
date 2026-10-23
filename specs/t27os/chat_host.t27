@@ -10,7 +10,10 @@
 //     call port is not shared, so an INVITE that arrives here is a message session by construction). The same
 //     handshake, the same 6-digit code and the same AES-128-GCM channel as a call, with no audio and no video.
 //     chm_tick answers a RINGING session only when the caller is in the friends table and is the friend of this
-//     log, and declines anyone else. It never says "match" itself: no person compares a code in a message session,
+//     log. A session from someone who is not a friend is left ringing for the window (CHM_E_STRANGER): the window
+//     answers it to take an invitation (invites.t27) or declines it in the quiet hour after a DECLINE; the session
+//     then ends by itself with CS_R_INVITE (call_session) and chm_tick says so once (CHM_E_INVITE, cs_id_proven
+//     gives the fingerprint and the proven key). It never opens and none of its frames reaches a log. It never says "match" itself: no person compares a code in a message session,
 //     so the session opens only when the friend proves the identity key stored for it (call_session cs_identity,
 //     peer_identity pid_verdict TRUSTED); a friend whose key is not stored yet (never compared a code in a call, or
 //     a v1 friends file) is refused with CS_R_UNVERIFIED and the messages wait. Behaviour, not an audit.
@@ -29,6 +32,8 @@ use t27os::peer_identity_host::ih_home;
 use t27os::peer_identity_host::ih_slurp;
 use t27os::peer_identity_host::ih_write_atomic;
 use t27os::peer_identity_host::IH_PATH_MAX;
+use t27os::peer_identity_host::ih_invites_path;
+use t27os::peer_identity_host::ih_path;
 use t27os::peer_identity::ft_find;
 use t27os::peer_identity::FT_MAX;
 use t27os::call_core::CK_IDLE;
@@ -50,6 +55,8 @@ use t27os::call_session::CS_EV_NONE;
 use t27os::call_session::CS_EV_ACTIVE;
 use t27os::call_session::CS_EV_ENDED;
 use t27os::call_session::CS_EV_FAILED;
+use t27os::call_session::CS_R_INVITE;
+use t27os::call_session::cs_reason;
 use t27os::chat_core::CH_K_TEXT;
 use t27os::chat_core::CH_K_ACK;
 use t27os::chat_core::CH_K_READ;
@@ -203,6 +210,21 @@ pub const CHM_E_STATUS : u32 = 2;
 pub const CHM_E_DIRTY : u32 = 4;
 /// Another friend than the one of this log rings: still ringing; chm_ringing names it.
 pub const CHM_E_OTHER : u32 = 8;
+/// A session from someone who is not a friend just ended as an invitation (CS_R_INVITE): said once, at its end.
+pub const CHM_E_INVITE : u32 = 16;
+/// Someone who is not a friend rings: still ringing; the window answers (an invitation) or declines (quiet hour).
+pub const CHM_E_STRANGER : u32 = 32;
+
+/// What the window does with a session that rings from someone who is not a friend: answer it, so the peer proves its
+/// key and the session ends as an invitation; or decline it while it rings, when the person declined this fingerprint
+/// less than an hour ago (invites.t27 iv_quiet).
+pub fn chm_stranger_answer(quiet: bool) -> bool { return quiet == false; }
+
+/// The bits a session's end adds: CHM_E_INVITE when it ended as an invitation.
+pub fn chm_end_bits(failed: bool, reason: u32) -> u32 {
+    if (failed and reason == CS_R_INVITE) { return CHM_E_INVITE; }
+    return 0;
+}
 
 fn mg(m: []const u8, k: usize) -> u64 { return get_u64(m, k * 8); }
 fn mp(m: []u8, k: usize, v: u64) -> void { put_u64(m, k * 8, v); }
@@ -296,19 +318,23 @@ pub fn chm_tick(m: []u8, s: []u8, log: []u8, asm: []u8, friends: []const u8, me_
             mp(m, M_READ_SENT, 0);
             if (cl_session_start(log) > 0) { ev = ev | CHM_E_STATUS; }
         } else if (e == CS_EV_ENDED or e == CS_EV_FAILED) {
+            ev = ev | chm_end_bits(e == CS_EV_FAILED, cs_reason(s));
             cs_dismiss(s);
         }
         e = cs_poll(s);
         guard = guard + 1;
     }
-    // a session that rings: the friend of this log is answered, another friend is left ringing for the window, anyone
-    // else is declined (read from the state, so a session the window switched logs for is answered on this tick)
+    // an invitation just ended: nothing else this pass, so the window reads its proven key (cs_id_proven) before a dial
+    // of this log's friend starts the next session
+    if ((ev & CHM_E_INVITE) != 0) { return ev; }
+    // a session that rings: the friend of this log is answered, another friend is left ringing for the window, so is
+    // anyone who is not a friend (an invitation: the window answers or declines it; read from the state, so a session
+    // the window switched logs for is answered on this tick)
     if (cs_state(s) == CK_RINGING) {
         var rf : [10]u8 = undefined;
         cs_peer(s, rf[0..10]);
         if (ft_find(friends, rf[0..10]) == FT_MAX) {
-            ma(m, CHM_REFUSED);
-            cs_decline(s);
+            ev = ev | CHM_E_STRANGER;
         } else if (chm_peer_is(m, s)) {
             cs_answer(s);
         } else {
@@ -433,4 +459,24 @@ test the_log_path_is_the_chat_folder_and_the_fingerprint {
     chm_addr(m[0..256], 3232235786, 47728);
     assert chm_stat(m[0..256], CHM_K_DROP) == 5 and mg(m[0..256], M_IP) == 3232235786 and mg(m[0..256], M_PORT) == 47728;
     assert CHM_E_OTHER != CHM_E_NEW and CHM_E_OTHER != CHM_E_STATUS and CHM_E_OTHER != CHM_E_DIRTY;
+}
+
+test the_invitations_file_lives_beside_the_friends_file {
+    const home : [10]u8 = [47, 85, 115, 101, 114, 115, 47, 120, 121, 122];
+    var out : [256]u8 = undefined;
+    const n : usize = ih_invites_path(home[0..10], 10, 0, out[0..256]);
+    assert n == 10 + 19 and out[n] == 0 and out[10] == 47 and out[18] == 105 and out[n - 4] == 46 and out[n - 1] == 55;
+    assert ih_invites_path(home[0..10], 10, 1, out[0..256]) == n + 4 and out[n + 1] == 116;
+    assert ih_invites_path(home[0..10], 10, 2, out[0..256]) == n + 4 and out[n + 1] == 98;
+    assert ih_invites_path(home[0..10], 10, 0, out[0..40]) == 0;
+    var f : [256]u8 = undefined;
+    const m : usize = ih_path(home[0..10], 10, 2, false, f[0..256]);
+    assert m == 10 + 15 and f[17] == 47;
+}
+
+test a_stranger_is_answered_for_its_invitation_unless_declined_this_hour_and_its_end_is_said_once {
+    assert chm_stranger_answer(false) and chm_stranger_answer(true) == false;
+    assert chm_end_bits(true, CS_R_INVITE) == CHM_E_INVITE;
+    assert chm_end_bits(false, CS_R_INVITE) == 0 and chm_end_bits(true, 15) == 0 and chm_end_bits(true, 0) == 0;
+    assert CHM_E_INVITE != CHM_E_OTHER and CHM_E_STRANGER != CHM_E_INVITE and (CHM_E_STRANGER & (CHM_E_NEW | CHM_E_STATUS | CHM_E_DIRTY | CHM_E_OTHER)) == 0;
 }

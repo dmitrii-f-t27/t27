@@ -4,6 +4,9 @@
 // is a tested fn of peer_identity.t27; this file only moves bytes:
 //   * the identity key pair: a P-256 pair from the OS (keysync_host.ks_gen_pair, Security.framework), fingerprint =
 //     first 10 bytes of CC_SHA256 over the layout peer_identity.fp_input makes;
+//   * ~/.t27os/invites.t27 (invites.t27: the invitations to accept or decline): read whole, a file that does not check
+//     is moved aside to invites.t27.bad (kept, never written over) and the table starts empty; written whole and
+//     atomically like the others.
 //   * ~/.t27os/identity and ~/.t27os/friends (v1 or v2 read, v2 written, with the friends' stored keys): read whole,
 //     checked by peer_identity, written atomically (creat of a
 //     .tmp with mode 0600, write, fsync, rename), the directory made with mode 0700. A file that is there and does not
@@ -69,6 +72,11 @@ use t27os::peer_identity::ft2_split;
 use t27os::peer_identity::ft2_join;
 use t27os::peer_identity::fk_get;
 use t27os::peer_identity::fk_pin;
+use t27os::invites::IV_LEN;
+use t27os::invites::IV_OK;
+use t27os::invites::iv_init;
+use t27os::invites::iv_load;
+use t27os::invites::iv_check;
 
 pub const IH_CREATED : u32 = 1;
 pub const IH_LOADED : u32 = 2;
@@ -409,6 +417,55 @@ pub fn ih_pin_put(fp: []const u8, pubk: []const u8) -> u32 {
     if (r != PIN_NEW) { return r; }
     if (!ih_friends_write(dir[0..IH_PATH_MAX], path[0..IH_PATH_MAX], tmp[0..IH_PATH_MAX], t[0..FT_LEN], keys[0..FK_LEN])) { return PIN_BAD; }
     return PIN_NEW;
+}
+
+// ---------------------------------------------------------------- the invitations file
+
+/// <home>/.t27os/invites.t27; kind 1 adds ".tmp", kind 2 ".bad". NUL-terminated; the length, 0 when it does not fit.
+pub fn ih_invites_path(home: []const u8, hn: usize, kind: u32, out: []u8) -> usize {
+    if (hn + 32 > out.len) { return 0; }
+    var n : usize = put_bytes(out, 0, home[0..hn]);
+    n = put_bytes(out, n, "/.t27os/invites.t27");
+    if (kind == 1) { n = put_bytes(out, n, ".tmp"); }
+    if (kind == 2) { n = put_bytes(out, n, ".bad"); }
+    out[n] = 0;
+    return n;
+}
+
+/// ih_invites_open: no file -> an empty table (nothing written until the first invitation); a good file -> loaded; a
+/// file that does not check -> moved to invites.t27.bad and an empty table (IH_REFUSED | status << 8).
+pub fn ih_invites_open(t: []u8) -> u32 {
+    if (t.len < IV_LEN or !iv_init(t)) { return IH_IOERR; }
+    var home : [IH_PATH_MAX]u8 = undefined;
+    const hn : usize = ih_home(home[0..IH_PATH_MAX]);
+    if (hn == 0) { return IH_IOERR; }
+    var path : [IH_PATH_MAX]u8 = undefined;
+    if (ih_invites_path(home[0..IH_PATH_MAX], hn, 0, path[0..IH_PATH_MAX]) == 0) { return IH_IOERR; }
+    if (ih_access(path[0..IH_PATH_MAX], 0) != 0) { return IH_CREATED; }
+    var f : [8213]u8 = undefined;
+    const got : i64 = ih_slurp(path[0..IH_PATH_MAX], f[0..8213], IV_LEN + 1);
+    if (got < 0) { return IH_IOERR; }
+    const st : u32 = iv_load(f[0..8213], @as(usize, @intCast(got)), t);
+    if (st == IV_OK) { return IH_LOADED; }
+    var bad : [IH_PATH_MAX]u8 = undefined;
+    ih_invites_path(home[0..IH_PATH_MAX], hn, 2, bad[0..IH_PATH_MAX]);
+    sys_rename(path[0..IH_PATH_MAX], bad[0..IH_PATH_MAX]);
+    return IH_REFUSED | (st << 8);
+}
+
+/// Write the table (it must check) whole and atomically, mode 0600, the directory 0700.
+pub fn ih_invites_save(t: []const u8) -> bool {
+    if (t.len < IV_LEN or iv_check(t[0..IV_LEN]) != IV_OK) { return false; }
+    var home : [IH_PATH_MAX]u8 = undefined;
+    const hn : usize = ih_home(home[0..IH_PATH_MAX]);
+    if (hn == 0) { return false; }
+    var dir : [IH_PATH_MAX]u8 = undefined;
+    var path : [IH_PATH_MAX]u8 = undefined;
+    var tmp : [IH_PATH_MAX]u8 = undefined;
+    ih_path(home[0..IH_PATH_MAX], hn, 0, false, dir[0..IH_PATH_MAX]);
+    ih_invites_path(home[0..IH_PATH_MAX], hn, 0, path[0..IH_PATH_MAX]);
+    ih_invites_path(home[0..IH_PATH_MAX], hn, 1, tmp[0..IH_PATH_MAX]);
+    return ih_write_atomic(dir[0..IH_PATH_MAX], path[0..IH_PATH_MAX], tmp[0..IH_PATH_MAX], t[0..IV_LEN], IV_LEN);
 }
 
 // ---------------------------------------------------------------- mDNS state blocks

@@ -733,6 +733,24 @@ pub fn pid_show_code(pinned: bool, got: bool, verdict: u32, waited_ms: u64) -> b
     return true;
 }
 
+// ---------------------------------------------------------------- invitations (owner, 2026-10-22)
+// A person adds a friend by pasting the friend's key string: the fingerprint in it is the person's own input. In a
+// message session (no person compares a code there) the first proof of such a friend whose key is not stored yet is
+// stored as the friend's key (the host checks it hashes to that fingerprint, ih_pin_put); the verdict that follows is
+// pid_verdict's own TRUSTED. A session from someone who is not a friend at all is an invitation: it never opens, the
+// proven key is kept for the person to ACCEPT or DECLINE (invites.t27).
+
+/// Store the proof of a friend whose key is not stored, before the verdict: only in a message session, only for a proof
+/// that checks.
+pub fn pid_store_first(pinned: bool, got: bool, proof_ok: bool, message_session: bool) -> bool {
+    return message_session and pinned == false and got and proof_ok;
+}
+
+/// A message session from a peer who is not a friend, whose proof checks, is an invitation to keep (and to close).
+pub fn pid_is_invitation(friend: bool, got: bool, proof_ok: bool, message_session: bool) -> bool {
+    return message_session and friend == false and got and proof_ok;
+}
+
 // ---------------------------------------------------------------- mDNS TXT record
 
 pub const TXT_MAX : usize = 96;
@@ -1586,4 +1604,37 @@ test the_code_is_shown_to_strangers_at_once_and_to_a_trusted_friend_only_if_the_
     assert pid_show_code(true, true, PID_TRUSTED, 2 * PID_WAIT_MS);
     // refused: never
     assert pid_show_code(true, true, PID_REFUSE, 100000) == false;
+}
+
+test an_invitation_never_opens_and_only_a_friend_s_first_proof_is_stored_in_a_message_session {
+    // a stranger's message session with a good proof: an invitation, never trusted, refused (pid_verdict says CODE)
+    assert pid_is_invitation(false, true, true, true);
+    assert pid_verdict(false, true, true, false) == PID_CODE;
+    assert pid_message_refused(true, true, PID_CODE);
+    // not an invitation: a friend, no proof yet, a proof that does not check, a call (the code is compared there)
+    assert pid_is_invitation(true, true, true, true) == false;
+    assert pid_is_invitation(false, false, false, true) == false;
+    assert pid_is_invitation(false, true, false, true) == false;
+    assert pid_is_invitation(false, true, true, false) == false;
+    // a friend added by key whose key is not stored: the first good proof in a message session is stored, and with it
+    // stored the same proof is pid_verdict's TRUSTED (the session opens)
+    assert pid_store_first(false, true, true, true);
+    var t : [1108]u8 = undefined;
+    var k : [2400]u8 = undefined;
+    t_two(t[0..1108]);
+    var i : usize = 0;
+    while (i < 2400) {
+        k[i] = 0;
+        i = i + 1;
+    }
+    var ka : [65]u8 = undefined;
+    t_key(5, ka[0..65]);
+    assert fk_pin(t[0..1108], k[0..2400], T_FP[0..10], ka[0..65]) == PIN_NEW;
+    assert pid_verdict(true, true, true, true) == PID_TRUSTED and pid_message_refused(true, true, PID_TRUSTED) == false;
+    // never in a call, never twice (a stored key decides: another key is REFUSE), never for a proof that fails
+    assert pid_store_first(false, true, true, false) == false;
+    assert pid_store_first(true, true, true, true) == false;
+    assert pid_store_first(false, true, false, true) == false;
+    assert pid_store_first(false, false, false, true) == false;
+    assert pid_verdict(true, true, true, false) == PID_REFUSE;
 }

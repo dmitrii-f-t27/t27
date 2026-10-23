@@ -278,7 +278,7 @@ pub fn fv_trust_word_put(out: []u8, trust: u32) -> usize {
 pub fn fv_trust_hint(trust: u32) -> str {
     if (trust == FV_T_VERIFIED) { return "Verified: the key is stored, calls and messages need no code."; }
     if (trust == FV_T_MISMATCH) { return "Key mismatch: the last call offered another key than the stored one and was refused."; }
-    return "Not verified yet: call once and compare the code.";
+    return "Not verified yet: your first message asks them to accept you; a call compares a code.";
 }
 
 /// The second line of a row: "fp 1234-5678 <mark>  online, seen just now" or "fp 1234-5678 <mark>  offline, <why>".
@@ -505,12 +505,12 @@ test fv_trust_reads_as_verified_not_verified_or_key_mismatch {
     assert fv_trust_of(b) == FV_T_VERIFIED;
     // a code compared in a call with no key yet (neither stored nor proven) changes nothing
     assert fv_trust_step(0, false, false, false) == 0;
-    // the card's words and the hints: the unverified one is the message session's own refusal line
+    // the card's words and the hints: the unverified one says a message invites (invites.t27)
     assert fv_eq(o[0..96], fv_trust_word_put(o[0..96], FV_T_UNVERIFIED), "not verified");
     assert fv_eq(o[0..96], fv_trust_word_put(o[0..96], FV_T_MISMATCH), "! key mismatch");
     const n : usize = fv_trust_word_put(o[0..96], FV_T_VERIFIED);
     assert n == 12 and o[0] == 226 and o[1] == 156 and o[2] == 147 and fv_eq(o[3..96], n - 3, " verified");
-    assert fv_eq(o[0..96], put_bytes(o[0..96], 0, fv_trust_hint(FV_T_UNVERIFIED)), "Not verified yet: call once and compare the code.");
+    assert fv_eq(o[0..96], put_bytes(o[0..96], 0, fv_trust_hint(FV_T_UNVERIFIED)), "Not verified yet: your first message asks them to accept you; a call compares a code.");
     assert fv_trust_hint(FV_T_VERIFIED).len > 0 and fv_trust_hint(FV_T_MISMATCH).len > 0;
     assert fv_eq(o[0..96], put_bytes(o[0..96], 0, fv_trust_hint(FV_T_MISMATCH)), "Key mismatch: the last call offered another key than the stored one and was refused.");
 }

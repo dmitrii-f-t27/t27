@@ -71,6 +71,11 @@
 // CS_R_IDENTITY. After a matched code the proven key of a friend is stored, so the next call needs no code. A message
 // session (CS_AUDIO_NONE) has no person to compare a code: it opens only for a trusted friend (else CS_R_UNVERIFIED),
 // and cs_confirm(true) is refused there. A block with no identity handed in calls as before, with the code.
+// Invitations (owner, 2026-10-22): in a message session the first good proof of a friend whose key is not stored is
+// stored (peer_identity pid_store_first: the person pasted that fingerprint), so the session is TRUSTED; the proof of
+// someone who is not a friend makes an invitation (pid_is_invitation): the session ends with CS_R_INVITE and
+// cs_id_proven gives the window the proven key for invites.t27 (ACCEPT / DECLINE). A call is not changed.
+//   cs_id_proven(s, fp, pubk) -> bool                  after CS_R_INVITE: the peer's fingerprint and proven key.
 //   cs_identity(s, pubk, priv) -> bool                 the identity key pair for every link of the slice; false when
 //                                                      the block is not open or the key is not the one of me_fp.
 //   cs_id_state(s) -> u32                              CS_ID_* of the current or last call (unverified, verified,
@@ -224,10 +229,14 @@ use t27os::call_core::ck_ident_build;
 use t27os::call_core::ck_ident_sig_len;
 use t27os::keysync_host::ks_sign;
 use t27os::keysync_host::ks_verify;
+use t27os::peer_identity::PID_CODE;
 use t27os::peer_identity::PID_TRUSTED;
 use t27os::peer_identity::PID_REFUSE;
 use t27os::peer_identity::PIN_NEW;
 use t27os::peer_identity::PIN_SAME;
+use t27os::peer_identity::PIN_NOT_FRIEND;
+use t27os::peer_identity::pid_store_first;
+use t27os::peer_identity::pid_is_invitation;
 use t27os::peer_identity::pid_verdict;
 use t27os::peer_identity::pid_pinnable;
 use t27os::peer_identity::pid_auto_match;
@@ -316,6 +325,7 @@ const CI_VERDICT : usize = 5;
 const CI_PERSON : usize = 6;
 const CI_STORED : usize = 7;
 const CI_MSGN : usize = 8;
+const CI_STRANGER : usize = 10;
 const CI_PUB : usize = 16;
 const CI_PRIV : usize = 88;
 const CI_PEER : usize = 192;
@@ -439,6 +449,8 @@ pub const CS_R_AUDIO : u32 = 13;
 pub const CS_R_IDENTITY : u32 = 14;
 /// A message session with a peer whose identity is not verified (no stored key, or no own identity).
 pub const CS_R_UNVERIFIED : u32 = 15;
+/// A message session from someone who is not a friend: it proved its key and waits as an invitation (invites.t27).
+pub const CS_R_INVITE : u32 = 16;
 
 /// Slots of the group region (u64 k at CS_GRP + 8 k). 0..15 belong to one call of one link (cs_fresh clears them),
 /// 16..31 to the link for good, 32.. to the whole group and are used in the block of link 0 only.
@@ -1453,6 +1465,17 @@ fn cs_id_take(s: []u8, m: []const u8) -> void {
         var inp : [160]u8 = undefined;
         const k : usize = ck_ident_input(!ckh_caller(ep), s[EP_SID..EP_SID + 16], s[EP_T..EP_T + 32], s[EP_PPUB..EP_PPUB + 65], s[EP_PEER..EP_PEER + 10], s[EP_ME..EP_ME + 10], inp[0..160]);
         ok = fp_ok and k == CK_IDENT_INPUT_LEN and ks_verify(pt[0..65], inp[0..k], pt[66..66 + sl]);
+        // a message session: a friend's first proof is stored now; a stranger's proof is an invitation
+        const msg : bool = cs_g(s, CS_MODE) == @as(u64, CS_AUDIO_NONE);
+        if (pid_store_first(s[CS_ID + CI_PIN] != 0, true, ok, msg)) {
+            const pr : u32 = ih_pin_put(s[EP_PEER..EP_PEER + 10], pt[0..65]);
+            if (pr == PIN_NEW or pr == PIN_SAME) {
+                ck_put(s, CS_ID + CI_PEER, pt[0..65]);
+                s[CS_ID + CI_PIN] = 1;
+                s[CS_ID + CI_STORED] = 1;
+            }
+            if (pid_is_invitation(pr != PIN_NOT_FRIEND, true, ok, msg)) { s[CS_ID + CI_STRANGER] = 1; }
+        }
         same = s[CS_ID + CI_PIN] != 0 and ck_same(pt[0..65], s[CS_ID + CI_PEER..CS_ID + CI_PEER + 65]);
     }
     ck_wipe(pt[0..160]);
@@ -1463,15 +1486,24 @@ fn cs_id_take(s: []u8, m: []const u8) -> void {
     cs_id_apply(s);
 }
 
+/// Why a session in VERIFY ends on the identity verdict, CS_R_NONE when it goes on: a refused key; a message session
+/// that is not trusted (a stranger's is an invitation).
+pub fn cs_id_why(msg: bool, have_own: bool, got: bool, verdict: u32, stranger: bool) -> u32 {
+    if (got and verdict == PID_REFUSE) { return CS_R_IDENTITY; }
+    if (msg and pid_message_refused(have_own, got, verdict)) {
+        if (stranger and got) { return CS_R_INVITE; }
+        return CS_R_UNVERIFIED;
+    }
+    return CS_R_NONE;
+}
+
 /// What the identity verdict does to a call in VERIFY: refuse it, refuse an unverified message session, or say
 /// "match" for a trusted friend.
 fn cs_id_apply(s: []u8) -> void {
     if (ckh_state(s[0..EP_LEN]) != CK_VERIFY or s[EP_HAVE_CODE] == 0) { return; }
     const v : u32 = @as(u32, s[CS_ID + CI_VERDICT]);
     const got : bool = s[CS_ID + CI_GOT] != 0;
-    var why : u32 = CS_R_NONE;
-    if (got and v == PID_REFUSE) { why = CS_R_IDENTITY; }
-    if (why == CS_R_NONE and cs_g(s, CS_MODE) == @as(u64, CS_AUDIO_NONE) and pid_message_refused(s[CS_ID + CI_ON] != 0, got, v)) { why = CS_R_UNVERIFIED; }
+    const why : u32 = cs_id_why(cs_g(s, CS_MODE) == @as(u64, CS_AUDIO_NONE), s[CS_ID + CI_ON] != 0, got, v, s[CS_ID + CI_STRANGER] != 0);
     if (why != CS_R_NONE) {
         cs_send_plain_bye(s);
         cs_p(s, CS_REASON, @as(u64, why));
@@ -1479,6 +1511,24 @@ fn cs_id_apply(s: []u8) -> void {
         return;
     }
     if (got and pid_auto_match(v) and cs_g(s, CS_N2) == 0) { cs_say(s, true); }
+}
+
+/// After a session that ended with CS_R_INVITE: the peer's fingerprint and the key its signature proved (hashed to that
+/// fingerprint by cs_id_take). False for anything else; kept until the next session starts.
+pub fn cs_id_proven(s: []const u8, fp: []u8, pubk: []u8) -> bool {
+    if (s.len < CS_LEN or fp.len < 10 or pubk.len < 65) { return false; }
+    if (cs_g(s, CS_REASON) != @as(u64, CS_R_INVITE) or s[CS_ID + CI_STRANGER] == 0 or s[CS_ID + CI_OK] == 0) { return false; }
+    var i : usize = 0;
+    while (i < 10) {
+        fp[i] = s[EP_PEER + i];
+        i = i + 1;
+    }
+    i = 0;
+    while (i < 65) {
+        pubk[i] = s[CS_ID + CI_RX + i];
+        i = i + 1;
+    }
+    return true;
 }
 
 /// The call became ACTIVE after the person said "match": store the proven key of a friend that had none.
@@ -2999,4 +3049,42 @@ test a_new_call_forgets_the_last_peers_proof_and_keeps_the_own_identity {
     }
     assert z == 0;
     assert cs_id_state(s[0..CS_LEN]) == CS_ID_UNVERIFIED;
+}
+
+test a_strangers_message_session_ends_as_an_invitation_with_its_proven_key_and_nothing_else_does {
+    // the verdict: a stranger's proven message session is an invitation; a friend that is not trusted is refused as
+    // before; a call goes on (the code is compared there); a refused key stays refused; a trusted one opens
+    assert cs_id_why(true, true, true, PID_CODE, true) == CS_R_INVITE;
+    assert cs_id_why(true, true, true, PID_CODE, false) == CS_R_UNVERIFIED;
+    assert cs_id_why(false, true, true, PID_CODE, true) == CS_R_NONE;
+    assert cs_id_why(true, true, true, PID_REFUSE, true) == CS_R_IDENTITY;
+    assert cs_id_why(true, true, true, PID_TRUSTED, false) == CS_R_NONE;
+    assert cs_id_why(true, true, false, PID_CODE, true) == CS_R_NONE;
+    assert cs_id_why(true, false, false, PID_CODE, false) == CS_R_UNVERIFIED;
+    // the proven key is handed out only after CS_R_INVITE, only for a stranger, only for a proof that checked
+    var s : [166528]u8 = undefined;
+    var fp : [10]u8 = undefined;
+    var k : [65]u8 = undefined;
+    cs_t_live(s[0..CS_LEN]);
+    s[CS_ID + CI_ON] = 1;
+    s[CS_ID + CI_GOT] = 1;
+    s[CS_ID + CI_OK] = 1;
+    s[CS_ID + CI_STRANGER] = 1;
+    ck_fill_session(s[EP_PEER..EP_PEER + 10], 3);
+    ck_fill_session(s[CS_ID + CI_RX..CS_ID + CI_RX + 65], 9);
+    assert cs_id_proven(s[0..CS_LEN], fp[0..10], k[0..65]) == false;
+    cs_p(s[0..CS_LEN], CS_REASON, @as(u64, CS_R_INVITE));
+    assert cs_id_proven(s[0..CS_LEN], fp[0..10], k[0..65]);
+    assert ck_same(fp[0..10], s[EP_PEER..EP_PEER + 10]) and ck_same(k[0..65], s[CS_ID + CI_RX..CS_ID + CI_RX + 65]);
+    s[CS_ID + CI_OK] = 0;
+    assert cs_id_proven(s[0..CS_LEN], fp[0..10], k[0..65]) == false;
+    s[CS_ID + CI_OK] = 1;
+    s[CS_ID + CI_STRANGER] = 0;
+    assert cs_id_proven(s[0..CS_LEN], fp[0..10], k[0..65]) == false;
+    cs_p(s[0..CS_LEN], CS_REASON, @as(u64, CS_R_UNVERIFIED));
+    s[CS_ID + CI_STRANGER] = 1;
+    assert cs_id_proven(s[0..CS_LEN], fp[0..10], k[0..65]) == false;
+    // a new session forgets that the last peer was a stranger
+    cs_id_fresh(s[0..CS_LEN]);
+    assert s[CS_ID + CI_STRANGER] == 0;
 }

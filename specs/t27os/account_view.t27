@@ -15,6 +15,10 @@
 //          when the last check was. Read from the tables the window already holds (the health words of keys.t27 and
 //          the NVIDIA counts of nvidia_direct.t27); never a key value, never a request from this panel. A limit or a
 //          balance is not in any of these tables, so the line shows none.
+//   INVITATIONS (owner, 2026-10-22; only while there is one) people who added this device's key and wrote: the
+//          newest AC_INV_ROWS_MAX, each with its nickname (the peer's own word), its short key, when it came and
+//          "again" after a decline; ACCEPT makes it a friend (its proven key stored), DECLINE hides it (invites.t27).
+//          The number waiting stands in the head as well. The friends part moves down by ac_inv_dy.
 //   CALL   the friends, online or not, with CALL and MESSAGE on every row; CALL in the head of the panel as well
 //          while there is a friend, so a call is one click from the open cabinet.
 // A long value is cut with an ellipsis at a code point (ac_fit), never past the panel's right edge.
@@ -87,6 +91,17 @@ use t27os::friends_view::fv_trust_tag_put;
 use t27os::friends_view::FV_T_UNVERIFIED;
 use t27os::friends_view::FV_T_VERIFIED;
 use t27os::friends_view::FV_T_MISMATCH;
+use t27os::invites::IV_MAX;
+use t27os::invites::IR_NICK;
+use t27os::invites::IR_NICKLEN;
+use t27os::invites::iv_at;
+use t27os::invites::iv_nth;
+use t27os::invites::iv_time;
+use t27os::invites::iv_again;
+use t27os::invites::iv_waiting;
+use t27os::invites::iv_init;
+use t27os::invites::iv_arrive;
+use t27os::invites::iv_decline;
 
 // ---------------------------------------------------------------- 1. the state in the CALL region (below 256, folded)
 
@@ -496,6 +511,10 @@ pub const AC_H_NO : u32 = 80;
 pub const AC_H_CALL : u32 = 96;
 pub const AC_H_MSG : u32 = 112;
 pub const AC_H_END : u32 = 128;
+/// Per invitation row k (0..7): ACCEPT, DECLINE.
+pub const AC_H_IACC : u32 = 128;
+pub const AC_H_IDEC : u32 = 136;
+pub const AC_H_IEND : u32 = 144;
 
 pub fn ac_av_cx(l: f64) -> f64 { return l + QP_PAD + AC_AV_R; }
 pub fn ac_av_cy(t: f64) -> f64 { return t + AC_AV_CY; }
@@ -567,6 +586,121 @@ pub fn ac_hit(x: f64, y: f64, l: f64, w: f64, t: f64, h: f64, drawn: usize, coun
     if (fv_in(x, y, ac_paste_x(l, w), ac_btn_y(t, h), AC_PASTE_W, CV_BTN_H)) { return AC_H_PASTE; }
     if (fv_in(x, y, ac_addb_x(l, w), ac_btn_y(t, h), AC_ADDB_W, CV_BTN_H)) { return AC_H_ADD; }
     return AC_H_NONE;
+}
+
+// ---------------------------------------------------------------- 6b. INVITATIONS (between KEYS and the friends)
+
+/// At most this many invitations are in view (the newest); the label counts all that wait.
+pub const AC_INV_ROWS_MAX : usize = 2;
+pub const AC_INV_ROW_H : f64 = 30.0;
+/// The label line of the next part after the last invitation row.
+pub const AC_INV_AFTER : f64 = 14.0;
+pub const AC_INV_BTN_H : f64 = 18.0;
+pub const AC_INV_ACC_W : f64 = 52.0;
+pub const AC_INV_DEC_W : f64 = 56.0;
+pub const AC_INV_BTN_DY : f64 = 6.0;
+/// The head's count stands right of the title ACCOUNT.
+pub const AC_INV_HEAD_DX : f64 = 62.0;
+
+/// How many invitation rows are drawn for `waiting` invitations.
+pub fn ac_inv_rows(waiting: usize) -> usize {
+    if (waiting > AC_INV_ROWS_MAX) { return AC_INV_ROWS_MAX; }
+    return waiting;
+}
+
+/// How far the friends part moves down for `rows` invitation rows: nothing without one; else the label and the rows
+/// stand where the friends' label and rows stood, and the friends follow them.
+pub fn ac_inv_dy(rows: usize) -> f64 {
+    if (rows == 0) { return 0.0; }
+    return (AC_ROWS_Y - AC_FR_LABEL_Y) + AC_INV_ROW_H * @as(f64, @floatFromInt(rows)) + AC_INV_AFTER;
+}
+
+/// The label baseline and row k's top of the INVITATIONS part.
+pub fn ac_inv_label_y(t: f64) -> f64 { return t + AC_FR_LABEL_Y; }
+pub fn ac_inv_row_y(t: f64, k: usize) -> f64 { return t + AC_ROWS_Y + AC_INV_ROW_H * @as(f64, @floatFromInt(k)); }
+/// DECLINE ends at the panel's right text edge, ACCEPT left of it.
+pub fn ac_inv_dec_x(l: f64, w: f64) -> f64 { return l + w - QP_PAD - AC_INV_DEC_W; }
+pub fn ac_inv_acc_x(l: f64, w: f64) -> f64 { return ac_inv_dec_x(l, w) - AC_ZONE_GAP - AC_INV_ACC_W; }
+
+/// "INVITATIONS  3".
+pub fn ac_inv_label(n: usize, out: []u8) -> usize {
+    const k : usize = put_bytes(out, 0, "INVITATIONS  ");
+    return put_dec(out, k, @as(u64, n));
+}
+
+/// The head's count: "1 invitation", "3 invitations"; nothing for none.
+pub fn ac_inv_head_text(n: usize, out: []u8) -> usize {
+    if (n == 0) { return 0; }
+    const k : usize = put_dec(out, 0, @as(u64, n));
+    if (n == 1) { return put_bytes(out, k, " invitation"); }
+    return put_bytes(out, k, " invitations");
+}
+
+/// The first line of invitation row (table row i): its nickname, or "(no name)".
+pub fn ac_inv_name(iv: []const u8, i: usize, out: []u8) -> usize {
+    const a : usize = iv_at(i);
+    const n : usize = @as(usize, iv[a + IR_NICKLEN]);
+    if (n == 0) { return put_bytes(out, 0, "(no name)"); }
+    var k : usize = 0;
+    while (k < n) {
+        out[k] = iv[a + IR_NICK + k];
+        k = k + 1;
+    }
+    return n;
+}
+
+/// The second line: "fp abcd-1234  added you just now", "fp abcd-1234  added you 5 min ago, again".
+pub fn ac_inv_line(iv: []const u8, i: usize, now_ms: u64, out: []u8) -> usize {
+    var n : usize = put_bytes(out, 0, "fp ");
+    n = n + fv_short_fp(iv[iv_at(i) .. iv_at(i) + 10], out[n..out.len]);
+    n = put_bytes(out, n, "  added you ");
+    const at : u64 = iv_time(iv, i);
+    var secs : u64 = 0;
+    if (now_ms > at) { secs = (now_ms - at) / 1000; }
+    if (secs < 60) { n = put_bytes(out, n, "just now"); } else { n = n + fv_ago_text(secs, out[n..out.len]); }
+    if (iv_again(iv, i)) { n = put_bytes(out, n, ", again"); }
+    return n;
+}
+
+/// Is the hit an invitation's button; its row in view (0-based) and whether it is ACCEPT.
+pub fn ac_hit_invite(hit: u32) -> bool { return hit >= AC_H_IACC and hit < AC_H_IEND; }
+pub fn ac_inv_hit_k(hit: u32) -> usize {
+    if (hit >= AC_H_IDEC) { return @as(usize, hit - AC_H_IDEC); }
+    return @as(usize, hit - AC_H_IACC);
+}
+pub fn ac_inv_hit_accept(hit: u32) -> bool { return hit >= AC_H_IACC and hit < AC_H_IDEC; }
+
+/// The table row of the invitation in view at k (the newest first), IV_MAX when none.
+pub fn ac_inv_row_of(iv: []const u8, k: usize) -> usize {
+    if (k >= AC_INV_ROWS_MAX) { return IV_MAX; }
+    return iv_nth(iv, k);
+}
+
+/// ac_hit with the INVITATIONS part: `inv` rows drawn (ac_inv_rows), the friends part moved down by ac_inv_dy(inv)
+/// (vis is then counted by the caller from h - ac_inv_dy(inv)). ACCEPT and DECLINE of each row; the rest of a row is
+/// no button.
+pub fn ac_hit_inv(x: f64, y: f64, l: f64, w: f64, t: f64, h: f64, inv: usize, drawn: usize, count: usize, vis: usize, conf: usize, upd: bool) -> u32 {
+    var k : usize = 0;
+    while (k < inv and k < AC_INV_ROWS_MAX) {
+        const ry : f64 = ac_inv_row_y(t, k);
+        const kk : u32 = @as(u32, @intCast(k));
+        if (fv_in(x, y, ac_inv_acc_x(l, w), ry + AC_INV_BTN_DY, AC_INV_ACC_W, AC_INV_BTN_H)) { return AC_H_IACC + kk; }
+        if (fv_in(x, y, ac_inv_dec_x(l, w), ry + AC_INV_BTN_DY, AC_INV_DEC_W, AC_INV_BTN_H)) { return AC_H_IDEC + kk; }
+        if (fv_in(x, y, l + QP_PAD, ry, w - 2.0 * QP_PAD, AC_INV_ROW_H - 2.0)) { return AC_H_NONE; }
+        k = k + 1;
+    }
+    const dy : f64 = ac_inv_dy(inv);
+    if (dy == 0.0) { return ac_hit(x, y, l, w, t, h, drawn, count, vis, conf, upd); }
+    // the moved friends part, from its label line down to the add part: only its arrows and rows answer there
+    if (y >= t + AC_FR_LABEL_Y - 14.0 + dy and y < ac_ifield_y(t, h) - 12.0) {
+        const r : u32 = ac_hit(x, y - dy, l, w, t, h, drawn, count, vis, conf, false);
+        if (r == AC_H_UP or r == AC_H_DOWN or (r >= AC_H_ROW and r < AC_H_END)) { return r; }
+        return AC_H_NONE;
+    }
+    // the rest stands where it stood (the head, ME, KEYS, the add part); no friend row or arrow is there now
+    var c : usize = count;
+    if (c > vis) { c = vis; }
+    return ac_hit(x, y, l, w, t, h, 0, c, vis, FV_ROWS_SNAP, upd);
 }
 
 /// The panel (the area under the title) takes a wheel step at this point: the friends rows and the label above them.
@@ -1486,4 +1620,122 @@ test ac_the_friends_label_says_who_can_be_called {
     assert fv_eq(o[0..64], ac_fr_label(3, o[0..64]), "WHO YOU CAN CALL  3");
     // the label, then the range or the copy word right of it, then the arrows
     assert chv_text_w(o[0..64], ac_fr_label(32, o[0..64]), 9.5) <= AC_FLASH_FRIEND_DX - 4.0;
+}
+
+fn ac_t_inv(iv: []u8, n: usize) -> void {
+    iv_init(iv);
+    var fp : [10]u8 = undefined;
+    var k : [65]u8 = undefined;
+    k[0] = 4;
+    var i : usize = 1;
+    while (i < 65) {
+        k[i] = @as(u8, @intCast(i));
+        i = i + 1;
+    }
+    var j : usize = 0;
+    while (j < n) {
+        i = 0;
+        while (i < 10) {
+            fp[i] = @as(u8, @intCast(16 * j + i));
+            i = i + 1;
+        }
+        if (j == 1) { iv_arrive(iv, fp[0..10], k[0..65], "nodeb", 5, 1000 + @as(u64, j)); } else { iv_arrive(iv, fp[0..10], k[0..65], "", 0, 1000 + @as(u64, j)); }
+        j = j + 1;
+    }
+}
+
+test ac_invitations_stand_between_keys_and_the_friends_and_move_the_friends_down {
+    const t : f64 = 35.0;
+    // none: nothing moves, the panel is the one before invitations
+    assert ac_inv_rows(0) == 0 and ac_inv_dy(0) == 0.0;
+    assert ac_inv_rows(1) == 1 and ac_inv_rows(2) == 2 and ac_inv_rows(9) == AC_INV_ROWS_MAX;
+    // the label after KEYS, the rows under it, and the friends' label after the last row
+    assert ac_keys_row_base(t, AC_KP_N - 1) + 3.0 <= ac_inv_label_y(t) - 12.0;
+    assert ac_inv_label_y(t) < ac_inv_row_y(t, 0);
+    var r : usize = 1;
+    while (r <= AC_INV_ROWS_MAX) {
+        const dy : f64 = ac_inv_dy(r);
+        assert ac_inv_row_y(t, r - 1) + AC_INV_ROW_H + AC_INV_AFTER - 14.0 <= t + AC_FR_LABEL_Y + dy - 12.0 + 2.0;
+        assert ac_arrow_y(t + dy) >= ac_inv_row_y(t, r - 1) + AC_INV_ROW_H - 2.0;
+        // the friends that fit: fewer, never none, and the last ends above the add part
+        const h : f64 = 505.0;
+        const v : usize = ac_rows_vis(h - dy);
+        assert v >= 1 and v <= ac_rows_vis(h);
+        assert ac_row_y(t + dy, v) <= ac_add_label_y(t, h) + 4.0 + AC_ROW_H;
+        r = r + 1;
+    }
+    // ACCEPT and DECLINE inside the panel, side by side, right of the text
+    assert ac_inv_acc_x(0.0, 300.0) + AC_INV_ACC_W + AC_ZONE_GAP == ac_inv_dec_x(0.0, 300.0);
+    assert ac_inv_dec_x(0.0, 300.0) + AC_INV_DEC_W == 300.0 - QP_PAD;
+    assert ac_inv_acc_x(0.0, 300.0) - QP_PAD >= 150.0;
+    assert AC_INV_BTN_DY + AC_INV_BTN_H <= AC_INV_ROW_H - 2.0;
+    // the head's count stands between the title and CALL
+    assert QP_PAD + AC_INV_HEAD_DX + 70.0 <= ac_hcall_x(0.0, 300.0);
+}
+
+test ac_accept_and_decline_hit_their_own_row_and_the_rest_keeps_its_target {
+    const l : f64 = 660.0;
+    const w : f64 = 300.0;
+    const t : f64 = 35.0;
+    const h : f64 = 600.0;
+    const none : usize = FV_ROWS_SNAP;
+    const dy : f64 = ac_inv_dy(2);
+    const v : usize = ac_rows_vis(h - dy);
+    // each row's ACCEPT and DECLINE
+    assert ac_hit_inv(ac_inv_acc_x(l, w) + 4.0, ac_inv_row_y(t, 0) + AC_INV_BTN_DY + 4.0, l, w, t, h, 2, 3, 3, v, none, false) == AC_H_IACC;
+    assert ac_hit_inv(ac_inv_dec_x(l, w) + 4.0, ac_inv_row_y(t, 1) + AC_INV_BTN_DY + 4.0, l, w, t, h, 2, 3, 3, v, none, false) == AC_H_IDEC + 1;
+    assert ac_hit_inv(ac_inv_acc_x(l, w) + 4.0, ac_inv_row_y(t, 1) + AC_INV_BTN_DY + 4.0, l, w, t, h, 2, 3, 3, v, none, false) == AC_H_IACC + 1;
+    // the text of a row is no button; a third row is not drawn
+    assert ac_hit_inv(l + 40.0, ac_inv_row_y(t, 0) + 6.0, l, w, t, h, 2, 3, 3, v, none, false) == AC_H_NONE;
+    assert ac_hit_inv(ac_inv_acc_x(l, w) + 4.0, ac_inv_row_y(t, 0) + AC_INV_BTN_DY + 4.0, l, w, t, h, 0, 3, 3, 5, none, false) != AC_H_IACC;
+    // the friends moved down by dy: their rows answer there, and not where they stood
+    assert ac_hit_inv(l + 40.0, ac_row_y(t + dy, 0) + 4.0, l, w, t, h, 2, 1, 3, v, none, false) == AC_H_ROW;
+    assert ac_hit_inv(ac_msg_x(l, w) + 4.0, ac_row_y(t + dy, 0) + 4.0, l, w, t, h, 2, 1, 3, v, none, false) == AC_H_MSG;
+    // ME, the head and the add part keep their place
+    assert ac_hit_inv(l + 40.0, t + AC_KEY_Y + 6.0, l, w, t, h, 2, 1, 3, v, none, false) == AC_H_KEY;
+    assert ac_hit_inv(ac_hcall_x(l, w) + 4.0, t + AC_HCALL_Y + 4.0, l, w, t, h, 2, 1, 3, v, none, false) == AC_H_HCALL;
+    assert ac_hit_inv(ac_addb_x(l, w) + 4.0, ac_btn_y(t, h) + 4.0, l, w, t, h, 2, 1, 3, v, none, false) == AC_H_ADD;
+    // no invitation: the same answers as the cabinet before
+    assert ac_hit_inv(l + 40.0, ac_row_y(t, 0) + 4.0, l, w, t, h, 0, 3, 3, 5, none, false) == ac_hit(l + 40.0, ac_row_y(t, 0) + 4.0, l, w, t, h, 3, 3, 5, none, false);
+    // the hits read back as row and kind; they are neither CALL nor MESSAGE
+    assert ac_hit_invite(AC_H_IDEC + 1) and ac_inv_hit_k(AC_H_IDEC + 1) == 1 and ac_inv_hit_accept(AC_H_IDEC + 1) == false;
+    assert ac_hit_invite(AC_H_IACC) and ac_inv_hit_k(AC_H_IACC) == 0 and ac_inv_hit_accept(AC_H_IACC);
+    assert ac_hit_invite(AC_H_MSG + 3) == false and ac_hit_action(AC_H_IACC) == AC_A_NONE and ac_hit_action(AC_H_IDEC + 1) == AC_A_NONE;
+}
+
+test ac_an_invitation_reads_name_key_when_and_again {
+    var iv : [8212]u8 = undefined;
+    ac_t_inv(iv[0..8212], 3);
+    var o : [128]u8 = undefined;
+    assert iv_waiting(iv[0..8212]) == 3;
+    // the newest first: row 2 (no name), then row 1 (nodeb)
+    const i0 : usize = ac_inv_row_of(iv[0..8212], 0);
+    const i1 : usize = ac_inv_row_of(iv[0..8212], 1);
+    assert ac_inv_row_of(iv[0..8212], 2) == IV_MAX;
+    assert fv_eq(o[0..128], ac_inv_name(iv[0..8212], i0, o[0..128]), "(no name)");
+    assert fv_eq(o[0..128], ac_inv_name(iv[0..8212], i1, o[0..128]), "nodeb");
+    assert fv_eq(o[0..128], ac_inv_line(iv[0..8212], i1, 1001 + 30000, o[0..128]), "fp 1011-1213  added you just now");
+    assert fv_eq(o[0..128], ac_inv_line(iv[0..8212], i1, 1001 + 300000, o[0..128]), "fp 1011-1213  added you 5 min ago");
+    // declined and back after the quiet hour: "again"
+    var fp : [10]u8 = undefined;
+    var k : [65]u8 = undefined;
+    var j : usize = 0;
+    while (j < 10) {
+        fp[j] = iv[iv_at(i1) + j];
+        j = j + 1;
+    }
+    j = 0;
+    while (j < 65) {
+        k[j] = iv[iv_at(i1) + 10 + j];
+        j = j + 1;
+    }
+    assert iv_decline(iv[0..8212], fp[0..10], 2000);
+    assert iv_waiting(iv[0..8212]) == 2;
+    assert iv_arrive(iv[0..8212], fp[0..10], k[0..65], "", 0, 2000 + 3600000) == 3;
+    assert fv_eq(o[0..128], ac_inv_line(iv[0..8212], ac_inv_row_of(iv[0..8212], 0), 2000 + 3600000, o[0..128]), "fp 1011-1213  added you just now, again");
+    // the label and the head
+    assert fv_eq(o[0..128], ac_inv_label(3, o[0..128]), "INVITATIONS  3");
+    assert fv_eq(o[0..128], ac_inv_head_text(1, o[0..128]), "1 invitation");
+    assert fv_eq(o[0..128], ac_inv_head_text(4, o[0..128]), "4 invitations");
+    assert ac_inv_head_text(0, o[0..128]) == 0;
 }

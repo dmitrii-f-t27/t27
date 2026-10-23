@@ -909,6 +909,59 @@ pub fn fe_add(cl: []u8, now: u64) -> u32 {
     return note;
 }
 
+/// ACCEPT of an invitation (invites.t27): the fingerprint of the row becomes a friend, named with the nickname the row
+/// holds (the peer's own word, it proves nothing), the table saved; the window then stores the row's key for it
+/// (ih_pin_put). The same notes as ADD: FN_ADDED, FN_DUP (already a friend: the key is still stored), FN_SELF, FN_FULL,
+/// FN_DAMAGED, FN_NOSAVE (kept in memory only). The add field is not touched.
+pub fn fe_accept(cl: []u8, fp: []const u8, nick: []const u8, nn: usize, now: u64) -> u32 {
+    if (fp.len < FP_BYTES) { return FN_DAMAGED; }
+    var inv : [25]u8 = undefined;
+    if (invite_make(fp[0..FP_BYTES], inv[0..25]) != INVITE_LEN) { return FN_DAMAGED; }
+    const r : u32 = ft_add(cl[FE_FT..FE_FT + FT_LEN], inv[0..25], cl[FE_FP..FE_FP + FP_BYTES]);
+    if (r == FA_DUPLICATE) { return FN_DUP; }
+    if (r == FA_SELF) { return FN_SELF; }
+    if (r == FA_FULL) { return FN_FULL; }
+    if (r != FA_OK) { return FN_DAMAGED; }
+    if (nn > 0) { ft_set_nick(cl[FE_FT..FE_FT + FT_LEN], fp[0..FP_BYTES], nick, nn); }
+    var note : u32 = FN_ADDED;
+    if (!fe_ss_file(cl) or !ih_friends_save(cl[FE_FT..FE_FT + FT_LEN])) { note = FN_NOSAVE; }
+    fe_snapshot(cl, now);
+    return note;
+}
+
+/// The nickname a service on the network announces for fp (its TXT "nick=", the peer's own word): its length into
+/// out, 0 when no resolved service names fp or it announces none. Used for an invitation from someone not yet a friend.
+pub fn fe_nick_for(cl: []u8, fp: []const u8, out: []u8) -> usize {
+    if (fp.len < FP_BYTES or out.len < 32 or cl[FV_NET] != @as(u8, @intCast(FV_NET_UP))) { return 0; }
+    const block_at : u64 = fe_base(cl[FE_BR..FE_BR + BR_LEN]);
+    if (block_at == 0) { return 0; }
+    var k : usize = 0;
+    while (k < BR_COUNT) {
+        const e : u64 = ih_entry(block_at, k);
+        if (fe_peek32(e + BE_STATE) >= BS_RESOLVED) {
+            var tb : [128]u8 = undefined;
+            const tl : usize = fe_read_txt(e, tb[0..128]);
+            var pfp : [10]u8 = undefined;
+            if (txt_fp(tb[0..128], tl, pfp[0..10]) == INV_OK) {
+                var same : bool = true;
+                var z : usize = 0;
+                while (z < 10) {
+                    if (pfp[z] != fp[z]) { same = false; }
+                    z = z + 1;
+                }
+                if (same) {
+                    const key : [4]u8 = [110, 105, 99, 107];
+                    const kn : usize = txt_get(tb[0..128], tl, key[0..4], out[0..32]);
+                    if (kn > 0 and kn <= NICK_MAX and nick_ok(out, kn)) { return kn; }
+                    return 0;
+                }
+            }
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+
 /// The key typed in the add field, parsed (not added): its 10 bytes into fp. False when it is not a valid invite.
 pub fn fe_typed_key(cl: []const u8, fp: []u8) -> bool {
     const n : usize = @as(usize, cl[FV_INVLEN]);
@@ -1287,4 +1340,30 @@ test fe_stop_takes_the_engine_off_the_net_and_holds_no_ref {
     // a pass after the stop does nothing
     assert fe_tick(cl[0..8000], 5000) == FV_ROWS_SNAP;
     assert fe_sl(cl[0..8000], FE_S_TICK) == 0;
+}
+
+test fe_an_accepted_invitation_is_a_friend_with_its_nickname_and_only_once {
+    var cl : [8000]u8 = undefined;
+    fe_t_blank(cl[0..8000]);
+    const own : [10]u8 = [1, 35, 69, 103, 137, 171, 205, 239, 254, 220];
+    const other : [10]u8 = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
+    var i : usize = 0;
+    while (i < 10) {
+        cl[FE_FP + i] = own[i];
+        i = i + 1;
+    }
+    fe_ss(cl[0..8000], FE_S_FILE, 0);
+    cl[FV_IDSTATE] = 1;
+    assert ft_init(cl[FE_FT..FE_FT + FT_LEN]);
+    // something typed in the add field stays as it was
+    cl[FV_INVLEN] = 3;
+    assert fe_accept(cl[0..8000], other[0..10], "nodeb", 5, 1000) == FN_NOSAVE;
+    assert cl[FV_COUNT] == 1 and cl[FV_SHOWN] == 1 and cl[FV_INVLEN] == 3;
+    assert cl[fv_row_at(0) + FR_FP] == 10 and cl[fv_row_at(0) + FR_FP + 9] == 100;
+    assert cl[fv_row_at(0) + FR_NICKLEN] == 5 and cl[fv_row_at(0) + FR_NICK] == 110;
+    assert ft_find(cl[FE_FT..FE_FT + FT_LEN], other[0..10]) == 0;
+    // twice: one friend; myself: refused
+    assert fe_accept(cl[0..8000], other[0..10], "", 0, 1000) == FN_DUP and cl[FV_COUNT] == 1;
+    assert fe_accept(cl[0..8000], own[0..10], "", 0, 1000) == FN_SELF and cl[FV_COUNT] == 1;
+    assert fe_accept(cl[0..8000], own[0..9], "", 0, 1000) == FN_DAMAGED;
 }
