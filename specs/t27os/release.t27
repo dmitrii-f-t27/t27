@@ -1108,12 +1108,27 @@ pub fn dev_path(t : []const u8, n : usize) -> bool {
     return false;
 }
 
+/// A bundle path the scripts may hold between double quotes (A="..." and every use as "$A"): absolute, printable
+/// ASCII, at most 400 bytes, and none of  "  $  `  \  -- a space is fine. The installer puts the app in
+/// "/Applications/T27 OS/", and path_ok refused that space, so an installed copy never updated (owner's M1,
+/// 2026-10-23: why=8 "this copy is not an installed app" right after a good download and stage).
+pub fn quoted_path_ok(t : []const u8, n : usize) -> bool {
+    if (n < 2 or n > 400 or t[0] != 47) { return false; }
+    var i : usize = 0;
+    while (i < n) {
+        const c : u8 = t[i];
+        if (c < 32 or c > 126 or c == 34 or c == 36 or c == 96 or c == 92) { return false; }
+        i += 1;
+    }
+    return true;
+}
+
 /// The length of the bundle path inside the running executable's path (".../T27OS.app/Contents/MacOS/T27OS"),
 /// 0 when the app does not run from a bundle (a dev build), runs from a checkout's target folder, or the path
-/// is not path_ok.
+/// is not quoted_path_ok.
 pub fn bundle_len(exe : []const u8, n : usize) -> usize {
     const tail : usize = 21;
-    if (n <= tail + 4 or !path_ok(exe, n) or dev_path(exe, n)) { return 0; }
+    if (n <= tail + 4 or !quoted_path_ok(exe, n) or dev_path(exe, n)) { return 0; }
     if (!starts_here(exe, n, n - tail, "/Contents/MacOS/T27OS", tail)) { return 0; }
     if (!starts_here(exe, n, n - tail - 4, ".app", 4)) { return 0; }
     return n - tail;
@@ -1853,7 +1868,18 @@ test the_running_build_and_bundle_are_read_from_the_app_itself {
     assert(dev_path("/Users/x/t27/target/t27os/T27OS.app", 35));
     assert(bundle_len("/Users/x/Applications/T27OS.app/Contents/MacOS/T27OS", 52) == 31);
     assert(bundle_len("/Users/x/t27/target/dev/T27OS", 29) == 0);
-    assert(bundle_len("/Applications/T 27.app/Contents/MacOS/T27OS", 43) == 0);
+    // the installer's own place has a space: it is an installed app (it was refused before, so it never updated)
+    assert(bundle_len("/Applications/T27 OS/T27OS.app/Contents/MacOS/T27OS", 51) == 30);
+    assert(bundle_len("/Applications/T 27.app/Contents/MacOS/T27OS", 43) == 22);
+    // what would break the double quotes is still refused, and so is a relative path
+    assert(bundle_len("/Applications/T\"27.app/Contents/MacOS/T27OS", 43) == 0);
+    assert(bundle_len("/Applications/$T27.app/Contents/MacOS/T27OS", 43) == 0);
+    assert(bundle_len("/Applications/`T27.app/Contents/MacOS/T27OS", 43) == 0);
+    assert(bundle_len("/Applications/\\T27.app/Contents/MacOS/T27OS", 43) == 0);
+    assert(bundle_len("Applications/T27OS.app/Contents/MacOS/T27OS", 43) == 0);
+    assert(quoted_path_ok("/Users/x y", 10));
+    assert(quoted_path_ok("/Users/x\ny", 10) == false);
+    assert(quoted_path_ok("/", 1) == false);
     assert(path_ok("/Users/x/.t27os", 15));
     assert(path_ok("/Users/x y", 10) == false);
     assert(path_ok("/Users/x\"y", 10) == false);
@@ -1933,6 +1959,17 @@ test the_swap_keeps_the_previous_bundle_and_tools_and_restarts_the_server_only_w
     // the executable is touched last so the window relaunches
     assert(rl_has(out[0..4096], n, "; }; touch \"$A/Contents/MacOS/T27OS\""));
     assert(out[n - 1] == '"');
+    // the installer's place, with its space, stays one word everywhere the swap names it
+    var sp : [4096]u8 = undefined;
+    const m : usize = swap_cmd(sp[0..4096], 4096, "/Users/x", 8, "/Applications/T27 OS/T27OS.app", 30, 4460);
+    assert(m < 4096);
+    assert(rl_has(sp[0..4096], m, "A=\"/Applications/T27 OS/T27OS.app\";"));
+    assert(rl_has(sp[0..4096], m, "mv \"$A\" $U/previous/T27OS.app"));
+    assert(rl_has(sp[0..4096], m, "touch \"$A/Contents/MacOS/T27OS\""));
+    var rb : [4096]u8 = undefined;
+    const r : usize = rollback_cmd(rb[0..4096], 4096, "/Users/x", 8, "/Applications/T27 OS/T27OS.app", 30, 4460);
+    assert(rl_has(rb[0..4096], r, "A=\"/Applications/T27 OS/T27OS.app\";"));
+    assert(rl_has(rb[0..4096], r, "mv $U/previous/T27OS.app \"$A\""));
 }
 
 test a_start_that_did_not_live_puts_the_previous_bundle_and_tools_back {
