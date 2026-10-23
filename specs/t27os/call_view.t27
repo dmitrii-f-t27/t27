@@ -556,3 +556,52 @@ test cv_the_panel_boxes_hit_their_own_button_inside_the_slot {
     assert cv_head_hit(cv_head_x(500.0) + 2.0, cv_head_y(38.0) + 2.0, 500.0, 38.0);
     assert cv_head_hit(500.0 + 1.0, cv_head_y(38.0) + 2.0, 500.0, 38.0) == false;
 }
+
+test cv_button_counts_are_one_or_two_and_none_past_the_last_view {
+    assert cv_btn_count(CV_IDLE) == 1;
+    assert cv_btn_count(CV_CALLING) == 1;
+    assert cv_btn_count(CV_RINGING) == 2;
+    assert cv_btn_count(CV_KEYS) == 1;
+    assert cv_btn_count(CV_COMPARE) == 2;
+    assert cv_btn_count(CV_WAIT) == 1;
+    assert cv_btn_count(CV_ACTIVE) == 2;
+    assert cv_btn_count(CV_ENDED) == 1;
+    assert cv_btn_count(CV_FAILED) == 1;
+    assert cv_btn_count(CV_FAILED + 1) == 0;
+    assert cv_btn_count(4294967295) == 0;
+}
+
+test cv_every_view_has_its_title_and_only_the_live_ones_have_a_hint {
+    assert cv_title(CV_IDLE) == "NEW CALL";
+    assert cv_title(CV_CALLING) == "CALLING";
+    assert cv_title(CV_RINGING) == "INCOMING CALL";
+    assert cv_title(CV_KEYS) == "SECURING THE CALL";
+    assert cv_title(CV_COMPARE) == "COMPARE THE CODE";
+    assert cv_title(CV_WAIT) == "WAITING FOR THE OTHER SIDE";
+    assert cv_title(CV_ACTIVE) == "IN CALL";
+    assert cv_title(CV_ENDED) == "CALL ENDED";
+    assert cv_title(CV_FAILED) == "CALL FAILED";
+    assert cv_title(99) == "NEW CALL";
+    assert cv_hint(CV_CALLING) == "Waiting for the other side to answer.";
+    assert cv_hint(CV_RINGING) == "Answer to see the code you both compare. Nothing is sent before you answer.";
+    assert cv_hint(CV_KEYS) == "Exchanging keys.";
+    assert cv_hint(CV_COMPARE) == "Read the code aloud. Press CODES MATCH only if both screens show the same digits.";
+    assert cv_hint(CV_WAIT) == "You said the codes match. The call opens when the other side says so too.";
+    assert cv_hint(CV_ACTIVE) == "Sealed audio, AES-128-GCM. Microphone and speakers at low volume.";
+    assert cv_hint(CV_IDLE).len == 0;
+    assert cv_hint(CV_ENDED).len == 0;
+    assert cv_hint(CV_FAILED).len == 0;
+    assert cv_hint(99).len == 0;
+}
+
+test cv_every_window_note_has_its_text_and_no_note_is_empty {
+    assert cv_note_text(CV_N_NONE).len == 0;
+    assert cv_note_text(CV_N_ADDR) == "Type an address like 192.168.1.10:47727.";
+    assert cv_note_text(CV_N_LAN) == "Calls go only to a private network address (10.x, 172.16-31.x, 192.168.x or 127.x).";
+    assert cv_note_text(CV_N_SOCKET) == "Calls are off: the call port could not be opened (is it taken?).";
+    assert cv_note_text(CV_N_BIND) == "Calls are off: T27OS_CALL_BIND must be a private network address (10.x, 172.16-31.x, 192.168.x or 127.x).";
+    assert cv_note_text(CV_N_REFUSED) == "The call could not be started.";
+    assert cv_note_text(CV_N_SELF) == "That is this device's own address.";
+    assert cv_note_text(CV_N_SELF + 1).len == 0;
+    assert cv_note_text(4294967295).len == 0;
+}

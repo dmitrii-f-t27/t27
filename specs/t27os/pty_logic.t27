@@ -2502,3 +2502,120 @@ test a_panes_path_starts_with_the_toolchain_folder_once {
     n = path_first(out[0..200], "/Users/x", "");
     assert pl_count(out[0..n], "/Users/x/.t27os/bin:/usr/bin:/bin") == 1;
 }
+
+test a_free_key_is_one_not_resting_not_skipped_and_used_longest_ago {
+    var st : [512]u64 = undefined;
+    t_zai3(st[0..512]);
+    key_used(st[0..512], P_ZAI, 0, 900);
+    key_used(st[0..512], P_ZAI, 1, 500);
+    key_used(st[0..512], P_ZAI, 2, 700);
+    // the one used longest ago; the skipped one is passed over
+    assert key_pick_free(st[0..512], P_ZAI, MAX_KEYS, 1000000) == 1;
+    assert key_pick_free(st[0..512], P_ZAI, 1, 1000000) == 2;
+    assert key_pick_free(st[0..512], P_ZAI, 2, 1000000) == 1;
+    // a key that rests is passed over until the rest ends (at its second)
+    key_rest(st[0..512], P_ZAI, 1, 5000);
+    assert key_pick_free(st[0..512], P_ZAI, MAX_KEYS, 1000000) == 2;
+    assert key_pick_free(st[0..512], P_ZAI, MAX_KEYS, 4999999) == 2;
+    assert key_pick_free(st[0..512], P_ZAI, MAX_KEYS, 5000000) == 1;
+    // every key resting or skipped: none (unlike key_pick, which falls back to the soonest rest)
+    key_rest(st[0..512], P_ZAI, 0, 9000);
+    key_rest(st[0..512], P_ZAI, 2, 9000);
+    assert key_pick_free(st[0..512], P_ZAI, MAX_KEYS, 1000000) == MAX_KEYS;
+    assert key_pick_free(st[0..512], P_ZAI, 1, 6000000) == MAX_KEYS;
+    // a provider with no key has none to give; other providers are not touched by z.ai rests
+    assert key_pick_free(st[0..512], P_OPENAI, MAX_KEYS, 1000000) == MAX_KEYS;
+    assert key_pick_free(st[0..512], P_ANTHROPIC, MAX_KEYS, 1000000) == 0;
+    assert key_pick_free(st[0..512], P_ANTHROPIC, 0, 1000000) == MAX_KEYS;
+}
+
+test lifting_the_rests_frees_every_key_of_one_provider_and_leaves_empty_slots_and_other_providers {
+    var st : [512]u64 = undefined;
+    t_zai3(st[0..512]);
+    key_rest(st[0..512], P_ZAI, 0, 5000);
+    key_rest(st[0..512], P_ZAI, 1, 6000);
+    key_rest(st[0..512], P_ZAI, 2, 7000);
+    key_rest(st[0..512], P_ANTHROPIC, 0, 7777);
+    key_rest(st[0..512], P_ZAI, 3, 9999);
+    key_rests_lift(st[0..512], P_ZAI);
+    assert st[G_KREST + 32] == 0;
+    assert st[G_KREST + 33] == 0;
+    assert st[G_KREST + 34] == 0;
+    // empty slots stay empty
+    assert st[G_KREST + 35] == KEY_NEVER;
+    assert st[G_KREST + 39] == KEY_NEVER;
+    assert key_present(st[0..512], P_ZAI, 3) == false;
+    assert key_count(st[0..512], P_ZAI) == 3;
+    // another provider keeps its rest
+    assert st[G_KREST + 0] == 7777;
+    // nothing to lift on a provider with no key
+    key_rests_lift(st[0..512], P_OPENAI);
+    assert st[G_KREST + 8] == KEY_NEVER;
+    assert key_pick_free(st[0..512], P_ZAI, MAX_KEYS, 1000) == 0;
+}
+
+test a_pane_holds_one_nibble_per_provider_and_setting_one_leaves_the_others {
+    var st : [512]u64 = undefined;
+    t_table(st[0..512]);
+    pane_key_set(st[0..512], 2, P_ZAI, 3);
+    assert pane_key_get(st[0..512], 2, P_ZAI) == 3;
+    assert st[G_PANEK + 2 * PK + PK_KEYS] == 3 * 65536;
+    pane_key_set(st[0..512], 2, P_OPENAI, 5);
+    assert pane_key_get(st[0..512], 2, P_OPENAI) == 5;
+    assert pane_key_get(st[0..512], 2, P_ZAI) == 3;
+    assert st[G_PANEK + 2 * PK + PK_KEYS] == 3 * 65536 + 5 * 16;
+    // overwrite replaces the old value
+    pane_key_set(st[0..512], 2, P_ZAI, 8);
+    assert pane_key_get(st[0..512], 2, P_ZAI) == 8;
+    assert st[G_PANEK + 2 * PK + PK_KEYS] == 8 * 65536 + 5 * 16;
+    pane_key_set(st[0..512], 2, P_ZAI, 0);
+    assert pane_key_get(st[0..512], 2, P_ZAI) == 0;
+    assert pane_key_get(st[0..512], 2, P_OPENAI) == 5;
+    // provider 0 and the largest nibble
+    pane_key_set(st[0..512], 2, P_ANTHROPIC, 15);
+    assert pane_key_get(st[0..512], 2, P_ANTHROPIC) == 15;
+    assert pane_key_get(st[0..512], 2, P_OPENAI) == 5;
+    // the other panes are untouched
+    assert st[G_PANEK + 1 * PK + PK_KEYS] == 0;
+    assert st[G_PANEK + 3 * PK + PK_KEYS] == 0;
+    assert pane_key_get(st[0..512], 3, P_OPENAI) == 0;
+}
+
+test a_pane_remembers_the_agent_cell_it_was_planned_for_as_one_nibble_of_cell_plus_one {
+    var st : [512]u64 = undefined;
+    t_table(st[0..512]);
+    assert st[G_AGENTS] == 0;
+    assert pane_agent_get(st[0..512], 0) == 0;
+    // cell 0 is stored as 1, so a pane planned for Claude Code is told from one never planned
+    pane_agent_set(st[0..512], 0, 0);
+    assert st[G_AGENTS] == 1;
+    assert pane_agent_get(st[0..512], 0) == 0;
+    pane_agent_set(st[0..512], 1, 3);
+    assert pane_agent_get(st[0..512], 1) == 3;
+    assert pane_agent_get(st[0..512], 0) == 0;
+    assert st[G_AGENTS] == 1 + 4 * 16;
+    // overwrite replaces the old value and keeps the neighbours
+    pane_agent_set(st[0..512], 1, 7);
+    assert pane_agent_get(st[0..512], 1) == 7;
+    assert st[G_AGENTS] == 1 + 8 * 16;
+    pane_agent_set(st[0..512], 1, 0);
+    assert st[G_AGENTS] == 1 + 1 * 16;
+    assert pane_agent_get(st[0..512], 1) == 0;
+    // the last pane of the word and the largest cell it can hold
+    pane_agent_set(st[0..512], 15, 14);
+    assert pane_agent_get(st[0..512], 15) == 14;
+    assert pane_agent_get(st[0..512], 0) == 0;
+    assert pane_agent_get(st[0..512], 14) == 0;
+    assert pane_agent_get(st[0..512], 2) == 0;
+}
+
+test lifting_the_rests_reaches_the_last_key_slot {
+    var st : [512]u64 = undefined;
+    t_table(st[0..512]);
+    t_key(st[0..512], P_ZAI, 7);
+    key_rest(st[0..512], P_ZAI, 7, 4000);
+    assert st[G_KREST + 32 + 7] == 4000;
+    key_rests_lift(st[0..512], P_ZAI);
+    assert st[G_KREST + 32 + 7] == 0;
+    assert key_present(st[0..512], P_ZAI, 7);
+}

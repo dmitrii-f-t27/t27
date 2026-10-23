@@ -191,3 +191,42 @@ test a_long_path_is_cut_at_103 {
     assert a[104] == 97;
     assert a[105] == 0;
 }
+
+test reply_cursor_reads_the_eight_bytes_after_the_header_little_endian {
+    var f : [32]u8 = undefined;
+    var i : usize = 0;
+    while (i < 32) { f[i] = 255; i = i + 1; }
+    put_u64(f[0..32], HEADER, 0);
+    assert reply_cursor(f[0..32]) == 0;
+    put_u64(f[0..32], HEADER, 1);
+    assert reply_cursor(f[0..32]) == 1;
+    put_u64(f[0..32], HEADER, 4096);
+    assert reply_cursor(f[0..32]) == 4096;
+    put_u64(f[0..32], HEADER, 18446744073709551615);
+    assert reply_cursor(f[0..32]) == 18446744073709551615;
+    // the bytes before the header and after the cursor are not part of it
+    put_u64(f[0..32], HEADER, 258);
+    f[0] = 7;
+    f[HEADER + 8] = 9;
+    assert reply_cursor(f[0..32]) == 258;
+    assert f[HEADER] == 2 and f[HEADER + 1] == 1 and f[HEADER + 2] == 0;
+}
+
+test the_client_refuses_what_cannot_be_framed_or_addressed_before_it_touches_a_socket {
+    var out : [64]u8 = undefined;
+    // a home whose socket path would pass 103 bytes: no socket is made, -1
+    var home : [120]u8 = undefined;
+    var i : usize = 0;
+    while (i < 120) { home[i] = 97; i = i + 1; }
+    assert client_connect(home[0..88]) == -1;
+    assert client_connect(home[0..120]) == -1;
+    // a payload past MAX_PAYLOAD (4096) cannot be framed: 0 bytes, nothing is written to the (invalid) fd
+    var big : [4097]u8 = undefined;
+    i = 0;
+    while (i < 4097) { big[i] = 65; i = i + 1; }
+    assert client_call(-1, OP_KEYS, 0, big[0..4097], out[0..64]) == 0;
+    assert client_keys(-1, 0, big[0..4097], out[0..64]) == 0;
+    assert client_set_key(-1, 1, big[0..4097], out[0..64]) == 0;
+    // an editor pick that is not in the table gives no request at all
+    assert client_spawn_editor(-1, 0, 0, 4294967295, "/tmp", out[0..64]) == 0;
+}

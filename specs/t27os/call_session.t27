@@ -3088,3 +3088,39 @@ test a_strangers_message_session_ends_as_an_invitation_with_its_proven_key_and_n
     cs_id_fresh(s[0..CS_LEN]);
     assert s[CS_ID + CI_STRANGER] == 0;
 }
+
+test cs_identity_refuses_a_key_pair_that_does_not_fit_before_it_stores_anything {
+    var s : [333056]u8 = undefined;
+    cs_t_live(s[0..CS_LEN]);
+    ck_wipe(s[CS_LEN..2 * CS_LEN]);
+    var pubk : [65]u8 = undefined;
+    ck_fill_session(pubk[0..65], 9);
+    pubk[0] = 4;
+    var priv : [97]u8 = undefined;
+    ck_fill_session(priv[0..97], 5);
+    ck_put(priv[0..97], 0, pubk[0..65]);
+    // wrong lengths
+    assert !cs_identity(s[0..2 * CS_LEN], pubk[0..64], priv[0..97]);
+    assert !cs_identity(s[0..2 * CS_LEN], pubk[0..65], priv[0..96]);
+    assert !cs_identity(s[0..2 * CS_LEN], pubk[0..0], priv[0..0]);
+    // a public key that is not uncompressed (first byte 4)
+    var bad : [65]u8 = undefined;
+    ck_put(bad[0..65], 0, pubk[0..65]);
+    bad[0] = 2;
+    var priv3 : [97]u8 = undefined;
+    ck_put(priv3[0..97], 0, priv[0..97]);
+    ck_put(priv3[0..97], 0, bad[0..65]);
+    assert !cs_identity(s[0..2 * CS_LEN], bad[0..65], priv3[0..97]);
+    // a private part that does not start with the public key
+    var priv2 : [97]u8 = undefined;
+    ck_put(priv2[0..97], 0, priv[0..97]);
+    priv2[64] = priv2[64] ^ 1;
+    assert !cs_identity(s[0..2 * CS_LEN], pubk[0..65], priv2[0..97]);
+    // a block that is not open
+    var dead : [166528]u8 = undefined;
+    ck_wipe(dead[0..CS_LEN]);
+    assert !cs_identity(dead[0..CS_LEN], pubk[0..65], priv[0..97]);
+    // nothing was stored in either link
+    assert s[CS_ID + CI_ON] == 0 and s[CS_LEN + CS_ID + CI_ON] == 0;
+    assert dead[CS_ID + CI_ON] == 0;
+}

@@ -1212,3 +1212,69 @@ test the_layout_fits_four_machines_in_a_960_by_440_page_without_overlap {
     assert dv_lane_rows(DV_CARD_MAX_H) > dv_lane_rows(DV_CARD_MIN_H);
     assert dv_meter_w(300.0) * 3.0 + 2.0 * DV_GAP + 2.0 * DV_PAD <= 300.001;
 }
+
+test feed_lines_are_found_by_their_end_kind_and_count {
+    const f : string = "S|1\nZ|2|x\nS|3\n\nZ|9\n";
+    assert dv_line_end(f, 0) == 3;
+    assert dv_line_end(f, 4) == 9;
+    assert dv_line_end(f, 14) == 14;
+    assert dv_line_end(f, 19) == 19;
+    assert dv_line_end("ab", 0) == 2;
+    assert dv_line_end("", 0) == 0;
+    assert dv_nth(f, 83, 0) == 0;
+    assert dv_nth(f, 83, 1) == 10;
+    assert dv_nth(f, 83, 2) == DV_NONE;
+    assert dv_nth(f, 90, 0) == 4;
+    assert dv_nth(f, 90, 1) == 15;
+    assert dv_nth(f, 81, 0) == DV_NONE;
+    assert dv_nth("", 83, 0) == DV_NONE;
+    assert dv_count(f, 83) == 2;
+    assert dv_count(f, 90) == 2;
+    assert dv_count(f, 81) == 0;
+    assert dv_count("", 83) == 0;
+    // a line of the kind byte alone, or a kind not followed by |, is not a record
+    assert dv_count("S\nSS|1\nS|1", 83) == 1;
+    assert dv_nth("S\nSS|1\nS|1", 83, 0) == 7;
+    assert dv_count("S", 83) == 0;
+    assert dv_nth("S", 83, 0) == DV_NONE;
+}
+
+test fields_of_a_line_start_and_end_at_the_bars {
+    const f : string = "Z|2|x\nZ||y\n";
+    assert dv_fstart(f, 0, 5, 0) == 0;
+    assert dv_fstart(f, 0, 5, 1) == 2;
+    assert dv_fstart(f, 0, 5, 2) == 4;
+    assert dv_fstart(f, 0, 5, 3) == 5;
+    assert dv_fend(f, 0, 5) == 1;
+    assert dv_fend(f, 2, 5) == 3;
+    assert dv_fend(f, 4, 5) == 5;
+    // an empty field has equal start and end
+    assert dv_fstart(f, 6, 10, 1) == 8;
+    assert dv_fend(f, 8, 10) == 8;
+    assert dv_fstart(f, 6, 10, 2) == 9;
+    assert dv_fend(f, 9, 10) == 10;
+}
+
+test key_value_tokens_of_a_payload_are_found_by_whole_key {
+    const p : string = "hb1 host=abc build=12 x=";
+    assert dv_kv_at(p, 0, 24, "host") == 9;
+    assert dv_kv_end(p, 9, 24) == 12;
+    assert dv_kv_at(p, 0, 24, "build") == 19;
+    assert dv_kv_end(p, 19, 24) == 21;
+    assert dv_kv_num(p, 0, 24, "build") == 12;
+    // a prefix, a suffix or a longer key is not the key
+    assert dv_kv_at(p, 0, 24, "hos") == DV_NONE;
+    assert dv_kv_at(p, 0, 24, "uild") == DV_NONE;
+    assert dv_kv_at(p, 0, 24, "builds") == DV_NONE;
+    assert dv_kv_at(p, 0, 24, "zzz") == DV_NONE;
+    // the range cuts the payload
+    assert dv_kv_at(p, 0, 6, "host") == DV_NONE;
+    // an empty value at the end starts at b and is not a number
+    assert dv_kv_at(p, 0, 24, "x") == 24;
+    assert dv_kv_end(p, 24, 24) == 24;
+    assert dv_kv_num(p, 0, 24, "x") == DV_NM;
+    // a missing key and a non-number value are "not measured"
+    assert dv_kv_num(p, 0, 24, "zzz") == DV_NM;
+    assert dv_kv_num(p, 0, 24, "host") == DV_NM;
+    assert dv_kv_num("", 0, 0, "a") == DV_NM;
+}

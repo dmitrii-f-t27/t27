@@ -650,3 +650,42 @@ test the_plist_is_deterministic_and_a_short_buffer_is_detected {
     assert(ns == na);
     assert(ns > 64);
 }
+
+test put_line_writes_the_text_and_a_newline_and_the_cursor_advances_when_clipped {
+    var b : [8]u8 = undefined;
+    var z : usize = 0;
+    while (z < 8) { b[z] = 0; z += 1; }
+    assert(put_line(b[0..8], 8, 0, "abc", 3) == 4);
+    assert(b[0] == 97 and b[1] == 98 and b[2] == 99 and b[3] == 10 and b[4] == 0);
+    assert(put_line(b[0..8], 8, 4, "", 0) == 5);
+    assert(b[4] == 10 and b[5] == 0);
+    // clipped: nothing is written past cap, the cursor still counts the newline
+    var c : [4]u8 = undefined;
+    z = 0;
+    while (z < 4) { c[z] = 0; z += 1; }
+    assert(put_line(c[0..4], 4, 0, "abcd", 4) == 5);
+    assert(c[0] == 97 and c[3] == 100);
+    assert(put_line(c[0..4], 4, 4, "x", 1) == 6);
+    assert(c[0] == 97 and c[3] == 100);
+    // the newline lands exactly on the last byte
+    var d : [4]u8 = undefined;
+    z = 0;
+    while (z < 4) { d[z] = 0; z += 1; }
+    assert(put_line(d[0..4], 4, 0, "abc", 3) == 4);
+    assert(d[3] == 10);
+}
+
+test put_slice_copies_the_bytes_and_clips_at_cap_while_the_cursor_counts_them_all {
+    var b : [6]u8 = undefined;
+    var z : usize = 0;
+    while (z < 6) { b[z] = 0; z += 1; }
+    var s : [4]u8 = undefined;
+    s[0] = 208; s[1] = 175; s[2] = 1; s[3] = 255;
+    assert(put_slice(b[0..6], 6, 1, s[0..4], 4) == 5);
+    assert(b[0] == 0 and b[1] == 208 and b[2] == 175 and b[3] == 1 and b[4] == 255 and b[5] == 0);
+    assert(put_slice(b[0..6], 6, 5, s[0..4], 4) == 9);
+    assert(b[5] == 208 and b[4] == 255);
+    assert(put_slice(b[0..6], 6, 9, s[0..4], 4) == 13);
+    assert(put_slice(b[0..6], 6, 2, s[0..4], 0) == 2);
+    assert(b[2] == 175 and b[5] == 208);
+}

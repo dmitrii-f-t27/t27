@@ -502,3 +502,39 @@ test the_buttons_are_where_they_are_drawn {
     assert made_again(REPEAT_MIN, true);
     assert made_again(REPEAT_MIN, false) == false;
 }
+
+test a_flag_is_read_by_its_own_bit_only {
+    assert has(0, F_CHECKED) == false;
+    assert has(F_CHECKED, F_CHECKED);
+    assert has(F_CHECKED, F_WORKTREE) == false;
+    assert has(F_CHECKED + F_DUP, F_DUP);
+    assert has(F_CHECKED + F_DUP, DOC_F_AGENT) == false;
+    assert has(F_HIDDEN, F_HIDDEN);
+    assert has(F_HIDDEN - 1, F_HIDDEN) == false;
+    assert has(F_HIDDEN + F_CHECKED, F_BOUND) == false;
+    assert has(65535, F_BOUND);
+}
+
+test the_walk_goes_five_deep_in_home_and_three_in_tmp_and_ends_with_an_empty_queue {
+    assert root_depth(ROOT_HOME) == 5;
+    assert root_depth(ROOT_TMP) == 3;
+    assert root_depth(ROOT_COUNT) == DEPTH_HOME;
+    assert root_depth(99) == DEPTH_HOME;
+    assert pass_done(0);
+    assert pass_done(1) == false;
+    assert pass_done(4294967295) == false;
+}
+
+test a_leftover_is_a_duplicate_an_agent_copy_or_a_repeat_and_never_a_bound_space {
+    assert leftover(0) == false;
+    assert leftover(F_CHECKED + F_PUSH_CHECKED) == false;
+    assert leftover(F_DUP);
+    assert leftover(DOC_F_AGENT);
+    assert leftover(F_REPEATED);
+    assert leftover(F_DUP + DOC_F_AGENT + F_REPEATED);
+    assert leftover(F_WORKTREE + F_HEAVY + F_BUILD + F_DIRTY) == false;
+    assert leftover(F_DUP + F_BOUND) == false;
+    assert leftover(DOC_F_AGENT + F_BOUND) == false;
+    assert leftover(F_REPEATED + F_BOUND) == false;
+    assert leftover(F_BOUND) == false;
+}
