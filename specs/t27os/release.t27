@@ -1258,7 +1258,7 @@ pub fn swap_cmd(out : []u8, cap : usize, home : []const u8, hn : usize, bundle :
     w = put_slice(out, cap, w, bundle, bn);
     w = rl_put(out, cap, w, "\"; OLD=$(shasum -a 256 < $P 2>/dev/null); ");
     w = rl_put(out, cap, w, "for t in t27b t27c tri; do cp $B/$t-darwin-arm64 $BIN/$t.new || exit 1; [ ! -f $BIN/$t ] || cp -p $BIN/$t $BIN/$t.prev; done; ");
-    w = rl_put(out, cap, w, "cp $N/t27os-pty $P.new || exit 1; [ ! -f $P ] || cp -p $P $P.prev; ");
+    w = rl_put(out, cap, w, "cp $N/t27os-pty $P.new && chmod 700 $P.new || exit 1; [ ! -f $P ] || { cp -p $P $P.prev && chmod 700 $P.prev; }; ");
     w = rl_put(out, cap, w, "rm -rf $U/previous/T27OS.app; echo 1 > $U/pending; ");
     w = rl_put(out, cap, w, "mv \"$A\" $U/previous/T27OS.app || { rm -f $U/pending; exit 1; }; ");
     w = rl_put(out, cap, w, "mv $N/T27OS.app \"$A\" || { mv $U/previous/T27OS.app \"$A\"; rm -f $U/pending; exit 1; }; echo 1 > $U/previous/kept; ");
@@ -1923,6 +1923,9 @@ test the_swap_keeps_the_previous_bundle_and_tools_and_restarts_the_server_only_w
     assert(rl_has(out[0..4096], n, "mv \"$A\" $U/previous/T27OS.app"));
     assert(rl_has(out[0..4096], n, "mv $N/T27OS.app \"$A\" || { mv $U/previous/T27OS.app \"$A\";"));
     assert(rl_has(out[0..4096], n, "cp -p $BIN/$t $BIN/$t.prev"));
+    // every way the pane server reaches HOME ends at 0700 (the cp of a 0755 source kept 0755 on 7122 -> 7123)
+    assert(rl_has(out[0..4096], n, "cp $N/t27os-pty $P.new && chmod 700 $P.new || exit 1;"));
+    assert(rl_has(out[0..4096], n, "cp -p $P $P.prev && chmod 700 $P.prev;"));
     assert(rl_has(out[0..4096], n, "mv -f $BIN/$t.new $BIN/$t"));
     assert(rl_has(out[0..4096], n, "echo 1 > $U/pending"));
     assert(rl_has(out[0..4096], n, "[ \"$OLD\" = \"$NEW\" ] || { pkill -x t27os-pty"));

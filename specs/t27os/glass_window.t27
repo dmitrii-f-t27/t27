@@ -1824,6 +1824,14 @@ use t27os::hot_reload::RELOAD_IDLE;
 use t27os::hot_reload::reload_wait;
 use t27os::hot_reload::reload_due;
 use t27os::hot_reload::reload_poll;
+use t27os::hot_reload::RR_HELPER;
+use t27os::hot_reload::RR_OPEN_DIRECT;
+use t27os::hot_reload::RR_EXEC;
+use t27os::hot_reload::RR_STAY;
+use t27os::hot_reload::rr_method;
+use t27os::hot_reload::rr_bundle_len;
+use t27os::hot_reload::rr_script;
+use t27os::hot_reload::rr_line;
 use t27os::live_data::TH_TINT_BLACK;
 use t27os::live_data::TH_STRICT_SIDE;
 use t27os::live_data::TH_STRICT_CONTENT;
@@ -2179,6 +2187,7 @@ use t27os::dash::poll_due;
 use t27os::session_store::put_bytes;
 use t27os::session_store::put_dec;
 use t27os::pty_sys::sys_spawn;
+use t27os::pty_sys::sys_environ;
 use t27os::pty_sys::sys_waitpid;
 use t27os::pty_sys::sys_open_ro;
 use t27os::pty_sys::sys_read;
@@ -3193,6 +3202,67 @@ fn msg_flag(o: u64, s: u64, a: bool) -> u64 { return @extern("objc_msgSend"); }
 fn msg_test(o: u64, s: u64) -> bool { return @extern("objc_msgSend"); }
 fn msg_test1(o: u64, s: u64, a: u64) -> bool { return @extern("objc_msgSend"); }
 fn exec_self(path: u64, argv: [2]u64) -> i32 { return @extern("execv"); }
+fn rr_attr_init(at: []u8) -> i32 { return @extern("posix_spawnattr_init"); }
+fn rr_attr_flags(at: []u8, flags: i32) -> i32 { return @extern("posix_spawnattr_setflags"); }
+
+/// Start the relaunch of the executable exe[0..en] (hot_reload.t27 rr_method): the helper shell, or `open -n`, in a
+/// NEW SESSION (POSIX_SPAWN_SETSID), so nothing the parent shell or terminal does to its session reaches it. True
+/// when the child was started.
+fn relaunch_start(exe: []const u8, en: usize, bn: usize, method: u32) -> bool {
+    var buf : [1400]u8 = undefined;
+    var at : [16]u8 = undefined;
+    if (rr_attr_init(at[0..16]) != 0) { return false; }
+    if (rr_attr_flags(at[0..16], 1024) != 0) { return false; }
+    var argv : [8]u64 = undefined;
+    var i : usize = 0;
+    while (i < 8) { argv[i] = 0; i = i + 1; }
+    var cp : [24]u8 = undefined;
+    if (method == RR_HELPER) {
+        buf[0] = 115;
+        buf[1] = 104;
+        buf[2] = 0;
+        buf[3] = 45;
+        buf[4] = 99;
+        buf[5] = 0;
+        const sn : usize = rr_script(buf[6..1390], @as(u32, @intCast(pf_getpid())), exe, en, bn);
+        if (sn == 0 or sn >= 1380) { return false; }
+        buf[6 + sn] = 0;
+        argv[0] = sys_addr(buf[0..1400], exe[0..1], 0);
+        argv[1] = sys_addr(buf[3..1400], exe[0..1], 0);
+        argv[2] = sys_addr(buf[6..1400], exe[0..1], 0);
+        put_bytes(cp[0..24], 0, "/bin/sh");
+        cp[7] = 0;
+    } else {
+        // open -n <bundle>: the bundle path, NUL-terminated, after "open\0-n\0"
+        put_bytes(buf[0..1400], 0, "open");
+        buf[4] = 0;
+        buf[5] = 45;
+        buf[6] = 110;
+        buf[7] = 0;
+        if (bn + 9 > 1400) { return false; }
+        i = 0;
+        while (i < bn) { buf[8 + i] = exe[i]; i = i + 1; }
+        buf[8 + bn] = 0;
+        argv[0] = sys_addr(buf[0..1400], exe[0..1], 0);
+        argv[1] = sys_addr(buf[5..1400], exe[0..1], 0);
+        argv[2] = sys_addr(buf[8..1400], exe[0..1], 0);
+        put_bytes(cp[0..24], 0, "/usr/bin/open");
+        cp[13] = 0;
+    }
+    var pid : [2]u32 = undefined;
+    pid[0] = 0;
+    // the child gets this process's environment (HOME, CFFIXED_USER_HOME, T27OS_*): an envp of 0 is an empty one
+    var ep : [8]u8 = undefined;
+    sys_peek(ep[0..8], sys_environ(), 8);
+    var envp : u64 = 0;
+    i = 8;
+    while (i > 0) {
+        i = i - 1;
+        envp = (envp << 8) | @as(u64, ep[i]);
+    }
+    const rc : i32 = sys_spawn(pid, cp[0..24], 0, sys_addr(at[0..16], exe[0..1], 0), argv, envp);
+    return rc == 0 and pid[0] != 0;
+}
 fn msg_f(o: u64, s: u64, t: f64) -> u64 { return @extern("objc_msgSend"); }
 fn msg_ff(o: u64, s: u64, a: f64, b: f64) -> u64 { return @extern("objc_msgSend"); }
 fn msg_dict3(o: u64, s: u64, vals: [3]u64, keys: [3]u64, n: u64) -> u64 { return @extern("objc_msgSend"); }
@@ -15751,6 +15821,7 @@ pub fn main() -> void {
     var seen : u64 = msg0(msg2(files, s_attrs, exe, 0), s_mdate);
     msg0(seen, sel("retain"));
     var waited : u32 = RELOAD_IDLE;
+    var rr_failed : u32 = 0;
     // D. the DOCTOR (doctor.t27): every handle the walk, the checks and the panel use, made once here
     var dk : [128]u64 = undefined;
     var di : u32 = 0;
@@ -18567,11 +18638,34 @@ pub fn main() -> void {
                 msg2(defs, sel("setInteger:forKey:"), 1, k_hot);
                 msg0(defs, sel("synchronize"));
                 const path : u64 = msg0(exe, sel("UTF8String"));
-                var argv : [2]u64 = undefined;
-                argv[0] = path;
-                argv[1] = 0;
-                exec_self(path, argv);
-                waited = RELOAD_IDLE;
+                // the new build is started by the system in a new session, not inherited (hot_reload.t27 rr_method):
+                // an exec in place left no process when the window had been started by `nohup ... &` (2026-10-23)
+                var rrp : [512]u8 = undefined;
+                var rrn : usize = @as(usize, sys_strlen(path));
+                if (rrn > 500) { rrn = 0; }
+                sys_peek(rrp[0..512], path, @as(u64, rrn));
+                const rrb : usize = rr_bundle_len(rrp[0..512], rrn);
+                const rrm : u32 = rr_method(rrb, rr_failed);
+                var rrl : [96]u8 = undefined;
+                const rrln : usize = rr_line(rrl[0..95], rrm, rr_failed);
+                rrl[rrln] = 10;
+                sys_write(2, rrl[0..rrln + 1], @as(u64, rrln + 1));
+                if (rrm == RR_EXEC) {
+                    var argv : [2]u64 = undefined;
+                    argv[0] = path;
+                    argv[1] = 0;
+                    exec_self(path, argv);
+                    waited = RELOAD_IDLE;
+                } else if (rrm == RR_STAY) {
+                    rr_failed = 0;
+                    waited = RELOAD_IDLE;
+                } else if (relaunch_start(rrp[0..512], rrn, rrb, rrm)) {
+                    // the helper is running and waits for this process to end; the state is already saved
+                    sys_exit(0);
+                } else {
+                    rr_failed = rr_failed + 1;
+                    waited = 0;
+                }
             }
         }
         // T27OS_PERF: children started this frame (a job slot holding a new pid), and the line every FG_PERF_S seconds
