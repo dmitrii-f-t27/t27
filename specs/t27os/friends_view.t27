@@ -328,6 +328,9 @@ pub const FV_NOTE_Y : f64 = 382.0;
 pub const FV_DBG_LABEL_Y : f64 = 428.0;
 pub const FV_DFIELD_Y : f64 = 436.0;
 pub const FV_DCALL_Y : f64 = 470.0;
+/// Under the debug CALL for a public address (call_view section 7): the row "public address -- allow?" and the hint.
+pub const FV_PUB_Y : f64 = 512.0;
+pub const FV_PUBHINT_Y : f64 = 528.0;
 
 pub const FV_H_NONE : u32 = 0;
 pub const FV_H_INVITE : u32 = 1;
@@ -336,6 +339,8 @@ pub const FV_H_ADD : u32 = 3;
 pub const FV_H_DEBUG : u32 = 4;
 pub const FV_H_DFIELD : u32 = 5;
 pub const FV_H_DCALL : u32 = 6;
+/// ALLOW, right of the debug CALL, drawn only while the typed public address waits for consent.
+pub const FV_H_DALLOW : u32 = 7;
 pub const FV_H_ROW : u32 = 16;
 
 pub fn fv_in(x: f64, y: f64, bx: f64, by: f64, bw: f64, bh: f64) -> bool {
@@ -351,7 +356,7 @@ pub fn fv_rows_drawn(shown: u32) -> usize {
 
 pub fn fv_row_y(t: f64, i: usize) -> f64 { return t + FV_ROWS_Y + FV_ROW_H * @as(f64, @floatFromInt(i)); }
 
-pub fn fv_hit(x: f64, y: f64, l: f64, w: f64, t: f64, shown: u32, debug: bool) -> u32 {
+pub fn fv_hit(x: f64, y: f64, l: f64, w: f64, t: f64, shown: u32, debug: bool, allow: bool) -> u32 {
     if (fv_in(x, y, l + QP_PAD, t + FV_INV_BOX_Y, w - 2.0 * QP_PAD, FV_INV_BOX_H)) { return FV_H_INVITE; }
     const rows : usize = fv_rows_drawn(shown);
     var i : usize = 0;
@@ -365,6 +370,7 @@ pub fn fv_hit(x: f64, y: f64, l: f64, w: f64, t: f64, shown: u32, debug: bool) -
     if (debug) {
         if (fv_in(x, y, cv_field_x(l), t + FV_DFIELD_Y, cv_field_w(w), CV_FIELD_H)) { return FV_H_DFIELD; }
         if (fv_in(x, y, cv_btn_x(l, w, 0), t + FV_DCALL_Y, cv_btn_w(w), CV_BTN_H)) { return FV_H_DCALL; }
+        if (allow and fv_in(x, y, cv_btn_x(l, w, 1), t + FV_DCALL_Y, cv_btn_w(w), CV_BTN_H)) { return FV_H_DALLOW; }
     }
     return FV_H_NONE;
 }
@@ -544,20 +550,20 @@ test fv_the_boxes_hit_their_own_target_and_nothing_overlaps {
     const l : f64 = 600.0;
     const w : f64 = 300.0;
     const t : f64 = 35.0;
-    assert fv_hit(l + 30.0, t + FV_INV_BOX_Y + 4.0, l, w, t, 2, false) == FV_H_INVITE;
-    assert fv_hit(l + 30.0, fv_row_y(t, 0) + 4.0, l, w, t, 2, false) == FV_H_ROW;
-    assert fv_hit(l + 30.0, fv_row_y(t, 1) + 4.0, l, w, t, 2, false) == FV_H_ROW + 1;
-    assert fv_hit(l + 30.0, fv_row_y(t, 2) + 4.0, l, w, t, 2, false) == FV_H_NONE;
-    assert fv_hit(l + 30.0, fv_row_y(t, 4) + 4.0, l, w, t, 9, false) == FV_H_ROW + 4;
-    assert fv_hit(l + 30.0, fv_row_y(t, 5) + 4.0, l, w, t, 9, false) == FV_H_NONE;
-    assert fv_hit(cv_field_x(l) + 4.0, t + FV_IFIELD_Y + 4.0, l, w, t, 0, false) == FV_H_IFIELD;
-    assert fv_hit(cv_btn_x(l, w, 0) + 4.0, t + FV_BTN_Y + 4.0, l, w, t, 0, false) == FV_H_ADD;
-    assert fv_hit(cv_btn_x(l, w, 1) + 4.0, t + FV_BTN_Y + 4.0, l, w, t, 0, false) == FV_H_DEBUG;
+    assert fv_hit(l + 30.0, t + FV_INV_BOX_Y + 4.0, l, w, t, 2, false, false) == FV_H_INVITE;
+    assert fv_hit(l + 30.0, fv_row_y(t, 0) + 4.0, l, w, t, 2, false, false) == FV_H_ROW;
+    assert fv_hit(l + 30.0, fv_row_y(t, 1) + 4.0, l, w, t, 2, false, false) == FV_H_ROW + 1;
+    assert fv_hit(l + 30.0, fv_row_y(t, 2) + 4.0, l, w, t, 2, false, false) == FV_H_NONE;
+    assert fv_hit(l + 30.0, fv_row_y(t, 4) + 4.0, l, w, t, 9, false, false) == FV_H_ROW + 4;
+    assert fv_hit(l + 30.0, fv_row_y(t, 5) + 4.0, l, w, t, 9, false, false) == FV_H_NONE;
+    assert fv_hit(cv_field_x(l) + 4.0, t + FV_IFIELD_Y + 4.0, l, w, t, 0, false, false) == FV_H_IFIELD;
+    assert fv_hit(cv_btn_x(l, w, 0) + 4.0, t + FV_BTN_Y + 4.0, l, w, t, 0, false, false) == FV_H_ADD;
+    assert fv_hit(cv_btn_x(l, w, 1) + 4.0, t + FV_BTN_Y + 4.0, l, w, t, 0, false, false) == FV_H_DEBUG;
     // the debug field and its CALL answer only while the debug part is shown
-    assert fv_hit(cv_field_x(l) + 4.0, t + FV_DFIELD_Y + 4.0, l, w, t, 0, false) == FV_H_NONE;
-    assert fv_hit(cv_field_x(l) + 4.0, t + FV_DFIELD_Y + 4.0, l, w, t, 0, true) == FV_H_DFIELD;
-    assert fv_hit(cv_btn_x(l, w, 0) + 4.0, t + FV_DCALL_Y + 4.0, l, w, t, 0, true) == FV_H_DCALL;
-    assert fv_hit(cv_btn_x(l, w, 0) + 4.0, t + FV_DCALL_Y + 4.0, l, w, t, 0, false) == FV_H_NONE;
+    assert fv_hit(cv_field_x(l) + 4.0, t + FV_DFIELD_Y + 4.0, l, w, t, 0, false, false) == FV_H_NONE;
+    assert fv_hit(cv_field_x(l) + 4.0, t + FV_DFIELD_Y + 4.0, l, w, t, 0, true, false) == FV_H_DFIELD;
+    assert fv_hit(cv_btn_x(l, w, 0) + 4.0, t + FV_DCALL_Y + 4.0, l, w, t, 0, true, false) == FV_H_DCALL;
+    assert fv_hit(cv_btn_x(l, w, 0) + 4.0, t + FV_DCALL_Y + 4.0, l, w, t, 0, false, false) == FV_H_NONE;
     // the order down the panel: invite, rows (5), add field, buttons, note, debug field, debug CALL
     assert t + FV_INV_BOX_Y + FV_INV_BOX_H <= t + FV_FR_LABEL_Y;
     assert fv_row_y(t, FV_ROWS_MAX) <= t + FV_ADD_LABEL_Y;
@@ -565,6 +571,12 @@ test fv_the_boxes_hit_their_own_target_and_nothing_overlaps {
     assert t + FV_BTN_Y + CV_BTN_H < t + FV_NOTE_Y - 10.0;
     assert t + FV_NOTE_Y + 28.0 < t + FV_DBG_LABEL_Y;
     assert t + FV_DFIELD_Y + CV_FIELD_H < t + FV_DCALL_Y;
+    // ALLOW answers only while a public address waits for consent, right of the debug CALL; its row and hint below
+    assert fv_hit(cv_btn_x(l, w, 1) + 4.0, t + FV_DCALL_Y + 4.0, l, w, t, 0, true, false) == FV_H_NONE;
+    assert fv_hit(cv_btn_x(l, w, 1) + 4.0, t + FV_DCALL_Y + 4.0, l, w, t, 0, true, true) == FV_H_DALLOW;
+    assert fv_hit(cv_btn_x(l, w, 1) + 4.0, t + FV_DCALL_Y + 4.0, l, w, t, 0, false, true) == FV_H_NONE;
+    assert fv_hit(cv_btn_x(l, w, 0) + 4.0, t + FV_DCALL_Y + 4.0, l, w, t, 0, true, true) == FV_H_DCALL;
+    assert t + FV_DCALL_Y + CV_BTN_H < t + FV_PUB_Y - 9.0 and FV_PUB_Y < FV_PUBHINT_Y;
     assert fv_rows_drawn(0) == 0 and fv_rows_drawn(3) == 3 and fv_rows_drawn(8) == FV_ROWS_MAX;
 }
 

@@ -18,8 +18,8 @@
 // carried by the handshake (call_core INVITE has no field for it), so the RINGING view names the address and the
 // fingerprint only.
 //
-// Addresses: a private IPv4 network (10.x, 172.16-31.x, 192.168.x) or this machine (127.x) only (cv_lan_ok), the
-// port 47727 when none is typed (CV_PORT).
+// Addresses: a private IPv4 network (10.x, 172.16-31.x, 192.168.x) or this machine (127.x) (cv_lan_ok); a public
+// IPv4 only with the person's consent for that address (section 7); the port 47727 when none is typed (CV_PORT).
 // Flat namespace (the window build splices imported modules): every name here starts with cv_ / CV_.
 module T27osCallView;
 
@@ -173,12 +173,17 @@ pub const CV_N_REFUSED : u32 = 5;
 pub const CV_N_SELF : u32 = 6;
 /// Every call port tried was taken (section 6); the window draws the list, cv_port_all_busy_text.
 pub const CV_N_PORTS : u32 = 7;
+/// A public address with no consent yet (section 7), and an address that is never called.
+pub const CV_N_PUBASK : u32 = 8;
+pub const CV_N_NEVER : u32 = 9;
 
 pub fn cv_note_text(note: u32) -> str {
     if (note == CV_N_ADDR) { return "Type an address like 192.168.1.10:47727."; }
     if (note == CV_N_LAN) { return "Calls go only to a private network address (10.x, 172.16-31.x, 192.168.x or 127.x)."; }
     if (note == CV_N_SOCKET) { return "Calls are off: the call port could not be opened (is it taken?)."; }
-    if (note == CV_N_BIND) { return "Calls are off: T27OS_CALL_BIND must be a private network address (10.x, 172.16-31.x, 192.168.x or 127.x)."; }
+    if (note == CV_N_BIND) { return "Calls are off: T27OS_CALL_BIND must be a private network address (10.x, 172.16-31.x, 192.168.x or 127.x) or 0.0.0.0."; }
+    if (note == CV_N_PUBASK) { return "That is a public address. Press ALLOW to call it once, or set T27OS_ALLOW_PUBLIC=1."; }
+    if (note == CV_N_NEVER) { return "Never called: a multicast, broadcast, 0.x, 240.x or link-local (169.254.x) address."; }
     if (note == CV_N_REFUSED) { return "The call could not be started."; }
     if (note == CV_N_SELF) { return "That is this device's own address."; }
     if (note == CV_N_PORTS) { return "Calls are off: every call port tried is taken."; }
@@ -528,6 +533,131 @@ pub fn cv_port_all_busy_text(base: u64, used: u64, busy: u64, tried: u64, out: [
     return put_bytes(out, n, ". Close what holds one, or set T27OS_CALL_PORT.");
 }
 
+// ---------------------------------------------------------------- 7. addresses beyond the home network
+// Owner, 2026-10-23: a first step to calls over the internet, with no server and no relay. The decision on an address
+// (cv_dial_step) is one of three: a private network or this machine (cv_lan_ok) is called as before; a public IPv4 is
+// called only when the person typed it and pressed ALLOW for that very address and port (the consent is spent by the
+// call that uses it, never kept, never written anywhere), or when T27OS_ALLOW_PUBLIC=1 is set; multicast (224/4),
+// broadcast (255.255.255.255), 0.0.0/8, 240/4 and link-local (169.254/16) are never called, nor a port outside
+// 1..65535. The handshake, the keys and the 6-digit comparison are the same on every address.
+// Listening: T27OS_CALL_BIND is a private address (as before) or 0.0.0.0, all interfaces, an explicit choice the panel
+// warns about (cv_bind_class); the mDNS TXT record then carries pub=1 (cv_txt_pub).
+
+pub const CV_AC_INVALID : u32 = 0;
+pub const CV_AC_PRIVATE : u32 = 1;
+pub const CV_AC_PUBLIC : u32 = 2;
+pub const CV_AC_MULTICAST : u32 = 3;
+pub const CV_AC_BROADCAST : u32 = 4;
+pub const CV_AC_LINKLOCAL : u32 = 5;
+
+/// What kind of IPv4 an address is. 0.0.0/8 and 240/4 (reserved) are INVALID, as is anything past 32 bits.
+pub fn cv_addr_class(ip: u64) -> u32 {
+    if (ip > 4294967295) { return CV_AC_INVALID; }
+    if (ip == 4294967295) { return CV_AC_BROADCAST; }
+    const a : u64 = ip >> 24;
+    const b : u64 = (ip >> 16) & 255;
+    if (a == 0 or a >= 240) { return CV_AC_INVALID; }
+    if (a >= 224) { return CV_AC_MULTICAST; }
+    if (a == 169 and b == 254) { return CV_AC_LINKLOCAL; }
+    if (cv_lan_ok(ip)) { return CV_AC_PRIVATE; }
+    return CV_AC_PUBLIC;
+}
+
+pub const CV_D_OK : u32 = 0;
+pub const CV_D_ASK : u32 = 1;
+pub const CV_D_NO : u32 = 2;
+
+/// The decision on an address a (ip * 65536 + port) without spending anything: OK, ASK (public, no consent for it)
+/// or NO. env: T27OS_ALLOW_PUBLIC=1; consent: the one address ALLOW was pressed for (0 = none).
+pub fn cv_dial_decide(a: u64, env: bool, consent: u64) -> u32 {
+    const port : u64 = cv_addr_port(a);
+    if (port == 0 or port > 65535) { return CV_D_NO; }
+    const k : u32 = cv_addr_class(cv_addr_ip(a));
+    if (k == CV_AC_PRIVATE) { return CV_D_OK; }
+    if (k != CV_AC_PUBLIC) { return CV_D_NO; }
+    if (env or (consent != 0 and consent == a)) { return CV_D_OK; }
+    return CV_D_ASK;
+}
+
+/// ALLOW pressed for a: the consent becomes a when a is a public address; otherwise nothing changes.
+pub fn cv_allow(consent: []u64, a: u64) -> bool {
+    if (consent.len < 1 or cv_addr_port(a) == 0 or cv_addr_class(cv_addr_ip(a)) != CV_AC_PUBLIC) { return false; }
+    consent[0] = a;
+    return true;
+}
+
+/// One dial: the decision, and the consent is spent (back to 0) by any dial, so the next call to a public address asks
+/// again. Nothing about a public address outlives the call that used it.
+pub fn cv_dial_step(consent: []u64, a: u64, env: bool) -> u32 {
+    if (consent.len < 1) { return cv_dial_decide(a, env, 0); }
+    const d : u32 = cv_dial_decide(a, env, consent[0]);
+    consent[0] = 0;
+    return d;
+}
+
+/// The row under the debug CALL for the typed address: 0 = none (not public), 1 = "public address -- allow?" with
+/// ALLOW, 2 = allowed (by ALLOW for this address, or by T27OS_ALLOW_PUBLIC).
+pub fn cv_pub_row(a: u64, env: bool, consent: u64) -> u32 {
+    if (a == 0 or cv_addr_class(cv_addr_ip(a)) != CV_AC_PUBLIC) { return 0; }
+    if (cv_dial_decide(a, env, consent) == CV_D_OK) { return 2; }
+    return 1;
+}
+
+pub fn cv_pub_row_text(row: u32, env: bool) -> str {
+    if (row == 1) { return "public address -- allow?"; }
+    if (row == 2 and env) { return "public address -- allowed by T27OS_ALLOW_PUBLIC"; }
+    if (row == 2) { return "public address -- allowed for one call"; }
+    return "";
+}
+
+/// "Over the internet: forward UDP port 47727 on that router; the address is the one its provider gave."
+pub fn cv_pub_hint(port: u64, out: []u8) -> usize {
+    if (port == 0 or port > 65535 or out.len < 96) { return 0; }
+    var n : usize = put_bytes(out, 0, "Over the internet: forward UDP port ");
+    n = put_dec(out, n, port);
+    return put_bytes(out, n, " on that router; the address is the one its provider gave.");
+}
+
+pub const CV_B_NO : u32 = 0;
+pub const CV_B_LAN : u32 = 1;
+pub const CV_B_ANY : u32 = 2;
+/// Not an IPv4: what cv_bind_parse gives for a T27OS_CALL_BIND that does not parse.
+pub const CV_BIND_BAD : u64 = 4294967296;
+
+/// The address T27OS_CALL_BIND names: 127.0.0.1 when unset (n = 0), CV_BIND_BAD when it is not an address.
+pub fn cv_bind_parse(t: []const u8, n: usize) -> u64 {
+    if (n == 0) { return 2130706433; }
+    const a : u64 = cv_parse_addr(t, n);
+    if (a == 0) { return CV_BIND_BAD; }
+    return cv_addr_ip(a);
+}
+
+/// Where a window may listen: a private address (LAN), 0.0.0.0 (ANY: all interfaces, warned in the panel), nothing else.
+pub fn cv_bind_class(ip: u64) -> u32 {
+    if (ip == 0) { return CV_B_ANY; }
+    if (cv_lan_ok(ip)) { return CV_B_LAN; }
+    return CV_B_NO;
+}
+
+/// The warning on THIS DEVICE while listening on all interfaces; "" otherwise.
+pub fn cv_bind_warn(ip: u64) -> str {
+    if (cv_bind_class(ip) == CV_B_ANY) { return "listening on all interfaces"; }
+    return "";
+}
+
+/// The mDNS TXT record of a window listening on all interfaces gets "pub=1" at its end (in place); its new length.
+/// any false, or no room within out (at most 96 bytes, peer_identity TXT_MAX): the record as it was.
+pub fn cv_txt_pub(txt: []u8, n: usize, any: bool) -> usize {
+    if (!any or n + 6 > txt.len or n + 6 > 96) { return n; }
+    txt[n] = 5;
+    txt[n + 1] = 112;
+    txt[n + 2] = 117;
+    txt[n + 3] = 98;
+    txt[n + 4] = 61;
+    txt[n + 5] = 49;
+    return n + 6;
+}
+
 /// The file for the port that opened at unix second at; its length (at most CV_CP_CAP), 0 for a bad port or at = 0.
 pub fn cv_cp_text(port: u64, at: u64, out: []u8) -> usize {
     if (port == 0 or port > 65535 or at == 0 or out.len < CV_CP_CAP) { return 0; }
@@ -800,11 +930,13 @@ test cv_every_window_note_has_its_text_and_no_note_is_empty {
     assert cv_note_text(CV_N_ADDR) == "Type an address like 192.168.1.10:47727.";
     assert cv_note_text(CV_N_LAN) == "Calls go only to a private network address (10.x, 172.16-31.x, 192.168.x or 127.x).";
     assert cv_note_text(CV_N_SOCKET) == "Calls are off: the call port could not be opened (is it taken?).";
-    assert cv_note_text(CV_N_BIND) == "Calls are off: T27OS_CALL_BIND must be a private network address (10.x, 172.16-31.x, 192.168.x or 127.x).";
+    assert cv_note_text(CV_N_BIND) == "Calls are off: T27OS_CALL_BIND must be a private network address (10.x, 172.16-31.x, 192.168.x or 127.x) or 0.0.0.0.";
     assert cv_note_text(CV_N_REFUSED) == "The call could not be started.";
     assert cv_note_text(CV_N_SELF) == "That is this device's own address.";
     assert cv_note_text(CV_N_PORTS) == "Calls are off: every call port tried is taken.";
-    assert cv_note_text(CV_N_PORTS + 1).len == 0;
+    assert cv_note_text(CV_N_PUBASK) == "That is a public address. Press ALLOW to call it once, or set T27OS_ALLOW_PUBLIC=1.";
+    assert cv_note_text(CV_N_NEVER) == "Never called: a multicast, broadcast, 0.x, 240.x or link-local (169.254.x) address.";
+    assert cv_note_text(CV_N_NEVER + 1).len == 0;
     assert cv_note_text(4294967295).len == 0;
 }
 
@@ -953,4 +1085,126 @@ test cv_the_port_file_reads_back_and_refuses_anything_else {
     st[0] = 47730;
     const m : usize = cv_port_save_text(st[0..3], 1792000000, f[0..80]);
     assert cv_cp_parse(f[0..m]) == 47730;
+}
+
+fn cv_a(s: []const u8) -> u64 { return cv_parse_addr(s, s.len); }
+
+test cv_every_address_has_one_class {
+    assert cv_addr_class(cv_addr_ip(cv_a("192.168.1.10"))) == CV_AC_PRIVATE;
+    assert cv_addr_class(cv_addr_ip(cv_a("10.0.0.1"))) == CV_AC_PRIVATE;
+    assert cv_addr_class(cv_addr_ip(cv_a("172.31.0.1"))) == CV_AC_PRIVATE;
+    assert cv_addr_class(cv_addr_ip(cv_a("127.0.0.1"))) == CV_AC_PRIVATE;
+    assert cv_addr_class(cv_addr_ip(cv_a("8.8.8.8"))) == CV_AC_PUBLIC;
+    assert cv_addr_class(cv_addr_ip(cv_a("172.32.0.1"))) == CV_AC_PUBLIC;
+    assert cv_addr_class(cv_addr_ip(cv_a("223.255.255.254"))) == CV_AC_PUBLIC;
+    assert cv_addr_class(cv_addr_ip(cv_a("224.0.0.251"))) == CV_AC_MULTICAST;
+    assert cv_addr_class(cv_addr_ip(cv_a("239.255.255.250"))) == CV_AC_MULTICAST;
+    assert cv_addr_class(cv_addr_ip(cv_a("255.255.255.255"))) == CV_AC_BROADCAST;
+    assert cv_addr_class(cv_addr_ip(cv_a("169.254.10.20"))) == CV_AC_LINKLOCAL;
+    assert cv_addr_class(cv_addr_ip(cv_a("169.253.10.20"))) == CV_AC_PUBLIC;
+    assert cv_addr_class(cv_addr_ip(cv_a("0.0.0.0"))) == CV_AC_INVALID;
+    assert cv_addr_class(cv_addr_ip(cv_a("0.1.2.3"))) == CV_AC_INVALID;
+    assert cv_addr_class(cv_addr_ip(cv_a("240.0.0.1"))) == CV_AC_INVALID;
+    assert cv_addr_class(4294967296) == CV_AC_INVALID;
+}
+
+test cv_a_public_address_is_called_only_with_consent_and_the_rest_never {
+    var c : [1]u64 = undefined;
+    c[0] = 0;
+    const pa : u64 = cv_a("8.8.8.8:47727");
+    // private: as before, no question
+    assert cv_dial_step(c[0..1], cv_a("192.168.1.10:47727"), false) == CV_D_OK;
+    // public: asked until ALLOW, then called
+    assert cv_dial_step(c[0..1], pa, false) == CV_D_ASK;
+    assert cv_allow(c[0..1], pa) and c[0] == pa;
+    assert cv_dial_decide(cv_a("8.8.8.8:47728"), false, c[0]) == CV_D_ASK;
+    assert cv_dial_decide(cv_a("8.8.4.4:47727"), false, c[0]) == CV_D_ASK;
+    assert cv_dial_step(c[0..1], pa, false) == CV_D_OK;
+    // T27OS_ALLOW_PUBLIC=1 allows a public address without ALLOW
+    assert cv_dial_decide(cv_a("1.2.3.4:5000"), true, 0) == CV_D_OK;
+    // never, with or without consent or the variable
+    const never : [5]u64 = [cv_a("224.0.0.251:5353"), cv_a("255.255.255.255:47727"), cv_a("0.0.0.0:47727"), cv_a("169.254.1.1:47727"), cv_a("240.0.0.1:47727")];
+    var i : usize = 0;
+    while (i < 5) {
+        assert cv_allow(c[0..1], never[i]) == false;
+        c[0] = never[i];
+        assert cv_dial_decide(never[i], true, never[i]) == CV_D_NO;
+        assert cv_dial_step(c[0..1], never[i], true) == CV_D_NO;
+        i = i + 1;
+    }
+    assert cv_allow(c[0..1], cv_a("192.168.1.10:47727")) == false and c[0] == 0;
+}
+
+test cv_the_consent_is_never_remembered {
+    var c : [1]u64 = undefined;
+    c[0] = 0;
+    const pa : u64 = cv_a("203.0.113.7:47727");
+    assert cv_allow(c[0..1], pa);
+    assert cv_pub_row(pa, false, c[0]) == 2;
+    assert cv_dial_step(c[0..1], pa, false) == CV_D_OK;
+    // the call used it: the very same address asks again
+    assert c[0] == 0;
+    assert cv_pub_row(pa, false, c[0]) == 1;
+    assert cv_dial_step(c[0..1], pa, false) == CV_D_ASK;
+    // a refused or private dial spends it as well
+    assert cv_allow(c[0..1], pa);
+    assert cv_dial_step(c[0..1], cv_a("10.0.0.2:47727"), false) == CV_D_OK and c[0] == 0;
+    assert cv_dial_step(c[0..1], pa, false) == CV_D_ASK;
+}
+
+test cv_the_panel_rows_for_a_public_address {
+    const pa : u64 = cv_a("203.0.113.7:47800");
+    assert cv_pub_row(0, false, 0) == 0;
+    assert cv_pub_row(cv_a("192.168.1.10"), false, 0) == 0;
+    assert cv_pub_row(cv_a("224.0.0.1"), true, 0) == 0;
+    assert cv_pub_row(pa, false, 0) == 1;
+    assert cv_pub_row(pa, true, 0) == 2;
+    assert cv_pub_row_text(1, false) == "public address -- allow?";
+    assert cv_pub_row_text(2, false) == "public address -- allowed for one call";
+    assert cv_pub_row_text(2, true) == "public address -- allowed by T27OS_ALLOW_PUBLIC";
+    assert cv_pub_row_text(0, false).len == 0;
+    var t : [120]u8 = undefined;
+    assert cv_eq(t[0..120], cv_pub_hint(cv_addr_port(pa), t[0..120]), "Over the internet: forward UDP port 47800 on that router; the address is the one its provider gave.");
+    assert cv_pub_hint(0, t[0..120]) == 0 and cv_pub_hint(65536, t[0..120]) == 0;
+    assert cv_eq(t[0..120], cv_pub_hint(65535, t[0..120]), "Over the internet: forward UDP port 65535 on that router; the address is the one its provider gave.");
+}
+
+test cv_port_bounds_hold_on_every_class {
+    assert cv_dial_decide(cv_addr_ip(cv_a("8.8.8.8")) * 65536, true, 0) == CV_D_NO;
+    assert cv_dial_decide(cv_addr_ip(cv_a("192.168.1.10")) * 65536, false, 0) == CV_D_NO;
+    assert cv_dial_decide(cv_addr_ip(cv_a("8.8.8.8")) * 65536 + 1, true, 0) == CV_D_OK;
+    assert cv_dial_decide(cv_addr_ip(cv_a("8.8.8.8")) * 65536 + 65535, true, 0) == CV_D_OK;
+    var c : [1]u64 = undefined;
+    c[0] = 0;
+    assert cv_allow(c[0..1], cv_addr_ip(cv_a("8.8.8.8")) * 65536) == false;
+    assert cv_a("8.8.8.8:0") == 0 and cv_a("8.8.8.8:65536") == 0;
+}
+
+test cv_listening_on_all_interfaces_is_a_warned_choice {
+    assert cv_bind_parse("", 0) == 2130706433;
+    assert cv_bind_parse("0.0.0.0", 7) == 0;
+    assert cv_bind_parse("0.0.0", 5) == CV_BIND_BAD;
+    assert cv_bind_parse("all", 3) == CV_BIND_BAD;
+    assert cv_bind_class(cv_bind_parse("0.0.0.0", 7)) == CV_B_ANY;
+    assert cv_bind_class(cv_bind_parse("192.168.1.10", 12)) == CV_B_LAN;
+    assert cv_bind_class(cv_bind_parse("", 0)) == CV_B_LAN;
+    assert cv_bind_class(cv_bind_parse("8.8.8.8", 7)) == CV_B_NO;
+    assert cv_bind_class(cv_bind_parse("224.0.0.1", 9)) == CV_B_NO;
+    assert cv_bind_class(CV_BIND_BAD) == CV_B_NO;
+    assert cv_bind_warn(0) == "listening on all interfaces";
+    assert cv_bind_warn(2130706433).len == 0;
+}
+
+test cv_the_txt_record_says_pub_when_listening_on_all_interfaces {
+    var t : [96]u8 = undefined;
+    t[0] = 3;
+    t[1] = 97;
+    t[2] = 61;
+    t[3] = 98;
+    assert cv_txt_pub(t[0..96], 4, false) == 4;
+    const n : usize = cv_txt_pub(t[0..96], 4, true);
+    assert n == 10 and t[4] == 5 and t[5] == 112 and t[6] == 117 and t[7] == 98 and t[8] == 61 and t[9] == 49;
+    // no room: the record is left as it was
+    assert cv_txt_pub(t[0..96], 91, true) == 91;
+    assert cv_txt_pub(t[0..96], 90, true) == 96;
 }

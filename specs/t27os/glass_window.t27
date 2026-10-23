@@ -308,6 +308,20 @@ use t27os::call_view::cv_port_line;
 use t27os::call_view::cv_port_all_busy_text;
 use t27os::call_view::cv_cp_parse;
 use t27os::call_view::cv_port_save_text;
+use t27os::call_view::cv_dial_step;
+use t27os::call_view::cv_allow;
+use t27os::call_view::cv_pub_row;
+use t27os::call_view::cv_pub_row_text;
+use t27os::call_view::cv_pub_hint;
+use t27os::call_view::cv_bind_parse;
+use t27os::call_view::cv_bind_class;
+use t27os::call_view::cv_bind_warn;
+use t27os::call_view::CV_D_OK;
+use t27os::call_view::CV_D_ASK;
+use t27os::call_view::CV_B_NO;
+use t27os::call_view::CV_B_ANY;
+use t27os::call_view::CV_N_PUBASK;
+use t27os::call_view::CV_N_NEVER;
 use t27os::call_session::CS_LEN;
 use t27os::call_session::CS_AUDIO_DEV;
 use t27os::call_session::CS_AUDIO_TEST;
@@ -417,6 +431,8 @@ use t27os::friends_view::FV_NOTE_Y;
 use t27os::friends_view::FV_DBG_LABEL_Y;
 use t27os::friends_view::FV_DFIELD_Y;
 use t27os::friends_view::FV_DCALL_Y;
+use t27os::friends_view::FV_PUB_Y;
+use t27os::friends_view::FV_PUBHINT_Y;
 use t27os::friends_view::FV_H_NONE;
 use t27os::friends_view::FV_H_INVITE;
 use t27os::friends_view::FV_H_IFIELD;
@@ -424,6 +440,7 @@ use t27os::friends_view::FV_H_ADD;
 use t27os::friends_view::FV_H_DEBUG;
 use t27os::friends_view::FV_H_DFIELD;
 use t27os::friends_view::FV_H_DCALL;
+use t27os::friends_view::FV_H_DALLOW;
 use t27os::friends_view::FV_H_ROW;
 use t27os::friends_view::FN_IDENT;
 use t27os::friends_view::FN_COPIED;
@@ -9700,7 +9717,9 @@ fn draw_profile_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, 
 //   - the CALL panel (the slot of the Queen, DOCTOR, KEYS and PROFILE panels): this device's address and test
 //     fingerprint, then the view of call_view (address field and CALL; CANCEL; ANSWER / DECLINE; the 6 digits large
 //     with CODES MATCH / CODES DIFFER; the duration with MUTE / END CALL; the reason with CLOSE).
-//   - where it listens: T27OS_CALL_BIND (default 127.0.0.1, only a private network or 127.x, call_view cv_lan_ok), T27OS_CALL_PORT (47727);
+//   - where it listens: T27OS_CALL_BIND (default 127.0.0.1; a private network or 127.x, or 0.0.0.0 for all interfaces,
+//     warned on THIS DEVICE and announced with pub=1, call_view section 7), T27OS_CALL_PORT (47727);
+//   - a public address is dialled only after ALLOW for that address (spent by the dial) or with T27OS_ALLOW_PUBLIC=1;
 //     a taken port moves on to the next of at most ten (call_view section 6, cl_port_open), the one that opened is
 //     kept in ~/.t27os/callport.t27 and said in the panel and the cabinet;
 //     T27OS_CALL_AUDIO=test sends call_session's numbered test pattern instead of the microphone; T27OS_CALL_PEER
@@ -9780,6 +9799,36 @@ pub const CL_BPORT : usize = 232;
 pub const CL_PORT_Y : f64 = 39.0;
 pub const CL_PBUSY : usize = 234;
 pub const CL_PTRIED : usize = 236;
+/// Drawn (call_view section 7): 1 when T27OS_CALL_BIND=0.0.0.0 (all interfaces, warned on THIS DEVICE), 1 when
+/// T27OS_ALLOW_PUBLIC=1, and the one public address ALLOW was pressed for (IPv4 then port, big-endian; 0 = none). The
+/// consent lives only here, in memory, and the next dial spends it.
+pub const CL_ANY : usize = 237;
+pub const CL_PUBENV : usize = 238;
+pub const CL_PUBOK : usize = 240;
+
+pub fn cl_consent(cl: []const u8) -> u64 {
+    return cl_ip(cl, CL_PUBOK) * 65536 + ((@as(u64, cl[CL_PUBOK + 4]) << 8) | @as(u64, cl[CL_PUBOK + 5]));
+}
+
+pub fn cl_put_consent(cl: []u8, a: u64) -> void {
+    cl_put_ip(cl, CL_PUBOK, a / 65536);
+    cl_put_port(cl, CL_PUBOK + 4, a % 65536);
+}
+
+/// The address typed in the debug field (call_view cv_parse_addr; 0 = none).
+pub fn cl_typed_addr(cl: []const u8) -> u64 {
+    return cv_parse_addr(cl[CL_ADDR .. CL_ADDR + CV_ADDR_MAX], @as(usize, cl[CL_ALEN]));
+}
+
+/// The row under the debug CALL for the typed address (call_view cv_pub_row): 1 shows ALLOW.
+pub fn cl_pub_row(cl: []const u8) -> u32 {
+    return cv_pub_row(cl_typed_addr(cl), cl[CL_PUBENV] != 0, cl_consent(cl));
+}
+
+/// ALLOW is drawn and answers: the debug part is shown and the typed public address waits for consent.
+pub fn cl_allow_shown(cl: []const u8) -> bool {
+    return cl[FV_DEBUG] != 0 and cl_pub_row(cl) == 1;
+}
 pub const CLW_AUTO_T : usize = 9;
 /// The window's own call clock (main's [10]u64): when ACTIVE began, when the last poll returned, the longest gap from
 /// the end of one poll to the start of the next while ACTIVE, the state the last snapshot saw, the system activity
@@ -10000,9 +10049,12 @@ pub fn cl_port_of(t: []const u8, n: usize) -> u64 {
 /// (cl_port_open), leaves calls off with a note; nothing else depends on it.
 pub fn cl_boot(cl: []u8, s: []u8) -> void {
     var e : [32]u8 = undefined;
-    var bind : u64 = 2130706433;
     var n : usize = cl_env("T27OS_CALL_BIND", e[0..32]);
-    if (n > 0) { bind = cv_addr_ip(cv_parse_addr(e[0..32], n)); }
+    const bind : u64 = cv_bind_parse(e[0..32], n);
+    const bclass : u32 = cv_bind_class(bind);
+    if (bclass == CV_B_ANY) { cl[CL_ANY] = 1; }
+    n = cl_env("T27OS_ALLOW_PUBLIC", e[0..32]);
+    if (n == 1 and e[0] == 49) { cl[CL_PUBENV] = 1; }
     var port : u64 = CV_PORT;
     n = cl_env("T27OS_CALL_PORT", e[0..32]);
     if (n > 0) { port = cl_port_of(e[0..32], n); }
@@ -10018,7 +10070,7 @@ pub fn cl_boot(cl: []u8, s: []u8) -> void {
         }
         cl[CL_ALEN] = @as(u8, @intCast(i));
     }
-    if (bind == 0 or port == 0 or !cv_lan_ok(bind)) {
+    if (bclass == CV_B_NO or port == 0) {
         cl[CL_NOTE] = @as(u8, @intCast(CV_N_BIND));
         return;
     }
@@ -10402,12 +10454,19 @@ pub fn cl_dial(cl: []u8, s: []u8) -> void {
         if (cl[CL_NOTE] == 0) { cl[CL_NOTE] = @as(u8, @intCast(CV_N_SOCKET)); }
         return;
     }
-    const a : u64 = cv_parse_addr(cl[CL_ADDR .. CL_ADDR + CV_ADDR_MAX], @as(usize, cl[CL_ALEN]));
+    const a : u64 = cl_typed_addr(cl);
     var note : u32 = 0;
+    // a public address needs ALLOW for this very address (or T27OS_ALLOW_PUBLIC=1); the consent is spent by this dial
+    var c : [1]u64 = undefined;
+    c[0] = cl_consent(cl);
+    const d : u32 = cv_dial_step(c[0..1], a, cl[CL_PUBENV] != 0);
+    cl_put_consent(cl, c[0]);
     if (a == 0) {
         note = CV_N_ADDR;
-    } else if (!cv_lan_ok(cv_addr_ip(a))) {
-        note = CV_N_LAN;
+    } else if (d == CV_D_ASK) {
+        note = CV_N_PUBASK;
+    } else if (d != CV_D_OK) {
+        note = CV_N_NEVER;
     } else if (cv_addr_ip(a) == cl_ip(cl, CL_ME_IP) and cv_addr_port(a) == cl_me_port(cl)) {
         note = CV_N_SELF;
     } else {
@@ -10457,6 +10516,11 @@ pub fn cl_front(cl: []u8, s: []u8, w: []u64, hit: u32) -> void {
         cl[CL_FOCUS] = 1;
     } else if (hit == FV_H_DCALL) {
         cl_do(cl, s, w, CV_A_DIAL);
+    } else if (hit == FV_H_DALLOW) {
+        // the person's consent for the typed public address only, held in memory until the next dial
+        var c : [1]u64 = undefined;
+        c[0] = cl_consent(cl);
+        if (cv_allow(c[0..1], cl_typed_addr(cl))) { cl_put_consent(cl, c[0]); }
     } else if (hit >= FV_H_ROW) {
         if (cl[CL_UP] != 0) {
             cl[CL_NOTE] = @as(u8, @intCast(fe_call(cl, s, @as(usize, hit - FV_H_ROW))));
@@ -10660,7 +10724,7 @@ fn draw_cl_front(c: u64, kit: [48]u64, sh: f64, mx: f64, my: f64, l: f64, t: f64
     const right : f64 = l + QP_W - QP_PAD;
     const shown : u32 = @as(u32, cl[FV_SHOWN]);
     const debug : bool = cl[FV_DEBUG] != 0;
-    const hit : u32 = fv_hit(mx, my, l, QP_W, t, shown, debug);
+    const hit : u32 = fv_hit(mx, my, l, QP_W, t, shown, debug, cl_allow_shown(cl));
     var line : [96]u8 = undefined;
     // my invite: a click copies it
     cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
@@ -10748,6 +10812,18 @@ fn draw_cl_front(c: u64, kit: [48]u64, sh: f64, mx: f64, my: f64, l: f64, t: f64
         draw_bytes(c, kit, "DEBUG: ADDRESS, CALLED WITH THE KEY TYPED ABOVE", 46, x, t + FV_DBG_LABEL_Y, 9.0, 0.0, false);
         draw_cl_field(c, kit, cv_field_x(l), t + FV_DFIELD_Y, cv_field_w(QP_W), cl[CL_FOCUS] == 1, hit == FV_H_DFIELD, cl[CL_ADDR .. CL_ADDR + CV_ADDR_MAX], @as(usize, cl[CL_ALEN]), "192.168.1.10:47727");
         draw_cl_btn(c, kit, cv_btn_x(l, QP_W, 0), t + FV_DCALL_Y, cv_btn_w(QP_W), "CALL", hit == FV_H_DCALL);
+        // a public address (call_view section 7): ALLOW while it waits for consent, the row, and the port forward hint
+        const prow : u32 = cl_pub_row(cl);
+        if (prow != 0) {
+            if (prow == 1) { draw_cl_btn(c, kit, cv_btn_x(l, QP_W, 1), t + FV_DCALL_Y, cv_btn_w(QP_W), "ALLOW", hit == FV_H_DALLOW); }
+            const pt : []const u8 = cv_pub_row_text(prow, cl[CL_PUBENV] != 0);
+            cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_TEXT_WHITE));
+            draw_fit(c, kit, pt, pt.len, x, t + FV_PUB_Y, 9.5, WEIGHT_SEMIBOLD, false, right);
+            var hb : [120]u8 = undefined;
+            const hn : usize = cv_pub_hint(cv_addr_port(cl_typed_addr(cl)), hb[0..120]);
+            cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_MUTED_WHITE));
+            draw_cl_wrap(c, kit, hb[0..hn], x, right, t + FV_PUBHINT_Y, 9.0, 3, sh);
+        }
     }
 }
 
@@ -10830,6 +10906,11 @@ fn draw_call_panel(c: u64, kit: [48]u64, sw: f64, sh: f64, mx: f64, my: f64, cl:
     draw_fit(c, kit, pl[0..160], pn, x + 14.0, t + CL_PORT_Y, 9.5, WEIGHT_SEMIBOLD, false, right);
     var n : usize = put_bytes(line[0..96], 0, "THIS DEVICE  ");
     n = n + cv_addr_text(cl_ip(cl, CL_ME_IP), cl_me_port(cl), line[n..96]);
+    // T27OS_CALL_BIND=0.0.0.0: the explicit choice to listen on every interface is said next to the address
+    if (cl[CL_ANY] != 0) {
+        n = put_bytes(line[0..96], n, "  ");
+        n = put_bytes(line[0..96], n, cv_bind_warn(0));
+    }
     cg_fill_rgba(c, 1.0, 1.0, 1.0, lv(kit, THV_LABEL_WHITE));
     draw_fit(c, kit, line[0..96], n, x, t + CV_ME_Y, 9.5, 0.0, false, right);
     if (cl[CL_UP] != 0) {
@@ -14722,7 +14803,7 @@ pub fn main() -> void {
                             }
                         } else if (clv == CV_IDLE) {
                             // CL. the friends view: a hit is the invite, a friend's row, the add field and button, the debug part
-                            cl_front(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN * 3], clw[0..10], fv_hit(mx, my, qp_left(sw), QP_W, WS_TOP, @as(u32, tbv[TBO_CL + FV_SHOWN]), tbv[TBO_CL + FV_DEBUG] != 0));
+                            cl_front(tbv[TBO_CL .. TBO_CL + CL_CAP], csv[0..CS_LEN * 3], clw[0..10], fv_hit(mx, my, qp_left(sw), QP_W, WS_TOP, @as(u32, tbv[TBO_CL + FV_SHOWN]), tbv[TBO_CL + FV_DEBUG] != 0, cl_allow_shown(tbv[TBO_CL .. TBO_CL + CL_CAP])));
                         } else {
                             const cla : u32 = cv_action(clv, cv_hit(mx, my, qp_left(sw), QP_W, WS_TOP, clv));
                             if (cla != CV_A_FOCUS) { tbv[TBO_CL + CL_FOCUS] = 0; }
@@ -16287,7 +16368,7 @@ pub fn main() -> void {
         if (on_pf_head(mx, my, sw)) { on_control = true; }
         if (on_cl_head(mx, my, sw)) { on_control = true; }
         if (clp and on_panel_close(mx, my, sw, WS_TOP)) { on_control = true; }
-        if (clp and tbv[TBO_CL + CL_VIEW] == 0 and tbv[TBO_CL + AC_ON] == 0 and fv_hit(mx, my, qp_left(sw), QP_W, WS_TOP, @as(u32, tbv[TBO_CL + FV_SHOWN]), tbv[TBO_CL + FV_DEBUG] != 0) != FV_H_NONE) { on_control = true; }
+        if (clp and tbv[TBO_CL + CL_VIEW] == 0 and tbv[TBO_CL + AC_ON] == 0 and fv_hit(mx, my, qp_left(sw), QP_W, WS_TOP, @as(u32, tbv[TBO_CL + FV_SHOWN]), tbv[TBO_CL + FV_DEBUG] != 0, cl_allow_shown(tbv[TBO_CL .. TBO_CL + CL_CAP])) != FV_H_NONE) { on_control = true; }
         if (clp and tbv[TBO_CL + CL_VIEW] == 0 and tbv[TBO_CL + AC_ON] != 0 and chv_mode(tbv[TBO_CH .. TBO_CH + CHV_CAP]) == CHV_M_OFF and ac_hit_now_iv(mx, my, sw, sh, tbv[TBO_CL .. TBO_CL + CL_CAP], tbv[TBO_IV .. TBO_IV + IV_LEN]) != AC_H_NONE) { on_control = true; }
         if (clp and tbv[TBO_CL + CL_VIEW] == 0 and tbv[TBO_CL + AC_ON] != 0 and chv_mode(tbv[TBO_CH .. TBO_CH + CHV_CAP]) != CHV_M_OFF) {
             const chh0 : u32 = ch_hit_now(mx, my, sw, sh, tbv[TBO_CH .. TBO_CH + CHV_CAP]);
@@ -17913,6 +17994,8 @@ test the_call_region_ends_the_text_store_and_draw_reads_only_folded_bytes {
     assert CL_CAMTRY < CL_VENC and CL_VENC + 8 <= AC_ON;
     // the call port bytes stand after the account panel and the voice flag, before the friends snapshot, folded
     assert AC_END <= CL_NOCAM and CL_NOCAM < CL_BPORT and CL_BPORT + 2 <= CL_PBUSY and CL_PBUSY + 2 <= CL_PTRIED;
+    // the public address bytes follow the port bytes, before the friends snapshot, folded into the frame key
+    assert CL_PTRIED < CL_ANY and CL_ANY < CL_PUBENV and CL_PUBENV < CL_PUBOK and CL_PUBOK + 6 <= FV_BASE and FV_BASE <= CL_KEY_N;
     assert CL_PTRIED < FV_BASE and CL_PTRIED < CL_KEY_N;
 }
 

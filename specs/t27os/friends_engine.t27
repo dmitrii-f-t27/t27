@@ -37,6 +37,7 @@ use t27os::call_crypto_probe::ckh_ms;
 use t27os::call_session::cs_call;
 use t27os::call_session::csg_add;
 use t27os::call_view::cv_lan_ok;
+use t27os::call_view::cv_txt_pub;
 use t27os::call_view::CV_N_REFUSED;
 use t27os::call_view::CV_N_SOCKET;
 use t27os::peer_identity::FP_BYTES;
@@ -410,6 +411,9 @@ pub fn fe_net(cl: []u8, ip: u64, port: u64) -> bool {
         cl[FV_NET] = @as(u8, @intCast(FV_NET_FAIL));
         return false;
     }
+    // listening on all interfaces (T27OS_CALL_BIND=0.0.0.0, call_view section 7): the record says pub=1, before the
+    // update keys so it is never the one left out
+    tn = cv_txt_pub(cl[FE_TXT..FE_TXT + 96], tn, ip == 0);
     tn = fe_txt_update(cl, tn);
     // "<nick> <4 hex>" as the instance name (NUL-terminated)
     var nm : usize = 0;
@@ -1251,6 +1255,33 @@ test fe_the_announcement_carries_ver_build_and_the_update_port {
     assert txt_port(cl[FE_TXT..FE_TXT + 96], k2) == 47727;
     var back : [10]u8 = undefined;
     assert txt_fp(cl[FE_TXT..FE_TXT + 96], k2, back[0..10]) == INV_OK and back[9] == 10;
+}
+
+test fe_listening_on_all_interfaces_announces_pub_and_the_rest_still_reads {
+    var cl : [8192]u8 = undefined;
+    fe_zero(cl[0..8192], 0, 8192);
+    const fp : [10]u8 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    var inv : [25]u8 = undefined;
+    invite_make(fp[0..10], inv[0..25]);
+    const nick : [5]u8 = [116, 50, 55, 111, 115];
+    const key : [3]u8 = [112, 117, 98];
+    var v : [8]u8 = undefined;
+    // a private bind: no pub key, as before
+    var tn : usize = txt_build(inv[0..25], 47727, nick[0..5], 5, cl[FE_TXT..FE_TXT + 96]);
+    assert cv_txt_pub(cl[FE_TXT..FE_TXT + 96], tn, false) == tn;
+    assert txt_get(cl[FE_TXT..FE_TXT + 96], tn, key[0..3], v[0..8]) == 0;
+    // 0.0.0.0: pub=1, then the update keys, and fp, port and build still read
+    tn = cv_txt_pub(cl[FE_TXT..FE_TXT + 96], tn, true);
+    assert txt_get(cl[FE_TXT..FE_TXT + 96], tn, key[0..3], v[0..8]) == 1 and v[0] == 49;
+    cl[UPV_MYVEROK] = 1;
+    cl[UPV_MYMIN] = 1;
+    upv_put32(cl[0..8192], UPV_MYBUILD, 7068);
+    const k : usize = fe_txt_update(cl[0..8192], tn);
+    assert k == tn + 21 and upd_txt_build(cl[FE_TXT..FE_TXT + 96], k) == 7068;
+    assert txt_get(cl[FE_TXT..FE_TXT + 96], k, key[0..3], v[0..8]) == 1;
+    assert txt_port(cl[FE_TXT..FE_TXT + 96], k) == 47727;
+    var back : [10]u8 = undefined;
+    assert txt_fp(cl[FE_TXT..FE_TXT + 96], k, back[0..10]) == INV_OK and back[0] == 1;
 }
 
 test fe_the_typed_key_is_read_only_from_a_whole_invite {
