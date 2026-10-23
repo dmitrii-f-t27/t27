@@ -569,6 +569,8 @@ pub const CS_K_ALLOW_PUB : u32 = 57;
 /// calls; 0 = none (this side then sends the JPEG and cannot show H.264).
 const CS_K_VHENC : u32 = 58;
 const CS_K_VHDEC : u32 = 59;
+/// Test aid (call_h264_probe, never the window): every n-th H.264 part is sealed and not sent, a lost datagram; 0 = none.
+pub const CS_K_VHLOSS : u32 = 61;
 
 pub const CS_AUDIO_DEV : u32 = 1;
 pub const CS_AUDIO_TEST : u32 = 2;
@@ -1037,7 +1039,7 @@ pub fn cs_set(s: []u8, k: u32, v: u64) -> bool {
         if (v > cs_g(s, CS_K_JB_TARGET) and v + CBP_F_TX < CBP_F_JB) { ok = true; }
     } else if (k == CS_K_GSTATS or k == CS_K_GAUTO or k == CS_K_VIDEO or k == CS_K_ALLOW_PUB) {
         if (v <= 1) { ok = true; }
-    } else if (k == CS_K_VDROP or k == CS_K_VLIMIT) {
+    } else if (k == CS_K_VDROP or k == CS_K_VLIMIT or k == CS_K_VHLOSS) {
         if (v <= 4294967295) { ok = true; }
     } else if (k == CS_K_GLEAVE_S) {
         if (v <= 3600) { ok = true; }
@@ -2774,6 +2776,7 @@ const VX_CUR_US : usize = 28;
 const VX_WANTED : usize = 29;
 const VX_DEC_NO : usize = 30;
 const VX_FORCED_TX : usize = 31;
+const VX_LOST_TX : usize = 32;
 pub const CS_VH_RX : usize = 0;
 pub const CS_VH_SS : usize = 256;
 pub const CS_VH_MRX : usize = 768;
@@ -2918,7 +2921,8 @@ fn cs_vh_control(s: []u8, now: u64, caps: u8) -> void {
     if (at != 0 and now >= at + 1000 and va_get(s[CS_VH + CS_VH_RX..CS_VH + CS_VH_RX + VA_LEN], VA_SEEN) != 0) {
         var rep : [7]u64 = undefined;
         const done : u64 = va_get(s[CS_VH + CS_VH_RX..CS_VH + CS_VH_RX + VA_LEN], VA_DONE);
-        const lost : u64 = va_get(s[CS_VH + CS_VH_RX..CS_VH + CS_VH_RX + VA_LEN], VA_LOST) + va_get(s[CS_VH + CS_VH_RX..CS_VH + CS_VH_RX + VA_LEN], VA_DROPPED);
+        // a half-built frame dropped (VA_DROPPED) is also a number that never completed (VA_LOST): counted once
+        const lost : u64 = va_get(s[CS_VH + CS_VH_RX..CS_VH + CS_VH_RX + VA_LEN], VA_LOST);
         const bytes : u64 = va_get(s[CS_VH + CS_VH_RX..CS_VH + CS_VH_RX + VA_LEN], VA_BYTES);
         const under : u64 = cs_stat(s, 1004);
         const held : u64 = va_get(s[CS_VH + CS_VH_RX..CS_VH + CS_VH_RX + VA_LEN], VD_HELD);
@@ -2999,7 +3003,11 @@ fn cs_vh_send(s: []u8, now: u64) -> void {
             return;
         }
         const pn : usize = vh_part(pt[0..1176], cvx(s, VX_CUR_F), total, k, cvx(s, VX_CUR_KEY) != 0, @as(u32, @intCast(cvx(s, VX_CUR_RUNG))), cut[0..c]);
-        if (pn > 0 and cs_vh_seal_send(s, CK_T_H264, pt[0..pn])) {
+        const loss : u64 = cs_g(s, CS_K_VHLOSS);
+        if (loss != 0 and (cvx(s, VX_PARTS_TX) + cvx(s, VX_LOST_TX) + 1) % loss == 0) {
+            // the test aid: this part is lost on the way
+            cvxa(s, VX_LOST_TX, 1);
+        } else if (pn > 0 and cs_vh_seal_send(s, CK_T_H264, pt[0..pn])) {
             cvxa(s, VX_PARTS_TX, 1);
             vf_note(s[CS_VH + CS_VH_MPB..CS_VH + CS_VH_MPB + VF_LEN], now, @as(u64, pn + 68));
         }
@@ -3081,6 +3089,7 @@ pub const CS_H_PEER_FPS : u32 = 32;
 pub const CS_H_STEPS : u32 = 33;
 pub const CS_H_SEND_ERR : u32 = 34;
 pub const CS_H_RX_DROPPED : u32 = 35;
+pub const CS_H_LOST_TX : u32 = 36;
 
 pub fn cs_vh_stat(s: []const u8, k: u32) -> u64 {
     if (s.len < CS_LEN) { return 0; }
@@ -3124,6 +3133,7 @@ pub fn cs_vh_stat(s: []const u8, k: u32) -> u64 {
     if (k == CS_H_STEPS) { return cvx(s, VX_STEPS); }
     if (k == CS_H_SEND_ERR) { return cvx(s, VX_SEND_ERR); }
     if (k == CS_H_RX_DROPPED) { return va_get(va, VA_DROPPED); }
+    if (k == CS_H_LOST_TX) { return cvx(s, VX_LOST_TX); }
     return 0;
 }
 
@@ -3561,7 +3571,7 @@ test the_block_holds_its_parts_without_overlap {
     assert CS_VASM + CS_VBUF == CS_VLAST and CS_VLAST + CS_VBUF == CS_VCAM and CS_VCAM + CS_VBUF == CS_ID;
     assert CS_ID + CS_ID_LEN == CS_VH and CS_VH + CS_VH_LEN == CS_LEN;
     assert CS_VH_RX + VA_LEN <= CS_VH_SS and CS_VH_SS + VS_LEN <= CS_VH_MRX and CS_VH_MRX + VF_LEN <= CS_VH_MTX;
-    assert CS_VH_MTX + VF_LEN <= CS_VH_MPB and CS_VH_MPB + VF_LEN <= CS_VH_X and CS_VH_X + 32 * 8 <= CS_VH_BUF;
+    assert CS_VH_MTX + VF_LEN <= CS_VH_MPB and CS_VH_MPB + VF_LEN <= CS_VH_X and CS_VH_X + 33 * 8 <= CS_VH_BUF;
     assert CS_VH_BUF + VH_FRAME_MAX == CS_VH_LEN;
     assert CI_MSGN + 2 <= CI_PUB and CI_PUB + 65 <= CI_PRIV and CI_PRIV + 97 <= CI_PEER and CI_PEER + 65 <= CI_RX;
     assert CI_RX + 65 <= CI_MSG and CI_MSG + CK_HDR + CK_IDENT_PT + CK_TAG <= CS_ID_LEN;
@@ -3951,6 +3961,8 @@ test the_tunables_take_only_their_ranges_and_never_during_media {
     assert cs_set(z, CS_K_VDROP, 4294967296) == false and cs_set(z, CS_K_VLIMIT, 4294967295);
     // a slot that is not a tunable is never written through cs_set
     assert cs_set(z, CS_ST_SENT, 5) == false and cs_set(z, CS_MAGIC, 0) == false and cs_set(z, 60, 1) == false;
+    // the H.264 loss aid takes a count of parts; the codec blocks are never a tunable
+    assert cs_set(z, CS_K_VHLOSS, 200) and cs_set(z, CS_K_VHENC, 5) == false and cs_set(z, CS_K_VHDEC, 5) == false;
     assert cs_g(z, CS_MAGIC) == CS_MAGIC_V;
     // while media flows nothing changes
     z[1] = @as(u8, @intCast(CK_ACTIVE));

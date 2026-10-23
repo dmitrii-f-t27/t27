@@ -7,6 +7,12 @@
 // audio test pattern runs beside it, so the sound and the video share the sealed channel exactly as in a call.
 //   CS_ROLE=caller|callee   (required) CS_PORT / CS_PEER_PORT (127.0.0.1; caller 47791, callee 47792)
 //   CS_HSECS=20              seconds of video after the call is ACTIVE (the caller hangs up then)
+//   CS_HLOSS=n               every n-th H.264 part this side sends is lost on the way (call_session CS_K_VHLOSS):
+//                            the other side then checks that the gate held the broken frames back, asked for key
+//                            frames and came back (at least 20 a second on average), never that nothing was lost
+//   CS_HEXPECT=old           the other side is an older T27 OS window (7132 and before: JPEG only, no HELLO): check
+//                            that this side fell back to the JPEG of call_core after 3 s, both pictures flow (8+ a
+//                            second each way) and the sound is untouched
 //   CS_PEER_INVITE=T27-...   (caller) the callee is a T27 OS window on this machine, known by its invite key: the
 //                            probe dials it at 127.0.0.1:CS_PEER_PORT (47727) with that key's fingerprint; the window
 //                            answers with T27OS_CALL_AUTOTEST=1 and T27OS_QA=1 (a test aid), its people compare the
@@ -91,6 +97,12 @@ use t27os::call_session::cs_stat;
 use t27os::call_session::cs_video_h264;
 use t27os::call_session::cs_vh_stat;
 use t27os::call_session::cs_vh_mode;
+use t27os::call_session::cs_vstat;
+use t27os::call_session::CS_V_SHOWN;
+use t27os::call_session::CS_V_TXFRAMES;
+use t27os::call_session::CS_K_VHLOSS;
+use t27os::call_session::CS_H_LOST_TX;
+use t27os::call_h264::VN_JPEG_OLD;
 use t27os::call_h264::VN_H264;
 use t27os::call_vt::VT_BGRA;
 use t27os::call_vt::VDK_OUT;
@@ -191,6 +203,10 @@ fn hp_side(caller: bool) -> bool {
     my_port = ckh_env_num("CS_PORT", my_port);
     peer_port = ckh_env_num("CS_PEER_PORT", peer_port);
     const secs : u64 = ckh_env_num("CS_HSECS", 20);
+    const hloss : u64 = ckh_env_num("CS_HLOSS", 0);
+    var eb : [32]u8 = undefined;
+    const old : bool = ckh_env("CS_HEXPECT", eb[0..32]) == 3 and eb[0] == 111 and eb[1] == 108 and eb[2] == 100;
+    // the other side's loss: its parts are lost, so this side sees the losses (both sides are given the same CS_HLOSS)
     if (my_port == 0 or my_port > 65535 or peer_port == 0 or peer_port > 65535 or secs == 0 or secs > 600) {
         ckh_line("NOT RUN: CS_PORT, CS_PEER_PORT or CS_HSECS is malformed\n");
         return false;
@@ -214,6 +230,7 @@ fn hp_side(caller: bool) -> bool {
     var all : bool = true;
     all = ckh_check("encoder, decoder and 8 source buffers", e != 0 and d != 0 and mem != 0 and hp_pool(mem)) and all;
     all = ckh_check("video on, codec blocks handed in", cs_set(s[0..CS_LEN], CS_K_VIDEO, 1) and cs_video_h264(s[0..CS_LEN], e, d)) and all;
+    if (hloss != 0) { all = ckh_check("a part in every CS_HLOSS is lost on the way", cs_set(s[0..CS_LEN], CS_K_VHLOSS, hloss)) and all; }
     if (!all) { return false; }
     if (caller and !cs_call(s[0..CS_LEN], 2130706433, peer_port, peer[0..10])) {
         ckh_line("NOT RUN: cs_call refused\n");
@@ -238,6 +255,10 @@ fn hp_side(caller: bool) -> bool {
     var acc_mark : u64 = 0;
     var acc_min : u64 = 1000000;
     var nsec : u64 = 0;
+    var jpeg0 : u64 = 0;
+    var jpeg1 : u64 = 0;
+    var jtx0 : u64 = 0;
+    var jtx1 : u64 = 0;
     const t0 : u64 = ckh_ms();
     while (ckh_ms() - t0 < 60000 + secs * 1000 and !(ended and cs_state(s[0..CS_LEN]) == CK_IDLE)) {
         ckh_usleep(1000);
@@ -282,6 +303,12 @@ fn hp_side(caller: bool) -> bool {
                 const acc : u64 = cs_stat(s[0..CS_LEN], CS_ST_ACCEPTED);
                 // the first two seconds are the codecs' start (sessions are made): not counted
                 if (now - t_act >= 3000) {
+                    if (nsec == 0) {
+                        jpeg0 = cs_vstat(s[0..CS_LEN], CS_V_SHOWN);
+                        jtx0 = cs_vstat(s[0..CS_LEN], CS_V_TXFRAMES);
+                    }
+                    jpeg1 = cs_vstat(s[0..CS_LEN], CS_V_SHOWN);
+                    jtx1 = cs_vstat(s[0..CS_LEN], CS_V_TXFRAMES);
                     per[@as(usize, nsec)] = o - out_mark;
                     aper[@as(usize, nsec)] = acc - acc_mark;
                     nsec = nsec + 1;
@@ -353,7 +380,35 @@ fn hp_side(caller: bool) -> bool {
     hp_n(caller, "audio frames sent / accepted: ", cs_stat(s[0..CS_LEN], CS_ST_SENT) * 100000 + cs_stat(s[0..CS_LEN], CS_ST_ACCEPTED));
     hp_n(caller, "audio accepted in the slowest 5 s: ", acc_min);
     hp_n(caller, "refused: AEAD / replay: ", cs_stat(s[0..CS_LEN], CS_ST_REJ_AEAD) * 1000 + cs_stat(s[0..CS_LEN], CS_ST_REJ_REPLAY));
+    hp_n(caller, "H.264 parts lost on the way (this side's test aid): ", cs_vh_stat(v, CS_H_LOST_TX));
+    hp_n(caller, "JPEG frames shown / sent in the counted seconds: ", (jpeg1 - jpeg0) * 100000 + (jtx1 - jtx0));
     all = ckh_check("the call ended and the session is back in IDLE", ended) and all;
+    if (old) {
+        all = ckh_check("an older build: this side fell back to the JPEG (no word from it)", cs_vh_stat(v, CS_H_MODE) == @as(u64, VN_JPEG_OLD)) and all;
+        all = ckh_check("its JPEG arrives, 8+ frames a second", nsec >= 5 and (jpeg1 - jpeg0) * 10 >= nsec * 80) and all;
+        all = ckh_check("this side's JPEG leaves, 8+ frames a second", nsec >= 5 and (jtx1 - jtx0) * 10 >= nsec * 80) and all;
+        all = ckh_check("no H.264 either way", cs_vh_stat(v, CS_H_RX_DONE) == 0 and cs_vh_stat(v, CS_H_TX_FRAMES) == 0) and all;
+        all = ckh_check("the sound kept flowing (490+ of 500 frames accepted in every 5 counted seconds)", nsec >= 5 and acc_min >= 490) and all;
+        all = ckh_check("0 AEAD failures, 0 replays", cs_stat(s[0..CS_LEN], CS_ST_REJ_AEAD) + cs_stat(s[0..CS_LEN], CS_ST_REJ_REPLAY) == 0) and all;
+        if (last_pb != 0) { vt_pb_release(last_pb); }
+        vtd_close(d);
+        vte_close(e);
+        cs_close(s[0..CS_LEN]);
+        return all;
+    }
+    if (hloss != 0) {
+        // the other side lost parts on their way here: the gate and the key frame requests must have brought it back
+        all = ckh_check("both ends agreed on H.264", cs_vh_stat(v, CS_H_MODE) == @as(u64, VN_H264)) and all;
+        all = ckh_check("losses seen, frames held back and key frames asked for", cs_vh_stat(v, CS_H_RX_LOST) + cs_vh_stat(v, CS_H_RX_DROPPED) > 0 and cs_vh_stat(v, CS_H_KREQ_TX) > 0) and all;
+        all = ckh_check("it came back: at least 20 pictures a second on average", nsec >= 5 and avg10 >= 200) and all;
+        all = ckh_check("no decoder refusal (a broken frame is never decoded)", vtd_errors(d) + cs_vh_stat(v, CS_H_DEC_ERR) == 0) and all;
+        all = ckh_check("the sound kept flowing (490+ of 500 frames accepted in every 5 counted seconds)", nsec >= 5 and acc_min >= 490) and all;
+        if (last_pb != 0) { vt_pb_release(last_pb); }
+        vtd_close(d);
+        vte_close(e);
+        cs_close(s[0..CS_LEN]);
+        return all;
+    }
     all = ckh_check("both ends agreed on H.264", cs_vh_stat(v, CS_H_MODE) == @as(u64, VN_H264)) and all;
     all = ckh_check("at least 28 pictures a second on average", nsec >= 5 and avg10 >= 280) and all;
     all = ckh_check("at least 25 a second in the slowest 5 seconds", nsec >= 5 and wmin >= 125) and all;
