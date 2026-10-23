@@ -214,14 +214,14 @@ fn kh_row_key(row: usize, key: []u8) -> usize {
     if (row == 0) { return kc_get_n(P_OPENROUTER, 0, key); }
     if (row == 1) { return kc_get_n(P_ZAI, 0, key); }
     if (row != 2) { return 0; }
-    var st : [260]u32 = undefined;
+    var st : [964]u32 = undefined;
     var json : [8192]u8 = undefined;
     var offs : [64]u32 = undefined;
     var lens : [64]u32 = undefined;
-    const listed : u32 = nv_load(st[0..260], json[0..8192], offs[0..64], lens[0..64]);
+    const listed : u32 = nv_load(st[0..964], json[0..8192], offs[0..64], lens[0..64]);
     var n : usize = 0;
     if (listed != NV_BAD and listed > 0) {
-        const k : u32 = nv_pick(st[0..260]);
+        const k : u32 = nv_pick(st[0..964]);
         if (k != NV_NONE) {
             const o : usize = @as(usize, offs[k]);
             const l : usize = @as(usize, lens[k]);

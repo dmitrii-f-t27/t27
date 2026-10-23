@@ -44,8 +44,10 @@ pub const NV_MAX : u32 = 64;
 pub const NV_KEY_MAX : u32 = 128;
 /// The bytes the host reads from the Keychain item (34 keys measured 2527 bytes).
 pub const NV_JSON_CAP : u32 = 8192;
-/// Seconds a check waits for an answer: the slowest measured 200 took 13.5 s.
-pub const NV_TIMEOUT_S : u32 = 20;
+/// Seconds one request waits for an answer. Measured 2026-10-23: the same request took 0.78, 2.71 and 24.83 s on
+/// three keys, and the 24.83 s key answered 0.82 and 1.36 s when asked again: a slow route, not a slow key. A
+/// longer wait holds the answer for that long; 15 s keeps the slowest measured 200 (13.5 s) and drops the hang.
+pub const NV_TIMEOUT_S : u32 = 15;
 /// The prefix every NVIDIA API key has.
 pub const NV_PREFIX : str = "nvapi-";
 
@@ -54,13 +56,35 @@ pub const NV_S_N : usize = 0;
 pub const NV_S_CUR : usize = 1;
 pub const NV_S_HASH : usize = 2;
 pub const NV_HDR : usize = 4;
-pub const NV_STRIDE : usize = 4;
+pub const NV_STRIDE : usize = 15;
 pub const NV_K_FLAGS : usize = 0;
 pub const NV_K_OK : usize = 1;
 pub const NV_K_RATE : usize = 2;
 pub const NV_K_AUTH : usize = 3;
-pub const NV_ST_LEN : usize = 260;
+/// The last answer time in ms (0: never answered), how many samples the window holds, where the next one goes,
+/// then the window itself: the last NV_LAT_WIN answer times.
+pub const NV_K_LAST : usize = 4;
+pub const NV_K_LCNT : usize = 5;
+pub const NV_K_LHEAD : usize = 6;
+pub const NV_K_LAT : usize = 7;
+pub const NV_LAT_WIN : usize = 8;
+/// The fields of a v1 state file (counters only).
+pub const NV_STRIDE_V1 : usize = 4;
+pub const NV_ST_LEN : usize = 964;
 pub const NV_F_DEAD : u32 = 1;
+/// Set by a 429, cleared by a 2xx: the key goes last until it answers again.
+pub const NV_F_RATED : u32 = 2;
+/// A sample is cut here; a request with no answer counts as this (the timeout).
+pub const NV_LAT_CAP : u32 = 15000;
+/// A key whose median is over this goes after every key that is not, and after the keys never measured.
+pub const NV_SLOW_MS : u32 = 5000;
+/// Medians in the same step of this many ms are equal: the pick goes round them instead of always the same key.
+pub const NV_LAT_STEP : u32 = 100;
+/// The order tiers of nv_rank: measured and fast, never measured, slow, rate limited.
+pub const NV_T_FAST : u32 = 0;
+pub const NV_T_NEW : u32 = 1;
+pub const NV_T_SLOW : u32 = 2;
+pub const NV_T_RATED : u32 = 3;
 /// Counters stop here rather than wrap.
 pub const NV_COUNT_CAP : u32 = 999999999;
 
@@ -278,7 +302,8 @@ fn nv_at(i: u32, field: usize) -> usize {
     return NV_HDR + @as(usize, i) * NV_STRIDE + field;
 }
 
-/// A clean state for a list of n keys (n is cut at NV_MAX) named by `hash`; key 0 goes first.
+/// A clean state for a list of n keys (n is cut at NV_MAX) named by `hash`; key 0 goes first (the pick goes round
+/// from the key after the current one, so the current one starts as the last).
 pub fn nv_state_init(st: []u32, n: u32, hash: u32) -> void {
     var i : usize = 0;
     while (i < st.len) {
@@ -289,6 +314,7 @@ pub fn nv_state_init(st: []u32, n: u32, hash: u32) -> void {
     if (m > NV_MAX) { m = NV_MAX; }
     st[NV_S_N] = m;
     st[NV_S_HASH] = hash;
+    if (m > 0) { st[NV_S_CUR] = m - 1; }
 }
 
 pub fn nv_dead(st: []const u32, i: u32) -> bool {
@@ -320,46 +346,122 @@ fn nv_live_from(st: []const u32, from: u32) -> u32 {
     return NV_NONE;
 }
 
-/// The key the next request uses: the current one, or the first live key after it.
+// ---- answer times --------------------------------------------------------------------------------------
+
+/// The median of key i's window (the last NV_LAT_WIN answer times, ms); 0 when it holds none. The samples are
+/// copied and put in order by insertion (at most 8 of them); an even count takes the mean of the middle two.
+pub fn nv_median(st: []const u32, i: u32) -> u32 {
+    if (i >= st[NV_S_N]) { return 0; }
+    var c : usize = @as(usize, st[nv_at(i, NV_K_LCNT)]);
+    if (c > NV_LAT_WIN) { c = NV_LAT_WIN; }
+    if (c == 0) { return 0; }
+    const head : usize = @as(usize, st[nv_at(i, NV_K_LHEAD)]) % NV_LAT_WIN;
+    var a : [8]u32 = undefined;
+    var j : usize = 0;
+    while (j < c) {
+        const v : u32 = st[nv_at(i, NV_K_LAT + (head + NV_LAT_WIN - c + j) % NV_LAT_WIN)];
+        var p : usize = j;
+        while (p > 0 and a[p - 1] > v) {
+            a[p] = a[p - 1];
+            p = p - 1;
+        }
+        a[p] = v;
+        j = j + 1;
+    }
+    if (c % 2 == 1) { return a[c / 2]; }
+    return (a[c / 2 - 1] + a[c / 2]) / 2;
+}
+
+/// Put one answer time of key i into its window (the oldest of 8 drops out) and as its last time; cut at NV_LAT_CAP.
+pub fn nv_lat_note(st: []u32, i: u32, ms: u32) -> void {
+    if (i >= st[NV_S_N]) { return; }
+    var v : u32 = ms;
+    if (v > NV_LAT_CAP) { v = NV_LAT_CAP; }
+    const head : usize = @as(usize, st[nv_at(i, NV_K_LHEAD)]) % NV_LAT_WIN;
+    st[nv_at(i, NV_K_LAT + head)] = v;
+    st[nv_at(i, NV_K_LHEAD)] = @as(u32, @intCast((head + 1) % NV_LAT_WIN));
+    if (st[nv_at(i, NV_K_LCNT)] < @as(u32, @intCast(NV_LAT_WIN))) { st[nv_at(i, NV_K_LCNT)] = st[nv_at(i, NV_K_LCNT)] + 1; }
+    st[nv_at(i, NV_K_LAST)] = v;
+}
+
+/// Key i's place in the order, smaller first: the tier (fast, never measured, slow over NV_SLOW_MS, rate
+/// limited) times 1000, plus the median in NV_LAT_STEP steps for a measured key.
+pub fn nv_rank(st: []const u32, i: u32) -> u32 {
+    if ((st[nv_at(i, NV_K_FLAGS)] / NV_F_RATED) % 2 == 1) { return NV_T_RATED * 1000; }
+    if (st[nv_at(i, NV_K_LCNT)] == 0) { return NV_T_NEW * 1000; }
+    const m : u32 = nv_median(st, i);
+    if (m > NV_SLOW_MS) { return NV_T_SLOW * 1000 + m / NV_LAT_STEP; }
+    return NV_T_FAST * 1000 + m / NV_LAT_STEP;
+}
+
+/// The key the next request uses: the live key of the smallest nv_rank (the smallest median); among equal ranks
+/// the first after the current key, going round, so equal keys take turns. NV_NONE when none is live.
 pub fn nv_pick(st: []const u32) -> u32 {
-    return nv_live_from(st, st[NV_S_CUR]);
+    const n : u32 = st[NV_S_N];
+    if (n == 0) { return NV_NONE; }
+    var best : u32 = NV_NONE;
+    var br : u32 = 0;
+    var j : u32 = 1;
+    while (j <= n) {
+        const k : u32 = (st[NV_S_CUR] + j) % n;
+        if (nv_dead(st, k) == false) {
+            const r : u32 = nv_rank(st, k);
+            if (best == NV_NONE or r < br) {
+                best = k;
+                br = r;
+            }
+        }
+        j = j + 1;
+    }
+    return best;
 }
 
 fn nv_bump(st: []u32, at: usize) -> void {
     if (st[at] < NV_COUNT_CAP) { st[at] = st[at] + 1; }
 }
 
-/// Fold the HTTP status of a request sent with key i into the state, and say what it did:
-///   2xx      the key stays current                                   NV_A_OK
-///   401/403  the key is dead for good, the next live key is current  NV_A_DEAD
-///   429      the next live key is current (this one stays live)      NV_A_NEXT
-///   404      the model is not deployed for this account; no key moves NV_A_MODEL
-///   0        no answer (network, timeout); no key moves              NV_A_NET
-///   other    a server error; no key moves                            NV_A_RETRY
+/// Fold the HTTP status of a request sent with key i into the state, and say what it did. Key i becomes the
+/// current key in every case that moves one, so the next pick among equal keys starts after it.
+///   2xx      the key is current, a rate limit mark is cleared          NV_A_OK
+///   401/403  the key is dead for good                                  NV_A_DEAD
+///   429      the key is marked rate limited and goes last (stays live) NV_A_NEXT
+///   404      the model is not deployed for this account; no key moves  NV_A_MODEL
+///   0        no answer (network, timeout); no key moves                NV_A_NET
+///   other    a server error; no key moves                              NV_A_RETRY
 pub fn nv_on_status(st: []u32, i: u32, code: u32) -> u32 {
     const n : u32 = st[NV_S_N];
     if (i >= n) { return NV_A_NONE; }
+    const fl : usize = nv_at(i, NV_K_FLAGS);
     if (code >= 200 and code < 300) {
         nv_bump(st, nv_at(i, NV_K_OK));
+        if ((st[fl] / NV_F_RATED) % 2 == 1) { st[fl] = st[fl] - NV_F_RATED; }
         st[NV_S_CUR] = i;
         return NV_A_OK;
     }
     if (code == 401 or code == 403) {
-        st[nv_at(i, NV_K_FLAGS)] = st[nv_at(i, NV_K_FLAGS)] | NV_F_DEAD;
+        st[fl] = st[fl] | NV_F_DEAD;
         nv_bump(st, nv_at(i, NV_K_AUTH));
-        const nx : u32 = nv_live_from(st, (i + 1) % n);
-        if (nx != NV_NONE) { st[NV_S_CUR] = nx; }
+        st[NV_S_CUR] = i;
         return NV_A_DEAD;
     }
     if (code == 429) {
         nv_bump(st, nv_at(i, NV_K_RATE));
-        const nr : u32 = nv_live_from(st, (i + 1) % n);
-        if (nr != NV_NONE) { st[NV_S_CUR] = nr; }
+        st[fl] = st[fl] | NV_F_RATED;
+        st[NV_S_CUR] = i;
         return NV_A_NEXT;
     }
     if (code == 404) { return NV_A_MODEL; }
     if (code == 0) { return NV_A_NET; }
     return NV_A_RETRY;
+}
+
+/// nv_on_status, and the answer time `ms` into key i's window: a 2xx puts its own time, no answer (0, the
+/// timeout) puts NV_LAT_CAP; every other answer (404, 429, 401/403, 5xx) leaves the window as it was.
+pub fn nv_on_answer(st: []u32, i: u32, code: u32, ms: u32) -> u32 {
+    const act : u32 = nv_on_status(st, i, code);
+    if (act == NV_A_OK) { nv_lat_note(st, i, ms); }
+    if (act == NV_A_NET) { nv_lat_note(st, i, NV_LAT_CAP); }
+    return act;
 }
 
 // ---- models --------------------------------------------------------------------------------------------
@@ -422,10 +524,10 @@ pub fn nv_probe_body(model: []const u8, out: []u8) -> usize {
 
 // ---- the state file ------------------------------------------------------------------------------------
 
-/// The state as text (out needs 64 + 44 per key): "nvidia-state v1 <n> <hash> <cur>" then one line per key,
-/// "<flags> <ok> <rate> <auth>". No key and no part of one.
+/// The state as text (out needs 64 + 100 per key): "nvidia-state v2 <n> <hash> <cur>" then one line per key,
+/// "<flags> <ok> <rate> <auth> <last ms> <samples> <next slot> <8 window ms>". No key and no part of one.
 pub fn nv_state_text(st: []const u32, out: []u8) -> usize {
-    var n : usize = put_bytes(out, 0, "nvidia-state v1 ");
+    var n : usize = put_bytes(out, 0, "nvidia-state v2 ");
     n = put_dec(out, n, @as(u64, st[NV_S_N]));
     out[n] = 32;
     n = put_dec(out, n + 1, @as(u64, st[NV_S_HASH]));
@@ -463,11 +565,28 @@ fn nv_num(text: []const u8, at: usize, v: []u32) -> usize {
     return i;
 }
 
+/// Can field f of a saved key line hold v? Flags are DEAD and RATED only; a window count is at most NV_LAT_WIN,
+/// its next slot under it; answer times are at most NV_LAT_CAP. Anything else marks the file as broken.
+fn nv_field_ok(f: usize, v: u32) -> bool {
+    if (f == NV_K_FLAGS) { return v <= (NV_F_DEAD | NV_F_RATED); }
+    if (f == NV_K_LCNT) { return v <= @as(u32, @intCast(NV_LAT_WIN)); }
+    if (f == NV_K_LHEAD) { return v < @as(u32, @intCast(NV_LAT_WIN)); }
+    if (f == NV_K_LAST or f >= NV_K_LAT) { return v <= NV_LAT_CAP; }
+    return true;
+}
+
 /// Load a saved state for the list now in the Keychain (n keys, named by hash). True when the text is a
-/// whole state of that same list; otherwise st is a clean state for the list and false comes back.
+/// whole state of that same list; otherwise st is a clean state for the list and false comes back. A v1 file
+/// (counters only, before answer times were kept) is read with empty windows; a field out of its range
+/// (nv_field_ok) makes the file broken.
 pub fn nv_state_load(text: []const u8, n: u32, hash: u32, st: []u32) -> bool {
     nv_state_init(st, n, hash);
-    if (begins_with(text, "nvidia-state v1 ") == false) { return false; }
+    var fields : usize = NV_STRIDE;
+    if (begins_with(text, "nvidia-state v1 ")) {
+        fields = NV_STRIDE_V1;
+    } else if (begins_with(text, "nvidia-state v2 ") == false) {
+        return false;
+    }
     var v : [2]u32 = undefined;
     var i : usize = nv_num(text, 16, v[0..2]);
     if (i > text.len or v[0] != st[NV_S_N]) { return false; }
@@ -476,7 +595,7 @@ pub fn nv_state_load(text: []const u8, n: u32, hash: u32, st: []u32) -> bool {
     i = nv_num(text, i, v[0..2]);
     if (i > text.len) { return false; }
     var cur : u32 = v[0];
-    var tmp : [260]u32 = undefined;
+    var tmp : [964]u32 = undefined;
     var z : usize = 0;
     while (z < NV_ST_LEN) {
         tmp[z] = 0;
@@ -485,9 +604,9 @@ pub fn nv_state_load(text: []const u8, n: u32, hash: u32, st: []u32) -> bool {
     var k : u32 = 0;
     while (k < st[NV_S_N]) {
         var f : usize = 0;
-        while (f < NV_STRIDE) {
+        while (f < fields) {
             i = nv_num(text, i, v[0..2]);
-            if (i > text.len) { return false; }
+            if (i > text.len or nv_field_ok(f, v[0]) == false) { return false; }
             tmp[nv_at(k, f)] = v[0];
             f = f + 1;
         }
@@ -648,63 +767,63 @@ test the_list_hash_follows_the_keys_and_their_order {
     assert nv_list_hash(c, o[0..64], l[0..64], 2) != ha;
 }
 
-test the_pick_starts_at_the_current_key_and_skips_the_dead {
-    var st : [260]u32 = undefined;
-    nv_state_init(st[0..260], 4, 7);
-    assert nv_pick(st[0..260]) == 0;
+test the_pick_goes_round_from_the_key_after_the_current_one_and_skips_the_dead {
+    var st : [964]u32 = undefined;
+    nv_state_init(st[0..964], 4, 7);
+    assert nv_pick(st[0..964]) == 0;
     st[nv_at(0, NV_K_FLAGS)] = NV_F_DEAD;
     st[nv_at(1, NV_K_FLAGS)] = NV_F_DEAD;
-    assert nv_pick(st[0..260]) == 2;
-    st[NV_S_CUR] = 3;
-    assert nv_pick(st[0..260]) == 3;
+    assert nv_pick(st[0..964]) == 2;
+    st[NV_S_CUR] = 2;
+    assert nv_pick(st[0..964]) == 3;
     st[nv_at(3, NV_K_FLAGS)] = NV_F_DEAD;
-    assert nv_pick(st[0..260]) == 2;
+    assert nv_pick(st[0..964]) == 2;
     st[nv_at(2, NV_K_FLAGS)] = NV_F_DEAD;
-    assert nv_pick(st[0..260]) == NV_NONE;
-    assert nv_live(st[0..260]) == 0;
-    nv_state_init(st[0..260], 0, 0);
-    assert nv_pick(st[0..260]) == NV_NONE;
+    assert nv_pick(st[0..964]) == NV_NONE;
+    assert nv_live(st[0..964]) == 0;
+    nv_state_init(st[0..964], 0, 0);
+    assert nv_pick(st[0..964]) == NV_NONE;
 }
 
 test a_refused_key_dies_and_the_next_live_key_goes_next {
-    var st : [260]u32 = undefined;
-    nv_state_init(st[0..260], 3, 1);
-    assert nv_on_status(st[0..260], 0, 401) == NV_A_DEAD;
-    assert nv_dead(st[0..260], 0) and nv_pick(st[0..260]) == 1;
-    assert nv_on_status(st[0..260], 1, 403) == NV_A_DEAD;
-    assert nv_pick(st[0..260]) == 2 and nv_live(st[0..260]) == 1;
+    var st : [964]u32 = undefined;
+    nv_state_init(st[0..964], 3, 1);
+    assert nv_on_status(st[0..964], 0, 401) == NV_A_DEAD;
+    assert nv_dead(st[0..964], 0) and nv_pick(st[0..964]) == 1;
+    assert nv_on_status(st[0..964], 1, 403) == NV_A_DEAD;
+    assert nv_pick(st[0..964]) == 2 and nv_live(st[0..964]) == 1;
     assert st[nv_at(1, NV_K_AUTH)] == 1;
     // a dead key never comes back by an answer to another key
-    assert nv_on_status(st[0..260], 2, 200) == NV_A_OK;
-    assert nv_dead(st[0..260], 0) and nv_dead(st[0..260], 1) and nv_pick(st[0..260]) == 2;
+    assert nv_on_status(st[0..964], 2, 200) == NV_A_OK;
+    assert nv_dead(st[0..964], 0) and nv_dead(st[0..964], 1) and nv_pick(st[0..964]) == 2;
 }
 
 test a_rate_limit_moves_to_the_next_key_and_keeps_this_one_live {
-    var st : [260]u32 = undefined;
-    nv_state_init(st[0..260], 3, 1);
+    var st : [964]u32 = undefined;
+    nv_state_init(st[0..964], 3, 1);
     st[NV_S_CUR] = 2;
-    assert nv_on_status(st[0..260], 2, 429) == NV_A_NEXT;
-    assert nv_pick(st[0..260]) == 0;
-    assert nv_dead(st[0..260], 2) == false and st[nv_at(2, NV_K_RATE)] == 1;
+    assert nv_on_status(st[0..964], 2, 429) == NV_A_NEXT;
+    assert nv_pick(st[0..964]) == 0;
+    assert nv_dead(st[0..964], 2) == false and st[nv_at(2, NV_K_RATE)] == 1;
     // the only live key stays current after a 429
     st[nv_at(0, NV_K_FLAGS)] = NV_F_DEAD;
     st[nv_at(1, NV_K_FLAGS)] = NV_F_DEAD;
     st[NV_S_CUR] = 2;
-    assert nv_on_status(st[0..260], 2, 429) == NV_A_NEXT;
-    assert nv_pick(st[0..260]) == 2;
+    assert nv_on_status(st[0..964], 2, 429) == NV_A_NEXT;
+    assert nv_pick(st[0..964]) == 2;
 }
 
 test model_network_and_server_errors_move_no_key {
-    var st : [260]u32 = undefined;
-    nv_state_init(st[0..260], 2, 1);
+    var st : [964]u32 = undefined;
+    nv_state_init(st[0..964], 2, 1);
     st[NV_S_CUR] = 1;
-    assert nv_on_status(st[0..260], 1, 404) == NV_A_MODEL;
-    assert nv_on_status(st[0..260], 1, 0) == NV_A_NET;
-    assert nv_on_status(st[0..260], 1, 500) == NV_A_RETRY;
-    assert nv_on_status(st[0..260], 1, 503) == NV_A_RETRY;
-    assert nv_pick(st[0..260]) == 1 and nv_live(st[0..260]) == 2;
-    assert nv_on_status(st[0..260], 5, 401) == NV_A_NONE;
-    assert nv_on_status(st[0..260], 1, 200) == NV_A_OK and st[nv_at(1, NV_K_OK)] == 1;
+    assert nv_on_status(st[0..964], 1, 404) == NV_A_MODEL;
+    assert nv_on_status(st[0..964], 1, 0) == NV_A_NET;
+    assert nv_on_status(st[0..964], 1, 500) == NV_A_RETRY;
+    assert nv_on_status(st[0..964], 1, 503) == NV_A_RETRY;
+    assert st[NV_S_CUR] == 1 and nv_live(st[0..964]) == 2;
+    assert nv_on_status(st[0..964], 5, 401) == NV_A_NONE;
+    assert nv_on_status(st[0..964], 1, 200) == NV_A_OK and st[nv_at(1, NV_K_OK)] == 1;
 }
 
 test the_dead_model_is_never_sent {
@@ -736,44 +855,44 @@ test the_short_model_name_drops_the_vendor_and_the_sizes {
 }
 
 test the_state_survives_a_restart_of_the_same_list_only {
-    var st : [260]u32 = undefined;
-    nv_state_init(st[0..260], 3, 77);
-    nv_on_status(st[0..260], 0, 403);
-    nv_on_status(st[0..260], 1, 429);
-    nv_on_status(st[0..260], 2, 200);
-    nv_on_status(st[0..260], 2, 200);
+    var st : [964]u32 = undefined;
+    nv_state_init(st[0..964], 3, 77);
+    nv_on_status(st[0..964], 0, 403);
+    nv_on_status(st[0..964], 1, 429);
+    nv_on_answer(st[0..964], 2, 200, 800);
+    nv_on_answer(st[0..964], 2, 200, 900);
     var t : [400]u8 = undefined;
-    const n : usize = nv_state_text(st[0..260], t[0..400]);
-    assert begins_with(t[0..n], "nvidia-state v1 3 77 2\n1 0 0 1\n0 0 1 0\n0 2 0 0\n");
-    var back : [260]u32 = undefined;
-    assert nv_state_load(t[0..n], 3, 77, back[0..260]);
-    assert nv_pick(back[0..260]) == 2 and nv_live(back[0..260]) == 2 and back[nv_at(2, NV_K_OK)] == 2;
-    assert nv_dead(back[0..260], 0);
+    const n : usize = nv_state_text(st[0..964], t[0..400]);
+    assert same_bytes(t[0..n], "nvidia-state v2 3 77 2\n1 0 0 1 0 0 0 0 0 0 0 0 0 0 0\n2 0 1 0 0 0 0 0 0 0 0 0 0 0 0\n0 2 0 0 900 2 2 800 900 0 0 0 0 0 0\n");
+    var back : [964]u32 = undefined;
+    assert nv_state_load(t[0..n], 3, 77, back[0..964]);
+    assert nv_pick(back[0..964]) == 2 and nv_live(back[0..964]) == 2 and back[nv_at(2, NV_K_OK)] == 2;
+    assert nv_dead(back[0..964], 0);
     // another list (count or hash) or a cut file starts clean
-    assert nv_state_load(t[0..n], 4, 77, back[0..260]) == false;
-    assert nv_live(back[0..260]) == 4 and nv_pick(back[0..260]) == 0;
-    assert nv_state_load(t[0..n], 3, 78, back[0..260]) == false;
-    assert nv_state_load(t[0 .. n - 6], 3, 77, back[0..260]) == false;
-    assert nv_live(back[0..260]) == 3;
-    assert nv_state_load("", 3, 77, back[0..260]) == false;
+    assert nv_state_load(t[0..n], 4, 77, back[0..964]) == false;
+    assert nv_live(back[0..964]) == 4 and nv_pick(back[0..964]) == 0;
+    assert nv_state_load(t[0..n], 3, 78, back[0..964]) == false;
+    assert nv_state_load(t[0 .. n - 6], 3, 77, back[0..964]) == false;
+    assert nv_live(back[0..964]) == 3;
+    assert nv_state_load("", 3, 77, back[0..964]) == false;
 }
 
 test the_status_line_reads_the_numbers_from_the_state {
-    var st : [260]u32 = undefined;
+    var st : [964]u32 = undefined;
     var o : [96]u8 = undefined;
-    nv_state_init(st[0..260], 34, 5);
-    nv_on_status(st[0..260], 7, 401);
-    var n : usize = nv_status_line(st[0..260], 34, NV_MODEL_DEFAULT, o[0..96]);
+    nv_state_init(st[0..964], 34, 5);
+    nv_on_status(st[0..964], 7, 401);
+    var n : usize = nv_status_line(st[0..964], 34, NV_MODEL_DEFAULT, o[0..96]);
     assert same_bytes(o[0..n], "NVIDIA: 34 keys, 33 live, model nemotron-3-ultra");
-    n = nv_status_line(st[0..260], 34, "deepseek-ai/deepseek-v4.1-flash", o[0..96]);
+    n = nv_status_line(st[0..964], 34, "deepseek-ai/deepseek-v4.1-flash", o[0..96]);
     assert same_bytes(o[0..n], "NVIDIA: 34 keys, 33 live, model nemotron-3-ultra");
-    nv_state_init(st[0..260], 1, 5);
-    n = nv_status_line(st[0..260], 1, NV_MODEL_DEFAULT, o[0..96]);
+    nv_state_init(st[0..964], 1, 5);
+    n = nv_status_line(st[0..964], 1, NV_MODEL_DEFAULT, o[0..96]);
     assert same_bytes(o[0..n], "NVIDIA: 1 key, 1 live, model nemotron-3-ultra");
-    nv_state_init(st[0..260], 0, 0);
-    n = nv_status_line(st[0..260], 0, NV_MODEL_DEFAULT, o[0..96]);
+    nv_state_init(st[0..964], 0, 0);
+    n = nv_status_line(st[0..964], 0, NV_MODEL_DEFAULT, o[0..96]);
     assert same_bytes(o[0..n], "NVIDIA: no keys (Keychain nvidia-api-keys)");
-    n = nv_status_line(st[0..260], NV_BAD, NV_MODEL_DEFAULT, o[0..96]);
+    n = nv_status_line(st[0..964], NV_BAD, NV_MODEL_DEFAULT, o[0..96]);
     assert same_bytes(o[0..n], "NVIDIA: key list unreadable (Keychain nvidia-api-keys)");
     assert NV_CHAT_URL.len > 0;
 }
@@ -932,22 +1051,22 @@ test nv_take_refuses_a_key_over_the_length_cap_and_a_full_table {
 }
 
 test nv_live_from_wraps_round_and_skips_dead_keys {
-    var st : [260]u32 = undefined;
-    nv_state_init(st[0..260], 4, 1);
-    assert nv_live_from(st[0..260], 0) == 0;
+    var st : [964]u32 = undefined;
+    nv_state_init(st[0..964], 4, 1);
+    assert nv_live_from(st[0..964], 0) == 0;
     st[nv_at(1, NV_K_FLAGS)] = NV_F_DEAD;
     st[nv_at(2, NV_K_FLAGS)] = NV_F_DEAD;
-    assert nv_live_from(st[0..260], 1) == 3;
-    assert nv_live_from(st[0..260], 3) == 3;
+    assert nv_live_from(st[0..964], 1) == 3;
+    assert nv_live_from(st[0..964], 3) == 3;
     // the start index wraps modulo the count
-    assert nv_live_from(st[0..260], 4) == 0;
-    assert nv_live_from(st[0..260], 6) == 3;
+    assert nv_live_from(st[0..964], 4) == 0;
+    assert nv_live_from(st[0..964], 6) == 3;
     st[nv_at(0, NV_K_FLAGS)] = NV_F_DEAD;
-    assert nv_live_from(st[0..260], 1) == 3;
+    assert nv_live_from(st[0..964], 1) == 3;
     st[nv_at(3, NV_K_FLAGS)] = NV_F_DEAD;
-    assert nv_live_from(st[0..260], 0) == NV_NONE;
-    nv_state_init(st[0..260], 0, 1);
-    assert nv_live_from(st[0..260], 0) == NV_NONE;
+    assert nv_live_from(st[0..964], 0) == NV_NONE;
+    nv_state_init(st[0..964], 0, 1);
+    assert nv_live_from(st[0..964], 0) == NV_NONE;
 }
 
 test nv_bump_counts_up_and_stops_at_the_cap {
@@ -997,4 +1116,175 @@ test nv_take_trims_a_leading_tab_as_well_as_spaces {
     r[0] = 0; r[1] = 0;
     assert nv_take(" \x09nvapi-test-9", 0, 14, o[0..4], l[0..4], 0, r[0..2]) == 1;
     assert o[0] == 2 and l[0] == 12 and r[1] == 0;
+}
+
+// ---- answer times and the fast pick (fake times only) ---------------------------------------------------
+
+fn nv_t_window(st: []const u32, i: u32) -> u32 {
+    return st[nv_at(i, NV_K_LCNT)];
+}
+
+test one_request_waits_15_s_and_no_answer_counts_as_15000_ms {
+    assert NV_TIMEOUT_S == 15;
+    assert NV_LAT_CAP == NV_TIMEOUT_S * 1000;
+    var st : [964]u32 = undefined;
+    nv_state_init(st[0..964], 2, 1);
+    assert nv_on_answer(st[0..964], 0, 0, 3) == NV_A_NET;
+    assert st[nv_at(0, NV_K_LAST)] == 15000 and nv_median(st[0..964], 0) == 15000;
+    // a 2xx slower than the cap is cut at it
+    assert nv_on_answer(st[0..964], 1, 200, 24830) == NV_A_OK;
+    assert st[nv_at(1, NV_K_LAST)] == 15000 and nv_median(st[0..964], 1) == 15000;
+}
+
+test the_fast_key_of_three_is_picked_whatever_the_current_key {
+    var st : [964]u32 = undefined;
+    nv_state_init(st[0..964], 3, 1);
+    nv_on_answer(st[0..964], 0, 200, 2710);
+    nv_on_answer(st[0..964], 1, 200, 780);
+    nv_on_answer(st[0..964], 2, 200, 4600);
+    st[NV_S_CUR] = 0;
+    assert nv_pick(st[0..964]) == 1;
+    st[NV_S_CUR] = 1;
+    assert nv_pick(st[0..964]) == 1;
+    st[NV_S_CUR] = 2;
+    assert nv_pick(st[0..964]) == 1;
+    // its answers keep it first; a slower answer that lifts its median past key 0 moves the pick
+    assert nv_on_answer(st[0..964], 1, 200, 820) == NV_A_OK and nv_pick(st[0..964]) == 1;
+    nv_on_answer(st[0..964], 1, 200, 9000);
+    nv_on_answer(st[0..964], 1, 200, 9000);
+    assert nv_median(st[0..964], 1) == 4910 and nv_pick(st[0..964]) == 0;
+}
+
+test equal_medians_take_turns {
+    var st : [964]u32 = undefined;
+    nv_state_init(st[0..964], 3, 1);
+    nv_on_answer(st[0..964], 0, 200, 800);
+    nv_on_answer(st[0..964], 1, 200, 850);
+    nv_on_answer(st[0..964], 2, 200, 820);
+    // 800, 850 and 820 are one 100 ms step: equal
+    assert nv_rank(st[0..964], 0) == nv_rank(st[0..964], 1) and nv_rank(st[0..964], 1) == nv_rank(st[0..964], 2);
+    var seen : [4]u32 = undefined;
+    var r : usize = 0;
+    while (r < 4) {
+        const k : u32 = nv_pick(st[0..964]);
+        seen[r] = k;
+        nv_on_answer(st[0..964], k, 200, 810);
+        r = r + 1;
+    }
+    assert seen[0] == 0 and seen[1] == 1 and seen[2] == 2 and seen[3] == 0;
+}
+
+test slow_keys_go_last_after_the_new_ones {
+    var st : [964]u32 = undefined;
+    nv_state_init(st[0..964], 4, 1);
+    nv_on_answer(st[0..964], 0, 200, 6000);
+    nv_on_answer(st[0..964], 2, 200, 4900);
+    nv_on_answer(st[0..964], 3, 200, 14000);
+    st[NV_S_CUR] = 3;
+    assert nv_rank(st[0..964], 0) > nv_rank(st[0..964], 1);
+    assert nv_pick(st[0..964]) == 2;
+    st[nv_at(2, NV_K_FLAGS)] = NV_F_DEAD;
+    // never measured before slow
+    assert nv_pick(st[0..964]) == 1;
+    st[nv_at(1, NV_K_FLAGS)] = NV_F_DEAD;
+    // of two slow keys the less slow one
+    assert nv_pick(st[0..964]) == 0;
+    // a rate limited key goes after the slow ones
+    assert nv_on_answer(st[0..964], 0, 429, 300) == NV_A_NEXT;
+    assert nv_pick(st[0..964]) == 3;
+    assert nv_on_answer(st[0..964], 0, 200, 6000) == NV_A_OK and nv_pick(st[0..964]) == 0;
+}
+
+test the_route_that_hung_once_comes_back_when_it_answers_fast {
+    // measured 2026-10-23: one key 24.83 s, then 0.82 and 1.36 s on the same key
+    var st : [964]u32 = undefined;
+    nv_state_init(st[0..964], 2, 1);
+    nv_on_answer(st[0..964], 0, 200, 24830);
+    nv_on_answer(st[0..964], 1, 200, 2710);
+    assert nv_pick(st[0..964]) == 1;
+    nv_on_answer(st[0..964], 0, 200, 820);
+    nv_on_answer(st[0..964], 0, 200, 1360);
+    assert nv_median(st[0..964], 0) == 1360 and nv_pick(st[0..964]) == 0;
+}
+
+test the_median_keeps_the_last_8_answers {
+    var st : [964]u32 = undefined;
+    nv_state_init(st[0..964], 1, 1);
+    assert nv_median(st[0..964], 0) == 0 and nv_rank(st[0..964], 0) == NV_T_NEW * 1000;
+    nv_lat_note(st[0..964], 0, 900);
+    assert nv_median(st[0..964], 0) == 900;
+    nv_lat_note(st[0..964], 0, 100);
+    assert nv_median(st[0..964], 0) == 500;
+    nv_lat_note(st[0..964], 0, 300);
+    assert nv_median(st[0..964], 0) == 300;
+    nv_lat_note(st[0..964], 0, 700);
+    nv_lat_note(st[0..964], 0, 500);
+    nv_lat_note(st[0..964], 0, 200);
+    nv_lat_note(st[0..964], 0, 800);
+    nv_lat_note(st[0..964], 0, 600);
+    // 900 100 300 700 500 200 800 600: the middle two are 500 and 600
+    assert nv_t_window(st[0..964], 0) == 8 and nv_median(st[0..964], 0) == 550;
+    // the ninth pushes out the first (900): 100 200 300 500 600 700 800 50
+    nv_lat_note(st[0..964], 0, 50);
+    assert nv_t_window(st[0..964], 0) == 8 and nv_median(st[0..964], 0) == 400;
+    assert st[nv_at(0, NV_K_LAST)] == 50 and st[nv_at(0, NV_K_LHEAD)] == 1;
+    // eight more replace the whole window
+    var r : usize = 0;
+    while (r < 8) {
+        nv_lat_note(st[0..964], 0, 3000);
+        r = r + 1;
+    }
+    assert nv_median(st[0..964], 0) == 3000 and nv_t_window(st[0..964], 0) == 8;
+    nv_lat_note(st[0..964], 7, 10);
+    assert nv_median(st[0..964], 7) == 0;
+}
+
+test errors_other_than_no_answer_leave_the_median {
+    var st : [964]u32 = undefined;
+    nv_state_init(st[0..964], 2, 1);
+    nv_on_answer(st[0..964], 0, 200, 700);
+    assert nv_on_answer(st[0..964], 0, 500, 14000) == NV_A_RETRY;
+    assert nv_on_answer(st[0..964], 0, 503, 14000) == NV_A_RETRY;
+    assert nv_on_answer(st[0..964], 0, 404, 14000) == NV_A_MODEL;
+    assert nv_on_answer(st[0..964], 0, 429, 14000) == NV_A_NEXT;
+    assert nv_t_window(st[0..964], 0) == 1 and nv_median(st[0..964], 0) == 700 and st[nv_at(0, NV_K_LAST)] == 700;
+    assert nv_on_answer(st[0..964], 1, 401, 300) == NV_A_DEAD and nv_t_window(st[0..964], 1) == 0;
+    assert nv_on_answer(st[0..964], 0, 204, 1100) == NV_A_OK and nv_median(st[0..964], 0) == 900;
+}
+
+test the_answer_times_survive_a_restart_and_a_v1_file_still_loads {
+    var st : [964]u32 = undefined;
+    nv_state_init(st[0..964], 2, 9);
+    nv_on_answer(st[0..964], 1, 200, 640);
+    nv_on_answer(st[0..964], 1, 200, 1200);
+    nv_on_answer(st[0..964], 0, 0, 15000);
+    var t : [600]u8 = undefined;
+    const n : usize = nv_state_text(st[0..964], t[0..600]);
+    var back : [964]u32 = undefined;
+    assert nv_state_load(t[0..n], 2, 9, back[0..964]);
+    assert nv_median(back[0..964], 1) == 920 and nv_median(back[0..964], 0) == 15000;
+    assert nv_pick(back[0..964]) == 1;
+    // the counters-only file of before: dead flags kept, windows empty
+    assert nv_state_load("nvidia-state v1 2 9 1\n1 0 0 1\n0 4 0 0\n", 2, 9, back[0..964]);
+    assert nv_dead(back[0..964], 0) and back[nv_at(1, NV_K_OK)] == 4 and nv_t_window(back[0..964], 1) == 0;
+}
+
+test a_broken_state_file_starts_again {
+    var st : [964]u32 = undefined;
+    const ok : str = "nvidia-state v2 2 5 1\n0 1 0 0 700 1 1 700 0 0 0 0 0 0 0\n0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n";
+    assert nv_state_load(ok, 2, 5, st[0..964]);
+    assert nv_median(st[0..964], 0) == 700;
+    // flags past DEAD and RATED, a window count over 8, a next slot of 8, a time over the cap, a word, v3, junk
+    assert nv_state_load("nvidia-state v2 2 5 1\n4 1 0 0 700 1 1 700 0 0 0 0 0 0 0\n0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n", 2, 5, st[0..964]) == false;
+    assert nv_state_load("nvidia-state v2 2 5 1\n0 1 0 0 700 9 1 700 0 0 0 0 0 0 0\n0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n", 2, 5, st[0..964]) == false;
+    assert nv_state_load("nvidia-state v2 2 5 1\n0 1 0 0 700 1 8 700 0 0 0 0 0 0 0\n0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n", 2, 5, st[0..964]) == false;
+    assert nv_state_load("nvidia-state v2 2 5 1\n0 1 0 0 700 1 1 700 0 0 0 0 0 0 0\n0 0 0 0 0 1 1 99999 0 0 0 0 0 0 0\n", 2, 5, st[0..964]) == false;
+    assert nv_state_load("nvidia-state v2 2 5 1\n0 1 0 0 x 1 1 700 0 0 0 0 0 0 0\n0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n", 2, 5, st[0..964]) == false;
+    assert nv_state_load("nvidia-state v3 2 5 1\n", 2, 5, st[0..964]) == false;
+    assert nv_state_load("\xff\x00nvidia", 2, 5, st[0..964]) == false;
+    // a v2 header with v1 lines is cut, not read as answer times
+    assert nv_state_load("nvidia-state v2 2 5 1\n0 1 0 0\n0 0 0 0\n", 2, 5, st[0..964]) == false;
+    // each refusal leaves a clean state of the list now in the Keychain
+    assert nv_live(st[0..964]) == 2 and nv_t_window(st[0..964], 0) == 0 and nv_median(st[0..964], 0) == 0;
+    assert st[NV_S_N] == 2 and st[NV_S_HASH] == 5 and nv_pick(st[0..964]) == 0;
 }
