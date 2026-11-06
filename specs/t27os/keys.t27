@@ -3414,6 +3414,48 @@ pub fn slot_taken(mask: u32, k: u32) -> bool {
     return k < MAX_KEYS and (mask >> k) % 2 == 1;
 }
 
+/// Queue a read-only check of the saved slot, without interrupting a running check.
+/// Refs https://github.com/dmitrii-f-t27/t27/issues/18.
+pub fn queue_saved_key_check(pending: []u32, provider: u32, slot: u32) -> void {
+    if (provider < pending.len and slot < MAX_KEYS and probe_has(provider) and !probe_post(provider)) {
+        pending[provider] = pending[provider] | (1 << slot);
+    }
+}
+
+/// Take one provider/slot in index order, or KY_NONE when the queue is empty.
+pub fn take_saved_key_check(pending: []u32) -> u32 {
+    var provider : u32 = 0;
+    while (provider < PROVIDER_COUNT and provider < pending.len) {
+        if (pending[provider] != 0) {
+            var slot : u32 = 0;
+            while (slot < MAX_KEYS) {
+                if (slot_taken(pending[provider], slot)) {
+                    pending[provider] = pending[provider] ^ (1 << slot);
+                    return provider * MAX_KEYS + slot;
+                }
+                slot = slot + 1;
+            }
+        }
+        provider = provider + 1;
+    }
+    return KY_NONE;
+}
+
+test saved_keys_queue_the_exact_slot_without_dropping_other_saves {
+    var pending : [10]u32 = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    queue_saved_key_check(pending[0..10], P_NVIDIA, MAX_KEYS - 1);
+    queue_saved_key_check(pending[0..10], P_NVIDIA, MAX_KEYS - 1);
+    queue_saved_key_check(pending[0..10], P_ANTHROPIC, 3);
+    queue_saved_key_check(pending[0..10], P_CURSOR, 0);
+    queue_saved_key_check(pending[0..10], P_ZAI, 0);
+    queue_saved_key_check(pending[0..10], PROVIDER_COUNT, 0);
+    queue_saved_key_check(pending[0..10], P_ANTHROPIC, MAX_KEYS);
+    queue_saved_key_check(pending[0..1], P_NVIDIA, 0);
+    assert(take_saved_key_check(pending[0..10]) == P_ANTHROPIC * MAX_KEYS + 3);
+    assert(take_saved_key_check(pending[0..10]) == P_NVIDIA * MAX_KEYS + MAX_KEYS - 1);
+    assert(take_saved_key_check(pending[0..10]) == KY_NONE);
+}
+
 /// The number "add" stores under: the lowest free one; MAX_KEYS when all are taken ("full").
 pub fn next_free_key(mask: u32) -> u32 {
     var k : u32 = 0;

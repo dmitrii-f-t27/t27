@@ -151,6 +151,8 @@ use t27os::keys::age_seconds_text;
 use t27os::keys::next_mark_text;
 use t27os::session_store::put_bytes;
 use t27os::keys::probe_has;
+use t27os::keys::queue_saved_key_check;
+use t27os::keys::take_saved_key_check;
 use t27os::keys::bad_mask_keys;
 use t27os::keys::profile_why;
 use t27os::keys::PROFILE_PROVIDER;
@@ -12718,6 +12720,7 @@ pub fn main() -> void {
     var kst : [80]u32 = undefined;
     var kfail : [10]u32 = undefined;
     var kopen : [10]u64 = undefined;
+    var kqueued : [10]u32 = undefined;
     var kbuf : [256]u8 = undefined;
     var klen : u32 = 0;
     var kedit : u32 = KY_NONE;
@@ -12759,6 +12762,7 @@ pub fn main() -> void {
         kstored[ki] = 0;
         kfail[ki] = 0;
         kopen[ki] = 0;
+        kqueued[ki] = 0;
         ki = ki + 1;
     }
     var km : u32 = 0;
@@ -13861,6 +13865,8 @@ pub fn main() -> void {
                             if (ksn < MAX_KEYS) {
                                 if (kc_put_n(kedit, ksn, kbuf[0 .. @as(usize, klen)])) {
                                     kst[key_index(kedit, ksn)] = ST_STORED;
+                                    kat[key_index(kedit, ksn)] = 0;
+                                    queue_saved_key_check(kqueued[0..10], kedit, ksn);
                                     kfail[kedit] = 0;
                                     if (tfd >= 0) { client_set_key(tfd, setkey_byte(kedit, ksn), kbuf[0 .. @as(usize, klen)], tout[0..4100]); }
                                 }
@@ -14216,6 +14222,16 @@ pub fn main() -> void {
                 }
                 keys_wipe(ktmp[0..256]);
                 kbk = kbk + 1;
+            }
+        }
+        // A successful save requests its own check before the routine provider scans.
+        if (kbusy == KY_NONE) {
+            const saved_check : u32 = take_saved_key_check(kqueued[0..10]);
+            if (saved_check != KY_NONE) {
+                kbusy = saved_check / MAX_KEYS;
+                kbk = saved_check % MAX_KEYS;
+                klast = kbk;
+                kpend = 0;
             }
         }
         // K. pre-flight (M12): once at start, check the stored key behind each claude profile, in the order
