@@ -1,0 +1,99 @@
+// SPDX-License-Identifier: Apache-2.0
+; Telegram account link policy for the T27 OS local profile.
+; Refs https://github.com/dmitrii-f-t27/t27/issues/17.
+
+; The dedicated broker verifies Telegram OIDC before presenting a result to the
+; app. Verify signature against Telegram JWKS, issuer, configured client audience,
+; time claims, and the current nonce. Use state and S256 PKCE for the browser
+; exchange. Keep the client secret in the broker and request only openid.
+
+; Scope stored subjects to the configured issuer and client. A subject is opaque;
+; a username or display name cannot identify an account. Account proofs, browser
+; state, and exchange codes never enter the local profile. The app presents a
+; verified identity for confirmation, then persists the link separately from the
+; profile and provider keys. Compare and consume the current attempt atomically
+; with the write, using a non-reused local attempt handle. Cancellation and unlink
+; invalidate the active handle before returning. A mismatch requires an explicit
+; unlink before another Telegram account can be attached.
+module T27osTelegramLink;
+
+use t27os::editors::same_bytes;
+
+pub const LINK_WINDOW_S : u64 = 300;
+pub const LINK_REJECTED : u32 = 0;
+pub const LINK_CONFIRM : u32 = 1;
+pub const LINK_ATTACH : u32 = 2;
+pub const LINK_ALREADY_ATTACHED : u32 = 3;
+pub const LINK_CONFLICT : u32 = 4;
+
+/// A zero handle represents no active attempt. Times are monotonic seconds.
+pub fn link_attempt_current(profile : u64, attempt : u64, owner : u64, active : u64, started : u64, now : u64) -> bool {
+    if (owner == 0 or active == 0 or profile != owner or attempt != active or now < started) {
+        return false;
+    }
+    return now - started < LINK_WINDOW_S;
+}
+
+/// OIDC subject identifiers are opaque ASCII strings of at most 255 bytes.
+pub fn link_subject_valid(subject : []const u8) -> bool {
+    if (subject.len == 0 or subject.len > 255) { return false; }
+    var i : usize = 0;
+    while (i < subject.len) {
+        if (subject[i] < 33 or subject[i] > 126) { return false; }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// `verified` is supplied by the trusted broker adapter, never by browser input.
+/// An empty existing subject represents an unlinked profile.
+pub fn link_decision(current : bool, verified : bool, confirmed : bool, existing : []const u8, subject : []const u8) -> u32 {
+    if (!current or !verified or !link_subject_valid(subject)) { return LINK_REJECTED; }
+    if (existing.len != 0) {
+        if (same_bytes(existing, subject)) { return LINK_ALREADY_ATTACHED; }
+        return LINK_CONFLICT;
+    }
+    if (!confirmed) { return LINK_CONFIRM; }
+    return LINK_ATTACH;
+}
+
+test an_attempt_belongs_to_the_profile_and_expires_at_the_boundary {
+    assert(link_attempt_current(1, 2, 1, 2, 100, 100));
+    assert(link_attempt_current(1, 2, 1, 2, 100, 399));
+    assert(!link_attempt_current(1, 2, 1, 2, 100, 400));
+    assert(!link_attempt_current(1, 2, 1, 2, 100, 99));
+    assert(!link_attempt_current(3, 2, 1, 2, 100, 101));
+    assert(!link_attempt_current(1, 2, 1, 3, 100, 101));
+    assert(!link_attempt_current(0, 2, 0, 2, 100, 101));
+}
+
+test a_cancelled_or_consumed_attempt_cannot_attach_on_late_delivery {
+    const current : bool = link_attempt_current(1, 2, 1, 0, 100, 101);
+    assert(link_decision(current, true, true, "", "1234") == LINK_REJECTED);
+}
+
+test an_unlinked_profile_requires_verified_proof_and_explicit_confirmation {
+    assert(link_decision(true, false, true, "", "1234") == LINK_REJECTED);
+    assert(link_decision(true, true, false, "", "1234") == LINK_CONFIRM);
+    assert(link_decision(true, true, true, "", "1234") == LINK_ATTACH);
+}
+
+test a_second_account_cannot_replace_an_existing_subject {
+    assert(link_decision(true, true, true, "1234", "1235") == LINK_CONFLICT);
+    assert(link_decision(true, true, false, "1234", "1234") == LINK_ALREADY_ATTACHED);
+    assert(link_decision(true, false, true, "1234", "1234") == LINK_REJECTED);
+}
+
+test empty_or_malformed_subjects_cannot_be_linked {
+    var long : [256]u8 = undefined;
+    var i : usize = 0;
+    while (i < long.len) {
+        long[i] = 65;
+        i = i + 1;
+    }
+    assert(link_subject_valid(long[0..255]));
+    assert(!link_subject_valid(long[0..256]));
+    assert(link_decision(true, true, true, "", "") == LINK_REJECTED);
+    assert(link_decision(true, true, true, "", "12 34") == LINK_REJECTED);
+    assert(link_decision(true, true, true, "", "12\n34") == LINK_REJECTED);
+}

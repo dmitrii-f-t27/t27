@@ -1,0 +1,33 @@
+{
+  "built_by": "t27c-bootstrap@0.5.2+720a961e9",
+  "closure": [
+    {
+      "spec": "specs/t27os/editors.t27",
+      "spec_hash": "sha256:fc3608c5131f7fae21d6084102a019fc0425117ecf7544ec1eebfa8155d74f72"
+    }
+  ],
+  "config": "gen=c,rust,verilog,zig;tests=zig",
+  "gen_hash_c": "sha256:bf43edf907b27c3c8e316894e4b687abae7bf7471c95a071ac63087e52f072f5",
+  "gen_hash_rust": "sha256:4847476f527a2450a61e6304cb275f80fd31792290bec7bba324f041b030756a",
+  "gen_hash_verilog": "sha256:2fd4a78c1cdee98790d4d2323d80cb80bf3213745a03b86ae85cd5ebfcfd871f",
+  "gen_hash_zig": "sha256:0c400de5371c318f0e8abfe9623fbdd7af5f84e1bc15e1757f57976d59acd741",
+  "module": "T27osTelegramLink",
+  "ring": 12,
+  "seal_schema": 2,
+  "sealed_at": "2026-11-06T23:22:23Z",
+  "sealed_by": "t27c-bootstrap@0.5.2",
+  "spec_hash": "sha256:29cf2fc31df37afd52134bdc0d4302a0acaf1842e9dfa796aa0223bed2be24b7",
+  "spec_path": "specs/t27os/telegram_link.t27",
+  "tests": {
+    "failed": 0,
+    "failing": [],
+    "forced": false,
+    "passed": 5,
+    "total": 5,
+    "vacuous": 0
+  },
+  "toolchain": {
+    "test_runner": "sha256:1a50286d6170ef41c779d26385a1be59823925d7131497c93d84194144ba93b3",
+    "zig": "0.16.0"
+  }
+}
